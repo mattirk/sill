@@ -110,17 +110,6 @@ fn config_file(path: &Path) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The person's global config, read the same way: a filter driver defined there applies too.
-fn global_config() -> Vec<(String, String)> {
-    let mut c = std::process::Command::new("git");
-    c.args(["config", "--global", "--list", "-z"]).env("GIT_CONFIG_NOSYSTEM", "1");
-    let Ok(out) = run(c) else { return vec![] };
-    String::from_utf8_lossy(&out.stdout)
-        .split('\0')
-        .filter_map(|e| e.split_once('\n').map(|(k, v)| (k.to_ascii_lowercase(), v.to_string())))
-        .collect()
-}
-
 /// Filter names `.gitattributes` files at HEAD and `info/attributes` ask for.
 fn attribute_filters(git: &Git, gitdir: &Path) -> Result<Vec<String>> {
     let mut texts = Vec::new();
@@ -187,7 +176,9 @@ pub fn inspect(path: &Path) -> Result<std::result::Result<Source, Refusal>> {
     if filters.iter().any(|f| f == "lfs") || dot.join("lfs").is_dir() {
         return Ok(Err(Refusal::Lfs));
     }
-    let global = global_config();
+    // every file of the person's own config as git reads it here, keys in lower case: a filter
+    // driver defined there applies too
+    let global: Vec<(String, String)> = git.config().into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
     let defined = |name: &str| {
         let prefix = format!("filter.{}.", name.to_ascii_lowercase());
         config.iter().chain(global.iter()).any(|(k, _)| {

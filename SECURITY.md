@@ -53,8 +53,8 @@ installing sill from a checkout an agent has modified.
 ## Known limits
 
 - **The jail shares the host's kernel.** A kernel vulnerability reachable from the jail is a way
-  out. On x86_64 a syscall filter narrows that surface; **on arm64, including the Linux VM inside
-  Sill.app, there is no syscall filter.**
+  out. A syscall filter narrows that surface on x86_64 and on arm64 (the Linux VM inside
+  Sill.app); it is a deny-list, and on any other architecture there is none.
 - **The Mac VM is not a second wall of equal strength.** It keeps the agent off macOS itself, but
   the folders you share with it are writable from the whole VM, and sessions inside one VM are
   separated less strictly than on a Linux desktop.

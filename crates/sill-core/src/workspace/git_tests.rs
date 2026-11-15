@@ -340,3 +340,57 @@ fn no_program_from_either_config_runs_on_the_host() {
     assert!(ran.is_empty(), "programs ran on the host: {ran}");
 }
 
+
+/// A filter driver of the person's own configuration (git-lfs after `git lfs install`) named by
+/// the agent's `.gitattributes`: found wherever their configuration keeps it, and run by neither
+/// sill's commit of the agent's files nor Apply's checkout (audit 2026-11-15 A15).
+#[test]
+fn the_persons_own_filter_drivers_do_not_run_on_agent_attributes() {
+    let d = tmp("own-filter");
+    let s = source(&d);
+    let (_, c) = make(&d, &s, "ab12");
+    let log = d.0.join("ran.log");
+    let canary = d.0.join("canary");
+    write(&canary, &format!("#!/bin/sh\necho ran >> {}\ncat\n", log.display()));
+    std::fs::set_permissions(&canary, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // their configuration: one file including two others, each defining a driver, one of them
+    // only on the branch `main`
+    let own = d.0.join("gitconfig");
+    write(&own, "[user]\n\tname = Pat\n[include]\n\tpath = more\n[includeIf \"onbranch:main\"]\n\tpath = on-main\n");
+    write(&d.0.join("more"), &format!("[filter \"Evil.x\"]\n\tclean = {0}\n\tsmudge = {0}\n\trequired = true\n", canary.display()));
+    write(&d.0.join("on-main"), &format!("[filter \"OnMain\"]\n\tprocess = {0}\n\tsmudge = {0}\n", canary.display()));
+    let drivers = |repo: &Path| {
+        crate::changes::filter_drivers(&Git::open(repo).unwrap().config_with(|c| {
+            c.env("GIT_CONFIG_GLOBAL", &own);
+        }))
+    };
+    assert_eq!(drivers(&s), ["Evil.x", "OnMain"], "through the includes, as git on this branch reads them");
+    assert_eq!(drivers(&c.path), ["Evil.x"], "the workspace is on a branch of its own");
+
+    write(&c.path.join(".gitattributes"), "*.bin filter=Evil.x\n*.dat filter=OnMain\n");
+    write(&c.path.join("a.bin"), "agent bytes\n");
+    write(&c.path.join("a.dat"), "agent data\n");
+    // git as sill runs it, with that configuration as the person's
+    let run = |view: Git, work: &Path, args: &[&str]| {
+        let mut cmd = view.cmd_write_over(work);
+        cmd.args(args).env("GIT_CONFIG_GLOBAL", &own);
+        let out = cmd.output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    // the check itself: without the switch the driver runs
+    run(Git::open(&c.path).unwrap(), &c.path, &["hash-object", "--path=a.bin", "a.bin"]);
+    assert_eq!(std::fs::read_to_string(&log).unwrap_or_default(), "ran\n");
+    std::fs::remove_file(&log).unwrap();
+    // with it: hashing the agent's file, and checking its commit out as Apply does
+    let quiet = |repo: &Path| Git::open(repo).unwrap().without_filters(&drivers(repo));
+    let plain = git(&c.path, &["hash-object", "--no-filters", "a.bin"]);
+    assert_eq!(run(quiet(&c.path), &c.path, &["hash-object", "--path=a.bin", "a.bin"]), plain);
+    agent_commit(&c.path);
+    let (base, tip) = (git(&s, &["rev-parse", "main"]), git(&c.path, &["rev-parse", "HEAD"]));
+    run(quiet(&s), &s, &["fetch", "-q", "--no-tags", "--no-write-fetch-head", c.path.to_str().unwrap(), &format!("+{tip}:refs/sill/t")]);
+    run(quiet(&s), &s, &["read-tree", "-m", "-u", &base, &tip]);
+    assert_eq!(std::fs::read_to_string(s.join("a.bin")).unwrap(), "agent bytes\n");
+    assert_eq!(std::fs::read_to_string(s.join("a.dat")).unwrap(), "agent data\n");
+    assert!(!log.exists(), "the driver ran: {}", std::fs::read_to_string(&log).unwrap_or_default());
+}

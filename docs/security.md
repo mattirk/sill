@@ -102,8 +102,9 @@ image mode, S18's systemd/Landlock remainder, S10's pause.
 the code as it is. It is not set on session units: a session is a `systemd-run --user --scope`,
 which cannot carry it, and the string is nowhere in the code. bubblewrap sets `no_new_privs` on the
 jail itself, so the agent has it; the launcher, the proxy and the daemon outside the jail do not.
-The seccomp filter is x86_64 only, as the row says: on arm64, which includes the Linux VM inside
-Sill.app, a jail starts without one.
+The seccomp filter was x86_64 only, as the row says: on arm64, which includes the Linux VM inside
+Sill.app, a jail started without one. Since 2026-11-15 the same deny-list exists in arm64's syscall
+numbers (audit A9); other architectures still start without a filter, with a warning.
 
 ## Data at rest
 

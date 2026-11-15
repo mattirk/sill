@@ -109,6 +109,15 @@ fn read_index(gitdir: &Path) -> Result<Option<Vec<u8>>> {
 /// Hooks and fsmonitor are switched off on the command line as well, diffs never call out
 /// ([`Git::DIFF_SAFE`]), and nothing is written back (`--no-optional-locks`). Every host-side git
 /// goes through here (security.md S1, SPEC §4.11 #3).
+///
+/// The person's own configuration still applies (their identity, their ignore file), and a filter
+/// driver defined there — git-lfs after `git lfs install` — would run on any path the agent's
+/// `.gitattributes` gives it: on Apply's checkout, on hashing the agent's files. So every driver
+/// found there is switched off for the view's commands; a file with such an attribute is read and
+/// written byte for byte (audit 2026-11-15 A15). They are found by asking git in this view
+/// ([`Git::config`]): the configuration git reads depends on where it runs — an
+/// `includeIf "onbranch:…"` applies by the view's HEAD — so the list is of what these very
+/// commands would see.
 pub struct Git {
     work_tree: PathBuf,
     dir: PathBuf,
@@ -116,6 +125,22 @@ pub struct Git {
     gitdir: PathBuf,
     /// Where objects and refs live: the git directory, or the main one of a linked worktree.
     common: PathBuf,
+    /// Filter drivers of the person's own configuration, off in every command of this view.
+    filters: Vec<String>,
+}
+
+/// The names of the filter drivers `config` defines: `filter.<name>.clean`, `.smudge` or `.process`.
+pub fn filter_drivers(config: &[(String, String)]) -> Vec<String> {
+    let mut names: Vec<String> = config
+        .iter()
+        .filter_map(|(key, _)| {
+            let (name, var) = key.strip_prefix("filter.")?.rsplit_once('.')?;
+            ["clean", "smudge", "process"].contains(&var).then(|| name.to_string())
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 impl Git {
@@ -143,7 +168,7 @@ impl Git {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
         std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-        let view = Git { work_tree: repo.to_path_buf(), dir, gitdir: gitdir.clone(), common: common.clone() };
+        let mut view = Git { work_tree: repo.to_path_buf(), dir, gitdir: gitdir.clone(), common: common.clone(), filters: Vec::new() };
         for (base, name) in [(&common, "objects"), (&common, "refs"), (&common, "packed-refs"), (&common, "info"), (&common, "shallow"), (&common, "logs")] {
             let src = base.join(name);
             if src.exists() {
@@ -159,7 +184,59 @@ impl Git {
         }
         let original = std::fs::read_to_string(common.join("config")).unwrap_or_default();
         std::fs::write(view.dir.join("config"), format_config(&original))?;
+        // last: the view as its commands will have it, HEAD and config in place
+        view.filters = filter_drivers(&view.config());
         Ok(view)
+    }
+
+    /// The configuration git reads in this view, as `(key, value)` with the key as git prints it:
+    /// the person's own (`~/.gitconfig`, `$XDG_CONFIG_HOME/git/config`, every file those include,
+    /// conditionally too), what the environment adds, and the view's own few format keys.
+    /// `git config --global --list` would show one file and no includes.
+    pub fn config(&self) -> Vec<(String, String)> {
+        self.config_with(|_| {})
+    }
+
+    /// [`Git::config`] with the command adjusted (tests name another file as the person's own).
+    pub(crate) fn config_with(&self, with: impl FnOnce(&mut std::process::Command)) -> Vec<(String, String)> {
+        let mut c = self.cmd();
+        c.args(["config", "--list", "-z", "--show-scope", "--includes"]);
+        with(&mut c);
+        let Ok(out) = c.output() else { return vec![] };
+        // scope NUL key LF value NUL
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut fields = text.split('\0');
+        let mut entries = Vec::new();
+        while let (Some(_scope), Some(entry)) = (fields.next(), fields.next()) {
+            let (key, value) = entry.split_once('\n').unwrap_or((entry, ""));
+            entries.push((key.to_string(), value.to_string()));
+        }
+        entries
+    }
+
+    /// Switch the filter drivers `names` off in this view's commands as well (tests: drivers the
+    /// command's own environment defines).
+    #[cfg(test)]
+    pub(crate) fn without_filters(mut self, names: &[String]) -> Git {
+        self.filters.extend(names.iter().cloned());
+        self
+    }
+
+    /// The view's filter drivers off for `c`: no program named, and not required, so git passes
+    /// the file through. In the environment, where a name may hold any character; after what the
+    /// environment already sets, so these win.
+    fn no_filters(&self, c: &mut std::process::Command) {
+        if self.filters.is_empty() {
+            return;
+        }
+        let mut n: usize = std::env::var("GIT_CONFIG_COUNT").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        for name in &self.filters {
+            for (var, value) in [("clean", ""), ("smudge", ""), ("process", ""), ("required", "false")] {
+                c.env(format!("GIT_CONFIG_KEY_{n}"), format!("filter.{name}.{var}")).env(format!("GIT_CONFIG_VALUE_{n}"), value);
+                n += 1;
+            }
+        }
+        c.env("GIT_CONFIG_COUNT", n.to_string());
     }
 
     /// A `git` on this view, the subcommand and its arguments still to add.
@@ -176,6 +253,7 @@ impl Git {
             .env_remove("GIT_INDEX_FILE")
             .env_remove("GIT_COMMON_DIR")
             .current_dir(&self.work_tree);
+        self.no_filters(&mut c);
         c
     }
 
@@ -218,6 +296,7 @@ impl Git {
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_COMMON_DIR")
             .current_dir(work_tree);
+        self.no_filters(&mut c);
         c
     }
 
