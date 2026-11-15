@@ -206,6 +206,10 @@ impl Hub {
                     let id = done.workspace.as_ref().map(|w| w.workspace_id.clone());
                     (json!(done), id)
                 }
+                "_sill/workspaces.remove" => {
+                    let a: api::Operate = args(params)?;
+                    (json!(records::remove(&h, &a)?), Some(a.workspace_id))
+                }
                 "_sill/workspaces.abort" => {
                     let a: api::Operate = args(params)?;
                     (json!(records::abort(&h, &a)?), Some(a.workspace_id))

@@ -872,7 +872,8 @@ not, into the checkout's working tree as uncommitted changes for the person to t
 either side, the checkout's branch and index untouched, the workspace's work still there for a
 later apply, which takes the copied files over. `_sill/workspaces.discard`
 resets the workspace to what the person has and keeps the work 7 days; `_sill/workspaces.undo` puts it
-back. `_sill/workspaces.changed` (notification, this capability only) invalidates one workspace.
+back. `_sill/workspaces.remove` removes a workspace that cannot be read (its repository was
+replaced by another), folder and record, with no Undo. `_sill/workspaces.changed` (notification, this capability only) invalidates one workspace.
 
 Mutations take an `operation_id` with a receipt: an
 identical retry never repeats the work, and `_sill/operations.get` reports the receipt. Refusals use

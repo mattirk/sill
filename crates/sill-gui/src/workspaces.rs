@@ -77,6 +77,8 @@ pub enum Event {
     PageApply(String),
     PageDiscard(String),
     PageUndo(String),
+    /// Remove a workspace that cannot be read (asks for a second press).
+    PageRemove(String),
     PageDone(String, bool),
     Loaded(String, Result<Loaded, String>),
     Apply(String, String),
@@ -273,6 +275,23 @@ impl App {
                 blocking(
                     move || match ws::discard(&actions, &workspace, &seen) {
                         Ok(_) => ("Discarded. Undo below for 7 days.".to_string(), false),
+                        Err(e) => (ws::message(&e), true),
+                    },
+                    |(said, bad)| Message::Workspaces(Event::PageDone(said, bad)),
+                )
+            }
+            Event::PageRemove(workspace) => {
+                if !self.changes.as_ref().is_some_and(|p| p.fresh_workspaces) {
+                    return Task::none();
+                }
+                let Some(page) = &mut self.changes else { return Task::none() };
+                if !page.workspace_remove_armed.press(workspace.clone()) {
+                    return Task::none();
+                }
+                let Some(actions) = self.actions.clone() else { return Task::none() };
+                blocking(
+                    move || match ws::remove(&actions, &workspace) {
+                        Ok(_) => ("Removed the workspace and its folder.".to_string(), false),
                         Err(e) => (ws::message(&e), true),
                     },
                     |(said, bad)| Message::Workspaces(Event::PageDone(said, bad)),

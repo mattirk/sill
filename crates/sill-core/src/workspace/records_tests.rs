@@ -607,6 +607,27 @@ fn a_workspace_whose_repository_was_replaced_does_not_fail_the_listing() {
     f.host.pins.lock().unwrap().insert("s1".into(), vec![]);
     assert!(ensure_for_session(&f.host, "s1").unwrap().is_empty());
     assert!(clone_of(&w).exists());
+    // Remove: not under a session that may still run in it; then the folder and the record go
+    let gone = api::Operate { operation_id: "r".into(), workspace_id: w.workspace_id.clone() };
+    assert!(format!("{:#}", remove(&f.host, &gone).unwrap_err()).contains("has not ended"));
+    assert!(clone_of(&w).exists());
+    f.host.lives.lock().unwrap().insert("s1".into(), Life::Ended);
+    assert!(remove(&f.host, &gone).unwrap().workspace.is_none());
+    assert!(!clone_of(&w).exists());
+    assert!(list(&f.host, &all).unwrap().workspaces.is_empty());
+    assert!(remove(&f.host, &gone).unwrap().workspace.is_none(), "removing it again is done");
+}
+
+/// Remove is for what cannot be read: a workspace with readable work is applied or discarded.
+#[test]
+fn a_readable_workspace_is_not_removed() {
+    let f = fixture("remove-readable");
+    let w = session(&f, "s1");
+    write(&clone_of(&w).join("f1.txt"), "work\n");
+    f.host.lives.lock().unwrap().insert("s1".into(), Life::Ended);
+    let gone = api::Operate { operation_id: "r".into(), workspace_id: w.workspace_id.clone() };
+    assert!(format!("{:#}", remove(&f.host, &gone).unwrap_err()).contains("can be read"));
+    assert_eq!(read(&clone_of(&w).join("f1.txt")), "work\n");
 }
 
 /// A workspace starts from HEAD (§5): the person's own uncommitted work in the checkout is not in

@@ -197,6 +197,11 @@ pub fn undo(actions: &Actions, discard_id: &str) -> anyhow::Result<api::Changed>
     actions.once(|c| c.call("_sill/workspaces.undo", api::Undo { operation_id: crate::request_id("undo"), discard_id: discard_id.into() }))
 }
 
+/// Remove a workspace that cannot be read: folder and record, no Undo.
+pub fn remove(actions: &Actions, workspace_id: &str) -> anyhow::Result<api::Changed> {
+    actions.once(|c| c.call("_sill/workspaces.remove", api::Operate { operation_id: crate::request_id("remove"), workspace_id: workspace_id.into() }))
+}
+
 pub fn abort(actions: &Actions, workspace_id: &str) -> anyhow::Result<api::Changed> {
     actions.once(|c| c.call("_sill/workspaces.abort", api::Operate { operation_id: crate::request_id("abort"), workspace_id: workspace_id.into() }))
 }

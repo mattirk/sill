@@ -95,6 +95,8 @@ pub struct ChangesPage {
     pub said: Option<String>,
     /// A workspace's Discard pressed once, and the revision the page showed then.
     pub workspace_armed: Armed<(String, api::Revision)>,
+    /// An unreadable workspace's Remove pressed once.
+    pub workspace_remove_armed: Armed<String>,
     /// A workspace's Apply onto another branch pressed once, and the revision the page showed
     /// then.
     pub workspace_apply_armed: Armed<(String, api::Revision)>,
@@ -398,10 +400,25 @@ impl App {
                 );
             }
             for (w, why) in listing.unread_workspaces() {
+                let armed = page.workspace_remove_armed.is(&w.workspace_id);
+                let fresh = page.fresh_workspaces;
+                // its folder goes with whatever it holds and nothing brings it back: asked twice
+                let remove = keys::press_maybe(
+                    button(text(if armed { "Remove folder and work?" } else { "Remove" }).size(style::SMALL).color(warn_color(armed, fresh)))
+                        .padding([2, 8])
+                        .style(style::quiet),
+                    fresh.then(|| Message::Workspaces(crate::workspaces::Event::PageRemove(w.workspace_id.clone()))),
+                );
                 body = body.push(
                     container(
                         column![
-                            text(format!("{}: a workspace that cannot be read", w.name)).size(style::SMALL).color(P.fg),
+                            row![
+                                text(format!("{}: a workspace that cannot be read", w.name)).size(style::SMALL).color(P.fg),
+                                space().width(Fill),
+                                remove,
+                            ]
+                            .spacing(10)
+                            .align_y(Alignment::Center),
                             text(why.to_string()).size(style::TINY).color(P.fg_dim),
                         ]
                         .spacing(2),

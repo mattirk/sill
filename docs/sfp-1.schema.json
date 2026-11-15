@@ -8900,6 +8900,20 @@
       "capabilities": {
         "sill.workspaces": 1
       },
+      "doc": "Remove a workspace that cannot be read (its operation is of kind read) or whose folder or repository is gone: its folder and record go with whatever work the folder holds, and there is no Undo. Refusals: invalid_state with reason session_active (its session has not ended), readable (apply or discard it instead).",
+      "kind": "request",
+      "name": "_sill/workspaces.remove",
+      "params": {
+        "$ref": "#/$defs/Operate"
+      },
+      "result": {
+        "$ref": "#/$defs/Changed"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.workspaces": 1
+      },
       "doc": "Abort a rebase that prepare left stopped, in the same helper jail.",
       "kind": "request",
       "name": "_sill/workspaces.abort",

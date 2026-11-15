@@ -1351,6 +1351,24 @@ pub fn discard<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
     )
 }
 
+/// Remove a workspace nothing can be read of: its folder and its record go, with whatever work the
+/// folder holds, and there is no Undo (a Discard keeps the work in the repository, and that is
+/// what cannot be reached). Only one that cannot be read or whose folder or repository is gone,
+/// and never under a session that may still run in it. Removing one already gone is done.
+pub fn remove<H: Host>(h: &H, a: &api::Operate) -> Result<api::Changed> {
+    let _g = lock();
+    let Some(r) = h.db(|c| load(c, &a.workspace_id))? else { return changed(h, None, None, None) };
+    if h.life(&r.session_id) == Life::Alive {
+        return Err(refuse("session_active", "The workspace's session has not ended: end or delete the session first.", vec![]));
+    }
+    match detail(h, r.clone())? {
+        Settled::Freed => {}
+        Settled::Full(_) => return Err(refuse("readable", "The workspace can be read: apply or discard its work instead.", vec![])),
+        Settled::Record(_) => free(h, &r)?,
+    }
+    changed(h, None, None, None)
+}
+
 /// Undo a Discard: the work back into its workspace when nothing happened there since, or into a
 /// workspace of its own when its session's folder is gone (§12).
 pub fn undo<H: Host>(h: &H, a: &api::Undo) -> Result<api::Changed> {
