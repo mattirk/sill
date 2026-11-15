@@ -55,8 +55,8 @@ installing sill from a checkout an agent has modified.
 - **Keep is your review.** Sill shows what changed and refuses some dangerous paths, but what you
   keep is on the host. Read what "Keep all" covers before using it.
 - **The default mask list is not complete.** Credentials stored outside the masked paths (for
-  example `~/.npmrc`, `~/.docker/config.json`, `~/.kube/config`) are readable unless you add them
-  to your policy.
+  example `~/.pgpass`, `~/.terraform.d`, or Snap and Flatpak browser profiles) are readable unless
+  you add them to your policy.
 - **Allowed hosts are a way out for data.** If the policy allows `github.com`, an agent holding a
   token can send data there. The allow-list limits where data can go, not what is sent.
 - **Grants are wide.** Host control (`launch`, `commands`), "Control Mac" and "Run Mac commands"

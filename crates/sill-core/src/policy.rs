@@ -340,7 +340,9 @@ mod tests {
         let p = Policy::builtin_default();
         assert_eq!(p.name, "default");
         assert_eq!(p.network.mode, NetMode::Allow);
-        assert!(p.paths.mask.iter().any(|m| m.contains(".ssh")));
+        for m in ["~/.ssh", "~/.npmrc", "~/.pypirc", "~/.docker", "~/.kube", "~/.vault-token", "~/.password-store"] {
+            assert!(p.paths.mask.iter().any(|x| x == m), "missing default mask {m}");
+        }
         assert!(!p.jail.allow_userns);
     }
     #[test]
