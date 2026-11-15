@@ -43,8 +43,8 @@ pub fn dress(window: &dyn iced::window::Window) {
     dock_icon();
 }
 
-/// The Dock's icon: the herring on its sill, the shelf logo (the person, 2026-11-12), not the
-/// jar. Set while running until an app bundle carries it.
+/// The Dock's icon: the herring on its sill, the shelf logo (the person, 2026-11-12), as
+/// everywhere. Set while running until an app bundle carries it.
 fn dock_icon() {
     const SIZE: u32 = 512;
     let Some(rgba) = crate::tray::rgba(crate::tray::TRAY_ICON, SIZE) else { return };

@@ -1,5 +1,5 @@
-//! The tray icon: the herring on its sill (`sill-tray.svg`, not the application icon). A click
-//! shows, raises or hides the window as the hotkey does; its menu has the same and Quit, which
+//! The tray icon: the herring on its sill (`sill-tray.svg`, the application icon's picture too).
+//! A click shows, raises or hides the window as the hotkey does; its menu has the same and Quit, which
 //! ends this window (the daemon and its sessions go on). While an agent works the icon moves —
 //! the sill ripples, the fish rides it — a frame every 125 ms; still when every session is idle.
 //!
@@ -24,7 +24,8 @@ pub enum Asked {
     Quit,
 }
 
-/// The application icon (the herring in a jar): the window's icon, as the panel's and menu's.
+/// The application icon (the herring on its sill, as the tray's): the window's icon, as the
+/// panel's and menu's.
 pub const APP_ICON: &str = include_str!("../../../packaging/icons/sill.svg");
 /// The tray's own picture, the herring on its sill, drawn at the sizes panels pick from.
 pub(crate) const TRAY_ICON: &str = include_str!("../../../packaging/icons/sill-tray.svg");
