@@ -32,6 +32,12 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends bubblewrap pkg-config libwayland-dev libxkbcommon-dev
+      - name: Let bubblewrap make user namespaces
+        if: runner.os == 'Linux'
+        run: |
+          # Ubuntu 24.04 denies unprivileged user namespaces through AppArmor; every jailed test needs them
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --ro-bind / / true
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:

@@ -27,6 +27,11 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends bubblewrap pkg-config libwayland-dev libxkbcommon-dev
+      - name: Let bubblewrap make user namespaces
+        run: |
+          # Ubuntu 24.04 denies unprivileged user namespaces through AppArmor; every jailed test needs them
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --ro-bind / / true
       - run: cargo test --locked --workspace -- --test-threads=1
       - run: cargo build --locked --release
       - run: packaging/release.sh --no-build

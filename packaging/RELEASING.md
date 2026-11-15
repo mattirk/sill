@@ -5,6 +5,12 @@ The public repository runs `build` for pushes to `main`, pull requests targeting
 Download the binary archives from the workflow's artifacts. The Mac build archive
 is a developer binary, not a complete app: it does not include the Linux VM image.
 
+The Linux tests start real jails, so they need bubblewrap to be able to create user
+namespaces. Ubuntu 24.04 denies that through AppArmor; both workflows switch it off
+on the runner first (`sysctl kernel.apparmor_restrict_unprivileged_userns=0`) and
+check that `bwrap` starts. Where it cannot start, the jailed login tests in
+`crates/sill/tests/daemon.rs` fail.
+
 ## Release a version
 
 1. Update `[workspace.package].version` in Cargo.toml and regenerate Cargo.lock
