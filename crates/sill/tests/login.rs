@@ -655,7 +655,7 @@ fn resetting_an_agent_stops_its_sessions_then_removes_its_home_and_keys() {
     assert!(unknown.is_err_and(|e| format!("{e:#}").contains("agent not found")));
 }
 
-// --- host-side logins: the real `sill login` against a scripted adapter --------------------------
+// --- daemon-run logins (in the login jail): the real `sill login` against a scripted adapter --------------------------
 
 /// What `sill login fakelogin` sees: a home with the fake agent's definition, sill's state with its
 /// install (the adapter and a helper program under tools/), and the agent's existing sill home.
@@ -696,6 +696,16 @@ impl HostLogin {
     }
 
     fn own(&self, file: &str) -> PathBuf { self.dir.join("state/sill/agents/fakelogin/.fakelogin").join(file) }
+
+    /// Is the adapter's helper gone? It runs in the login jail's own process namespace, so it is
+    /// found from here by its arguments: the login's home is among them.
+    fn helper_stopped(&self) -> bool {
+        let scratch = self.dir.join("state/sill/login/fakelogin").display().to_string();
+        !std::fs::read_dir("/proc").unwrap().flatten().any(|entry| {
+            let running = std::fs::read(entry.path().join("cmdline")).is_ok_and(|argv| String::from_utf8_lossy(&argv).contains(&scratch));
+            running && !std::fs::read_to_string(entry.path().join("stat")).unwrap_or_default().contains(") Z ")
+        })
+    }
 
     fn leftovers(&self) -> Vec<String> {
         let mut out = vec![];
@@ -756,6 +766,7 @@ fn a_jailed_login_copies_only_credentials_and_cannot_write_outside() {
     assert_eq!(std::fs::read_to_string(login.own("state.sqlite")).unwrap(), "history", "the agent's history is untouched");
     assert!(!login.own(".tmp").exists(), "temp files are not the login");
     assert!(!login.dir.join("helper.pid").exists(), "login escaped its writable home");
+    assert!(login.helper_stopped(), "the adapter's helper still runs");
     assert!(login.leftovers().is_empty(), "left behind: {:?}", login.leftovers());
 }
 
@@ -814,6 +825,7 @@ fn a_host_login_propagates_to_existing_ghost_session_homes() {
     assert!(source.is_file());
     assert_eq!(std::fs::read(source).unwrap(), b"{}");
     assert!(!login.dir.join("helper.pid").exists());
+    assert!(login.helper_stopped(), "the adapter's helper still runs");
 }
 
 #[test]
@@ -826,5 +838,6 @@ fn a_failed_host_login_leaves_nothing_behind() {
     assert!(!login.own("auth.json").exists());
     assert_eq!(std::fs::read_to_string(login.own("state.sqlite")).unwrap(), "history");
     assert!(!login.dir.join("helper.pid").exists(), "login escaped its writable home");
+    assert!(login.helper_stopped(), "the adapter's helper still runs");
     assert!(login.leftovers().is_empty(), "left behind: {:?}", login.leftovers());
 }

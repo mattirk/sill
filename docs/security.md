@@ -141,7 +141,8 @@ agent declarations, with no adoption or credential discovery. Original host agen
 masked in both views; private roots bind through held, type-checked descriptors. A private
 agent binding may replace an agent-origin mask, never a policy secret mask. The immutable
 launch plan also supplies Changes classification and ghost credential authority. Host login
-uses private HOME/XDG storage and imports only declared files.
+runs in the login jail (docs/login.md) with private HOME/XDG storage and imports only declared
+files.
 Earlier audit rows mentioning `shared_files`,
 `seed_files` or adopted paths describe superseded implementation, not supported configuration.
 
@@ -179,7 +180,8 @@ seeded with nothing else, copy the login file back when it exits. The install pr
 (`probe_load_session`) runs inside a throwaway jail (`--unshare-all`, no home, no network) or is
 dropped in favour of reading `package.json`/the index's capability field; `binary.sha256` becomes
 mandatory and npm specs are pinned exactly. Both are the same rule: the agent's binaries and its
-writable config never meet on the host.
+writable config never meet on the host. *(2026-11-15: the login itself no longer runs on the
+host either. Every login runs in the login jail, docs/login.md.)*
 
 Then, in order: S5 (`O_DIRECTORY|O_NOFOLLOW` + owner check in `init` and `state_dir`), S6/S9/S11
 (one `openat2`-beneath helper shared by uploads, viewer save, revert), S7 (LDH-only hostnames, no
@@ -207,8 +209,9 @@ arbitrary ACP agents. Overlay + Keep lets the agent install tools and touch `~/.
 the decision to the person afterwards, where a deny-list just stops it. The host-side consumer
 surface is audited (S1–S11 above): Zed names the `.git` hooks problem and forbids writes to `.git`;
 sill runs host git with a private `--git-dir` and filtered config, gives host shells
-`GIT_CONFIG_PARAMETERS`, has Keep refuse `.git/config`, `.git/hooks` and sill's own config, never
-runs an agent on the host from a jail-writable directory, probes installs in a throwaway jail.
+`GIT_CONFIG_PARAMETERS`, has Keep refuse `.git/config`, `.git/hooks` and sill's own config, runs
+no agent on the host (a login runs in the login jail from a fresh home), probes installs in a
+throwaway jail.
 Memory and transcripts are read-only snapshots inside the jail.
 
 **Where sill is behind, or open.**

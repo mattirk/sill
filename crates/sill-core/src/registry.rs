@@ -782,9 +782,10 @@ struct Base {
 }
 
 /// A jail with nothing of the person's in it: no capabilities, the system read-only, `/tmp` and
-/// `/run` fresh, the state filesystem hidden, the home an empty tmpfs (or `scratch` in its place)
-/// but for the tools dir and the runtime the command needs. Its own network namespace, unless
-/// `share_net`.
+/// `/run` fresh, the state filesystem hidden, the person's files outside the home hidden
+/// ([`crate::mounts::personal_data`]: Mac folders, added disks, network shares), the home an empty
+/// tmpfs (or `scratch` in its place) but for the tools dir and the runtime the command needs. Its
+/// own network namespace, unless `share_net`.
 fn jail_base(program: &str, home: &Path, scratch: Option<&Path>, share_net: bool) -> Result<Base> {
     let prog = resolve_program(program, home).with_context(|| format!("{program}: not found"))?;
     let tools = tools_dir(home);
@@ -795,9 +796,15 @@ fn jail_base(program: &str, home: &Path, scratch: Option<&Path>, share_net: bool
     }
     b.args(["--unshare-user", "--disable-userns", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv"]);
     b.args(["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run"]);
+    let mounts = crate::mounts::host_mounts().unwrap_or_default();
+    // a link there is not a directory to cover: what it points at is covered where it is
+    let hidden: Vec<PathBuf> = crate::mounts::personal_data(&mounts).into_iter().filter(|p| p.symlink_metadata().is_ok_and(|m| m.is_dir())).collect();
+    for dir in &hidden {
+        b.arg("--tmpfs").arg(dir);
+    }
     b.arg("--tmpfs").arg(crate::jail::STATE_FS); // other sessions' upper trees
     // … and the same filesystem wherever else it is mounted (audit 2026-11-15 A2)
-    for alias in crate::mounts::state_aliases(&crate::mounts::host_mounts().unwrap_or_default(), Path::new(crate::jail::STATE_FS)) {
+    for alias in crate::mounts::state_aliases(&mounts, Path::new(crate::jail::STATE_FS)) {
         if alias != Path::new("/") && !home.starts_with(&alias) {
             b.arg("--tmpfs").arg(alias);
         }
@@ -817,23 +824,64 @@ fn jail_base(program: &str, home: &Path, scratch: Option<&Path>, share_net: bool
     b.arg("--ro-bind").arg(&tools).arg(&tools);
     // the runtime the command needs may live under the home (nvm's node, a venv): just those dirs
     let mut path_dirs: Vec<PathBuf> = ["/usr/local/bin", "/usr/bin", "/bin"].iter().map(PathBuf::from).collect();
-    let mut needed: Vec<PathBuf> = prog.parent().map(Path::to_path_buf).into_iter().collect();
-    for runtime in ["node", "python3", "uv"] {
-        if let Some(p) = resolve_program(runtime, home).and_then(|p| p.parent().map(Path::to_path_buf)) {
-            needed.push(p);
-        }
-    }
-    for d in needed {
-        if d.starts_with(home) && !d.starts_with(&tools) {
+    let programs: Vec<PathBuf> = std::iter::once(prog.clone()).chain(["node", "python3", "uv"].iter().filter_map(|runtime| resolve_program(runtime, home))).collect();
+    // directories for PATH, then what their links point at (bound, not on PATH)
+    let mut needed: Vec<(PathBuf, bool)> = programs.iter().filter_map(|p| p.parent()).map(|d| (d.to_path_buf(), true)).collect();
+    needed.extend(programs.iter().filter_map(|p| link_target_root(p, home)).map(|d| (d, false)));
+    let mut binds: Vec<PathBuf> = Vec::new();
+    for (d, on_path) in needed {
+        // covered above, so bound back; never the home itself or a directory that holds it
+        let covered = d.starts_with(home) || hidden.iter().any(|h| d.starts_with(h));
+        if covered && !d.starts_with(&tools) && !binds.iter().any(|done| d.starts_with(done)) {
+            if home.starts_with(&d) || hidden.iter().any(|h| h.starts_with(&d)) {
+                // the program's own directory: without it there is nothing to run
+                anyhow::ensure!(prog.parent() != Some(d.as_path()), "{} is in {}, which holds your files: put it in a folder of its own", prog.display(), d.display());
+                continue;
+            }
             b.arg("--ro-bind").arg(&d).arg(&d);
-            bound.push(d.strip_prefix(home).unwrap().to_path_buf());
+            if let Ok(rel) = d.strip_prefix(home) {
+                bound.push(rel.to_path_buf());
+            }
+            binds.push(d.clone());
         }
-        if !path_dirs.contains(&d) {
+        if on_path && !path_dirs.contains(&d) {
             path_dirs.push(d);
         }
     }
     let path = std::env::join_paths(path_dirs).context("PATH")?;
     Ok(Base { b, bound, seccomp, prog, path })
+}
+
+/// The directory to bind for a program that is a link: `~/.nvm/…/bin/agent` points into
+/// `lib/node_modules/@scope/agent`, a pipx script into its venv, and binding the link's own
+/// directory alone leaves it dangling in the jail. The package's root when one is recognised (a
+/// `node_modules` entry, a Python venv, the prefix of a `bin` directory at least two levels
+/// below the home), else the target's directory. `None` for a program that is no link.
+fn link_target_root(program: &Path, home: &Path) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(program).ok()?;
+    let plain = std::fs::canonicalize(program.parent()?).ok()?.join(program.file_name()?);
+    if real == plain {
+        return None;
+    }
+    let parts: Vec<_> = real.components().collect();
+    if let Some(i) = parts.iter().position(|c| c.as_os_str() == "node_modules") {
+        let scoped = parts.get(i + 1).is_some_and(|c| c.as_os_str().to_string_lossy().starts_with('@'));
+        let n = i + if scoped { 3 } else { 2 };
+        if parts.len() > n {
+            return Some(parts[..n].iter().collect());
+        }
+    }
+    if let Some(venv) = real.ancestors().skip(1).find(|a| a.join("pyvenv.cfg").is_file()) {
+        return Some(venv.to_path_buf());
+    }
+    let dir = real.parent()?;
+    if dir.file_name().is_some_and(|n| n == "bin")
+        && let Some(prefix) = dir.parent()
+        && prefix.strip_prefix(home).map_or(true, |rel| rel.components().count() >= 2)
+    {
+        return Some(prefix.to_path_buf());
+    }
+    Some(dir.to_path_buf())
 }
 
 /// What a jailed login keeps of the daemon's environment: the language, and how to reach the
@@ -1510,5 +1558,98 @@ mod snapshot_tests {
         assert_eq!(n.trust, Trust::Live);
         assert_eq!(n.install_spec(), "new@1.0.0");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod jail_base_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn home(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("sill-jail-base-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::canonicalize(d).unwrap()
+    }
+
+    fn argv(b: &Command) -> String {
+        b.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ") + " "
+    }
+
+    #[test]
+    fn a_linked_program_brings_its_package_and_not_the_home() {
+        let home = home("linked");
+        let package = home.join(".npm-global/lib/node_modules/@someone/agent");
+        std::fs::create_dir_all(package.join("bin")).unwrap();
+        std::fs::write(package.join("bin/agent.js"), "#!/usr/bin/env node\n").unwrap();
+        let bin = home.join(".npm-global/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        symlink("../lib/node_modules/@someone/agent/bin/agent.js", bin.join("agent")).unwrap();
+        let base = jail_base(bin.join("agent").to_str().unwrap(), &home, None, true).unwrap();
+        let r = argv(&base.b);
+        assert!(r.contains(&format!("--ro-bind {d} {d} ", d = bin.display())), "{r}");
+        assert!(r.contains(&format!("--ro-bind {d} {d} ", d = package.display())), "the link's target is in the jail: {r}");
+        assert!(!r.contains(&format!("--ro-bind {h} {h} ", h = home.display())), "{r}");
+        assert!(base.bound.contains(&PathBuf::from(".npm-global/lib/node_modules/@someone/agent")), "{:?}", base.bound);
+        assert!(std::env::split_paths(&base.path).any(|d| d == bin) && !std::env::split_paths(&base.path).any(|d| d == package), "{:?}", base.path);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_program_directly_in_the_home_is_refused_instead_of_showing_the_home() {
+        let home = home("in-home");
+        std::fs::write(home.join("agent"), "").unwrap();
+        let Err(e) = jail_base(home.join("agent").to_str().unwrap(), &home, None, true) else { panic!("the home would be bound") };
+        assert!(format!("{e:#}").contains("a folder of its own"), "{e:#}");
+        // a link from a folder of its own to a file in the home: the folder, never the home
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        symlink("../agent", home.join("bin/agent")).unwrap();
+        let base = jail_base(home.join("bin/agent").to_str().unwrap(), &home, None, true).unwrap();
+        assert!(!argv(&base.b).contains(&format!("--ro-bind {h} {h} ", h = home.display())));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_persons_files_outside_the_home_are_covered() {
+        let home = home("covered");
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::fs::write(home.join("bin/agent"), "").unwrap();
+        let r = argv(&jail_base(home.join("bin/agent").to_str().unwrap(), &home, None, true).unwrap().b);
+        for root in crate::mounts::DATA_ROOTS {
+            let covered = r.contains(&format!("--tmpfs {root} "));
+            assert_eq!(covered, Path::new(root).symlink_metadata().is_ok_and(|m| m.is_dir()), "{root}: {r}");
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_links_target_root_is_its_package() {
+        let home = home("roots");
+        let file = |rel: &str| {
+            let p = home.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "").unwrap();
+            p
+        };
+        let link = |target: &Path, rel: &str| {
+            let p = home.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            symlink(target, &p).unwrap();
+            p
+        };
+        assert_eq!(link_target_root(&file("plain/bin/agent"), &home), None, "no link, nothing more to bind");
+        file("pipx/venvs/agent/pyvenv.cfg");
+        let venv = link(&file("pipx/venvs/agent/bin/agent"), "links/venv");
+        assert_eq!(link_target_root(&venv, &home), Some(home.join("pipx/venvs/agent")));
+        let python = link(&file("share/uv/python/cpython-3/bin/python3.12"), "links/python3");
+        assert_eq!(link_target_root(&python, &home), Some(home.join("share/uv/python/cpython-3")));
+        let shallow = link(&file("local/bin/tool"), "links/tool");
+        assert_eq!(link_target_root(&shallow, &home), Some(home.join("local/bin")), "a prefix right under the home is too much");
+        let plain = link(&file("opt/agent/agent"), "links/agent");
+        assert_eq!(link_target_root(&plain, &home), Some(home.join("opt/agent")));
+        let unscoped = link(&file("lib/node_modules/agent/dist/cli.js"), "links/cli");
+        assert_eq!(link_target_root(&unscoped, &home), Some(home.join("lib/node_modules/agent")));
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

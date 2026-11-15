@@ -2,7 +2,7 @@
 //! return to the profile; settings, history, hooks and incidental tool output never do.
 //! The daemon never opens a browser: the browser helper hands each URL to the login's report
 //! ([`Line::OpenUrl`]) and the frontend opens it where the person is (docs/login.md, "The browser
-//! belongs to the frontend"). Host methods must be declared.
+//! belongs to the frontend"). The methods that log in this way (`host_login`) must be declared.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -286,7 +286,7 @@ fn login_command(
 ) -> Result<(Command, Option<std::os::fd::OwnedFd>)> {
     let scratch = PathBuf::from(env.get("HOME").context("private login home")?);
     let urls = PathBuf::from(env.get(URLS_ENV).context("login URL file")?);
-    report(Line::Status("Login runs in a jail, without your personal home files".into()));
+    report(Line::Status("the login runs in a jail, without your files".into()));
     crate::registry::login_jail(program, args, env, home, &scratch, &urls, &browser_shim(home)?)
 }
 

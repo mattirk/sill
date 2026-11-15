@@ -40,10 +40,11 @@ pub struct Agent {
     /// Credential files relative to the private home; no automatic discovery.
     #[serde(default)]
     pub login_files: Vec<String>,
-    /// Login methods (ids from `initialize`) that run on the host instead of inside the jail: a
-    /// browser flow with a localhost callback cannot be reached from the jail's own network
-    /// namespace, so sill runs the agent on the host for the login only and the result lands in the
-    /// declared credential files (see [`crate::login`]).
+    /// Login methods (ids from `initialize`) that run in a login jail on the host's network
+    /// instead of inside the session's jail: a browser flow with a localhost callback cannot be
+    /// reached from the session jail's own network namespace, so sill runs the agent a second
+    /// time for the login only and the result lands in the declared credential files (see
+    /// [`crate::login`]). The name is from when that ran on the host.
     #[serde(default)]
     pub host_login: Vec<String>,
     /// Environment variable that relocates the agent's home directory (`CODEX_HOME`). A host-side

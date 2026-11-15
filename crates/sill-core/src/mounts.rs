@@ -115,6 +115,35 @@ pub fn real_mounts(all: &[Mount]) -> Vec<Mount> {
     by_path.into_values().collect()
 }
 
+/// Directories that hold the person's files outside the home: Sill.app mounts the Mac's folders
+/// under `/Users` and `/Volumes`; removable and added disks are under `/mnt` and `/media`.
+pub const DATA_ROOTS: &[&str] = &["/Users", "/Volumes", "/mnt", "/media"];
+
+/// Is this a filesystem shared from another machine or served by a user program (a Mac folder,
+/// a network share, sshfs)? Such a mount holds the person's files wherever it is mounted.
+fn shared_fs(fstype: &str) -> bool {
+    matches!(fstype, "virtiofs" | "9p" | "nfs" | "nfs4" | "cifs" | "smb3" | "vboxsf" | "fuse" | "fuseblk") || fstype.starts_with("fuse.")
+}
+
+/// What a jail with nothing of the person's in it must cover besides the home: [`DATA_ROOTS`],
+/// and every shared filesystem mounted elsewhere. Not `/`, and nothing under the directories such
+/// a jail makes fresh or the kernel's own. Sorted, parents first, a path under another left out.
+pub fn personal_data(mounts: &[Mount]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = DATA_ROOTS.iter().map(PathBuf::from).collect();
+    out.extend(mounts.iter().filter(|m| shared_fs(&m.fstype)).map(|m| m.mount_point.clone()).filter(|p| {
+        p != Path::new("/") && !["/run", "/tmp", "/proc", "/sys", "/dev"].iter().any(|fresh| p.starts_with(fresh))
+    }));
+    out.sort();
+    out.dedup();
+    let mut kept: Vec<PathBuf> = Vec::new();
+    for p in out {
+        if !kept.iter().any(|k| p.starts_with(k)) {
+            kept.push(p);
+        }
+    }
+    kept
+}
+
 /// Is `path` itself a mount point (any filesystem type)?
 pub fn is_mount_point(all: &[Mount], path: &Path) -> bool {
     all.iter().any(|m| m.mount_point == path)
@@ -123,6 +152,23 @@ pub fn is_mount_point(all: &[Mount], path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn personal_data_is_the_data_roots_and_shared_filesystems_elsewhere() {
+        let mount = |point: &str, fstype: &str| Mount { mount_point: point.into(), fstype: fstype.into(), source: String::new(), device: String::new(), root: "/".into() };
+        let mounts = [
+            mount("/", "virtiofs"),
+            mount("/usr", "ext4"),
+            mount("/Users/someone/code", "virtiofs"),
+            mount("/srv/share", "nfs4"),
+            mount("/srv/share/deeper", "cifs"),
+            mount("/home/someone/remote", "fuse.sshfs"),
+            mount("/run/user/1000/doc", "fuse.portal"),
+            mount("/sys/fs/fuse/connections", "fusectl"),
+        ];
+        let paths: Vec<PathBuf> = ["/Users", "/Volumes", "/home/someone/remote", "/media", "/mnt", "/srv/share"].iter().map(PathBuf::from).collect();
+        assert_eq!(personal_data(&mounts), paths);
+    }
 
     #[test]
     fn raw_and_octal_mount_paths_preserve_filename_bytes() {
