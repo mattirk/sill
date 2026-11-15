@@ -24,6 +24,14 @@ problem is how sill runs them.
 Sill is pre-1.0 and comes without support. If a problem is fixed, the fix goes to the `main`
 branch and into a later release; earlier releases are not updated.
 
+## Isolation at a glance
+
+![Sill isolation: sandboxed agents use workspace copies and filesystem overlays; Apply and Keep transfer changes, live pins permit direct writes, a proxy filters network access, and host operations require explicit grants.](docs/isolation.svg)
+
+Workspace repositories are separate copies: **Apply** transfers their commits to your checkout.
+Ordinary filesystem changes stay in the overlay until **Keep**. Live pins are direct access.
+The diagram simplifies the default model; the limits below still apply.
+
 ## What sill is built to hold against
 
 The agent inside a session is assumed to be fully hostile, for example through a prompt injection:

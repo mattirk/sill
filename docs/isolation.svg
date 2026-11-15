@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1024" viewBox="0 0 1280 1024" role="img" aria-labelledby="title desc">
+<title id="title">Sill isolation: where agent actions go</title>
+<desc id="desc">Each agent and its tools run in a Linux sandbox with a view of the host filesystem under your user’s read permissions, except hidden paths. Workspace commits reach your checkout through Apply; ordinary file writes stay in an overlay until Keep. Live pins allow direct writes. Network requests pass through an allow-list proxy. Host operations require explicit grants. Policy-masked paths and Sill control state are hidden. Sandboxes share the Linux kernel; on macOS they run inside a Linux VM.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1L9 5L1 9" fill="none" stroke="#57716b" stroke-width="1.6"/></marker></defs>
+<style>
+text{font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fill:#183c36}
+.title{font-size:34px;font-weight:700}.sub{font-size:18px;fill:#526b66}.eyebrow{font-size:13px;font-weight:700;letter-spacing:1.8px}.head{font-size:21px;font-weight:650}.body{font-size:16px;fill:#526b66}.gate{font-size:17px;font-weight:650;text-anchor:middle}.small{font-size:15px;fill:#526b66}.edge{fill:none;stroke:#57716b;stroke-width:2;marker-end:url(#arrow)}
+</style>
+<rect width="1280" height="1024" rx="20" fill="#fafcfb"/>
+<text x="48" y="62" class="title">sill / isolation</text>
+<text x="48" y="96" class="sub">Agents work inside a sandbox. You control the paths out.</text>
+<rect x="40" y="128" width="1200" height="724" rx="18" fill="#f0f5f3" stroke="#ccdcd5"/>
+<text x="64" y="160" class="eyebrow">ACCESS FROM ONE SESSION</text>
+<rect x="60" y="182" width="402" height="648" rx="14" fill="#e4f1eb" stroke="#43866e" stroke-width="2"/>
+<text x="84" y="216" class="eyebrow">SESSION SANDBOX · BUBBLEWRAP</text>
+<text x="84" y="251" class="head">Agent + tools + child processes</text>
+<text x="84" y="279" class="small">Namespaces · no Linux capabilities</text>
+<text x="84" y="321" class="head">Filesystem read view</text>
+<text x="84" y="347" class="body">Masked paths excluded</text>
+<path d="M894 323H472" class="edge"/>
+<text x="676" y="306" class="gate">Read as your user</text>
+<text x="914" y="321" class="head">Host / VM filesystem</text>
+<text x="914" y="347" class="small">Files + installed tools</text>
+<text x="674" y="216" class="eyebrow" text-anchor="middle">ACCESS CONTROL</text>
+<text x="914" y="216" class="eyebrow">OUTSIDE THE SANDBOX</text>
+
+<text x="84" y="387" class="head">Writes stay in an overlay</text><text x="84" y="413" class="body">Other ordinary file writes</text>
+<path d="M440 389H566" class="edge"/><rect x="574" y="367" width="204" height="44" rx="22" fill="#ffffff" stroke="#8aafa0"/><text x="676" y="395" class="gate">You Keep</text><path d="M786 389H894" class="edge"/>
+<text x="914" y="387" class="head">Host files</text><text x="914" y="413" class="small">Selected changes copied back</text>
+<text x="84" y="475" class="head">Workspace copy</text><text x="84" y="501" class="body">Edits + commits on its own branch</text>
+<path d="M440 477H566" class="edge"/><rect x="574" y="455" width="204" height="44" rx="22" fill="#ffffff" stroke="#8aafa0"/><text x="676" y="483" class="gate">You Apply</text><path d="M786 477H894" class="edge"/>
+<text x="914" y="475" class="head">Your checkout</text><text x="914" y="501" class="small">Reviewed workspace commits</text>
+<text x="84" y="563" class="head">Live pinned folder</text><text x="84" y="589" class="body">Read / write bind mount</text>
+<path d="M440 565H566" class="edge"/><rect x="574" y="543" width="204" height="44" rx="22" fill="#fff0db" stroke="#b88232"/><text x="676" y="571" class="gate">Direct writes</text><path d="M786 565H894" class="edge"/>
+<text x="914" y="563" class="head">Pinned host folder</text><text x="914" y="589" class="small">Edits take effect immediately</text>
+<text x="84" y="651" class="head">Network requests</text><text x="84" y="677" class="body">No direct network access</text>
+<path d="M440 653H566" class="edge"/><rect x="574" y="631" width="204" height="44" rx="22" fill="#ffffff" stroke="#8aafa0"/><text x="676" y="659" class="gate">Allow-list proxy</text><path d="M786 653H894" class="edge"/>
+<text x="914" y="651" class="head">Allowed hosts</text><text x="914" y="677" class="small">Local / private IPs blocked by default</text>
+<text x="84" y="739" class="head">Host operations</text><text x="84" y="765" class="body">Requests to act outside the jail</text>
+<path d="M440 741H566" class="edge"/><rect x="574" y="719" width="204" height="44" rx="22" fill="#fff0db" stroke="#b88232"/><text x="676" y="747" class="gate">Explicit grant</text><path d="M786 741H894" class="edge"/>
+<text x="914" y="739" class="head">VM / Host controls</text><text x="914" y="765" class="small">Acts as you while enabled</text>
+<text x="84" y="808" class="small">Private caches stay with the session.</text>
+<rect x="40" y="874" width="1200" height="66" rx="12" fill="#e9edf2"/>
+<text x="64" y="903" class="eyebrow">HIDDEN FROM THE AGENT</text>
+<text x="64" y="926" class="body">Policy-masked paths (SSH keys, cloud credentials, …) · Sill configuration and control state</text>
+<text x="48" y="973" class="small">Simplified default model. Pins and grants expand access; allowed hosts can carry data out.</text>
+<text x="48" y="999" class="small">Sessions share the Linux kernel. On macOS, the Linux VM has access to the folders you share with it.</text>
+</svg>
