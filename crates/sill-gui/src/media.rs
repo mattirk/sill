@@ -47,6 +47,12 @@ pub enum Event {
     Pasted(String, Result<Paste, String>),
     Loaded(String, String, Result<Picture, String>),
     Reload(String, String),
+    Fetched(String, String, String, Result<Picture, String>),
+    Open(String, String),
+    Close,
+    Fullscreen(String),
+    FullscreenReady(String, iced::window::Id, iced::window::Mode),
+
     Copy(String, String),
     Copied(String, Result<(), String>),
 }
@@ -248,11 +254,15 @@ pub fn is_image(a: &Attachment) -> bool {
 pub fn picture<'a>(cache: &Cache, session: &str, key: &str) -> Element<'a, Message> {
     match cache.get(key) {
         Some(Some(Ok(pic))) => container(stack![
-            image(pic.handle.clone())
+            iced::widget::mouse_area(image(pic.handle.clone())
                 .width(iced::Fill)
                 .height(240)
-                .content_fit(iced::ContentFit::Contain),
-            container(crate::keys::press(
+                .content_fit(iced::ContentFit::Contain))
+                .on_press(Message::Media(Event::Open(session.into(), key.into()))),
+            container(iced::widget::row![
+                quiet_button("Expand", Some(Message::Media(Event::Open(session.into(), key.into())))),
+                quiet_button("Refresh", Some(Message::Media(Event::Reload(session.into(), key.into())))),
+                crate::keys::press(
                 button(text("Copy image").size(style::SMALL))
                     .padding([3, 6])
                     .style(|theme, status| iced::widget::button::Style {
@@ -260,7 +270,7 @@ pub fn picture<'a>(cache: &Cache, session: &str, key: &str) -> Element<'a, Messa
                         ..style::quiet(theme, status)
                     }),
                 Message::Media(Event::Copy(session.into(), key.into())),
-            ))
+            )].spacing(4))
             .padding(6)
             .align_right(iced::Fill),
         ])
@@ -295,6 +305,43 @@ pub fn item_keys(item: &sill_proto::sfp::Item) -> Vec<String> {
 impl App {
     pub(crate) fn media_event(&mut self, event: Event) -> Task<Message> {
         match event {
+            Event::Open(session, key) => {
+                if let Some(view) = self.views.get_mut(&session)
+                    && matches!(view.media.get(&key), Some(Some(Ok(_))))
+                {
+                    view.image_viewer = Some(key);
+                }
+            }
+            Event::Close => {
+                if let Some(view) = self.current_mut() {
+                    view.image_viewer = None;
+                    if let Some((id, mode)) = view.image_viewer_mode.take() {
+                        return iced::window::set_mode(id, mode);
+                    }
+                }
+            }
+            Event::Fullscreen(session) => {
+                return iced::window::latest().and_then(move |id| {
+                    let session = session.clone();
+                    iced::window::mode(id).map(move |mode|
+                        Message::Media(Event::FullscreenReady(session.clone(), id, mode)))
+                });
+            }
+            Event::FullscreenReady(session, id, mode) => {
+                if let Some(view) = self.views.get_mut(&session) && view.image_viewer.is_some() {
+                    if let Some((id, prior)) = view.image_viewer_mode.take() {
+                        return iced::window::set_mode(id, prior);
+                    }
+                    view.image_viewer_mode = Some((id, mode));
+                    return iced::window::set_mode(id, iced::window::Mode::Fullscreen);
+                }
+            }
+            Event::Fetched(session, key, request, result) => {
+                if self.views.get(&session).and_then(|v| v.media_requests.get(&key)) == Some(&request) {
+                    self.views.get_mut(&session).unwrap().media_requests.remove(&key);
+                    return self.media_event(Event::Loaded(session, key, result));
+                }
+            }
             Event::Scoped(session, token, event) => {
                 if self
                     .views
@@ -482,6 +529,7 @@ impl App {
             Event::Reload(session, key) => {
                 if let Some(view) = self.views.get_mut(&session) {
                     view.media.remove(&key);
+                    view.media_requests.remove(&key);
                 }
                 return self.load_media(&session);
             }
@@ -610,6 +658,8 @@ impl App {
                 continue;
             }
             view.media.insert(key.clone(), None);
+            let request = sill_client::request_id("image-read");
+            view.media_requests.insert(key.clone(), request.clone());
             inflight += 1;
             let session = session.to_string();
             let dest = session.clone();
@@ -683,7 +733,7 @@ impl App {
                     Message::Media(Event::Scoped(
                         dest.clone(),
                         token.clone(),
-                        Box::new(Event::Loaded(dest.clone(), out.clone(), r)),
+                        Box::new(Event::Fetched(dest.clone(), out.clone(), request.clone(), r)),
                     ))
                 },
             ));
@@ -702,6 +752,48 @@ mod tests {
             .unwrap();
         output.into_inner()
     }
+    #[test]
+    fn new_markdown_mention_refreshes_same_path_without_reloading_each_chunk() {
+        let (mut app, _) = App::new(true, None);
+        let view = app.views.get_mut("demo").unwrap();
+        let mut item = view.conversation.item("agent").unwrap().clone();
+        item.item_id = "image-result".into();
+        item.content = vec![sill_proto::sfp::Content::text("![result](/tmp/same.png)")];
+        view.media.insert("/tmp/same.png".into(), Some(decode(&png())));
+        view.media_requests.insert("/tmp/same.png".into(), "old-read".into());
+        view.conversation.insert_item(item.clone());
+        view.render("image-result");
+        assert!(!view.media.contains_key("/tmp/same.png"));
+        assert!(!view.media_requests.contains_key("/tmp/same.png"));
+        view.media.insert("/tmp/same.png".into(), Some(decode(&png())));
+        item.content = vec![sill_proto::sfp::Content::text("![result](/tmp/same.png) More text")];
+        view.conversation.insert_item(item.clone());
+        view.render("image-result");
+        assert!(view.media.contains_key("/tmp/same.png"));
+        item.item_id = "next-result".into();
+        view.conversation.insert_item(item);
+        view.render("next-result");
+        assert!(!view.media.contains_key("/tmp/same.png"));
+        let _ = app.media_event(Event::Fetched("demo".into(), "/tmp/same.png".into(), "old-read".into(), decode(&png())));
+        assert!(!app.views["demo"].media.contains_key("/tmp/same.png"));
+    }
+
+    #[test]
+    fn expanded_image_closes_on_escape_and_restores_window_mode() {
+        let (mut app, _) = App::new(true, None);
+        app.views.get_mut("demo").unwrap().media.insert("test".into(), Some(decode(&png())));
+        let _ = app.media_event(Event::Open("demo".into(), "test".into()));
+        assert_eq!(app.views["demo"].image_viewer.as_deref(), Some("test"));
+        let id = iced::window::Id::unique();
+        let _ = app.media_event(Event::FullscreenReady("demo".into(), id, iced::window::Mode::Windowed));
+        assert!(app.views["demo"].image_viewer_mode.is_some());
+        let _ = app.update(Message::Escape);
+        assert!(app.views["demo"].image_viewer.is_none());
+        assert!(app.views["demo"].image_viewer_mode.is_none());
+        let _ = app.media_event(Event::FullscreenReady("demo".into(), id, iced::window::Mode::Windowed));
+        assert!(app.views["demo"].image_viewer_mode.is_none(), "late full-screen request after closing is ignored");
+    }
+
     #[test]
     fn late_media_work_cannot_change_a_recreated_session_view() {
         let (mut app, _) = App::new(true, None);
@@ -766,4 +858,26 @@ mod tests {
         assert!(decode(b"not an image").is_err());
         assert!(make_image("huge.png".into(), vec![0; LIMIT + 1], "image/png").is_err());
     }
+}
+
+/// A full-window image viewer; the opaque layer prevents clicks reaching the conversation.
+pub fn expanded<'a>(view: &crate::SessionView, key: &str) -> Element<'a, Message> {
+    let content: Element<'a, Message> = match view.media.get(key) {
+        Some(Some(Ok(pic))) => image(pic.handle.clone())
+            .width(iced::Fill).height(iced::Fill)
+            .content_fit(iced::ContentFit::Contain).into(),
+        _ => text("Loading image…").into(),
+    };
+    iced::widget::opaque(container(column![
+        iced::widget::row![
+            text("Image").size(style::SMALL),
+            iced::widget::space().width(iced::Fill),
+            quiet_button("Copy image", Some(Message::Media(Event::Copy(view.id.clone(), key.into())))),
+            quiet_button(if view.image_viewer_mode.is_some() { "Exit full screen" } else { "Full screen" },
+                Some(Message::Media(Event::Fullscreen(view.id.clone())))),
+            quiet_button("Close · Esc", Some(Message::Media(Event::Close))),
+        ].spacing(12),
+        content,
+    ].spacing(12)).padding(16).width(iced::Fill).height(iced::Fill)
+        .style(|_| container::Style { background: Some(style::P.code_bg.into()), ..Default::default() }))
 }

@@ -458,6 +458,9 @@ pub struct SessionView {
     pub attachments_busy: bool,
     pub media_token: String,
     pub media: media::Cache,
+    pub media_requests: BTreeMap<String, String>,
+    pub image_viewer: Option<String>,
+    pub image_viewer_mode: Option<(iced::window::Id, iced::window::Mode)>,
     pub outbox: Outbox,
     /// A request the person made that did not take effect; shown until the next one.
     pub failed: Option<String>,
@@ -529,6 +532,9 @@ impl SessionView {
             attachments_busy: false,
             media_token: sill_client::request_id("media-view"),
             media: Default::default(),
+            media_requests: Default::default(),
+            image_viewer: None,
+            image_viewer_mode: None,
             outbox: Outbox::default(),
             failed: None,
             open_tools: BTreeSet::new(),
@@ -613,6 +619,9 @@ impl SessionView {
                 item_text(&text_item)
             }
         };
+        let previous_images: BTreeSet<String> = self.rendered.get(id)
+            .map(|r| r.markdown.images().iter().map(ToString::to_string).collect())
+            .unwrap_or_default();
         match self.rendered.get_mut(id) {
             Some(cached) if cached.source == source => {}
             Some(cached) if source.starts_with(&cached.source) => {
@@ -627,6 +636,16 @@ impl SessionView {
                         source,
                     },
                 );
+            }
+        }
+        // A new mention of a mutable file must not reuse an earlier message's preview.
+        if let Some(rendered) = self.rendered.get(id) {
+            for url in rendered.markdown.images() {
+                let key = url.to_string();
+                if !previous_images.contains(&key) {
+                    self.media.remove(&key);
+                    self.media_requests.remove(&key);
+                }
             }
         }
     }
@@ -1224,6 +1243,7 @@ impl App {
         }
         let before = self.backend_shown();
         let prior_session = self.selected.clone();
+        let prior_image_mode = self.current().and_then(|v| v.image_viewer_mode);
         let mut task = self.apply(message);
         if before != self.backend_shown() {
             self.herring_flick = Some(Instant::now());
@@ -1232,6 +1252,15 @@ impl App {
             }
         }
         let hidden = self.backend_shown();
+        if hidden || prior_session != self.selected {
+            if let Some((id, mode)) = prior_image_mode {
+                task = Task::batch([task, iced::window::set_mode(id, mode)]);
+            }
+            if let Some(view) = prior_session.as_ref().and_then(|id| self.views.get_mut(id)) {
+                view.image_viewer = None;
+                view.image_viewer_mode = None;
+            }
+        }
         for view in self.views.values_mut() {
             if (hidden || prior_session != self.selected) && let Some(editor) = &mut view.annotation {
                 editor.drawing = false;
@@ -1735,6 +1764,9 @@ impl App {
     /// Escape goes between the session and the backend; an
     /// open menu or file closes first, and the session's shell keeps Escape for itself.
     fn escape(&mut self) -> Task<Message> {
+        if self.current().is_some_and(|v| v.image_viewer.is_some()) {
+            return self.media_event(media::Event::Close);
+        }
         if self.name_editor.take().is_some() {
             return Task::none();
         }

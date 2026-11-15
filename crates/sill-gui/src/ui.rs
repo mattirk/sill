@@ -226,6 +226,12 @@ impl App {
                         .align_bottom(Fill),
                 );
         }
+        if !self.backend_shown()
+            && let Some(view) = self.current()
+            && let Some(key) = &view.image_viewer
+        {
+            layers = layers.push(crate::media::expanded(view, key));
+        }
         let annotating = !self.backend_shown()
             && self.current().is_some_and(|view| view.annotation.is_some());
         keys::annotation_shortcuts(
@@ -1174,7 +1180,8 @@ impl App {
                     let width = (size.width * THUMBNAIL_SHARE).max(72.0);
                     let height = width * 52.0 / 72.0;
                     let photos = thumbs.iter().fold(row![].spacing(6), |photos, key| {
-                        photos.push(crate::media::thumbnail(&view.media, key, width, height))
+                        photos.push(mouse_area(crate::media::thumbnail(&view.media, key, width, height))
+                            .on_press(Message::Media(crate::media::Event::Open(view.id.clone(), key.clone()))))
                     });
                     container(
                         scrollable(photos)
