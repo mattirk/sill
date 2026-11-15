@@ -5,7 +5,8 @@
 //! - every top-level directory of the host and every persistent mount below one gets its own overlay
 //!   (`--overlay-src D --overlay upper work D`), upper/work on the session's state dir;
 //! - `/proc /dev /tmp /run` are fresh, `/sys` read-only;
-//! - `/.sill/host/…` is the real tree read-only (per layer, sub-mounts masked) for revert and diffs;
+//! - `/.sill/host/…` is the real tree read-only (an overlay per layer, no bind of a host directory,
+//!   so no mount made later reaches it) for revert and diffs;
 //! - masked paths are tmpfs/`/dev/null` in both views; `direct` paths are bound through; `ro` read-only.
 //!
 //! Nothing here runs bwrap: [`JailSpec::plan`] returns the argv and the layer list, [`prepare`] creates
@@ -25,12 +26,18 @@ use crate::mounts::{self, Mount};
 use crate::paths::{expand_pattern, is_under, layer_name};
 use crate::policy::{NetMode, Policy};
 
-/// Mask at the first inaccessible directory, not below it: bwrap cannot create or
-/// resolve a destination through a root-only ancestor (e.g. Docker storage).
-fn reachable_mount_mask(path: &Path, denied: impl Fn(&Path) -> bool) -> PathBuf {
-    let mut ancestors: Vec<_> = path.ancestors().collect();
-    ancestors.reverse();
-    ancestors.into_iter().find(|p| denied(p)).unwrap_or(path).to_path_buf()
+/// Every mount of the host view read-only, after the last mask and bind laid in it (`laid` is
+/// the argv from the host view on): its overlays and tmpfs directories are writable until then.
+/// A mask laid on one of them is what the remount finds there instead. One below a mask is out
+/// of reach and has no path left to remount.
+fn seal_host_view(a: &mut Vec<OsString>, laid: usize, layers: &[Layer], expanded: &[PathBuf]) {
+    let covers: Vec<PathBuf> = a[laid..].iter().map(PathBuf::from).filter(|p| p.starts_with(HOST_VIEW)).collect();
+    for d in expanded.iter().chain(layers.iter().map(|l| &l.host)) {
+        let at = host_view(d);
+        if !covers.iter().any(|c| *c != at && at.starts_with(c)) {
+            push(a, &[&"--remount-ro", &at]);
+        }
+    }
 }
 
 /// Directories that are never overlaid: the jail gets fresh ones.
@@ -411,7 +418,8 @@ impl JailSpec {
         for l in &layers {
             push(&mut a, &[&"--overlay-src", &l.host, &"--overlay", &l.upper, &l.work, &l.host]);
         }
-        self.lay_host_view(&mut a, &layers, &expanded);
+        self.lay_host_view(&mut a, &layers, &expanded, &ro_binds, &symlinks);
+        let host_view_laid = a.len();
 
         let sill_own = crate::paths::sill_own(&self.home)?;
         let masked = Masked { policy: self.lay_policy_masks(&mut a, &paths)?, agents: self.lay_agent_masks(&mut a)? };
@@ -444,6 +452,7 @@ impl JailSpec {
         mount_fds.extend(fds);
         bound.extend(self.binds.iter().filter(|(host, inside)| host == inside).map(|(_, inside)| Bound { at: inside.clone(), backing: inside.clone(), borrowed: None }));
         mount_fds.extend(self.apply_rules_inside_binds(&mut a, &policy_masked, &ro_paths, &masked.agents, &bound, &mut warnings)?);
+        seal_host_view(&mut a, host_view_laid, &layers, &expanded);
         // bwrap's root tmpfs is writable by default; make it read-only now that every mount is in place
         push(&mut a, &[&"--remount-ro", &"/"]);
         push(&mut a, &[&"--chdir", &self.cwd]);
@@ -541,41 +550,31 @@ impl JailSpec {
         env
     }
 
-    /// The host view: the same layers read-only, every other mount below them masked.
-    fn lay_host_view(&self, a: &mut Vec<OsString>, layers: &[Layer], expanded: &[PathBuf]) {
+    /// The host view: the jail's own layout once more, read-only and without the session's
+    /// writes. Nothing in it is a bind of a host directory: a bind stays a slave of the host's
+    /// mount, so a filesystem mounted on the host later would arrive in it with its own flags,
+    /// writable (audit A3). A layer is an overlay of the directory itself, which shows no mount
+    /// below it, now or later; a directory that holds mount points is a tmpfs with its children
+    /// laid one by one, as in the jail. What the jail leaves out is absent here too.
+    fn lay_host_view(&self, a: &mut Vec<OsString>, layers: &[Layer], expanded: &[PathBuf], ro_binds: &[PathBuf], symlinks: &[(PathBuf, PathBuf)]) {
         push(a, &[&"--dir", &HOST_VIEW]);
-        // top-most of: expanded dirs and layers (an expanded dir's bind already covers its children)
-        let mut candidates: Vec<&PathBuf> = expanded.iter().chain(layers.iter().map(|l| &l.host)).collect();
-        candidates.sort();
-        let mut host_binds: Vec<&PathBuf> = Vec::new();
-        for p in candidates {
-            if !host_binds.iter().any(|o| is_under(p, o)) {
-                host_binds.push(p);
+        for d in expanded {
+            push(a, &[&"--tmpfs", &host_view(d)]);
+        }
+        for (target, name) in symlinks.iter().filter(|(_, n)| n.components().count() > 1) {
+            push(a, &[&"--symlink", target, &Path::new(HOST_VIEW).join(name)]);
+        }
+        // the plain files of an expanded directory; a mount bound read-only in the jail (/sys, a
+        // FUSE or FAT filesystem) is a recursive bind and stays out
+        for f in ro_binds {
+            if f.parent().is_some_and(|parent| expanded.iter().any(|d| d == parent)) && !mounts::is_mount_point(&self.mounts, f) {
+                push(a, &[&"--ro-bind", f, &host_view(f)]);
             }
         }
-        for h in &host_binds {
-            push(a, &[&"--ro-bind", h, &host_view(h)]);
-        }
-        let mut host_masks: Vec<PathBuf> = Vec::new();
-        for m in &self.mounts {
-            if m.mount_point == Path::new("/") || layers.iter().any(|l| l.host == m.mount_point) {
-                continue;
-            }
-            if host_binds.iter().any(|h| is_under(&m.mount_point, h)) {
-                host_masks.push(reachable_mount_mask(&m.mount_point, |path| {
-                    matches!(rustix::fs::access(path, rustix::fs::Access::READ_OK | rustix::fs::Access::EXEC_OK),
-                        Err(rustix::io::Errno::ACCESS) | Err(rustix::io::Errno::PERM))
-                }));
-            }
-        }
-        host_masks.sort();
-        host_masks.dedup();
-        let mut masked_roots: Vec<PathBuf> = Vec::new();
-        for m in host_masks {
-            // A parent mask already hides its mounts; do not recreate children inside it.
-            if masked_roots.iter().any(|parent| is_under(&m, parent)) { continue; }
-            push(a, &[&"--tmpfs", &host_view(&m)]);
-            masked_roots.push(m);
+        // an overlay whose writes would go to a tmpfs of bwrap's own; `seal_host_view` makes it
+        // read-only once the masks are in it (bwrap's read-only overlay wants a second source)
+        for l in layers {
+            push(a, &[&"--overlay-src", &l.host, &"--tmp-overlay", &host_view(&l.host)]);
         }
         if self.unsafe_state {
             // the agent must not reach its own upper trees
@@ -1476,15 +1475,6 @@ git -C "$S" fsck --full
     }
 
     #[test]
-    fn docker_mount_mask_stops_before_unsearchable_parent() {
-        let mount = Path::new("/var/lib/docker/rootfs/overlayfs/container");
-        assert_eq!(reachable_mount_mask(mount, |p| p == Path::new("/var/lib/docker")),
-                   Path::new("/var/lib/docker"));
-        assert_eq!(reachable_mount_mask(mount, |_| false), mount);
-        assert_eq!(reachable_mount_mask(mount, |p| p == mount), mount);
-    }
-
-    #[test]
     fn layers_follow_mounts_and_hidden() {
         let plan = spec().plan().unwrap();
         let hosts: Vec<_> = plan.layers.iter().map(|l| l.host.to_string_lossy().into_owned()).collect();
@@ -1504,13 +1494,48 @@ git -C "$S" fsck --full
         assert!(plan.expanded.contains(&PathBuf::from("/var")) && plan.expanded.contains(&PathBuf::from("/mnt")));
         let s = render(&plan.argv);
         assert!(s.contains("--tmpfs /var "));
-        assert!(s.contains("--tmpfs /.sill/host/var/lib/sill"));
-        assert!(s.contains("--tmpfs /.sill/host/mnt/portal"));
+        assert!(s.contains("--tmpfs /.sill/host/var ") && s.contains("--tmpfs /.sill/host/mnt "));
+        assert!(!s.contains("/.sill/host/var/lib/sill") && !s.contains("/.sill/host/mnt/portal"), "what the jail leaves out is not in the host view: {s}");
         assert!(s.contains("--symlink usr/bin /bin"));
         assert!(s.contains("--disable-userns"));
         assert!(!s.contains("--share-net"));
         assert!(s.contains("--ro-bind /sys /sys"));
         assert!(s.ends_with("--chdir /home/me -- true"));
+    }
+
+    /// Audit A3: a bind of a host directory is a slave of the host's mount and receives what is
+    /// mounted there later, writable. The host view holds none.
+    #[test]
+    fn the_host_view_binds_no_host_directory() {
+        let plan = spec().plan().unwrap();
+        let a: Vec<String> = plan.argv.iter().map(|s| s.to_string_lossy().into_owned()).collect();
+        assert!(!plan.layers.is_empty() && !plan.expanded.is_empty());
+        for (i, arg) in a.iter().enumerate().filter(|(_, arg)| arg.starts_with(HOST_VIEW)) {
+            let binds_a_directory = matches!(a[i - 2].as_str(), "--ro-bind" | "--bind" | "--dev-bind") && Path::new(&a[i - 1]).is_dir();
+            assert!(!binds_a_directory || a[i - 1].ends_with("/tools"), "{} {} {arg}", a[i - 2], a[i - 1]);
+        }
+        let last_mount = a.iter().rposition(|arg| arg.starts_with("--") && arg != "--remount-ro" && arg != "--chdir" && arg != "--").unwrap();
+        for layer in &plan.layers {
+            let at = host_view(&layer.host).to_string_lossy().into_owned();
+            let host = layer.host.to_string_lossy().into_owned();
+            assert!(a.windows(4).any(|w| w[0] == "--overlay-src" && w[1] == host && w[2] == "--tmp-overlay" && w[3] == at), "{at}");
+            let sealed = a.windows(2).rposition(|w| w[0] == "--remount-ro" && w[1] == at).unwrap_or_else(|| panic!("{at} stays writable"));
+            assert!(sealed > last_mount, "{at} is read-only before the last mount");
+        }
+        for dir in &plan.expanded {
+            let at = host_view(dir).to_string_lossy().into_owned();
+            assert!(a.windows(2).any(|w| w[0] == "--tmpfs" && w[1] == at) && a.windows(2).any(|w| w[0] == "--remount-ro" && w[1] == at), "{at}");
+        }
+    }
+
+    /// A layer under a mask of the host view has no path there: remounting it would fail the launch.
+    #[test]
+    fn a_host_view_mount_under_a_mask_is_not_remounted() {
+        let (layers, expanded) = ([layer_for(Path::new("/s"), Path::new("/home/me/.config")), layer_for(Path::new("/s"), Path::new("/etc"))], [PathBuf::from("/home/me")]);
+        let mut a: Vec<OsString> = ["--tmpfs", "/.sill/host/home/me", "--tmpfs", "/.sill/host/etc"].iter().map(OsString::from).collect();
+        seal_host_view(&mut a, 0, &layers, &expanded);
+        let r = render(&a[4..]);
+        assert_eq!(r, "--remount-ro /.sill/host/home/me --remount-ro /.sill/host/etc");
     }
 
     #[test]
@@ -1527,8 +1552,7 @@ git -C "$S" fsck --full
         assert!(!plan.layers.iter().any(|l| l.host.starts_with("/mnt/sill-state")), "the state disk is never a layer");
         let r = render(&plan.argv);
         assert!(!r.contains("--overlay-src /mnt/sill-state"), "{r}");
-        assert!(r.contains("--tmpfs /.sill/host/mnt/sill-state"), "{r}");
-        assert!(r.contains("--tmpfs /.sill/host/var/lib/sill"), "{r}");
+        assert!(!r.contains("/.sill/host/mnt/sill-state") && !r.contains("/.sill/host/var/lib/sill"), "{r}");
         assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
         // another filesystem on another device is not taken for it
         assert_eq!(mounts::state_aliases(&s.mounts, Path::new(STATE_FS)), [PathBuf::from("/mnt/sill-state")]);
