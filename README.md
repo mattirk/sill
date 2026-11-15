@@ -4,7 +4,7 @@
 [ACP](https://agentclientprotocol.com) agent in a jail on your own machine or remote box. The agent sees
 the whole machine, but what it may change, reach and keep is up to you.
 
-- **Security first.** Every session runs in its own sandbox (bubblewrap, no capabilities, its own
+- **Jailed by default.** Every session runs in its own sandbox (bubblewrap, no capabilities, its own
   network namespace). Secrets such as `~/.ssh` are hidden, and the network is an allow-list behind
   sill's proxy.
 - **Pins and Changes.** Folders you pin are live: the agent works in them directly. Everything it writes
