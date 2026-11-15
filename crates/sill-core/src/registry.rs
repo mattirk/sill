@@ -760,7 +760,7 @@ fn probe_load_session(command: &[String], env: &BTreeMap<String, String>, home: 
 /// mountpoints, so they are not the agent's own writes.
 fn throwaway_jail(command: &[String], env: &BTreeMap<String, String>, home: &Path, scratch: Option<&Path>) -> Result<(Command, Vec<PathBuf>, Option<std::os::fd::OwnedFd>)> {
     let Some(first) = command.first() else { bail!("no command") };
-    let Base { mut b, bound, seccomp, prog, path } = jail_base(first, home, scratch, false)?;
+    let Base { mut b, bound, seccomp, prog, path, .. } = jail_base(first, home, scratch, false)?;
     b.arg("--setenv").arg("HOME").arg(home).arg("--setenv").arg("PATH").arg(path).arg("--chdir").arg(home);
     for (k, v) in env {
         b.arg("--setenv").arg(k).arg(v);
@@ -779,6 +779,10 @@ struct Base {
     prog: PathBuf,
     /// `PATH` inside: the system's directories and the runtime the command needs.
     path: std::ffi::OsString,
+    /// What the jail covers with an empty directory: the home and the person's files elsewhere.
+    covered: Vec<PathBuf>,
+    /// What it binds back from there, read-only: the tools dir, the program's and runtimes' dirs.
+    shown: Vec<PathBuf>,
 }
 
 /// A jail with nothing of the person's in it: no capabilities, the system read-only, `/tmp` and
@@ -849,7 +853,9 @@ fn jail_base(program: &str, home: &Path, scratch: Option<&Path>, share_net: bool
         }
     }
     let path = std::env::join_paths(path_dirs).context("PATH")?;
-    Ok(Base { b, bound, seccomp, prog, path })
+    let covered = std::iter::once(home.to_path_buf()).chain(hidden).collect();
+    let shown = std::iter::once(tools).chain(binds).collect();
+    Ok(Base { b, bound, seccomp, prog, path, covered, shown })
 }
 
 /// The directory to bind for a program that is a link: `~/.nvm/…/bin/agent` points into
@@ -884,6 +890,28 @@ fn link_target_root(program: &Path, home: &Path) -> Option<PathBuf> {
     Some(dir.to_path_buf())
 }
 
+/// The program a login's answer asked to run, as the login jail holds it: a name on the jail's
+/// `PATH`, or an absolute path that is the system's, the login's own home, or in a directory the
+/// jail binds for the agent's program. Nothing is bound for it and no link is followed here: what
+/// the path shows inside the jail is what runs.
+fn advertised_program(command: &str, path: &std::ffi::OsStr, scratch: &Path, covered: &[PathBuf], shown: &[PathBuf]) -> Result<PathBuf> {
+    let given = Path::new(command);
+    if !given.is_absolute() {
+        anyhow::ensure!(!command.is_empty() && !command.contains('/'), "the login command {command:?} is neither a program name nor an absolute path");
+        return std::env::split_paths(path)
+            .map(|d| d.join(given))
+            .find(|c| c.is_file())
+            .with_context(|| format!("the login command {command:?} is not in the login jail: it holds the system's programs and the agent's own"));
+    }
+    anyhow::ensure!(
+        given.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_))),
+        "the login command {command:?} is not a plain path"
+    );
+    let inside = given.starts_with(scratch) || shown.iter().any(|d| given.starts_with(d)) || !covered.iter().any(|d| given.starts_with(d));
+    anyhow::ensure!(inside, "the login command {command} is among your files, which the login jail does not show: it holds the system's programs and the agent's own");
+    Ok(given.to_path_buf())
+}
+
 /// What a jailed login keeps of the daemon's environment: the language, and how to reach the
 /// network. Everything else of it stays out.
 const LOGIN_ENV: &[&str] = &[
@@ -899,8 +927,14 @@ const LOGIN_ENV: &[&str] = &[
 /// and the browser reaches the callback port the agent listens on. `env` is the login's own
 /// (`HOME`, the XDG directories, the helper's variables); its `PATH` is replaced by `front`
 /// (the browser helper's directory) before the jail's own.
+///
+/// `program` is the agent's own, from its definition: it alone decides what of the home is bound.
+/// `advertised` is a command the agent's answer asked to run instead (a terminal login): it runs
+/// in that same jail and adds nothing to it, so a path or a link the agent chose shows nothing
+/// of the person's. One that the jail does not hold is refused.
 pub fn login_jail(
     program: &str,
+    advertised: Option<&str>,
     args: &[String],
     env: &BTreeMap<String, String>,
     home: &Path,
@@ -908,7 +942,11 @@ pub fn login_jail(
     urls: &Path,
     front: &Path,
 ) -> Result<(Command, Option<std::os::fd::OwnedFd>)> {
-    let Base { mut b, seccomp, prog, path, .. } = jail_base(program, home, None, true)?;
+    let Base { mut b, seccomp, prog, path, covered, shown, .. } = jail_base(program, home, None, true)?;
+    let prog = match advertised {
+        Some(command) => advertised_program(command, &path, scratch, &covered, &shown)?,
+        None => prog,
+    };
     // the helper appends to this file; a bind needs it to exist
     std::fs::OpenOptions::new().create(true).append(true).open(urls).with_context(|| format!("create {}", urls.display()))?;
     b.arg("--bind").arg(scratch).arg(scratch).arg("--bind").arg(urls).arg(urls);

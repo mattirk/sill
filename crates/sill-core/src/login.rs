@@ -207,7 +207,7 @@ fn login_watched(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::age
     env.insert("PYTHON_KEYRING_BACKEND".into(), "keyring.backends.fail.Keyring".into());
     // Some agents refuse browser helpers beneath their working directory. The
     // private login home is separate from tools/.browser-shim under the real home.
-    let (mut cmd, _seccomp) = login_command(home, prog, &agent.command[1..], &env, report)?;
+    let (mut cmd, _seccomp) = login_command(home, prog, None, &agent.command[1..], &env, report)?;
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -277,9 +277,12 @@ fn login_watched(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::age
 
 /// Every login runs in a jail, independent of its agent or installation source.
 /// Failure to construct or start the jail is an error; there is no host fallback.
+/// `program` is the agent's own and decides the jail; `advertised` is a command the agent's
+/// answer asked to run in it instead ([`crate::registry::login_jail`]).
 fn login_command(
     home: &Path,
     program: &str,
+    advertised: Option<&str>,
     args: &[String],
     env: &std::collections::BTreeMap<String, String>,
     report: &mut impl FnMut(Line),
@@ -287,7 +290,7 @@ fn login_command(
     let scratch = PathBuf::from(env.get("HOME").context("private login home")?);
     let urls = PathBuf::from(env.get(URLS_ENV).context("login URL file")?);
     report(Line::Status("the login runs in a jail, without your files".into()));
-    crate::registry::login_jail(program, args, env, home, &scratch, &urls, &browser_shim(home)?)
+    crate::registry::login_jail(program, advertised, args, env, home, &scratch, &urls, &browser_shim(home)?)
 }
 
 /// Terminal auth runs the advertised login command rather than the ACP authenticate check.
@@ -307,21 +310,23 @@ fn terminal_login(
     let extra_env: std::collections::BTreeMap<String, String> =
         serde_json::from_value(method.get("env").cloned().unwrap_or(json!({})))
             .context("terminal login environment")?;
-    let (program, mut all_args) = if legacy {
-        let program = method
+    // The agent's own program builds the jail; a command its answer names only runs in it.
+    let program = agent.command.first().context("agent has no command")?;
+    let (advertised, mut all_args) = if legacy {
+        let command = method
             .get("command")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .context("terminal login command is missing")?;
-        (program.to_string(), Vec::new())
+        (Some(command), Vec::new())
     } else {
-        (agent.command[0].clone(), agent.command[1..].to_vec())
+        (None, agent.command[1..].to_vec())
     };
     all_args.extend(args);
     // the login's own variables win over the ones the method asks for
     let mut all_env = extra_env;
     all_env.extend(env.iter().map(|(k, v)| (k.clone(), v.clone())));
-    let (mut command, _seccomp) = login_command(home, &program, &all_args, &all_env, report)?;
+    let (mut command, _seccomp) = login_command(home, program, advertised, &all_args, &all_env, report)?;
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -563,10 +568,10 @@ mod login_copy_tests {
         let urls = home.join("urls");
         let env = [("HOME".into(), scratch.display().to_string()),
                    (URLS_ENV.into(), urls.display().to_string())].into_iter().collect();
-        let (command, _seccomp) = login_command(&home, "/bin/sh", &[], &env, &mut |_| {}).unwrap();
+        let (command, _seccomp) = login_command(&home, "/bin/sh", None, &[], &env, &mut |_| {}).unwrap();
         assert_eq!(command.get_program(), "bwrap");
         // Install trust is deliberately absent from command selection.
-        assert!(login_command(&home, "/nonexistent/login-program", &[], &env, &mut |_| {}).is_err());
+        assert!(login_command(&home, "/nonexistent/login-program", None, &[], &env, &mut |_| {}).is_err());
         let _ = std::fs::remove_dir_all(home);
     }
 
@@ -579,7 +584,7 @@ mod login_copy_tests {
         let front = home.join("front");
         let env: std::collections::BTreeMap<String, String> =
             [("HOME", scratch.to_str().unwrap()), ("PATH", "/person/bin"), (URLS_ENV, urls.to_str().unwrap())].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        let (command, _seccomp) = crate::registry::login_jail("/bin/sh", &["-c".into(), "true".into()], &env, &home, &scratch, &urls, &front).unwrap();
+        let (command, _seccomp) = crate::registry::login_jail("/bin/sh", None, &["-c".into(), "true".into()], &env, &home, &scratch, &urls, &front).unwrap();
         assert_eq!(command.get_program(), "bwrap");
         let argv: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         let r = argv.join(" ");
@@ -592,6 +597,52 @@ mod login_copy_tests {
         assert!(!r.contains("/person/bin"), "the host's PATH stays out: {r}");
         assert!(r.ends_with(&format!("--chdir {} -- /bin/sh -c true", scratch.display())), "{r}");
         assert!(urls.is_file(), "the helper's file exists before it is bound");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A terminal login's command comes from the agent's answer. Whatever it names, the jail is
+    /// the agent's own: no directory of the person's is bound for it.
+    #[test]
+    fn an_advertised_login_command_shows_nothing_of_the_persons() {
+        let home = dir("advertised");
+        let scratch = home.join(".local/state/sill/login/x");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::write(home.join(".ssh/known_hosts"), "host key").unwrap();
+        std::fs::create_dir_all(home.join("work/project/bin")).unwrap();
+        std::fs::write(home.join("work/project/bin/tool"), "#!/bin/sh\n").unwrap();
+        // links the login made in its own home, pointing at the person's files
+        std::os::unix::fs::symlink(home.join(".ssh/known_hosts"), scratch.join("keys")).unwrap();
+        std::os::unix::fs::symlink(home.join("work/project/bin/tool"), scratch.join("tool")).unwrap();
+        let urls = scratch.with_extension("urls");
+        let env: std::collections::BTreeMap<String, String> =
+            [("HOME", scratch.to_str().unwrap()), (URLS_ENV, urls.to_str().unwrap())].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        // the command line without the seccomp filter's descriptor, which differs per jail
+        let line = |c: Command| {
+            let mut args: Vec<String> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            if let Some(i) = args.iter().position(|a| a == "--seccomp") {
+                args.drain(i..i + 2);
+            }
+            args.join(" ")
+        };
+        let jail = |advertised: &str| login_command(&home, "/bin/sh", Some(advertised), &["login".into()], &env, &mut |_| {}).map(|(c, _)| line(c));
+        let own = line(login_command(&home, "/bin/sh", None, &[], &env, &mut |_| {}).unwrap().0);
+        let own_mounts = own.split(" --chdir ").next().unwrap().to_string();
+        for link in ["keys", "tool"] {
+            let advertised = scratch.join(link);
+            let r = jail(advertised.to_str().unwrap()).unwrap();
+            assert_eq!(r.split(" --chdir ").next().unwrap(), own_mounts, "the agent's own jail, nothing added");
+            assert!(!r.contains(&format!("bind {}", home.join(".ssh").display())) && !r.contains(&format!("bind {}", home.join("work").display())), "{r}");
+            assert!(r.ends_with(&format!("-- {} login", advertised.display())), "it runs as the jail shows it: {r}");
+        }
+        // a path among the person's files is not in the jail at all
+        for path in [home.join(".ssh/known_hosts"), home.join("work/project/bin/tool"), scratch.join("../../../../../.ssh/known_hosts")] {
+            assert!(jail(path.to_str().unwrap()).is_err(), "{}", path.display());
+        }
+        assert!(jail("bin/sh").is_err() && jail("no-such-login-program").is_err());
+        // a system program, by name or by path
+        assert!(jail("sh").unwrap().ends_with("/sh login"));
+        assert!(jail("/bin/sh").unwrap().ends_with("-- /bin/sh login"));
         let _ = std::fs::remove_dir_all(&home);
     }
 
