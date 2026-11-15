@@ -16,6 +16,21 @@ pub(super) struct Navigation {
 }
 
 impl App {
+    pub(crate) fn conversation_file_link(&mut self, target: String) -> Task<Message> {
+        let Some(session) = self.selected.clone() else {
+            return Task::none();
+        };
+        // Conversation file links are absolute host paths, read through the session's
+        // file worker (including workspace aliases), never the GUI's local filesystem.
+        let source = HostPath::from_path(std::path::Path::new("/"));
+        if let Ok(LinkTarget::File(path, fragment)) = resolve_link(&source, &target) {
+            return self.update(Message::Files(Action::Navigate {
+                session, path, fragment, history: true,
+            }));
+        }
+        Task::none()
+    }
+
     pub(super) fn follow_link(&mut self, session: String, source: HostPath, target: String) -> Task<Message> {
         if !self
             .views
@@ -217,10 +232,12 @@ pub(super) fn resolve_link(source: &HostPath, target: &str) -> Result<LinkTarget
     let path = if path.is_empty() {
         source.clone()
     } else {
-        source
-            .parent()
-            .ok_or("Document has no parent directory")?
-            .join(std::ffi::OsString::from_vec(decoded))
+        let decoded = std::path::PathBuf::from(std::ffi::OsString::from_vec(decoded));
+        if decoded.is_absolute() {
+            decoded
+        } else {
+            source.parent().ok_or("Document has no parent directory")?.join(decoded)
+        }
     };
     // Normalize lexically: the daemon resolves and reads host paths, never this GUI process.
     let mut normalized = std::path::PathBuf::new();

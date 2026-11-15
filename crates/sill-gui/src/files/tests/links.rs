@@ -171,3 +171,23 @@ fn heading_jump_finds_the_heading_in_the_laid_out_reader() {
         matches!(find.finish(), operation::Outcome::Some(Message::Files(Action::AnchorOffset { y, .. })) if y > 860.0)
     );
 }
+
+#[test]
+fn conversation_markdown_links_open_in_the_session_reader_and_guard_edits() {
+    let mut app = app();
+    let _ = app.update(Message::Link(
+        "/Users/demo/project/packaging/RELEASING.md#mac-image-and-packaging".into(),
+    ));
+    let file = files(&app, "demo").reader.as_ref().expect("conversation link opens reader");
+    assert_eq!(file.path.display, "/Users/demo/project/packaging/RELEASING.md");
+    // Demo files load immediately; its placeholder document lacks the requested heading.
+    assert_eq!(app.views["demo"].reader.as_ref().unwrap().notice.as_deref(),
+        Some("Heading not found: #mac-image-and-packaging"));
+    assert!(files(&app, "b").reader.is_none(), "other sessions stay unchanged");
+    let _ = app.update(Message::Link("/project/a%20b.md".into()));
+    assert_eq!(files(&app, "demo").reader.as_ref().unwrap().path.display, "/project/a b.md");
+    app.views.get_mut("demo").unwrap().reader.as_mut().unwrap().dirty = true;
+    let _ = app.update(Message::Link("/project/next.md".into()));
+    assert!(app.drawer.pending_discard.is_some());
+    assert_eq!(files(&app, "demo").reader.as_ref().unwrap().path.display, "/project/a b.md");
+}

@@ -1320,6 +1320,8 @@ impl App {
             Message::Link(url) => {
                 if url.starts_with("https://") || url.starts_with("http://") {
                     terminal::open_link(url);
+                } else if url.starts_with('/') {
+                    return self.conversation_file_link(url);
                 }
                 return Task::none();
             }
