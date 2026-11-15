@@ -30,6 +30,8 @@ pub struct AgentsPage {
     armed: crate::armed::Armed<String>,
     editor: Option<Editor>,
     details: Option<String>,
+    /// The tab shown in the expanded card; General again each time a card opens.
+    tab: Tab,
     /// Directory proposals the person unticked, per agent, until Apply.
     unticked: BTreeMap<String, BTreeSet<String>>,
     /// Model providers: a section in the row of each agent that takes them.
@@ -44,6 +46,28 @@ struct Editor {
     domain_error: Option<String>,
     path_input: String,
     path_error: Option<String>,
+}
+/// The expanded card's tabs. General holds what a person decides day to day; the rest is there
+/// for whoever comes looking.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Tab {
+    #[default]
+    General,
+    Models,
+    Network,
+    Directories,
+    Advanced,
+}
+impl Tab {
+    fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Models => "Models",
+            Self::Network => "Network",
+            Self::Directories => "Directories",
+            Self::Advanced => "Advanced",
+        }
+    }
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Filter {
@@ -71,8 +95,7 @@ pub enum Event {
     Untested(bool),
     /// Install or update to the entry's target version (see [`target`]).
     Install(String),
-    /// The per-agent version choice: on = Latest, off = Supported.
-    Latest(String, bool),
+    Tab(Tab),
     Remove(String),
     Reset(String),
     Edit(String),
@@ -102,15 +125,31 @@ pub enum Event {
 fn msg(e: Event) -> Message {
     Message::Agents(e)
 }
-/// The version Install and Update act on: with **Latest** chosen, the live index's newer version
-/// when there is one; otherwise, and with **Supported**, the snapshot's (or the live entry itself
-/// when the snapshot does not know it).
-fn target<'a>(settings: &crate::settings::Settings, e: &'a Entry) -> &'a RegistryEntry {
-    let r = &e.registry;
-    match &r.newer {
-        Some(newer) if settings.prefers_latest(&r.entry_id) => newer,
-        _ => r,
+/// The version Install and Update act on: always the latest, the live index's newer version
+/// when there is one, else the entry's own.
+fn target(e: &Entry) -> &RegistryEntry {
+    e.registry.newer.as_deref().unwrap_or(&e.registry)
+}
+/// The tab bar of an expanded card: the shown tab in full colour over an accent rule.
+fn tab_bar(tabs: &[Tab], shown: Tab) -> Element<'static, Message> {
+    let mut bar = row![].spacing(14);
+    for &tab in tabs {
+        let on = tab == shown;
+        bar = bar.push(column![
+            keys::press(
+                button(text(tab.label()).size(style::SMALL).color(if on { P.fg } else { P.fg_dim }))
+                    .padding([4, 2])
+                    .style(style::quiet),
+                msg(Event::Tab(tab)),
+            ),
+            container(iced::widget::Space::new().height(2)).width(Fill).style(style::fill(if on { P.accent } else { iced::Color::TRANSPARENT })),
+        ].width(iced::Shrink));
     }
+    column![bar, container(iced::widget::Space::new().height(1)).width(Fill).style(style::fill(P.border))].into()
+}
+/// One General row: a dim name and its value.
+fn field<'a>(name: &'a str, value: String) -> Element<'a, Message> {
+    row![text(name).size(style::SMALL).color(P.fg_dim).width(90), text(value).size(style::SMALL)].spacing(8).into()
 }
 fn control(label: &str, event: Event) -> Element<'_, Message> {
     keys::press(
@@ -147,7 +186,6 @@ fn home_path(input: &str) -> Option<sill_proto::agent_admin::HomePath> {
 /// The agent's own paths: kept in sill's storage across its sessions (login, settings, skills).
 fn path_controls(editor: &Editor) -> Element<'_, Message> {
     let mut paths = column![
-        text("Directories").size(style::SMALL),
         text("Kept across this agent's sessions, in sill's storage. Anything else the agent writes under your home stays with the session. Changes apply to new sessions.")
             .size(style::SMALL).color(P.fg_dim),
     ].spacing(4);
@@ -205,8 +243,7 @@ fn path_controls(editor: &Editor) -> Element<'_, Message> {
 
 fn domain_controls(editor: &Editor) -> Element<'_, Message> {
     let mut domains = column![
-        text("Allowed domains").size(style::SMALL),
-        text("Save applies to new sessions. Running sessions keep their access; policies may allow other domains.")
+        text("Domains this agent may reach. Save applies to new sessions. Running sessions keep their access; policies may allow other domains.")
             .size(style::SMALL).color(P.fg_dim),
     ].spacing(4);
     for domain in &editor.definition.domains {
@@ -499,6 +536,7 @@ impl App {
                     return Task::none();
                 }
                 p.details = Some(id.clone());
+                p.tab = Tab::General;
                 if let Some(d) = p
                     .entries
                     .iter()
@@ -634,14 +672,7 @@ impl App {
                     serde_json::to_value(definition).unwrap(),
                 );
             }
-            Event::Latest(id, latest) => {
-                if latest {
-                    self.settings.supported_agents.remove(&id);
-                } else {
-                    self.settings.supported_agents.insert(id);
-                }
-                self.save_settings();
-            }
+            Event::Tab(tab) => p.tab = tab,
             Event::Choose(id, path, ticked) => {
                 let set = p.unticked.entry(id).or_default();
                 if ticked {
@@ -702,7 +733,7 @@ impl App {
                 let Some(entry) = p.entries.iter().find(|e| e.registry.entry_id == id) else {
                     return Task::none();
                 };
-                let entry = target(&self.settings, entry).clone();
+                let entry = target(entry).clone();
                 let key = format!("install:{id}:{}:{}", entry.version, entry.source);
                 if entry.source == "live" && !p.armed.press(key) {
                     p.logs.insert(id, format!("Unreviewed live index: {} v{}; {}. Press the same action again to confirm.", entry.name, entry.version, entry.install_spec));
@@ -841,8 +872,7 @@ impl App {
             }
             count += 1;
             let id = &r.entry_id;
-            let latest = self.settings.prefers_latest(id);
-            let wanted = target(&self.settings, e);
+            let wanted = target(e);
             let mut top = row![
                 match p.icons.get(id) {
                     Some(handle) => iced::widget::svg(handle.clone())
@@ -889,66 +919,6 @@ impl App {
             if e.needs_setup() && !p.busy.contains(id) {
                 card = card.push(setup_card(e, p.unticked.get(id)));
             }
-            if expanded {
-                let mut versions = format!("{} · supported v{} ({})", id, r.version, r.source);
-                if let Some(newer) = &r.newer {
-                    versions.push_str(&format!(" · latest v{} (live, unreviewed)", newer.version));
-                }
-                card = card.push(text(versions).size(style::SMALL).color(P.fg_dim));
-                card = card.push(text(&r.description).size(style::SMALL).color(P.fg_dim));
-                if !r.installable && !e.present() {
-                    card = card.push(
-                        text("No build for this host")
-                            .size(style::SMALL)
-                            .color(P.fg_dim),
-                    );
-                }
-                if let Some(installed) = &e.installed {
-                    card = card.push(
-                        text(format!(
-                            "Installed {} · {}",
-                            installed.version, installed.source
-                        ))
-                        .size(style::SMALL)
-                        .color(P.fg_dim),
-                    );
-                }
-                let mut links = row![].spacing(8).align_y(Alignment::Center);
-                for (label, url) in [
-                    ("Copy source link", &r.repository),
-                    ("Copy website link", &r.website),
-                ] {
-                    if let Some(url) = url {
-                        links = links.push(keys::press(
-                            button(text(label).size(style::SMALL)).style(style::quiet),
-                            Message::Copy(url.clone()),
-                        ));
-                    }
-                }
-                if e.installed.is_some() {
-                    links = links.push(control("Remove", Event::Remove(id.clone())));
-                }
-                if e.definition.is_some() {
-                    links = links.push(control("Reset", Event::Reset(id.clone())));
-                }
-                card = card.push(links.wrap());
-                card = card.push(
-                    toggler(latest)
-                        .label(if latest {
-                            "Version: Latest — the live index's newest, unreviewed"
-                        } else {
-                            "Version: Supported — sill's reviewed snapshot"
-                        })
-                        .text_size(style::SMALL)
-                        .on_toggle({
-                            let id = id.clone();
-                            move |v| msg(Event::Latest(id.clone(), v))
-                        }),
-                );
-                if let Some(section) = p.providers.section(id, &r.name, e.present()) {
-                    card = card.push(section);
-                }
-            }
             if let Some(log) = p
                 .logs
                 .get(id)
@@ -956,29 +926,119 @@ impl App {
             {
                 card = card.push(crate::selection::text(log.clone()).size(style::SMALL));
             }
-            if let Some(editor) = p.editor.as_ref().filter(|editor| &editor.id == id) {
-                card = card.push(column![
-                    text("Command (JSON argument list)").size(style::SMALL),
-                    text_input("[\"executable\", \"argument\"]", &editor.command)
-                        .on_input(|s| msg(Event::Command(s)))
-                        .padding(7),
-                    text("Environment (NAME=value per line; may contain API keys)")
-                        .size(style::SMALL),
-                    iced::widget::text_editor(&editor.env)
-                        .on_action(|a| msg(Event::Env(a)))
-                        .height(100)
-                        .padding(7),
-                    domain_controls(editor),
-                    path_controls(editor),
-                    toggler(editor.definition.enabled)
-                        .label("Offer in the new session menu")
-                        .on_toggle(|v| msg(Event::Enabled(v))),
-                    row![
-                        control("Save", Event::Save),
-                        control("Close", Event::CloseEditor)
-                    ]
-                    .spacing(10),
-                ]);
+            if expanded {
+                card = card.push(text(&r.description).size(style::SMALL).color(P.fg_dim));
+                let editor = p.editor.as_ref().filter(|editor| &editor.id == id);
+                let providers = p.providers.section(id, &r.name, e.present());
+                let mut tabs = vec![Tab::General];
+                if providers.is_some() {
+                    tabs.push(Tab::Models);
+                }
+                if editor.is_some() {
+                    tabs.extend([Tab::Network, Tab::Directories]);
+                }
+                tabs.push(Tab::Advanced);
+                let shown = if tabs.contains(&p.tab) { p.tab } else { Tab::General };
+                card = card.push(tab_bar(&tabs, shown));
+                let mut pane = column![].spacing(6);
+                match shown {
+                    Tab::General => {
+                        let version = match &e.installed {
+                            Some(installed) if installed.version == wanted.version => format!("{} · up to date", installed.version),
+                            Some(installed) => format!("{} · {} available", installed.version, wanted.version),
+                            None if e.available => "On this machine, not installed by sill".into(),
+                            None if wanted.installable => format!("{} · not installed", wanted.version),
+                            None => "No build for this host".into(),
+                        };
+                        pane = pane.push(field("Version", version));
+                        if let Some(editor) = editor {
+                            pane = pane.push(field("Network", match editor.definition.domains.len() {
+                                0 => "No allowed domains".into(),
+                                1 => "1 allowed domain".into(),
+                                n => format!("{n} allowed domains"),
+                            }));
+                            pane = pane.push(field("Directories", match editor.definition.home_paths.as_deref() {
+                                None => "Not set up yet".into(),
+                                Some([]) => "Nothing kept across sessions".into(),
+                                Some(paths) => format!("{} kept across sessions", paths.len()),
+                            }));
+                            pane = pane.push(
+                                toggler(editor.definition.enabled)
+                                    .label("Offer in the new session menu")
+                                    .text_size(style::SMALL)
+                                    .on_toggle(|v| msg(Event::Enabled(v))),
+                            );
+                        }
+                    }
+                    Tab::Models => {
+                        if let Some(section) = providers {
+                            pane = pane.push(section);
+                        }
+                    }
+                    Tab::Network => {
+                        if let Some(editor) = editor {
+                            pane = pane.push(domain_controls(editor));
+                        }
+                    }
+                    Tab::Directories => {
+                        if let Some(editor) = editor {
+                            pane = pane.push(path_controls(editor));
+                        }
+                    }
+                    Tab::Advanced => {
+                        if let Some(editor) = editor {
+                            pane = pane.push(text("Start command (JSON argument list)").size(style::SMALL).color(P.fg_dim));
+                            pane = pane.push(
+                                text_input("[\"executable\", \"argument\"]", &editor.command)
+                                    .on_input(|s| msg(Event::Command(s)))
+                                    .size(style::SMALL)
+                                    .padding(7),
+                            );
+                            pane = pane.push(text("Environment variables (NAME=value per line; may contain API keys)").size(style::SMALL).color(P.fg_dim));
+                            pane = pane.push(
+                                iced::widget::text_editor(&editor.env)
+                                    .on_action(|a| msg(Event::Env(a)))
+                                    .size(style::SMALL)
+                                    .height(80)
+                                    .padding(7),
+                            );
+                        }
+                        let mut registry = format!("{} v{} ({})", id, r.version, r.source);
+                        if let Some(newer) = &r.newer {
+                            registry.push_str(&format!(" · latest v{} (live, unreviewed)", newer.version));
+                        }
+                        if let Some(installed) = &e.installed {
+                            registry.push_str(&format!(" · installed {} from {}", installed.version, installed.source));
+                        }
+                        pane = pane.push(field("Registry", registry));
+                        let mut links = row![].spacing(8).align_y(Alignment::Center);
+                        for (label, url) in [
+                            ("Copy source link", &r.repository),
+                            ("Copy website link", &r.website),
+                        ] {
+                            if let Some(url) = url {
+                                links = links.push(keys::press(
+                                    button(text(label).size(style::SMALL)).padding([4, 8]).style(style::quiet),
+                                    Message::Copy(url.clone()),
+                                ));
+                            }
+                        }
+                        pane = pane.push(links.wrap());
+                    }
+                }
+                card = card.push(container(pane).padding([4, 0]));
+                // what acts on the whole agent stays under every tab
+                let mut actions = row![iced::widget::Space::new().width(Fill)].spacing(10).align_y(Alignment::Center);
+                if e.installed.is_some() {
+                    actions = actions.push(control("Remove", Event::Remove(id.clone())));
+                }
+                if e.definition.is_some() {
+                    actions = actions.push(control("Reset", Event::Reset(id.clone())));
+                }
+                if editor.is_some() {
+                    actions = actions.push(control("Save", Event::Save));
+                }
+                card = card.push(actions);
             }
             body = body.push(
                 container(card)
@@ -1192,27 +1252,52 @@ mod tests {
             available: false,
             discovery: None,
         });
-        // Latest by default: the newer live version, which asks for confirmation first
-        assert!(app.settings.prefers_latest("codex-acp"));
-        assert_eq!(target(&app.settings, &app.agents_page.entries[0]).version, "2");
+        // always the latest: the newer live version, which asks for confirmation first
+        assert_eq!(target(&app.agents_page.entries[0]).version, "2");
         let _ = app.update(msg(Event::Install("codex-acp".into())));
         assert_eq!(
             app.agents_page.armed.get().map(String::as_str),
             Some("install:codex-acp:2:live")
         );
         assert!(app.agents_page.logs["codex-acp"].contains("codex@2"));
-        // Supported: the snapshot's version, no confirmation needed
-        let _ = app.update(msg(Event::Latest("codex-acp".into(), false)));
-        assert!(!app.settings.prefers_latest("codex-acp"));
-        assert_eq!(target(&app.settings, &app.agents_page.entries[0]).version, "1");
-        app.agents_page.armed.clear();
-        app.agents_page.logs.clear();
-        let _ = app.update(msg(Event::Install("codex-acp".into())));
-        assert!(app.agents_page.armed.get().is_none());
-        assert!(!app.agents_page.logs.contains_key("codex-acp"));
-        let _ = app.update(msg(Event::Latest("codex-acp".into(), true)));
-        assert!(app.settings.supported_agents.is_empty());
+        // with no newer live version, the entry's own
+        app.agents_page.entries[0].registry.newer = None;
+        assert_eq!(target(&app.agents_page.entries[0]).version, "1");
     }
+    /// The expanded card, one image per tab: `cargo test -p sill-gui render_agent_tabs -- --ignored`.
+    #[test]
+    #[ignore = "writes PNGs for review; run explicitly"]
+    fn render_agent_tabs() {
+        use serde_json::json;
+        let (mut app, _) = App::new(true, None);
+        let registry: RegistryEntry = serde_json::from_value(json!({
+            "entry_id":"claude-acp", "name":"Claude Agent", "version":"0.99.1", "source":"snapshot",
+            "installable":true, "description":"ACP wrapper for Anthropic's Claude", "repository":"https://example.invalid/claude-acp", "website":null,
+            "install_kind":"npx", "install_spec":"claude-acp@0.99.1", "package_name":"claude-acp",
+            "has_icon":false, "builtin_agent_id":"claude", "newer":{
+                "entry_id":"claude-acp", "name":"Claude Agent", "version":"0.107.0", "source":"live",
+                "installable":true, "description":"", "repository":null, "website":null,
+                "install_kind":"npx", "install_spec":"claude-acp@0.107.0", "package_name":"claude-acp",
+                "has_icon":false, "builtin_agent_id":"claude", "newer":null
+            }
+        }))
+        .unwrap();
+        let definition: Definition = serde_json::from_value(json!({
+            "id":"claude-acp", "name":"Claude Agent", "command":["/home/sill/.local/state/sill/tools/claude-acp/node_modules/.bin/claude-agent-acp"],
+            "domains":["api.anthropic.com", "*.anthropic.com", "claude.ai", "*.claude.ai", "claude.com", "*.claude.com"],
+            "home_paths":[{"path":"~/.claude","kind":"directory"}, {"path":"~/.claude.json","kind":"file"}]
+        }))
+        .unwrap();
+        let installed = serde_json::from_value(json!({"version":"0.107.0","kind":"npx","command":["claude-agent-acp"],"env":{},"source":"live"})).unwrap();
+        app.agents_page.entries.push(Entry { registry, installed: Some(installed), definition: Some(definition), available: true, discovery: None });
+        app.agents_page.shown = true;
+        let _ = app.update(msg(Event::Edit("claude-acp".into())));
+        for tab in [Tab::General, Tab::Network, Tab::Directories, Tab::Advanced] {
+            let _ = app.update(msg(Event::Tab(tab)));
+            crate::snapshots::render_size(&app, &format!("agent-tab-{}", tab.label().to_lowercase()), (720.0, 520.0));
+        }
+    }
+
     #[test]
     fn the_directories_editor_adds_and_removes_home_paths() {
         use serde_json::json;

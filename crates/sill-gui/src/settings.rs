@@ -1,7 +1,7 @@
 //! sill-gui's own settings, `~/.config/sill/sill-gui.toml`: the window's modes and sizes, and the
 //! Agents page's per-agent version choice. A file of its own, not a table in `sill.toml`: the
 //! daemon writes that file from its own settings and would drop a table it does not know.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -31,11 +31,6 @@ pub struct Settings {
     /// Interface scale, a multiplier on the desktop's own scaling: 1.0 is the desktop's normal
     /// size. Unset, unreadable or out of bounds = 1.0.
     pub interface_scale: Option<f32>,
-    /// Registry entries (by id) the Agents page keeps on the **Supported** version: the one in
-    /// sill's reviewed snapshot. Every other entry follows **Latest**: the live index's newest
-    /// version when it has one (unreviewed; its install still asks for confirmation).
-    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
-    pub supported_agents: BTreeSet<String>,
 }
 
 /// One display's window: the Shelf's width and the free window's (Drawer and Full) size and place,
@@ -57,12 +52,6 @@ pub const SCALES: &[f32] = &[0.75, 0.9, 1.0, 1.1, 1.25, 1.5];
 const SCALE_BOUNDS: (f32, f32) = (0.5, 2.0);
 
 impl Settings {
-    /// Whether the Agents page installs `entry_id`'s latest version (the default) rather than
-    /// the supported one.
-    pub fn prefers_latest(&self, entry_id: &str) -> bool {
-        !self.supported_agents.contains(entry_id)
-    }
-
     pub fn always_on_top(&self) -> bool {
         self.always_on_top.unwrap_or(!cfg!(target_os = "macos"))
     }
