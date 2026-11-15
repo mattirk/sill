@@ -1,4 +1,4 @@
-# Public build checks. Full installers are produced by the tagged release workflow.
+# Public build checks. Full installers are produced by the release workflow.
 name: build
 on:
   push:

@@ -15,18 +15,23 @@ check that `bwrap` starts. Where it cannot start, the jailed login tests in
 
 1. Update `[workspace.package].version` in Cargo.toml and regenerate Cargo.lock
    (`cargo check -p sill-proto` also refreshes workspace package versions).
-2. Commit and push private master, then manually run its publication workflow.
-3. Wait for the public build checks and test the artifacts.
-4. Push a `vVERSION` tag to the verified commit in the **public** repository.
-   For example, `v0.1.0` requires workspace and lockfile versions of `0.1.0`.
-5. The public `release` workflow builds Linux tar/deb packages and the Apple
-   Silicon DMG. It creates a **draft** release only after both platforms succeed,
-   with generated notes and one SHA256SUMS covering every package.
-6. Test the downloaded packages, edit the draft's notes, then publish it.
+2. Commit and push private master, then run its publication workflow
+   (`gh workflow run publish`).
 
-The workflow can also be dispatched against an existing version tag. Branch refs
-and mismatched versions are rejected. Release jobs do not run in the private repo.
-Tagging does not publish a release immediately: the final publish is a human step.
+That is all. A push to public `main` that changes Cargo.toml starts the `release`
+workflow. If the workspace version has no `vVERSION` tag yet, it runs the tests,
+builds the Linux tar/deb packages and the Apple Silicon DMG, and publishes the
+release with generated notes and one SHA256SUMS; publishing creates the tag at the
+built commit. It then runs `site/install.sh` against the new release on a Linux and
+a Mac runner. A version that is already tagged does nothing, so only a version bump
+releases. A failed run can be dispatched again on `main`; nothing is published
+unless every package was built.
+
+Not covered by CI: the Linux VM image is never booted under Apple's Virtualization
+framework, and the unsigned-app prompt is not exercised. Open a released DMG on an
+Apple Silicon Mac when the image or the app packaging changed. A bad release is
+withdrawn by deleting it and its tag on GitHub; the installer then offers the
+previous one.
 
 ## Download page and installer
 
@@ -39,8 +44,8 @@ manual dispatch. It needs Settings → Pages → Source set to **GitHub Actions*
 expects the package names the release workflow produces (`sill-VERSION-x86_64.tar.gz`,
 `sill_VERSION_amd64.deb`, `sill-VERSION-macos-arm64.dmg`, `SHA256SUMS`). Rename them in both
 places. `python3 packaging/test_release.py InstallTests` runs it against a pretend release.
-After publishing a release, run the command on a Linux machine and a Mac: the tests do not
-download from GitHub.
+The `release` workflow runs it for real against each release it publishes
+(`packaging/try-install.py`).
 
 ## Mac image and packaging
 
@@ -73,7 +78,7 @@ its key and sudo access are removed from the delivered image.
 
 CI transfers the compressed raw image, its original size and commit identity,
 plus checksums, to a `macos-15` ARM64 runner. `app.sh` accepts this compressed-only
-input as well as the local raw image. CI requires the image to match the tagged
+input as well as the local raw image. CI requires the image to match the released
 commit with `SILL_IMAGE_EXPECT_COMMIT`; it verifies transfer checksums before
 packaging. No VM is booted on GitHub's hosted Mac.
 
@@ -86,9 +91,7 @@ these are not configured yet.
 
 For downloaded Mac releases, drag Sill into Applications and try opening it.
 If macOS blocks the unidentified developer, use System Settings → Privacy &
-Security → Open Anyway for Sill. Test this download/open flow on a separate Mac
-before publishing; organization-managed Macs may prevent exceptions.
+Security → Open Anyway for Sill. Organization-managed Macs may prevent exceptions.
 
-The Linux/QEMU-generated image must also be boot-tested on a real Apple Silicon
-Mac before publishing the first release. Hosted CI cannot exercise Apple's VM
-framework. The workflow's tests and assembly checks do not replace that test.
+Hosted CI cannot exercise Apple's VM framework, so the Linux/QEMU-generated image
+is not boot-tested there.

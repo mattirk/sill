@@ -114,7 +114,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("sill@127.0.0.1", ssh)
         self.assertIn("23456", ssh)
 
-    def test_release_tag_and_lockfile_must_match(self):
+    def test_release_is_from_main_with_a_matching_lockfile(self):
         shutil.copy(ROOT / "packaging/check-release.py", self.root / "packaging/check-release.py")
         (self.root / "Cargo.toml").write_text('[workspace.package]\nversion = "0.1.0"\n')
         (self.root / "crates/demo").mkdir(parents=True)
@@ -123,12 +123,14 @@ class ReleaseTests(unittest.TestCase):
         lock.write_text('[[package]]\nname = "demo"\nversion = "0.1.0"\n')
         def check(ref):
             return subprocess.run(["python3", "packaging/check-release.py"], cwd=self.root,
-                                  env=dict(self.env, GITHUB_REF=ref), capture_output=True).returncode
-        self.assertEqual(check("refs/tags/v0.1.0"), 0)
-        self.assertNotEqual(check("refs/tags/v0.2.0"), 0)
-        self.assertNotEqual(check("refs/heads/main"), 0)
-        lock.write_text('[[package]]\nname = "demo"\nversion = "0.0.1"\n')
+                                  env=dict(self.env, GITHUB_REF=ref, GITHUB_OUTPUT=str(self.root / "output")),
+                                  capture_output=True).returncode
+        self.assertEqual(check("refs/heads/main"), 0)
+        self.assertEqual((self.root / "output").read_text(), "version=0.1.0\n")
+        self.assertNotEqual(check("refs/heads/other"), 0)
         self.assertNotEqual(check("refs/tags/v0.1.0"), 0)
+        lock.write_text('[[package]]\nname = "demo"\nversion = "0.0.1"\n')
+        self.assertNotEqual(check("refs/heads/main"), 0)
 
 
 class InstallTests(unittest.TestCase):

@@ -64,9 +64,9 @@ Then add it in Settings → Remote boxes on your desktop. The connection is SSH;
 ## Builds and releases
 
 Public CI checks Linux x86_64 and Apple Silicon macOS on pushes and pull requests.
-Workflow artifacts contain development binaries; tagged releases build Linux
-packages and a complete Mac DMG for review as a draft release.
-See [the release instructions](packaging/RELEASING.md) for versioning, tagging,
+Workflow artifacts contain development binaries; a new version on `main` is released
+with Linux packages and a complete Mac DMG.
+See [the release instructions](packaging/RELEASING.md) for versioning,
 Mac signing and the local/CI image build paths.
 
 ## Architecture

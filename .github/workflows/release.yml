@@ -1,23 +1,41 @@
-# Push a public v* tag to build all packages, then review and publish the draft release.
+# A new workspace version arriving on public main is released: tests, packages, the published
+# release with its tag, then the installer run against it. A version whose tag exists does nothing.
 name: release
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+    paths: [Cargo.toml]
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 jobs:
   version:
     if: github.repository == 'mattirk/sill'
     runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      release: ${{ steps.tag.outputs.release }}
     steps:
       - uses: actions/checkout@v4
-      - run: python3 packaging/check-release.py
+      - id: check
+        run: python3 packaging/check-release.py
+      - id: tag
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          found=$(git ls-remote --tags origin "refs/tags/v$VERSION")
+          if [ -n "$found" ]; then
+            echo "v$VERSION is already released; nothing to do."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
   linux:
     needs: version
+    if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -45,6 +63,7 @@ jobs:
           if-no-files-found: error
   mac-image:
     needs: version
+    if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 180
     env:
@@ -89,7 +108,7 @@ jobs:
             target/mac-image/vm.log
           retention-days: 7
   mac:
-    needs: mac-image
+    needs: [version, mac-image]
     runs-on: macos-15
     timeout-minutes: 90
     env:
@@ -110,14 +129,16 @@ jobs:
       - run: cargo test --locked -p sill-gui -p sill-vm -p sill-client -p sill-proto -- --test-threads=1
       - run: packaging/mac/app.sh
       - name: Name release package
-        run: mv dist/Sill.dmg "dist/sill-${GITHUB_REF_NAME#v}-macos-arm64.dmg"
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: mv dist/Sill.dmg "dist/sill-$VERSION-macos-arm64.dmg"
       - uses: actions/upload-artifact@v4
         with:
           name: release-mac
           path: dist/*.dmg
           if-no-files-found: error
-  draft:
-    needs: [linux, mac]
+  publish:
+    needs: [version, linux, mac]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -132,13 +153,27 @@ jobs:
           cd dist
           sha256sum *.tar.gz *.deb *.dmg > SHA256SUMS
           sha256sum -c SHA256SUMS
-      - uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: |
-            dist/*.tar.gz
-            dist/*.deb
-            dist/*.dmg
-            dist/SHA256SUMS
+      - name: Publish the release and its tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        # gh uploads the packages to a draft and publishes it only when all of them are there
+        run: |
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "sill $VERSION" --generate-notes --latest \
+            dist/*.tar.gz dist/*.deb dist/*.dmg dist/SHA256SUMS
+  # What the download page tells people to paste, run against the release that was just published.
+  install:
+    needs: [version, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install from the published release
+        env:
+          SILL_VERSION: ${{ needs.version.outputs.version }}
+        run: python3 packaging/try-install.py
