@@ -80,7 +80,7 @@ package_update: true
 # for the programs under test (the VM has no GPU of its own), the jail's private D-Bus, a font;
 # Weston itself is built from source below
 packages: [git, ripgrep, ca-certificates, build-essential, pkg-config, bubblewrap, e2fsprogs, util-linux,
-           libpam-systemd, dbus-user-session, openssh-server, sudo, curl, xz-utils,
+           libpam-systemd, dbus-user-session, openssh-server, sudo, curl, xz-utils, unzip,
            xwayland, xdotool, libxi6, libxkbcommon-x11-0, libxcb-xkb1,
            libgl1-mesa-dri, libegl1, mesa-vulkan-drivers, dbus,
            fonts-dejavu-core]

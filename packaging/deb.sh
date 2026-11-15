@@ -47,7 +47,7 @@ Priority: optional
 Architecture: $DEB_ARCH
 Maintainer: Matti Rita-Kasari <matti@rita-kasari.fi>
 Installed-Size: $SIZE
-Depends: bubblewrap, e2fsprogs, libwayland-client0, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6
+Depends: bubblewrap, e2fsprogs, curl, unzip, libwayland-client0, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6
 Recommends: systemd, libvulkan1, mesa-vulkan-drivers, libegl1, libwayland-egl1
 Suggests: weston, xwayland, dbus
 Homepage: https://github.com/mattirk/sill
