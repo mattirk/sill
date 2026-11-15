@@ -83,9 +83,10 @@ installing sill from a checkout an agent has modified.
 
 - **2026-11-01** — [docs/security.md](docs/security.md): the jail, the proxy, Keep and the root
   install; findings S1–S21 with their status.
-- **2026-11-15** — a second audit of the same areas plus the Mac app, the daemon protocol and the
-  release pipeline. It confirmed that most earlier fixes hold and found new issues, some of them
-  serious and open. The report is not published while they are open.
+- **2026-11-15** — [docs/security-2026-11-15.md](docs/security-2026-11-15.md): a second audit of
+  the same areas plus the Mac app, the daemon protocol and the release pipeline; findings A1–A31
+  with their status. It confirmed that most earlier fixes hold and found four serious issues,
+  which are fixed, and others that are still open.
 
 ## Checking a download
 
