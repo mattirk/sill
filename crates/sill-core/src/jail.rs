@@ -286,7 +286,7 @@ pub fn layout(policy: &Policy, home: &Path, state_dir: &Path, mounts: &[Mount], 
                 return;
             }
             let Ok(rd) = std::fs::read_dir(path) else {
-                self.out.warnings.push(format!("{} not readable, left out of the jail", path.display()));
+                // Discovered directories may be root-only; omit them like unreadable children.
                 return;
             };
             self.out.expanded.push(path.to_path_buf());
@@ -349,7 +349,7 @@ pub fn layout(policy: &Policy, home: &Path, state_dir: &Path, mounts: &[Mount], 
             continue;
         }
         if !e.readable {
-            walk.out.warnings.push(format!("{} not readable, left out of the jail", path.display()));
+            // Expected for root-only directories such as /root during the filesystem scan.
             continue;
         }
         walk.dir(&path);
