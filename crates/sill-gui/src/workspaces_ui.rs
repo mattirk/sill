@@ -2,7 +2,7 @@
 //! for each workspace with work not yet applied — what it would bring, Apply, Discard — and its
 //! diff on request. It never blocks the conversation: the person may go on talking. Also the pin
 //! chips' marks for workspaces and repositories kept live.
-use iced::widget::{Column, button, column, container, row, scrollable, text, tooltip};
+use iced::widget::{Column, button, column, container, row, scrollable, space, text, tooltip};
 use iced::{Alignment, Element, Fill};
 use sill_client::workspaces as ws;
 
@@ -111,25 +111,11 @@ impl App {
                 shelf = shelf.push(row);
             }
             if state.menu.as_deref() == Some(id.as_str()) && !rebase_stopped {
+                // the other ways to apply, side by side at the right (the person, 2026-11-16)
                 shelf = shelf.push(
                     row![
-                        text("Writes the changes into your checkout as they are, uncommitted, for you to try. Nothing is committed and the work stays here to apply; other sessions do not get it.")
-                            .size(style::TINY)
-                            .color(P.fg_dim)
-                            .width(Fill)
-                            .wrapping(text::Wrapping::WordOrGlyph),
+                        space::horizontal(),
                         quiet_button("Apply without commit", ev(Event::Copy(session.clone(), id.clone()))),
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
-                );
-                shelf = shelf.push(
-                    row![
-                        text("Makes a new branch in your checkout with the workspace's commits, named for the work. Your checkout stays on its branch, its files untouched; the work stays here to apply.")
-                            .size(style::TINY)
-                            .color(P.fg_dim)
-                            .width(Fill)
-                            .wrapping(text::Wrapping::WordOrGlyph),
                         quiet_button("Apply as branch", ev(Event::Branch(session.clone(), id.clone()))),
                     ]
                     .spacing(6)
