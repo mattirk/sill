@@ -1271,10 +1271,9 @@ impl App {
         let prior_session = self.selected.clone();
         let prior_image_mode = self.current().and_then(|v| v.image_viewer_mode);
         let mut task = self.apply(message);
-        // Find belongs to the conversation it was opened on (docs/find.md, decision 3)
-        if self.find.shown && (prior_session != self.selected || !self.find_available()) {
-            self.find.close();
-        }
+        // Find belongs to the surface it was opened on (docs/find.md, decision 3)
+        let find_task = self.find_follow(&prior_session);
+        task = Task::batch([task, find_task]);
         if before != self.backend_shown() {
             self.herring_flick = Some(Instant::now());
             if before {
@@ -1937,7 +1936,7 @@ impl App {
         let ended_now = !was_ended && view.ended();
         let followed_from = view.scroll_offset;
         let find_task = if grew && selected {
-            self.recompute_find(true)
+            self.find_streamed()
         } else {
             Task::none()
         };
@@ -2422,7 +2421,7 @@ impl App {
             }
         }
         let scroll_offset = view.scroll_offset;
-        let find_task = self.recompute_find(true);
+        let find_task = self.find_streamed();
         let snap = !self.selecting
             && self
                 .views

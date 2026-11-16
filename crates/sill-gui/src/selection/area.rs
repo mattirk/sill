@@ -57,6 +57,8 @@ pub struct FindQuery {
 pub struct VisibleLeaf {
     pub row: Option<usize>,
     pub origin_y: f32,
+    /// How far the outer scrollable was scrolled down when the leaf was recorded.
+    pub view_top: f32,
     pub layout: TextLayout,
 }
 
@@ -500,8 +502,7 @@ impl<Message> Area<'_, Message> {
             last_row: None,
             row_seen: 0,
             painted: false,
-            scrollable_y: None,
-            entered_scrollable_y: None,
+            entered_scrollable: None,
             scrollable_stack: Vec::new(),
             visible_leaves: self.visible_leaves.is_some().then_some(&mut recorded),
         };
@@ -1079,21 +1080,20 @@ struct PaintFind<'a> {
     last_row: Option<usize>,
     row_seen: usize,
     painted: bool,
-    scrollable_y: Option<f32>,
-    entered_scrollable_y: Option<f32>,
-    scrollable_stack: Vec<f32>,
+    /// A scrollable just met: its top and how far it is scrolled, for the traversal of its
+    /// content; the stack holds those entered, the outermost first.
+    entered_scrollable: Option<(f32, f32)>,
+    scrollable_stack: Vec<(f32, f32)>,
     visible_leaves: Option<&'a mut Vec<VisibleLeaf>>,
 }
 
 impl Operation for PaintFind<'_> {
     fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
-        match self.entered_scrollable_y.take() {
-            Some(y) => {
-                self.scrollable_stack.push(y);
-                self.scrollable_y = self.scrollable_stack.first().copied();
+        match self.entered_scrollable.take() {
+            Some(frame) => {
+                self.scrollable_stack.push(frame);
                 operate(self);
                 self.scrollable_stack.pop();
-                self.scrollable_y = self.scrollable_stack.first().copied();
             }
             None => operate(self),
         }
@@ -1104,10 +1104,10 @@ impl Operation for PaintFind<'_> {
         _id: Option<&Id>,
         bounds: Rectangle,
         _content_bounds: Rectangle,
-        _translation: Vector,
+        translation: Vector,
         _state: &mut dyn Scrollable,
     ) {
-        self.entered_scrollable_y = Some(bounds.y);
+        self.entered_scrollable = Some((bounds.y, translation.y));
     }
 
     fn custom(&mut self, _id: Option<&Id>, bounds: Rectangle, state: &mut dyn Any) {
@@ -1126,10 +1126,11 @@ impl Operation for PaintFind<'_> {
         };
         if let Some(out) = self.visible_leaves.as_deref_mut() {
             let origin = selectable.origin(bounds);
-            let scroll_y = self.scrollable_y.unwrap_or(0.0);
+            let (scroll_y, view_top) = self.scrollable_stack.first().copied().unwrap_or_default();
             out.push(VisibleLeaf {
                 row: self.current_row,
                 origin_y: origin.y - scroll_y,
+                view_top,
                 layout: selectable.layout().clone(),
             });
         }

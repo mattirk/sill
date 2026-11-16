@@ -145,6 +145,12 @@ impl Editor {
         self.break_group();
         result
     }
+    /// Puts the cursor at `cursor` (a selection when it has one) without touching the text or
+    /// its history: Find's current match in the reader's source.
+    pub fn select(&mut self, cursor: Cursor) {
+        self.content.move_to(cursor);
+        self.break_group();
+    }
     pub fn history(&mut self, redo: bool) {
         self.break_group();
         let snapshot = if redo {

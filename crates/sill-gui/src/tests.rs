@@ -5207,3 +5207,163 @@ fn find_escape_terminal_focus_and_navigation_close() {
     );
 }
 
+
+#[test]
+fn find_searches_the_reader_preview_source_and_diff() {
+    use crate::files::Action;
+    use crate::find::{Event as FindEvent, ReaderMode, Surface};
+    use sill_proto::sessions::HostPath;
+    let path = |p: &str| HostPath::from_path(std::path::Path::new(p));
+    let mode = |app: &App| match &app.find.surface {
+        Some(Surface::Reader { mode, .. }) => Some(*mode),
+        _ => None,
+    };
+    let (mut app, _) = App::new(true, None);
+    let mut live = Live::new((720.0, 860.0));
+    live.apply(
+        &mut app,
+        Message::Files(Action::Open {
+            path: path("/home/demo/project/README.md"),
+            repo: None,
+        }),
+    );
+    live.frame(&app, |_| {});
+
+    // the preview: a word selected in it is the query
+    let events = live.frame(&app, |ui| {
+        let from = aim_at(ui, "Staying oriented", "Staying");
+        let to = aim_at(ui, "Staying oriented", " oriented");
+        drag(ui, from, to);
+        ui.send(ctrl_f());
+    });
+    for m in events {
+        live.apply(&mut app, m);
+    }
+    assert_eq!(mode(&app), Some(ReaderMode::Preview));
+    assert_eq!(app.find.query, "Staying");
+    assert_eq!(app.find.matches.len(), 1);
+    // rendered text, so the heading's words are found without its `#`
+    live.apply(&mut app, Message::Find(FindEvent::Input("session".into())));
+    assert_eq!(app.find.matches.len(), 2);
+    assert_eq!(app.find.current, Some(0));
+    for m in live.frame(&app, |_| {}) {
+        live.apply(&mut app, m);
+    }
+    let (mut matched, mut current) = (Vec::new(), Vec::new());
+    live.frame(&app, |ui| {
+        matched = find_matched(ui);
+        current = current_matched(ui);
+    });
+    assert_eq!(matched, ["session", "session"]);
+    assert_eq!(current.len(), 1);
+    live.apply(&mut app, Message::Find(FindEvent::Next));
+    assert_eq!(app.find.current, Some(1));
+
+    // the same file as source: the bar stays, the matches are the source's, the current one is
+    // the editor's selection, searched from the cursor
+    live.apply(&mut app, Message::Files(Action::Source));
+    assert!(app.find.shown);
+    assert_eq!(mode(&app), Some(ReaderMode::Source));
+    assert_eq!(app.find.matches.len(), 2);
+    assert_eq!(app.find.current, Some(0));
+    let selection = |app: &App| {
+        let reader = app.views["demo"].reader.as_ref().unwrap();
+        (reader.content.selection(), reader.content.cursor().position.line)
+    };
+    assert_eq!(selection(&app), (Some("session".into()), 0));
+    live.apply(&mut app, Message::Find(FindEvent::Next));
+    assert_eq!(selection(&app), (Some("session".into()), 7));
+    // drawn with the editor's marks (sill patch)
+    live.frame(&app, |_| {});
+    assert_eq!(app.find.source_marks().iter().filter(|m| m.2).count(), 1);
+
+    // the file read again: a new editor, and the current match is its selection again
+    {
+        let view = app.views.get_mut("demo").unwrap();
+        view.files.reader.as_mut().unwrap().revision += 1;
+        view.sync_reader();
+    }
+    assert_eq!(selection(&app), (None, 0), "a fresh editor");
+    live.apply(&mut app, Message::Noop);
+    assert_eq!(app.find.current, Some(1));
+    assert_eq!(selection(&app), (Some("session".into()), 7));
+
+    // an edit before the match: it is looked for again and stays the current one
+    live.apply(&mut app, Message::Files(Action::Text(iced::widget::text_editor::Action::Move(
+        iced::widget::text_editor::Motion::DocumentStart,
+    ))));
+    live.apply(&mut app, Message::Files(Action::Text(iced::widget::text_editor::Action::Edit(
+        iced::widget::text_editor::Edit::Insert('X'),
+    ))));
+    assert_eq!(app.find.matches.len(), 2);
+
+    // Escape: the bar closes, the cursor is left where the match was
+    live.apply(&mut app, Message::Escape);
+    assert!(!app.find.shown);
+    assert!(app.views["demo"].files.reader.is_some(), "Escape closed only the bar");
+    live.apply(&mut app, Message::Files(Action::CloseViewer));
+    live.apply(&mut app, Message::Files(Action::DiscardEdits));
+
+    // the diff rows; another file closes the bar
+    live.apply(
+        &mut app,
+        Message::Files(Action::Open {
+            path: path("/home/demo/project/README.md"),
+            repo: None,
+        }),
+    );
+    live.apply(&mut app, Message::Find(FindEvent::Open));
+    assert!(app.find.shown);
+    live.apply(
+        &mut app,
+        Message::Files(Action::Open {
+            path: path("/home/demo/project/src/main.rs"),
+            repo: Some(path("/home/demo/project")),
+        }),
+    );
+    assert!(!app.find.shown);
+    live.frame(&app, |_| {});
+    live.apply(&mut app, Message::Find(FindEvent::Open));
+    assert_eq!(mode(&app), Some(ReaderMode::Diff));
+    live.apply(&mut app, Message::Find(FindEvent::Input("agents".into())));
+    assert_eq!(app.find.matches.len(), 1);
+    for m in live.frame(&app, |_| {}) {
+        live.apply(&mut app, m);
+    }
+    let mut current = Vec::new();
+    live.frame(&app, |ui| current = current_matched(ui));
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].0, "agents");
+
+    // a match far along a long diff line: the diff scrolls sideways to it
+    live.apply(&mut app, Message::Find(FindEvent::Close));
+    {
+        let view = app.views.get_mut("demo").unwrap();
+        let file = view.files.reader.as_mut().unwrap();
+        file.text = format!(
+            "diff --git a/x b/x\n@@ -1,1 +1,1 @@\n+{} far-needle\n",
+            "word ".repeat(80)
+        );
+        file.revision += 1;
+        view.sync_reader();
+    }
+    live.frame(&app, |_| {});
+    live.apply(&mut app, Message::Find(FindEvent::Open));
+    live.apply(&mut app, Message::Find(FindEvent::Input("far-needle".into())));
+    assert_eq!(app.find.matches.len(), 1);
+    for m in live.frame(&app, |_| {}) {
+        live.apply(&mut app, m);
+    }
+    let mut sideways = None;
+    live.frame(&app, |ui| {
+        sideways = ui.select(|candidate| match candidate {
+            iced_test::selector::Candidate::Scrollable {
+                id: Some(found),
+                translation,
+                ..
+            } if *found == iced::widget::Id::new("diff-reader") => Some(translation.x),
+            _ => None,
+        });
+    });
+    assert!(sideways.unwrap_or_default() > 200.0, "scrolled sideways: {sideways:?}");
+}

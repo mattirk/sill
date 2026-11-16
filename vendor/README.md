@@ -29,6 +29,10 @@ once upstream has an equivalent.
   events to a parent horizontal scrollbar: an event whose larger axis is sideways (a trackpad
   reports both axes in nearly every event), the rest scrolls the editor. Default editors stay
   unchanged.
+- `src/text_editor.rs`: optional `marks`, a callback giving rectangles (in the text's own
+  coordinates) with their colours, filled behind the text. sill-gui's Find draws its matches in the
+  reader's source with it (`find::mark_rects`): upstream draws the selection only while the editor
+  has the focus, and during Find the focus is in the find bar.
 - `src/scrollable.rs`: a wheel event along an axis the scrollable does not scroll reaches its
   content also just after the scrollable scrolled. Upstream withholds every wheel event from the
   content for up to 1.5 s then; around the source editor that froze vertical scrolling after any
