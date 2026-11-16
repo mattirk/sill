@@ -29,6 +29,9 @@ pub enum Slot {
 /// which row a [`crate::selection::Selectable`] leaf belongs to.
 pub struct RowScope(pub Option<usize>);
 
+/// The gap between the conversation's rows.
+pub const SPACING: f32 = 12.0;
+
 /// Which rows to build for a view `viewport` high scrolled to `offset` (to the end while
 /// following the tail): those within a screen of the view, and any not measured yet; the rest
 /// become gaps. `spacing` is the column's gap between children, which a gap of k rows keeps:
@@ -100,14 +103,13 @@ pub fn key(value: &str) -> u64 {
     hasher.finish()
 }
 
-/// A row that records its laid-out height under `key` and `signature`. Transparent otherwise:
-/// it has no tree node of its own, so wrapping a row changes nothing of its state.
+/// A conversation row: tells operations its `index` ([`RowScope`]) and, when it has a `key`,
+/// records its laid-out height under it and `signature`. Transparent otherwise: it has no tree
+/// node of its own, so wrapping a row changes nothing of its state.
 pub struct Measured<'a> {
     content: Element<'a, Message>,
     index: usize,
-    key: &'a str,
-    signature: u64,
-    heights: &'a Heights,
+    measure: Option<(&'a str, u64, &'a Heights)>,
 }
 
 pub fn measured<'a>(
@@ -120,9 +122,16 @@ pub fn measured<'a>(
     Measured {
         content: content.into(),
         index,
-        key,
-        signature,
-        heights,
+        measure: Some((key, signature, heights)),
+    }
+}
+
+/// A row after the measured ones (a question placed at the end, a problem): scoped, not measured.
+pub fn scoped<'a>(index: usize, content: impl Into<Element<'a, Message>>) -> Measured<'a> {
+    Measured {
+        content: content.into(),
+        index,
+        measure: None,
     }
 }
 
@@ -158,9 +167,11 @@ impl Widget<Message, Theme, Renderer> for Measured<'_> {
         limits: &layout::Limits,
     ) -> layout::Node {
         let node = self.content.as_widget_mut().layout(tree, renderer, limits);
-        self.heights
-            .borrow_mut()
-            .insert(self.key.to_string(), (self.signature, node.size().height));
+        if let Some((key, signature, heights)) = self.measure {
+            heights
+                .borrow_mut()
+                .insert(key.to_string(), (signature, node.size().height));
+        }
         node
     }
 
@@ -239,131 +250,6 @@ impl Widget<Message, Theme, Renderer> for Measured<'_> {
 impl<'a> From<Measured<'a>> for Element<'a, Message> {
     fn from(measured: Measured<'a>) -> Self {
         Element::new(measured)
-    }
-}
-
-/// Tags an unmeasured conversation row with its `index` during `Widget::operate`.
-pub struct Scoped<'a> {
-    content: Element<'a, Message>,
-    index: usize,
-}
-
-pub fn scoped<'a>(index: usize, content: impl Into<Element<'a, Message>>) -> Scoped<'a> {
-    Scoped {
-        content: content.into(),
-        index,
-    }
-}
-
-impl Widget<Message, Theme, Renderer> for Scoped<'_> {
-    fn tag(&self) -> tree::Tag {
-        self.content.as_widget().tag()
-    }
-
-    fn state(&self) -> tree::State {
-        self.content.as_widget().state()
-    }
-
-    fn children(&self) -> Vec<Tree> {
-        self.content.as_widget().children()
-    }
-
-    fn diff(&self, tree: &mut Tree) {
-        self.content.as_widget().diff(tree);
-    }
-
-    fn size(&self) -> Size<Length> {
-        self.content.as_widget().size()
-    }
-
-    fn size_hint(&self) -> Size<Length> {
-        self.content.as_widget().size_hint()
-    }
-
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        self.content.as_widget_mut().layout(tree, renderer, limits)
-    }
-
-    fn operate(
-        &mut self,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        operation: &mut dyn Operation,
-    ) {
-        operation.custom(None, layout.bounds(), &mut RowScope(Some(self.index)));
-        self.content
-            .as_widget_mut()
-            .operate(tree, layout, renderer, operation);
-        operation.custom(None, layout.bounds(), &mut RowScope(None));
-    }
-
-    fn update(
-        &mut self,
-        tree: &mut Tree,
-        event: &Event,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        renderer: &Renderer,
-        clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, Message>,
-        viewport: &Rectangle,
-    ) {
-        self.content.as_widget_mut().update(
-            tree, event, layout, cursor, renderer, clipboard, shell, viewport,
-        );
-    }
-
-    fn draw(
-        &self,
-        tree: &Tree,
-        renderer: &mut Renderer,
-        theme: &Theme,
-        style: &renderer::Style,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-    ) {
-        self.content
-            .as_widget()
-            .draw(tree, renderer, theme, style, layout, cursor, viewport);
-    }
-
-    fn mouse_interaction(
-        &self,
-        tree: &Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &Renderer,
-    ) -> mouse::Interaction {
-        self.content
-            .as_widget()
-            .mouse_interaction(tree, layout, cursor, viewport, renderer)
-    }
-
-    fn overlay<'b>(
-        &'b mut self,
-        tree: &'b mut Tree,
-        layout: Layout<'b>,
-        renderer: &Renderer,
-        viewport: &Rectangle,
-        translation: Vector,
-    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
-        self.content
-            .as_widget_mut()
-            .overlay(tree, layout, renderer, viewport, translation)
-    }
-}
-
-impl<'a> From<Scoped<'a>> for Element<'a, Message> {
-    fn from(scoped: Scoped<'a>) -> Self {
-        Element::new(scoped)
     }
 }
 

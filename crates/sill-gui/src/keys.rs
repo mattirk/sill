@@ -769,16 +769,6 @@ pub fn navigation(event: keyboard::Event) -> Option<Message> {
     let (ctrl, shift) = (modifiers.command(), modifiers.shift());
     Some(match key.as_ref() {
         Key::Named(Named::Tab) if !ctrl && !modifiers.alt() => Message::Focus(!shift),
-        Key::Named(Named::F3) if !ctrl && !modifiers.alt() => Message::Find(if shift {
-            crate::find::Event::Prev
-        } else {
-            crate::find::Event::Next
-        }),
-        Key::Character(c)
-            if modifiers.alt() && !ctrl && !shift && c.eq_ignore_ascii_case("c") =>
-        {
-            Message::Find(crate::find::Event::ToggleCase)
-        }
         Key::Character("s") if ctrl => Message::Files(crate::files::Action::SaveFile),
         Key::Character("q") if ctrl => Message::Quit,
         Key::Named(Named::Escape) => Message::Escape,

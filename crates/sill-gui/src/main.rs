@@ -1270,21 +1270,9 @@ impl App {
         let before = self.backend_shown();
         let prior_session = self.selected.clone();
         let prior_image_mode = self.current().and_then(|v| v.image_viewer_mode);
-        let prior_reader = self
-            .current()
-            .and_then(|v| v.files.reader.as_ref().map(|r| (r.path.clone(), r.repo.clone())));
-        let prior_details = self.details.as_ref().map(|d| d.id.clone());
-        let prior_desktop = self.current().is_some_and(|v| v.desktop.shown);
         let mut task = self.apply(message);
-        if before != self.backend_shown()
-            || prior_session != self.selected
-            || prior_reader
-                != self
-                    .current()
-                    .and_then(|v| v.files.reader.as_ref().map(|r| (r.path.clone(), r.repo.clone())))
-            || prior_details != self.details.as_ref().map(|d| d.id.clone())
-            || prior_desktop != self.current().is_some_and(|v| v.desktop.shown)
-        {
+        // Find belongs to the conversation it was opened on (docs/find.md, decision 3)
+        if self.find.shown && (prior_session != self.selected || !self.find_available()) {
             self.find.close();
         }
         if before != self.backend_shown() {
@@ -1949,7 +1937,7 @@ impl App {
         let ended_now = !was_ended && view.ended();
         let followed_from = view.scroll_offset;
         let find_task = if grew && selected {
-            self.refresh_find_on_stream()
+            self.recompute_find(true)
         } else {
             Task::none()
         };
@@ -2433,7 +2421,7 @@ impl App {
             }
         }
         let scroll_offset = view.scroll_offset;
-        let find_task = self.refresh_find_on_stream();
+        let find_task = self.recompute_find(true);
         let snap = !self.selecting
             && self
                 .views

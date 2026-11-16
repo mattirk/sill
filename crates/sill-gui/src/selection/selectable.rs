@@ -157,11 +157,9 @@ where
     }
 
     fn state(&self) -> tree::State {
-        let mut selectable = Selectable::default();
-        selectable.set_mouse_selectable(self.mouse_selectable);
         tree::State::new(State::<Link> {
             last: Last::Nothing,
-            selectable,
+            selectable: Selectable::default(),
             span_pressed: None,
             hovered_link: None,
         })
