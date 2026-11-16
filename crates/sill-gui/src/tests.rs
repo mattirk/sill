@@ -5367,3 +5367,91 @@ fn find_searches_the_reader_preview_source_and_diff() {
     });
     assert!(sideways.unwrap_or_default() > 200.0, "scrolled sideways: {sideways:?}");
 }
+
+#[test]
+fn find_searches_the_settings_page_and_focuses_the_agents_search() {
+    use crate::find::{Event as FindEvent, Surface};
+    use crate::settings_ui::{Category, Event};
+    let (mut app, _) = App::new(true, None);
+    let task = app.show_page(crate::Page::Settings);
+    settle_task(&mut app, task);
+    let mut live = Live::new((900.0, 860.0));
+    let redraw = || {
+        iced::Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now()))
+    };
+    live.frame(&app, |_| {});
+
+    // Ctrl+F on the page opens the bar over it; the matches are those the page laid out
+    let events = live.frame(&app, |ui| ui.send(ctrl_f()));
+    for m in events {
+        live.apply(&mut app, m);
+    }
+    assert!(app.find.shown);
+    assert_eq!(app.find.surface, Some(Surface::Settings));
+    live.apply(&mut app, Message::Find(FindEvent::Input("interface scale".into())));
+    assert_eq!(app.find.matches.len(), 1);
+    for m in live.frame(&app, |ui| ui.send(vec![redraw()])) {
+        live.apply(&mut app, m);
+    }
+    let (mut matched, mut current) = (Vec::new(), Vec::new());
+    live.frame(&app, |ui| {
+        matched = find_matched(ui);
+        current = current_matched(ui);
+    });
+    assert_eq!(matched, ["Interface scale"]);
+    assert_eq!(current.len(), 1);
+
+    // another category: the bar stays, and counts again once the page is laid out
+    live.apply(&mut app, Message::Find(FindEvent::Input("session".into())));
+    live.apply(&mut app, Message::Settings(Event::Category(Category::Sessions)));
+    assert!(app.find.shown);
+    for _ in 0..2 {
+        for m in live.frame(&app, |ui| ui.send(vec![redraw()])) {
+            live.apply(&mut app, m);
+        }
+    }
+    let mut matched = Vec::new();
+    live.frame(&app, |ui| matched = find_matched(ui));
+    assert!(!matched.is_empty());
+    assert_eq!(app.find.matches.len(), matched.len(), "the count is the page's");
+
+    // Escape closes the bar first; the page stays
+    live.apply(&mut app, Message::Escape);
+    assert!(!app.find.shown);
+    assert!(app.settings_page.is_some());
+    live.frame(&app, |ui| matched = find_matched(ui));
+    assert!(matched.is_empty(), "no highlights left: {matched:?}");
+
+    // with no session selected: Settings is still searched
+    app.selected = None;
+    live.frame(&app, |_| {});
+    live.apply(&mut app, Message::Find(FindEvent::Open));
+    assert!(app.find.shown);
+    live.apply(&mut app, Message::Find(FindEvent::Input("session".into())));
+    assert!(!app.find.matches.is_empty(), "matched with no session");
+    live.apply(&mut app, Message::Escape);
+    app.selected = Some("demo".into());
+
+    // Agents has its own search field: Ctrl+F puts the keys there, no bar
+    let _ = app.show_page(crate::Page::Agents);
+    live.frame(&app, |_| {});
+    live.apply(&mut app, Message::Find(FindEvent::Open));
+    assert!(!app.find.shown);
+    live.frame(&app, |_| {});
+    let typed = live.frame(&app, |ui| {
+        use iced::keyboard::{Event, Key, Location, Modifiers, key};
+        ui.send(vec![iced::Event::Keyboard(Event::KeyPressed {
+            key: Key::Character("x".into()),
+            modified_key: Key::Character("x".into()),
+            physical_key: key::Physical::Code(key::Code::KeyX),
+            location: Location::Standard,
+            modifiers: Modifiers::empty(),
+            text: Some("x".into()),
+            repeat: false,
+        })]);
+    });
+    assert!(
+        typed.iter().any(|m| format!("{m:?}").contains("Search(\"x\")")),
+        "{typed:?}"
+    );
+}

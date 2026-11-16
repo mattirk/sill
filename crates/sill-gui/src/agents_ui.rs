@@ -828,6 +828,7 @@ impl App {
         let mut body = column![
             row![
                 text_input("Search agents…", &p.search)
+                    .id("agents-search")
                     .on_input(|s| msg(Event::Search(s)))
                     .padding(8),
                 pick_list(
