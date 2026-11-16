@@ -76,6 +76,7 @@ mod window;
 mod workspaces;
 mod workspaces_ui;
 mod files;
+mod find;
 mod folds;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -433,12 +434,24 @@ pub enum Message {
     DaemonSettings(u64, Result<sill_proto::admin::Settings, String>),
     /// A tab's ×: end its session (a ghost's needs a second press).
     CloseTab(String),
+    Find(find::Event),
     Noop,
 }
 
 pub struct Rendered {
     pub source: String,
     pub markdown: markdown::Content,
+    leaves: std::sync::OnceLock<Vec<String>>,
+}
+
+impl Rendered {
+    pub fn leaves(&self) -> &[String] {
+        self.leaves.get_or_init(|| {
+            let mut out = Vec::new();
+            viewer::markdown_leaves(self.markdown.items(), &mut out);
+            out
+        })
+    }
 }
 
 /// Everything that belongs to one open session, for as long as it is open in this window: its
@@ -630,6 +643,7 @@ impl SessionView {
             Some(cached) if source.starts_with(&cached.source) => {
                 cached.markdown.push_str(&source[cached.source.len()..]);
                 cached.source = source;
+                cached.leaves = std::sync::OnceLock::new();
             }
             _ => {
                 self.rendered.insert(
@@ -637,6 +651,7 @@ impl SessionView {
                     Rendered {
                         markdown: markdown::Content::parse(&source),
                         source,
+                        leaves: std::sync::OnceLock::new(),
                     },
                 );
             }
@@ -807,6 +822,7 @@ pub struct App {
     /// A selection is being dragged in the conversation: following the tail would pull the text
     /// from under the pointer, so new text does not scroll it until the drag ends.
     pub selecting: bool,
+    pub find: find::State,
 }
 
 /// Why the window's geometry was read: the regular look, or the last one before the window
@@ -941,6 +957,7 @@ impl App {
             activity_hovered: false,
             herring_flick: None,
             selecting: false,
+            find: find::State::default(),
         };
         if demo {
             // the demo keeps its own state, but shows at the person's Interface scale (read
@@ -1253,7 +1270,23 @@ impl App {
         let before = self.backend_shown();
         let prior_session = self.selected.clone();
         let prior_image_mode = self.current().and_then(|v| v.image_viewer_mode);
+        let prior_reader = self
+            .current()
+            .and_then(|v| v.files.reader.as_ref().map(|r| (r.path.clone(), r.repo.clone())));
+        let prior_details = self.details.as_ref().map(|d| d.id.clone());
+        let prior_desktop = self.current().is_some_and(|v| v.desktop.shown);
         let mut task = self.apply(message);
+        if before != self.backend_shown()
+            || prior_session != self.selected
+            || prior_reader
+                != self
+                    .current()
+                    .and_then(|v| v.files.reader.as_ref().map(|r| (r.path.clone(), r.repo.clone())))
+            || prior_details != self.details.as_ref().map(|d| d.id.clone())
+            || prior_desktop != self.current().is_some_and(|v| v.desktop.shown)
+        {
+            self.find.close();
+        }
         if before != self.backend_shown() {
             self.herring_flick = Some(Instant::now());
             if before {
@@ -1737,6 +1770,7 @@ impl App {
                 };
                 return keys::page(ids, down);
             }
+            Message::Find(event) => return self.find_event(event),
             Message::Noop => {}
         }
         Task::none()
@@ -1812,6 +1846,9 @@ impl App {
             | std::mem::take(&mut self.agents_page.shown)
         {
             return self.restore_scroll();
+        }
+        if self.find.shown && !self.terminal_focused() {
+            return self.find_event(find::Event::Close);
         }
         // the session's shell has the keys, Escape included (an editor in it needs it)
         if self.current().is_some_and(|v| v.terminal_shown) {
@@ -1910,8 +1947,19 @@ impl App {
         let finished = was_busy && !view.conversation.busy();
         let began_summary = !was_summarizing && view.summarizing();
         let ended_now = !was_ended && view.ended();
-        let snap = grew && selected && view.follow_tail && view.conversation_shown() && !selecting;
         let followed_from = view.scroll_offset;
+        let find_task = if grew && selected {
+            self.refresh_find_on_stream()
+        } else {
+            Task::none()
+        };
+        let snap = grew
+            && selected
+            && !selecting
+            && self
+                .views
+                .get(&session)
+                .is_some_and(|v| v.follow_tail && v.conversation_shown());
         let mut tasks: Vec<Task<Message>> = checks
             .into_iter()
             .map(|(id, key)| {
@@ -1923,6 +1971,7 @@ impl App {
                 )
             })
             .collect();
+        tasks.push(find_task);
         if connection_lost {
             if self.daemon.problem.is_none() && !self.daemon.restarting {
                 self.daemon.problem =
@@ -2383,10 +2432,17 @@ impl App {
                 view.accept(event);
             }
         }
-        if view.follow_tail && view.conversation_shown() && !self.selecting {
-            keys::follow_end("conversation", view.scroll_offset)
+        let scroll_offset = view.scroll_offset;
+        let find_task = self.refresh_find_on_stream();
+        let snap = !self.selecting
+            && self
+                .views
+                .get("demo")
+                .is_some_and(|v| v.follow_tail && v.conversation_shown());
+        if snap {
+            Task::batch([find_task, keys::follow_end("conversation", scroll_offset)])
         } else {
-            Task::none()
+            find_task
         }
     }
 }

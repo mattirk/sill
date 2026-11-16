@@ -25,6 +25,7 @@ pub const ACTIONS: &[(&str, &str, &str)] = &[
     ("tab_8", "Tab 8", "Ctrl+8"),
     ("tab_9", "Tab 9", "Ctrl+9"),
     ("host_shell", "Toggle host shell", "Ctrl+Shift+H"),
+    ("find", "Find", "Ctrl+F"),
 ];
 pub type Bindings = std::collections::BTreeMap<String, String>;
 pub fn value<'a>(bindings: &'a Bindings, index: usize) -> &'a str {
@@ -125,6 +126,7 @@ pub fn message(bindings: &Bindings, key: &Key, modifiers: Modifiers) -> Option<M
         8 => Message::ScaleStep(-1),
         9 => Message::ScaleStep(0),
         19 => Message::ToggleHostTerminal,
+        20 => Message::Find(crate::find::Event::Open),
         i => Message::SelectTab(i - 10),
     })
 }

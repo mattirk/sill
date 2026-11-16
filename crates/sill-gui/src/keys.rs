@@ -85,11 +85,193 @@ pub fn configured_shortcuts<'a>(
     content: impl Into<Element<'a, Message>>,
     bindings: &'a crate::shortcuts::Bindings,
 ) -> Element<'a, Message> {
+    window_shortcuts(content, bindings, false, false)
+}
+
+pub fn window_shortcuts<'a>(
+    content: impl Into<Element<'a, Message>>,
+    bindings: &'a crate::shortcuts::Bindings,
+    find_shown: bool,
+    terminal_focused: bool,
+) -> Element<'a, Message> {
     let mut wrapper = focus(content);
     wrapper.before_children = Some(Rc::new(move |key, modifiers| {
-        crate::shortcuts::message(bindings, key, modifiers)
+        if find_shown {
+            match key.as_ref() {
+                Key::Named(Named::F3) if !modifiers.command() && !modifiers.alt() => {
+                    return Some(Message::Find(if modifiers.shift() {
+                        crate::find::Event::Prev
+                    } else {
+                        crate::find::Event::Next
+                    }));
+                }
+                Key::Character(c)
+                    if modifiers.alt()
+                        && !modifiers.command()
+                        && !modifiers.shift()
+                        && c.eq_ignore_ascii_case("c") =>
+                {
+                    return Some(Message::Find(crate::find::Event::ToggleCase));
+                }
+                _ => {}
+            }
+        }
+        let message = crate::shortcuts::message(bindings, key, modifiers)?;
+        if terminal_focused && matches!(message, Message::Find(crate::find::Event::Open)) {
+            return None;
+        }
+        Some(message)
     }));
     wrapper.into()
+}
+
+/// Wraps the Find bar's query input so `Enter` sends `Next` and `Shift+Enter` sends `Prev`
+/// while the query input has focus, without joining focus traversal itself.
+pub fn find_input<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    Element::new(FindInput {
+        content: content.into(),
+    })
+}
+
+struct FindInput<'a> {
+    content: Element<'a, Message>,
+}
+
+struct ChildFocused(bool);
+
+impl Operation for ChildFocused {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        operate(self);
+    }
+    fn focusable(&mut self, _id: Option<&Id>, _bounds: Rectangle, state: &mut dyn Focusable) {
+        self.0 |= state.is_focused();
+    }
+}
+
+impl Widget<Message, Theme, Renderer> for FindInput<'_> {
+    fn tag(&self) -> tree::Tag {
+        self.content.as_widget().tag()
+    }
+
+    fn state(&self) -> tree::State {
+        self.content.as_widget().state()
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        self.content.as_widget().children()
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        self.content.as_widget().diff(tree);
+    }
+
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn size_hint(&self) -> Size<Length> {
+        self.content.as_widget().size_hint()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        self.content.as_widget_mut().layout(tree, renderer, limits)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(tree, layout, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        if let Event::Keyboard(keyboard::Event::KeyPressed {
+            key: Key::Named(Named::Enter),
+            modifiers,
+            ..
+        }) = event
+            && !modifiers.command()
+            && !modifiers.alt()
+        {
+            let mut focused = ChildFocused(false);
+            self.content
+                .as_widget_mut()
+                .operate(tree, layout, renderer, &mut focused);
+            if focused.0 {
+                shell.publish(Message::Find(if modifiers.shift() {
+                    crate::find::Event::Prev
+                } else {
+                    crate::find::Event::Next
+                }));
+                shell.capture_event();
+                return;
+            }
+        }
+        self.content.as_widget_mut().update(
+            tree, event, layout, cursor, renderer, clipboard, shell, viewport,
+        );
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        self.content
+            .as_widget()
+            .draw(tree, renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        self.content
+            .as_widget()
+            .mouse_interaction(tree, layout, cursor, viewport, renderer)
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        self.content
+            .as_widget_mut()
+            .overlay(tree, layout, renderer, viewport, translation)
+    }
 }
 
 /// Annotation shortcuts take precedence over hidden prompt/file editors while the canvas is shown.
@@ -346,8 +528,17 @@ pub fn step(forward: bool) -> Task<Message> {
 
 /// A task that only runs `operation`, as iced's own focus operations are built: no output, so
 /// nothing waits on one.
-fn effect(operation: impl Operation + 'static) -> Task<Message> {
+pub(crate) fn effect(operation: impl Operation + 'static) -> Task<Message> {
     iced_runtime::task::effect(iced_runtime::Action::widget(operation))
+}
+
+/// Focuses the text input `id` and selects all of its text.
+pub fn focus_and_select_all(id: &'static str) -> Task<Message> {
+    use iced::advanced::widget::operation::text_input;
+    Task::batch([
+        iced::widget::operation::focus(id),
+        effect(text_input::select_all(Id::new(id))),
+    ])
 }
 
 /// Runs `inner` (and whatever it chains), then [`Reveal`].
@@ -578,6 +769,16 @@ pub fn navigation(event: keyboard::Event) -> Option<Message> {
     let (ctrl, shift) = (modifiers.command(), modifiers.shift());
     Some(match key.as_ref() {
         Key::Named(Named::Tab) if !ctrl && !modifiers.alt() => Message::Focus(!shift),
+        Key::Named(Named::F3) if !ctrl && !modifiers.alt() => Message::Find(if shift {
+            crate::find::Event::Prev
+        } else {
+            crate::find::Event::Next
+        }),
+        Key::Character(c)
+            if modifiers.alt() && !ctrl && !shift && c.eq_ignore_ascii_case("c") =>
+        {
+            Message::Find(crate::find::Event::ToggleCase)
+        }
         Key::Character("s") if ctrl => Message::Files(crate::files::Action::SaveFile),
         Key::Character("q") if ctrl => Message::Quit,
         Key::Named(Named::Escape) => Message::Escape,

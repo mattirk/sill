@@ -253,3 +253,30 @@ fn cost_of_a_long_conversation() {
         );
     }
 }
+
+#[test]
+#[ignore = "timing; run with --release"]
+fn find_in_a_long_conversation() {
+    use crate::Message;
+    use crate::find::Event as FindEvent;
+    for n in [250, 1000, 2000] {
+        let mut app = long(n);
+        let mut screen = Screen::new();
+        screen.frame(&app);
+        let _ = app.update(Message::Find(FindEvent::Open));
+        let query_ms = time(|| {
+            let _ = app.update(Message::Find(FindEvent::Input("inline code".into())));
+        });
+        let step_ms = time(|| {
+            for _ in 0..20 {
+                let _ = app.update(Message::Find(FindEvent::Next));
+                screen.frame(&app);
+            }
+        }) / 20;
+        println!(
+            "{n:>5} items ({} matches): initial query {query_ms:>9.2?}, Next + frame {step_ms:>9.2?}",
+            app.find.matches.len()
+        );
+    }
+}
+

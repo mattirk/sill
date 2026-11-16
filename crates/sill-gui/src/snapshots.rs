@@ -1030,3 +1030,19 @@ fn render_herring_hovered() {
     let _ = std::fs::remove_file(dir().join("herring-hovered-wgpu.png"));
     assert!(snapshot.matches_image(dir().join("herring-hovered")).unwrap());
 }
+
+#[test]
+#[ignore = "writes PNGs of the Find bar and match highlights for review"]
+fn render_find() {
+    use crate::Message;
+    use crate::find::Event as FindEvent;
+    let (mut app, _) = App::new(true, None);
+    for _ in 0..demo::CHUNKS.len() {
+        let _ = app.update(Message::DemoTick);
+    }
+    let _ = app.update(Message::Find(FindEvent::Open));
+    let _ = app.update(Message::Find(FindEvent::Input("arrow".into())));
+    let _ = app.update(Message::Find(FindEvent::Next));
+    render(&app, "find-conversation");
+}
+

@@ -235,7 +235,12 @@ impl App {
         let annotating = !self.backend_shown()
             && self.current().is_some_and(|view| view.annotation.is_some());
         keys::annotation_shortcuts(
-            keys::configured_shortcuts(layers, &self.settings.shortcuts),
+            keys::window_shortcuts(
+                layers,
+                &self.settings.shortcuts,
+                self.find.shown,
+                self.terminal_focused(),
+            ),
             annotating,
         )
     }
@@ -1004,12 +1009,13 @@ impl App {
         } else {
             self.height
         };
-        let slots = rows::plan(
+        let slots = rows::plan_with_pinned(
             &known,
             SPACING,
             view.scroll_offset,
             viewport,
             view.follow_tail,
+            self.find.pinned_row(),
         );
         let mut feed = iced::widget::keyed_column(std::iter::empty())
             .spacing(SPACING)
@@ -1054,7 +1060,7 @@ impl App {
                     }
                     feed = feed.push(
                         rows::key(&item.item_id),
-                        rows::measured(row, &item.item_id, signatures[index], &view.heights),
+                        rows::measured(row, index, &item.item_id, signatures[index], &view.heights),
                     );
                 }
             }
@@ -1063,14 +1069,17 @@ impl App {
         for question in places.values().flatten() {
             placed.insert(question.question_id.as_str());
         }
+        let mut next_row = entries.len();
         for question in conversation
             .questions
             .values()
             .filter(|q| !placed.contains(q.question_id.as_str()))
         {
+            let row_index = next_row;
+            next_row += 1;
             feed = feed.push(
                 rows::key(&format!("question {}", question.question_id)),
-                self.question(view, question),
+                rows::scoped(row_index, self.question(view, question)),
             );
         }
         // the agent asks for a login: its card, after everything else
@@ -1078,10 +1087,19 @@ impl App {
             feed = feed.push(rows::key("login"), card);
         }
         if let Some(error) = view.status.problem() {
-            feed = feed.push(rows::key("problem"), note(error, P.error));
+            let row_index = next_row;
+            next_row += 1;
+            feed = feed.push(
+                rows::key("problem"),
+                rows::scoped(row_index, note(error, P.error)),
+            );
         }
         if let Some(failed) = &view.failed {
-            feed = feed.push(rows::key("failed"), note(failed, P.error));
+            let row_index = next_row;
+            feed = feed.push(
+                rows::key("failed"),
+                rows::scoped(row_index, note(failed, P.error)),
+            );
         }
         if self.vm_shown() && view.status.problem().into_iter().chain(view.failed.as_deref()).any(crate::vm_ui::storage_error) {
             feed = feed.push(rows::key("storage"), column![
@@ -1134,10 +1152,18 @@ impl App {
             );
         }
         // one selection across every message
-        selection::area(layers)
+        let area: Element<'a, Message> = selection::area(layers)
             .on_copy(Message::Copy)
             .on_drag(Message::Selecting)
-            .into()
+            .find(self.find.area_query(view))
+            .selection(&self.find.selected_text)
+            .visible_leaves(&self.find.visible_leaves)
+            .into();
+        let mut outer = stack![area];
+        if self.find.shown {
+            outer = outer.push(self.find.bar());
+        }
+        outer.into()
     }
 
     fn item<'a>(&'a self, view: &'a SessionView, item: &'a Item) -> Element<'a, Message> {
@@ -1476,25 +1502,50 @@ impl App {
                 } else {
                     one_line(&group.latest(), 140)
                 };
-                cells
-                    .push(
-                        text(name)
-                            .size(style::SMALL)
-                            .width(name_width)
-                            .wrapping(text::Wrapping::None),
-                    )
-                    .push(
-                        container(
-                            text(latest)
+                if single {
+                    cells
+                        .push(
+                            selection::text(name)
                                 .size(style::SMALL)
-                                .color(quiet)
+                                .width(name_width)
+                                .wrapping(text::Wrapping::None)
+                                .find_only()
+                                .style(style::selectable(P.fg)),
+                        )
+                        .push(
+                            container(
+                                selection::text(latest)
+                                    .size(style::SMALL)
+                                    .wrapping(text::Wrapping::None)
+                                    .find_only()
+                                    .style(style::selectable(quiet)),
+                            )
+                            .width(Fill)
+                            .clip(true),
+                        )
+                        .push(status_mark(group.status()))
+                        .into()
+                } else {
+                    cells
+                        .push(
+                            text(name)
+                                .size(style::SMALL)
+                                .width(name_width)
                                 .wrapping(text::Wrapping::None),
                         )
-                        .width(Fill)
-                        .clip(true),
-                    )
-                    .push(status_mark(group.status()))
-                    .into()
+                        .push(
+                            container(
+                                text(latest)
+                                    .size(style::SMALL)
+                                    .color(quiet)
+                                    .wrapping(text::Wrapping::None),
+                            )
+                            .width(Fill)
+                            .clip(true),
+                        )
+                        .push(status_mark(group.status()))
+                        .into()
+                }
             };
             let toggle = if single {
                 session::message(&view.id, session::Event::ToggleTool(first.item_id.clone()))
@@ -2973,7 +3024,7 @@ fn asked<'a>(mut card: Column<'a, Message>, question: &'a Question) -> Column<'a
 }
 
 /// A fold's place in the open set (`SessionView::open_groups`), apart from its first item's own.
-fn fold_key(first: &Item) -> String {
+pub(crate) fn fold_key(first: &Item) -> String {
     format!("fold {}", first.item_id)
 }
 
@@ -3155,10 +3206,12 @@ fn kind_mark<'a>(kind: &str) -> Element<'a, Message> {
 /// reads as the names in the column above it and the rest as their arguments.
 fn step_line<'a>(step: &crate::shell::Step<'_>, arguments_quiet: bool) -> Element<'a, Message> {
     let quiet = alpha(P.fg, 0.45);
-    let part = |content: &str| {
-        text(content.to_owned())
+    let part = |content: &str, color: Color| {
+        selection::text(content.to_owned())
             .size(style::SMALL)
             .wrapping(text::Wrapping::None)
+            .find_only()
+            .style(style::selectable(color))
     };
     let shown = one_line(step.text, 140);
     let gap = || space().width(word_gap());
@@ -3166,11 +3219,11 @@ fn step_line<'a>(step: &crate::shell::Step<'_>, arguments_quiet: bool) -> Elemen
     match shown.split_once(' ') {
         Some((word, arguments)) if arguments_quiet => {
             line = line
-                .push(part(word))
+                .push(part(word, P.fg))
                 .push(gap())
-                .push(part(arguments.trim_start()).color(quiet));
+                .push(part(arguments.trim_start(), quiet));
         }
-        _ => line = line.push(part(&shown)),
+        _ => line = line.push(part(&shown, P.fg)),
     }
     // the operator where it was written: against the command, or a blank after it
     let operator = step.operator.trim_start();
@@ -3178,7 +3231,7 @@ fn step_line<'a>(step: &crate::shell::Step<'_>, arguments_quiet: bool) -> Elemen
         if operator.len() < step.operator.len() {
             line = line.push(gap());
         }
-        line = line.push(part(operator).color(quiet));
+        line = line.push(part(operator, quiet));
     }
     container(line).width(Fill).clip(true).into()
 }

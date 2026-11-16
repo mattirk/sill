@@ -3788,6 +3788,7 @@ fn markdown_image_is_read_from_session_host_and_decoded() {
         crate::Rendered {
             source: source.into(),
             markdown: iced::widget::markdown::Content::parse(source),
+            leaves: std::sync::OnceLock::new(),
         },
     );
     let task = app.load_media("demo");
@@ -4597,3 +4598,612 @@ fn an_unreadable_session_is_a_note_not_an_error_over_the_listing() {
     let _ = app.update(Message::Changes(Event::Loaded(Ok((demo::changes(), vec![], 0)))));
     assert!(app.changes_listing.unreadable.is_empty());
 }
+
+// --- find (Ctrl+F) ------------------------------------------------------------------------------
+
+fn find_matched(ui: &mut impl Drive) -> Vec<String> {
+    let found = Arc::new(Mutex::new(Vec::new()));
+    let sink = found.clone();
+    let _: Option<()> = ui.select(move |candidate| {
+        if let iced_test::selector::Candidate::Custom { state, .. } = candidate
+            && let Some(text) = state.downcast_ref::<crate::selection::Selectable>()
+        {
+            for part in text.find_matched_texts() {
+                sink.lock().unwrap().push(part.to_string());
+            }
+        }
+        None
+    });
+    found.lock().unwrap().clone()
+}
+
+fn current_matched(ui: &mut impl Drive) -> Vec<(String, iced::Rectangle)> {
+    let found = Arc::new(Mutex::new(Vec::new()));
+    let sink = found.clone();
+    let _: Option<()> = ui.select(move |candidate| {
+        if let iced_test::selector::Candidate::Custom { state, .. } = candidate
+            && let Some(text) = state.downcast_ref::<crate::selection::Selectable>()
+            && let Some(part) = text.current_matched_text()
+            && let Some(rect) = text.current_match_rect()
+        {
+            sink.lock().unwrap().push((part.to_string(), rect));
+        }
+        None
+    });
+    found.lock().unwrap().clone()
+}
+
+fn ctrl_f() -> Vec<iced::Event> {
+    use iced::keyboard::{Event, Key, Location, Modifiers, key};
+    vec![
+        iced::Event::Keyboard(Event::ModifiersChanged(Modifiers::COMMAND)),
+        iced::Event::Keyboard(Event::KeyPressed {
+            key: Key::Character("f".into()),
+            modified_key: Key::Character("f".into()),
+            physical_key: key::Physical::Code(key::Code::KeyF),
+            location: Location::Standard,
+            modifiers: Modifiers::COMMAND,
+            text: None,
+            repeat: false,
+        }),
+        iced::Event::Keyboard(Event::ModifiersChanged(Modifiers::empty())),
+    ]
+}
+
+#[test]
+fn find_opens_from_ctrl_f_prepopulates_selection_and_steps_matches() {
+    use crate::find::Event as FindEvent;
+    let mut app = streamed();
+    let mut live = Live::new((720.0, 860.0));
+    let events = live.frame(&app, |ui| {
+        let from = aim_at(ui, "Make the send arrow", "arrow");
+        let to = aim_at(ui, "Make the send arrow", " a little");
+        drag(ui, from, to);
+        ui.send(ctrl_f());
+    });
+    assert!(
+        events
+            .iter()
+            .any(|m| matches!(m, Message::Find(FindEvent::Open))),
+        "{events:?}"
+    );
+    for m in events {
+        live.apply(&mut app, m);
+    }
+    assert!(app.find.shown);
+    assert_eq!(app.find.query, "arrow");
+    assert_eq!(app.find.matches.len(), 4);
+    assert_eq!(app.find.current, Some(0));
+    assert_eq!(
+        app.find.count_label(),
+        Some(("1 of 4".to_string(), true))
+    );
+
+    let mut matched = Vec::new();
+    let mut current = Vec::new();
+    live.frame(&app, |ui| {
+        matched = find_matched(ui);
+        current = current_matched(ui);
+    });
+    assert_eq!(matched, ["arrow", "arrow", "arrow", "arrow"]);
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].0, "arrow");
+    assert!(current[0].1.width > 0.0 && current[0].1.height > 0.0);
+
+    // Step forward through all matches and wrap around to 0.
+    for expected in [1, 2, 3, 0] {
+        live.apply(&mut app, Message::Find(FindEvent::Next));
+        assert_eq!(app.find.current, Some(expected));
+    }
+    // Step backward and wrap around to the last match.
+    live.apply(&mut app, Message::Find(FindEvent::Prev));
+    assert_eq!(app.find.current, Some(3));
+
+    // Case sensitivity toggle ("Aa" / Alt+C).
+    live.apply(&mut app, Message::Find(FindEvent::Input("sill".into())));
+    assert_eq!(app.find.matches.len(), 3); // 2x "sill-gui" (tool command + detail) + 1x "Sill GUI"
+    live.apply(&mut app, Message::Find(FindEvent::Next));
+    assert_eq!(app.find.current, Some(1));
+    // Pressing Ctrl+F again while Find is already open keeps the edited query and current match
+    // (even though "arrow" is still selected in the conversation).
+    live.apply(&mut app, Message::Find(FindEvent::Open));
+    assert_eq!(app.find.query, "sill");
+    assert_eq!(app.find.current, Some(1));
+
+    live.apply(&mut app, Message::Find(FindEvent::ToggleCase));
+    assert!(app.find.case_sensitive);
+    assert_eq!(app.find.matches.len(), 2); // only lowercase "sill" in "sill-gui"
+    live.apply(&mut app, Message::Find(FindEvent::Input("Sill".into())));
+    assert_eq!(app.find.matches.len(), 1); // only uppercase "Sill" in "Sill GUI"
+    live.apply(&mut app, Message::Find(FindEvent::ToggleCase));
+    assert!(!app.find.case_sensitive);
+    assert_eq!(app.find.matches.len(), 3);
+
+    // Non-matching query reports "No matches".
+    live.apply(
+        &mut app,
+        Message::Find(FindEvent::Input("nonexistent-token".into())),
+    );
+    assert!(app.find.matches.is_empty());
+    assert_eq!(app.find.current, None);
+    assert_eq!(
+        app.find.count_label(),
+        Some(("No matches".to_string(), false))
+    );
+}
+
+#[test]
+fn find_searches_and_unfolds_folded_content_in_conversation() {
+    use crate::find::Event as FindEvent;
+    let (mut app, _) = App::new(true, None);
+    let view = app.views.get_mut("demo").unwrap();
+    view.conversation = sill_client::Conversation::new("demo", "sub", 1);
+    view.conversation.session = demo::conversation().session;
+
+    // 1. A folded turn (summary turn)
+    view.conversation.submissions.insert(
+        "fold-sub".into(),
+        Submission {
+            submission_id: "fold-sub".into(),
+            session_id: "demo".into(),
+            accepted_seq: "1".into(),
+            agent_generation_id: "g".into(),
+            text: "Summarize the session".into(),
+            attachments: vec![],
+            acceptance: "accepted".into(),
+            delivery: "sent".into(),
+            held: false,
+            hold_reason: None,
+            insertion: "inserted".into(),
+            outcome: "completed".into(),
+            reason: None,
+            purpose: Some("summary".into()),
+        },
+    );
+    view.conversation.turns.insert(
+        "fold-turn".into(),
+        Turn {
+            turn_id: "fold-turn".into(),
+            agent_generation_id: "g".into(),
+            activity: "idle".into(),
+            outcome: "completed".into(),
+            reason: None,
+            purpose: Some("summary".into()),
+        },
+    );
+    view.conversation.insert_item(Item {
+        item_id: "fold-u".into(),
+        created_seq: "1".into(),
+        turn_id: Some("fold-turn".into()),
+        submission_id: Some("fold-sub".into()),
+        agent_generation_id: "g".into(),
+        kind: "user".into(),
+        content: vec![Content::text("Fix the crosscheck issue")],
+        tool: None,
+    });
+    view.conversation.insert_item(Item {
+        item_id: "fold-a".into(),
+        created_seq: "2".into(),
+        turn_id: Some("fold-turn".into()),
+        submission_id: None,
+        agent_generation_id: "g".into(),
+        kind: "agent".into(),
+        content: vec![Content::text("Applied folded-turn-needle cleanly.")],
+        tool: None,
+    });
+
+    // 2. A grouped tool run (two rg calls in a normal turn)
+    view.conversation.turns.insert(
+        "main-turn".into(),
+        Turn {
+            turn_id: "main-turn".into(),
+            agent_generation_id: "g".into(),
+            activity: "idle".into(),
+            outcome: "completed".into(),
+            reason: None,
+            purpose: None,
+        },
+    );
+    view.conversation.insert_item(Item {
+        item_id: "tool-1".into(),
+        created_seq: "3".into(),
+        turn_id: Some("main-turn".into()),
+        submission_id: None,
+        agent_generation_id: "g".into(),
+        kind: "tool".into(),
+        content: vec![],
+        tool: Some(Tool {
+            title: "rg first-arg crates".into(),
+            command: Some("rg first-arg crates".into()),
+            kind: "execute".into(),
+            status: "completed".into(),
+            detail: "first output".into(),
+            diff: String::new(),
+            parent_item_id: None,
+        }),
+    });
+    view.conversation.insert_item(Item {
+        item_id: "tool-2".into(),
+        created_seq: "4".into(),
+        turn_id: Some("main-turn".into()),
+        submission_id: None,
+        agent_generation_id: "g".into(),
+        kind: "tool".into(),
+        content: vec![],
+        tool: Some(Tool {
+            title: "rg grouped-call-needle crates".into(),
+            command: Some("rg grouped-call-needle crates".into()),
+            kind: "execute".into(),
+            status: "completed".into(),
+            detail: "found closed-output-needle in src/find.rs".into(),
+            diff: "--- a/src/find.rs\n+++ b/src/find.rs\n+diff-line-needle\n".into(),
+            parent_item_id: None,
+        }),
+    });
+
+    // 3. A long thought (folded to 1 line by default)
+    let long_thought = "First line of reasoning.\n\nSecond paragraph with deep-thought-needle inside.\n\nThird line.\n\nFourth line of reasoning.";
+    assert!(crate::ui::is_long_thought(long_thought));
+    view.conversation.insert_item(Item {
+        item_id: "thought-1".into(),
+        created_seq: "5".into(),
+        turn_id: Some("main-turn".into()),
+        submission_id: None,
+        agent_generation_id: "g".into(),
+        kind: "thought".into(),
+        content: vec![Content::text(long_thought)],
+        tool: None,
+    });
+
+    // 4. A long notice (folded to 1 line by default)
+    let long_notice = "Line 1 of notice\nLine 2 of notice\nLine 3 with long-notice-needle\nLine 4 of notice\nLine 5 of notice";
+    assert!(crate::ui::is_long_notice(long_notice));
+    view.conversation.insert_item(Item {
+        item_id: "notice-1".into(),
+        created_seq: "6".into(),
+        turn_id: Some("main-turn".into()),
+        submission_id: None,
+        agent_generation_id: "g".into(),
+        kind: "notice".into(),
+        content: vec![Content::text(long_notice)],
+        tool: None,
+    });
+
+    // 5. An answered question (collapsed by default)
+    let question: Question = serde_json::from_value(json!({
+        "question_id": "q-1",
+        "agent_generation_id": "g",
+        "kind": "permission",
+        "title": "Run cargo test?",
+        "description": "Checks answered-question-needle before continuing.",
+        "options": [{"option_id": "allow", "title": "Yes", "kind": "allow_once"}],
+        "state": "answered",
+        "answer": {"type": "permission", "option_id": "allow"},
+        "fields": []
+    }))
+    .unwrap();
+    view.conversation.questions.insert("q-1".into(), question);
+    view.rebuild();
+
+    let mut live = Live::new((720.0, 860.0));
+    live.apply(&mut app, Message::Find(FindEvent::Open));
+
+    // 1. Search folded turn
+    live.apply(
+        &mut app,
+        Message::Find(FindEvent::Input("folded-turn-needle".into())),
+    );
+    assert!(
+        demo_view(&app).open_groups.contains("fold fold-u"),
+        "folded turn unfolded"
+    );
+    let mut current = Vec::new();
+    live.frame(&app, |ui| current = current_matched(ui));
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].0, "folded-turn-needle");
+
+    // 2. Search grouped tool call line (.find_only() leaf)
+    live.apply(
+        &mut app,
+        Message::Find(FindEvent::Input("grouped-call-needle".into())),
+    );
+    assert!(
+        demo_view(&app).open_groups.contains("tool-1"),
+        "tool group unfolded"
+    );
+    live.frame(&app, |ui| current = current_matched(ui));
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].0, "grouped-call-needle");
+
+    // 3. Search closed tool call output and diff
+    live.apply(
+        &mut app,
+        Message::Find(FindEvent::Input("closed-output-needle".into())),
+    );
+    assert!(
+        demo_view(&app).open_tools.contains("tool-2"),
+        "tool output unfolded"
+    );
+    live.frame(&app, |ui| current = current_matched(ui));
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].0, "closed-output-needle");
+
+    live.apply(
+        &mut app,
+        Message::Find(FindEvent::Input("diff-line-needle".into())),
+    );
+    live.frame(&app, |ui| current = current_matched(ui));
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].0, "diff-line-needle");
+
+    // 4. Search long thought
+    live.apply(
+        &mut app,
+        Message::Find(FindEvent::Input("deep-thought-needle".into())),
+    );
+    assert!(
+        demo_view(&app).open_tools.contains("thought-1"),
+        "long thought unfolded"
+    );
+    live.frame(&app, |ui| current = current_matched(ui));
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].0, "deep-thought-needle");
+
+    // 5. Search long notice
+    live.apply(
+        &mut app,
+        Message::Find(FindEvent::Input("long-notice-needle".into())),
+    );
+    assert!(
+        demo_view(&app).open_tools.contains("notice-1"),
+        "long notice unfolded"
+    );
+    live.frame(&app, |ui| current = current_matched(ui));
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].0, "long-notice-needle");
+
+    // 6. Search answered question details
+    live.apply(
+        &mut app,
+        Message::Find(FindEvent::Input("answered-question-needle".into())),
+    );
+    assert!(
+        demo_view(&app).open_answers.contains("q-1"),
+        "answered question unfolded"
+    );
+    live.frame(&app, |ui| current = current_matched(ui));
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].0, "answered-question-needle");
+
+    // 7. A query with no initial matches that later arrives via streaming inside a collapsed tool output
+    // activates the newly arrived match: unfolding the tool output and disabling follow_tail.
+    app.views.get_mut("demo").unwrap().follow_tail = true;
+    live.apply(
+        &mut app,
+        Message::Find(FindEvent::Input("streamed-tool-needle".into())),
+    );
+    assert!(app.find.matches.is_empty());
+    assert_eq!(app.find.current, None);
+    assert!(demo_view(&app).follow_tail);
+
+    let next_seq = demo_view(&app).conversation.seq + 1;
+    let epoch = demo_view(&app).lane_epoch;
+    let streamed_tool = Item {
+        item_id: "tool-streamed".into(),
+        created_seq: next_seq.to_string(),
+        turn_id: Some("main-turn".into()),
+        submission_id: None,
+        agent_generation_id: "g".into(),
+        kind: "tool".into(),
+        content: vec![],
+        tool: Some(Tool {
+            title: "rg check crates".into(),
+            command: Some("rg check crates".into()),
+            kind: "execute".into(),
+            status: "completed".into(),
+            detail: "arrived streamed-tool-needle in output".into(),
+            diff: String::new(),
+            parent_item_id: None,
+        }),
+    };
+    live.apply(
+        &mut app,
+        Message::Lane(
+            "demo".into(),
+            epoch,
+            crate::lane::Update::Event(Box::new(SessionEvent {
+                session_id: "demo".into(),
+                subscription_id: "sub".into(),
+                seq: next_seq.to_string(),
+                event: Event::ItemCreated {
+                    item: streamed_tool,
+                },
+            })),
+        ),
+    );
+    assert_eq!(app.find.matches.len(), 1);
+    assert_eq!(app.find.current, Some(0));
+    assert!(
+        demo_view(&app).open_tools.contains("tool-streamed"),
+        "streamed first match unfolds its collapsed tool output"
+    );
+    assert!(
+        !demo_view(&app).follow_tail,
+        "streamed first match disables follow_tail"
+    );
+    live.frame(&app, |ui| current = current_matched(ui));
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].0, "streamed-tool-needle");
+
+    // Closing Find leaves unfolded items open.
+    live.apply(&mut app, Message::Find(FindEvent::Close));
+    assert!(demo_view(&app).open_groups.contains("fold fold-u"));
+    assert!(demo_view(&app).open_groups.contains("tool-1"));
+    assert!(demo_view(&app).open_tools.contains("tool-2"));
+    assert!(demo_view(&app).open_tools.contains("thought-1"));
+    assert!(demo_view(&app).open_tools.contains("notice-1"));
+    assert!(demo_view(&app).open_answers.contains("q-1"));
+    assert!(demo_view(&app).open_tools.contains("tool-streamed"));
+}
+
+#[test]
+fn find_scrolls_to_offscreen_match_in_virtualized_long_conversation() {
+    use crate::find::Event as FindEvent;
+    let mut app = crate::perf::long(160);
+    {
+        let view = app.views.get_mut("demo").unwrap();
+        let item = view.conversation.item_mut("i00002").unwrap();
+        item.content = vec![Content::text("Early paragraph with ancient-needle at the top.")];
+        view.render("i00002");
+    }
+    let mut live = Live::new((720.0, 500.0));
+    // Measure rows and snap to the tail of the 160-item conversation.
+    live.apply(&mut app, Message::Latest);
+    let redraw = || {
+        iced::Event::Window(iced::window::Event::RedrawRequested(
+            std::time::Instant::now(),
+        ))
+    };
+    for m in live.frame(&app, |ui| ui.send(vec![redraw()])) {
+        live.apply(&mut app, m);
+    }
+    let mut tail_scroll = None;
+    live.frame(&app, |ui| tail_scroll = scrolled(ui, "conversation"));
+    assert!(
+        tail_scroll.unwrap_or_default() > 1000.0,
+        "at tail: {tail_scroll:?}"
+    );
+
+    // Search for "ancient-needle" near the top of the conversation.
+    live.apply(&mut app, Message::Find(FindEvent::Open));
+    live.apply(
+        &mut app,
+        Message::Find(FindEvent::Input("ancient-needle".into())),
+    );
+    assert_eq!(app.find.matches.len(), 1);
+    assert_eq!(app.find.pinned_row(), Some(app.find.matches[0].row));
+    assert!(!demo_view(&app).follow_tail);
+
+    // Frame 1 materializes the pinned row, paints find rects, and runs RevealMatch -> scroll_to.
+    for m in live.frame(&app, |_| {}) {
+        live.apply(&mut app, m);
+    }
+    let mut after_scroll = None;
+    let mut current = Vec::new();
+    live.frame(&app, |ui| {
+        after_scroll = scrolled(ui, "conversation");
+        current = current_matched(ui);
+    });
+    assert!(
+        after_scroll.unwrap_or(f32::MAX) < 400.0,
+        "scrolled to reveal early row: {after_scroll:?}"
+    );
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].0, "ancient-needle");
+
+    // When scrolled halfway through a single long message that contains multiple matches,
+    // searching picks the first match at or below the top of the viewport instead of jumping
+    // backward to the first occurrence at the top of that message.
+    live.apply(&mut app, Message::Find(FindEvent::Close));
+    {
+        let view = app.views.get_mut("demo").unwrap();
+        let mut long_para = String::from("repeat-needle at the very top of this long message.\n\n");
+        for i in 0..40 {
+            long_para.push_str(&format!("Filler paragraph {i} to make this single row tall.\n\n"));
+        }
+        long_para.push_str("repeat-needle near the bottom of this long message.\n");
+        let item = view.conversation.item_mut("i00002").unwrap();
+        item.content = vec![Content::text(&long_para)];
+        view.render("i00002");
+    }
+    // Lay out the tall row and scroll 500px into it so the first occurrence is scrolled off the top
+    // while the row itself is still top_row and the second occurrence is below top_y.
+    for m in live.frame(&app, |ui| ui.send(vec![redraw()])) {
+        live.apply(&mut app, m);
+    }
+    {
+        let view = app.views.get_mut("demo").unwrap();
+        view.follow_tail = false;
+        view.scroll_offset = 500.0;
+    }
+    live.frame(&app, |_| {});
+    live.apply(&mut app, Message::Find(FindEvent::Open));
+    live.apply(
+        &mut app,
+        Message::Find(FindEvent::Input("repeat-needle".into())),
+    );
+    assert_eq!(app.find.matches.len(), 2);
+    assert_eq!(
+        app.find.current,
+        Some(1),
+        "selected the second occurrence at or below top of viewport instead of jumping back to occurrence 0"
+    );
+}
+
+#[test]
+fn find_escape_terminal_focus_and_navigation_close() {
+    use crate::files::Action;
+    use crate::find::Event as FindEvent;
+    use sill_proto::sessions::HostPath;
+
+    let mut app = streamed();
+    add_session(&mut app, "second");
+
+    // Open Find and enter a query.
+    let _ = app.update(Message::Find(FindEvent::Open));
+    let _ = app.update(Message::Find(FindEvent::Input("arrow".into())));
+    assert!(app.find.shown);
+
+    // First Escape closes Find without leaving the conversation for the backend page.
+    let _ = app.update(Message::Escape);
+    assert!(!app.find.shown);
+    assert!(!app.backend_shown());
+    assert_eq!(app.find.query, "arrow", "query is remembered for next open");
+
+    // Second Escape with Find closed goes to the backend page.
+    let _ = app.update(Message::Escape);
+    assert!(app.backend_shown());
+    let _ = app.update(Message::Escape);
+    assert!(!app.backend_shown());
+
+    // Switching tabs closes Find.
+    let _ = app.update(Message::Find(FindEvent::Open));
+    assert!(app.find.shown);
+    let _ = app.update(Message::Choose("second".into()));
+    assert!(!app.find.shown);
+    let _ = app.update(Message::Choose("demo".into()));
+
+    // Opening a file in the reader closes Find.
+    let _ = app.update(Message::Find(FindEvent::Open));
+    assert!(app.find.shown);
+    let _ = app.update(Message::Files(Action::Open {
+        path: HostPath::from_path(std::path::Path::new("/home/demo/project/README.md")),
+        repo: None,
+    }));
+    assert!(!app.find.shown);
+    let _ = app.update(Message::Files(Action::CloseViewer));
+
+    // When the session terminal is open and focused, Ctrl+F passes through to the terminal.
+    let _events = app.update(Message::ToggleTerminal);
+    {
+        let pane = app
+            .views
+            .get_mut("demo")
+            .unwrap()
+            .terminal
+            .as_mut()
+            .unwrap();
+        pane.accept(crate::terminal::Event::Opened);
+    }
+    assert!(app.terminal_focused());
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.send(ctrl_f());
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        !messages
+            .iter()
+            .any(|m| matches!(m, Message::Find(FindEvent::Open))),
+        "Ctrl+F must not open Find while terminal is focused: {messages:?}"
+    );
+}
+

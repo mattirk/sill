@@ -18,6 +18,7 @@
 //! layout while a selection exists (layout is when text streams in or rewraps), so highlights are
 //! never drawn from stale offsets.
 use std::any::Any;
+use std::cell::RefCell;
 
 use iced::advanced::graphics::text::cosmic_text::Affinity;
 use iced::advanced::layout::{self, Layout};
@@ -40,11 +41,34 @@ pub struct Position {
     pub offset: usize,
 }
 
+/// What [`Area`] highlights for Find during layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindQuery {
+    pub needle: String,
+    pub case_sensitive: bool,
+    /// `(Some(row_index), visible_occurrence_in_row)` for row-scoped conversation areas, or
+    /// `(None, global_occurrence)` for unindexed areas.
+    pub current: Option<(Option<usize>, usize)>,
+}
+
+/// A rendered leaf's layout and vertical position within the scrollable content, recorded during
+/// layout so Find can locate the first match at or below the top of the viewport even inside a
+/// partially scrolled long message.
+#[derive(Debug, Clone)]
+pub struct VisibleLeaf {
+    pub row: Option<usize>,
+    pub origin_y: f32,
+    pub layout: TextLayout,
+}
+
 /// A selection area around some content (the conversation's or a reader's scrollable).
 pub struct Area<'a, Message> {
     content: Element<'a, Message>,
     on_copy: Option<Box<dyn Fn(String) -> Message + 'a>>,
     on_drag: Option<Box<dyn Fn(bool) -> Message + 'a>>,
+    find: Option<FindQuery>,
+    selection: Option<&'a RefCell<Option<String>>>,
+    visible_leaves: Option<&'a RefCell<Vec<VisibleLeaf>>>,
 }
 
 pub fn area<'a, Message>(content: impl Into<Element<'a, Message>>) -> Area<'a, Message> {
@@ -52,6 +76,9 @@ pub fn area<'a, Message>(content: impl Into<Element<'a, Message>>) -> Area<'a, M
         content: content.into(),
         on_copy: None,
         on_drag: None,
+        find: None,
+        selection: None,
+        visible_leaves: None,
     }
 }
 
@@ -66,6 +93,24 @@ impl<'a, Message> Area<'a, Message> {
     /// Told `true` when a selection drag starts and `false` when it ends, however it ends.
     pub fn on_drag(mut self, on_drag: impl Fn(bool) -> Message + 'a) -> Self {
         self.on_drag = Some(Box::new(on_drag));
+        self
+    }
+
+    /// Find query and current match to highlight inside this area's leaves.
+    pub fn find(mut self, find: Option<FindQuery>) -> Self {
+        self.find = find;
+        self
+    }
+
+    /// Keeps the currently selected text mirrored here so Ctrl+F can pre-populate its query.
+    pub fn selection(mut self, selection: &'a RefCell<Option<String>>) -> Self {
+        self.selection = Some(selection);
+        self
+    }
+
+    /// Records the rendered leaves with their scrollable content y-offsets on each layout pass.
+    pub fn visible_leaves(mut self, visible_leaves: &'a RefCell<Vec<VisibleLeaf>>) -> Self {
+        self.visible_leaves = Some(visible_leaves);
         self
     }
 }
@@ -136,6 +181,8 @@ struct State {
     modifiers: keyboard::Modifiers,
     /// Whether any leaf may still hold a highlight.
     painted: bool,
+    /// Whether any leaf may still hold a find highlight.
+    find_painted: bool,
 }
 
 impl State {
@@ -446,6 +493,40 @@ impl<Message> Area<'_, Message> {
         operation.painted
     }
 
+    fn paint_find(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer) -> bool {
+        let mut recorded = Vec::new();
+        let mut operation = PaintFind {
+            query: self.find.as_ref(),
+            current_row: None,
+            last_row: None,
+            row_seen: 0,
+            global_seen: 0,
+            painted: false,
+            scrollable_y: None,
+            entered_scrollable_y: None,
+            scrollable_stack: Vec::new(),
+            visible_leaves: self.visible_leaves.is_some().then_some(&mut recorded),
+        };
+        self.content
+            .as_widget_mut()
+            .operate(tree, layout, renderer, &mut operation);
+        let painted = operation.painted;
+        if let Some(slot) = self.visible_leaves {
+            *slot.borrow_mut() = recorded;
+        }
+        painted
+    }
+
+    fn sync_selection(&self, state: &State, leaves: &[Leaf]) {
+        if let Some(slot) = self.selection {
+            *slot.borrow_mut() = state
+                .range()
+                .filter(|(a, b)| a != b)
+                .map(|r| extract(leaves, r))
+                .filter(|s| !s.is_empty());
+        }
+    }
+
     fn clear(
         &mut self,
         state: &mut State,
@@ -457,6 +538,9 @@ impl<Message> Area<'_, Message> {
         state.reset();
         if state.painted {
             state.painted = self.paint(tree, layout, renderer, None);
+        }
+        if let Some(slot) = self.selection {
+            *slot.borrow_mut() = None;
         }
         had
     }
@@ -496,6 +580,7 @@ impl<Message> Area<'_, Message> {
         state.autoscroll = 0.0;
         state.record(&collected.leaves);
         state.painted = self.paint(tree, layout, renderer, state.range());
+        self.sync_selection(state, &collected.leaves);
     }
 
     /// Moves the focus to where the pointer is now. Returns whether the selection changed.
@@ -540,6 +625,7 @@ impl<Message> Area<'_, Message> {
         state.focus = Some(focus);
         state.record(&collected.leaves);
         state.painted = self.paint(tree, layout, renderer, state.range());
+        self.sync_selection(state, &collected.leaves);
         true
     }
 
@@ -681,6 +767,7 @@ impl<Message> Area<'_, Message> {
                             state.focus = Some((end, end));
                             state.record(&collected.leaves);
                             state.painted = self.paint(child, content, renderer, state.range());
+                            self.sync_selection(state, &collected.leaves);
                             shell.capture_event();
                             shell.request_redraw();
                         }
@@ -740,15 +827,19 @@ impl<Message> Widget<Message, Theme, Renderer> for Area<'_, Message> {
         let state = state.downcast_mut::<State>();
         let child = &mut children[0];
         let node = self.content.as_widget_mut().layout(child, renderer, limits);
+        let layout = Layout::new(&node);
         // text may have streamed in, been replaced or rewrapped: re-find the selection and
         // repaint it before anything is drawn from stale offsets
         if state.anchor.is_some() || state.painted {
-            let layout = Layout::new(&node);
             let collected = self.collect(child, layout, renderer);
             if !state.revalidate(&collected.leaves) {
                 state.reset();
             }
             state.painted = self.paint(child, layout, renderer, state.range());
+            self.sync_selection(state, &collected.leaves);
+        }
+        if self.find.is_some() || state.find_painted || self.visible_leaves.is_some() {
+            state.find_painted = self.paint_find(child, layout, renderer);
         }
         layout::Node::with_children(node.size(), vec![node])
     }
@@ -932,6 +1023,9 @@ impl Operation for Collect<'_> {
 
     fn custom(&mut self, _id: Option<&Id>, bounds: Rectangle, state: &mut dyn Any) {
         if let Some(selectable) = state.downcast_ref::<Selectable>() {
+            if !selectable.is_mouse_selectable() {
+                return;
+            }
             self.collected.leaves.push(Leaf {
                 layout: selectable.layout().clone(),
                 uid: selectable.uid(),
@@ -957,6 +1051,9 @@ impl Operation for Paint {
 
     fn custom(&mut self, _id: Option<&Id>, _bounds: Rectangle, state: &mut dyn Any) {
         if let Some(selectable) = state.downcast_mut::<Selectable>() {
+            if !selectable.is_mouse_selectable() {
+                return;
+            }
             let k = self.ordinal;
             self.ordinal += 1;
             let part = self.range.and_then(|(start, end)| {
@@ -972,6 +1069,99 @@ impl Operation for Paint {
             selectable.set_highlight(part);
             self.painted |= selectable.is_highlighted();
         }
+    }
+}
+
+/// Gives every leaf (including `find_only` leaves) its find match byte ranges and current-match
+/// index within the leaf, and optionally records each rendered leaf's vertical position in the
+/// outer scrollable.
+struct PaintFind<'a> {
+    query: Option<&'a FindQuery>,
+    current_row: Option<usize>,
+    last_row: Option<usize>,
+    row_seen: usize,
+    global_seen: usize,
+    painted: bool,
+    scrollable_y: Option<f32>,
+    entered_scrollable_y: Option<f32>,
+    scrollable_stack: Vec<f32>,
+    visible_leaves: Option<&'a mut Vec<VisibleLeaf>>,
+}
+
+impl Operation for PaintFind<'_> {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        match self.entered_scrollable_y.take() {
+            Some(y) => {
+                self.scrollable_stack.push(y);
+                self.scrollable_y = self.scrollable_stack.first().copied();
+                operate(self);
+                self.scrollable_stack.pop();
+                self.scrollable_y = self.scrollable_stack.first().copied();
+            }
+            None => operate(self),
+        }
+    }
+
+    fn scrollable(
+        &mut self,
+        _id: Option<&Id>,
+        bounds: Rectangle,
+        _content_bounds: Rectangle,
+        _translation: Vector,
+        _state: &mut dyn Scrollable,
+    ) {
+        self.entered_scrollable_y = Some(bounds.y);
+    }
+
+    fn custom(&mut self, _id: Option<&Id>, bounds: Rectangle, state: &mut dyn Any) {
+        if let Some(scope) = state.downcast_ref::<crate::rows::RowScope>() {
+            self.current_row = scope.0;
+            if let Some(row) = scope.0
+                && self.last_row != Some(row)
+            {
+                self.last_row = Some(row);
+                self.row_seen = 0;
+            }
+            return;
+        }
+        let Some(selectable) = state.downcast_mut::<Selectable>() else {
+            return;
+        };
+        if let Some(out) = self.visible_leaves.as_deref_mut() {
+            let origin = selectable.origin(bounds);
+            let scroll_y = self.scrollable_y.unwrap_or(0.0);
+            out.push(VisibleLeaf {
+                row: self.current_row,
+                origin_y: origin.y - scroll_y,
+                layout: selectable.layout().clone(),
+            });
+        }
+        let Some(query) = self.query.filter(|q| !q.needle.is_empty()) else {
+            selectable.set_find(Vec::new(), None);
+            return;
+        };
+        let ranges =
+            crate::find::match_ranges(selectable.text(), &query.needle, query.case_sensitive);
+        let count = ranges.len();
+        let current_in_leaf = match (query.current, self.current_row) {
+            (Some((Some(target_row), occ)), Some(row))
+                if row == target_row && occ >= self.row_seen && occ < self.row_seen + count =>
+            {
+                Some(occ - self.row_seen)
+            }
+            (Some((None, occ)), _)
+                if occ >= self.global_seen && occ < self.global_seen + count =>
+            {
+                Some(occ - self.global_seen)
+            }
+            _ => None,
+        };
+        if self.current_row.is_some() {
+            self.row_seen += count;
+        }
+        self.global_seen += count;
+        selectable.set_find(ranges, current_in_leaf);
+        self.painted |= selectable.has_find();
     }
 }
 
