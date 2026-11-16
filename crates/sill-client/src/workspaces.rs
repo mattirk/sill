@@ -189,6 +189,28 @@ fn apply_steps(
     Ok(ApplyOutcome::Applied)
 }
 
+/// What Apply as branch did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchOutcome {
+    /// The branch, made in the checkout (or already there at the same commits).
+    Made(String),
+    /// Uncommitted work the session's agent can still commit, as for [`ApplyOutcome::Uncommitted`].
+    Uncommitted,
+}
+
+/// Apply as branch (`workspaces.branch`): the work the person saw as a new branch in their
+/// checkout, which stays where it is. No rebase first: the branch need not sit on the checkout's
+/// tip, and the checkout's branch is not compared.
+pub fn branch(actions: &Actions, workspace_id: &str, seen: &api::Revision) -> anyhow::Result<BranchOutcome> {
+    actions.once(|c| {
+        match c.call::<api::Branched>("_sill/workspaces.branch", serde_json::json!(api::Apply { operation_id: crate::request_id("branch"), workspace_id: workspace_id.into(), revision: seen.clone() })) {
+            Ok(b) => Ok(BranchOutcome::Made(b.branch)),
+            Err(e) if refused_for(&e, "uncommitted") => Ok(BranchOutcome::Uncommitted),
+            Err(e) => Err(e),
+        }
+    })
+}
+
 pub fn discard(actions: &Actions, workspace_id: &str, seen: &api::Revision) -> anyhow::Result<api::Changed> {
     actions.once(|c| c.call("_sill/workspaces.discard", api::Apply { operation_id: crate::request_id("discard"), workspace_id: workspace_id.into(), revision: seen.clone() }))
 }

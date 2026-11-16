@@ -670,6 +670,59 @@ fn fast_forward(
     Ok(Ok(Applied { before: expected.to_string(), tip }))
 }
 
+/// Apply as branch (2026-11-16): make branch `name` in the person's checkout `source` at the
+/// clone's commits, without switching to it. Nothing of the checkout's own changes: not its
+/// branch, index or files, so none of Apply's checks of them apply. Commits only, as for Apply
+/// ([`Stop::Uncommitted`]). `Ok(Err(None))` when the name is taken by another commit there; the
+/// same branch already at these commits is done (a repeated click). The tip on success.
+pub fn branch(source: &Path, clone: &Path, id: &str, workspace_branch: &str, name: &str) -> Result<std::result::Result<String, Option<Stop>>> {
+    let src = Git::open(source)?;
+    let ws = Git::open(clone)?;
+    let tip = rev(&ws, &format!("refs/heads/{workspace_branch}"))?;
+    if worktree_tree(&ws, clone)? != rev(&ws, &format!("{tip}^{{tree}}"))? {
+        return Ok(Err(Some(Stop::Uncommitted)));
+    }
+    let target = format!("refs/heads/{name}");
+    let mut c = src.cmd();
+    c.args(["rev-parse", "-q", "--verify"]).arg(format!("{target}^{{commit}}"));
+    let had = run(c)?;
+    if had.status.success() {
+        let at = String::from_utf8_lossy(&had.stdout).trim().to_string();
+        return Ok(if at == tip { Ok(tip) } else { Err(None) });
+    }
+    // the commits into the person's own store first, as for Apply
+    let incoming = super::anchor_ref(id, "incoming");
+    let mut c = src.cmd_write();
+    c.args(["fetch", "-q", "--no-tags", "--no-write-fetch-head"]).arg(ws.view_dir()).arg(format!("+refs/heads/{workspace_branch}:{incoming}"));
+    ok(c, "import")?;
+    // made only where no branch of that name is (an empty old value): never moves one
+    let mut c = src.cmd_write();
+    c.args(["update-ref", "-m", &format!("sill: branch from workspace {id}")]).arg(&target).arg(&tip).arg("");
+    if !run(c)?.status.success() {
+        return Ok(Err(None));
+    }
+    Ok(Ok(tip))
+}
+
+/// A branch name for Apply as branch from words (a session's title): lower-case snake_case of
+/// its letters and digits, at most 48 characters, cut at a word; `sill_work` when none are left.
+pub fn branch_name(words: &str) -> String {
+    let mut name = String::new();
+    for word in words.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()) {
+        if name.len() + word.len() + usize::from(!name.is_empty()) > 48 {
+            if name.is_empty() {
+                name = word[..48].to_ascii_lowercase();
+            }
+            break;
+        }
+        if !name.is_empty() {
+            name.push('_');
+        }
+        name.push_str(&word.to_ascii_lowercase());
+    }
+    if name.is_empty() { "sill_work".into() } else { name }
+}
+
 /// A file's mode and blob in `commit`, None where it has none.
 fn try_entry(git: &Git, commit: &str, path: &str) -> Result<Have> {
     Ok(tree_entries(git, commit, &[path.to_string()])?.remove(path))

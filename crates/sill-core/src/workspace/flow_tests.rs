@@ -789,3 +789,13 @@ fn a_reset_never_writes_head_through_a_link_or_takes_a_name_that_is_not_one() {
     reset_to(&c.path, &c.branch, &at, &at).unwrap();
     assert_eq!(read(&head), format!("ref: refs/heads/{}\n", c.branch));
 }
+
+#[test]
+fn a_branch_name_is_the_title_in_snake_case() {
+    assert_eq!(super::branch_name("Fix the VM's clock after sleep"), "fix_the_vm_s_clock_after_sleep");
+    assert_eq!(super::branch_name("  Ääkköset -- ja ? merkit!! "), "kk_set_ja_merkit");
+    assert_eq!(super::branch_name("???"), "sill_work");
+    let long = super::branch_name("one two three four five six seven eight nine ten eleven twelve");
+    assert_eq!(long, "one_two_three_four_five_six_seven_eight_nine_ten", "cut at a word, 48 at most");
+    assert_eq!(super::branch_name(&"x".repeat(60)).len(), 48);
+}

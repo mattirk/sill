@@ -368,3 +368,77 @@ fn apply_without_commit_copies_what_the_person_saw() {
     assert!(state.menu.is_none() && state.committing.is_none());
     assert_eq!(state.notices.get("ws-1"), Some(&("Written into your checkout, uncommitted. The work is still here to apply.".to_string(), false)));
 }
+
+/// Apply as branch with uncommitted work: the agent is asked to commit, and at its turn's end the
+/// branch follows (not an Apply), named by the daemon.
+#[test]
+fn apply_as_branch_asks_for_the_commit_then_makes_the_branch() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let mut idle = crate::SessionView::new("idle");
+    idle.workspaces.loaded = Some(uncommitted());
+    app.views.insert("idle".into(), idle);
+    let server = std::thread::spawn(move || {
+        let first = daemon.expect("_sill/workspaces.branch");
+        daemon.refuse_for(&first, "uncommitted", "The workspace has uncommitted changes.");
+        let submit = daemon.expect("_sill/sessions.submit");
+        assert_eq!(submit["params"]["purpose"], "commit");
+        daemon.reply(&submit, json!({}));
+        let second = daemon.expect("_sill/workspaces.branch");
+        assert_eq!(second["params"]["revision"]["tip"], "t2", "the committed work");
+        daemon.reply(&second, json!({"workspace": workspace(), "operation": null, "branch": "fix_the_clock"}));
+    });
+    let task = app.update(Message::Workspaces(Event::Branch("idle".into(), "ws-1".into())));
+    settle_task(&mut app, task);
+    let state = &app.views["idle"].workspaces;
+    assert!(state.branch_after_commit && state.committing.as_ref().is_some_and(|(w, _)| w == "ws-1"), "waiting for the agent's commit");
+    let tree = state.committing.as_ref().unwrap().1.clone();
+    let task = app.update(Message::Workspaces(Event::Committed("idle".into(), Ok(committed(&tree)))));
+    settle_task(&mut app, task);
+    server.join().unwrap();
+    let state = &app.views["idle"].workspaces;
+    assert!(!state.branch_after_commit && state.committing.is_none() && state.committed.is_none());
+    let (said, bad) = state.notices["ws-1"].clone();
+    assert!(!bad && said.starts_with("Branch fix_the_clock is in your checkout"), "{said}");
+}
+
+/// Crosscheck, 2026-11-16: a branch's commit turn that left work uncommitted left the window set
+/// to make a branch after the next commit turn, so a later Apply from Changes made a branch. The
+/// turn decides once what follows it; a commit asked for by an Apply is followed by an Apply.
+#[test]
+fn a_failed_commit_for_a_branch_leaves_no_branch_for_a_later_apply() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let mut idle = crate::SessionView::new("idle");
+    idle.workspaces.loaded = Some(uncommitted());
+    app.views.insert("idle".into(), idle);
+    let server = std::thread::spawn(move || {
+        let first = daemon.expect("_sill/workspaces.branch");
+        daemon.refuse_for(&first, "uncommitted", "The workspace has uncommitted changes.");
+        let submit = daemon.expect("_sill/sessions.submit");
+        daemon.reply(&submit, json!({}));
+        // the Changes page's Apply asks for a commit of its own
+        let submit = daemon.expect("_sill/sessions.submit");
+        daemon.reply(&submit, json!({}));
+        let get = daemon.expect("_sill/workspaces.get");
+        daemon.reply(&get, serde_json::to_value(&committed("tree-1").details[0]).unwrap());
+        let apply = daemon.expect("_sill/workspaces.apply");
+        daemon.reply(&apply, json!({"workspace": workspace(), "operation": null, "discarded": null}));
+    });
+    let task = app.update(Message::Workspaces(Event::Branch("idle".into(), "ws-1".into())));
+    settle_task(&mut app, task);
+    assert!(app.views["idle"].workspaces.branch_after_commit);
+    // the agent's turn ends with the work still uncommitted
+    let task = app.update(Message::Workspaces(Event::Committed("idle".into(), Ok(uncommitted()))));
+    settle_task(&mut app, task);
+    assert!(!app.views["idle"].workspaces.branch_after_commit, "nothing waits on a turn that is over");
+    // later, Apply from Changes goes straight to a commit turn
+    let task = app.update(Message::Workspaces(Event::Commit("idle".into(), "ws-1".into())));
+    settle_task(&mut app, task);
+    assert!(!app.views["idle"].workspaces.branch_after_commit);
+    let tree = app.views["idle"].workspaces.committing.as_ref().unwrap().1.clone();
+    let task = app.update(Message::Workspaces(Event::Committed("idle".into(), Ok(committed(&tree)))));
+    settle_task(&mut app, task);
+    server.join().unwrap();
+    assert_eq!(app.views["idle"].workspaces.notices.get("ws-1"), Some(&("Applied to your checkout.".to_string(), false)), "an Apply, not a branch");
+}

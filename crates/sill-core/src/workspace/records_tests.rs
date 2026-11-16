@@ -1220,3 +1220,44 @@ fn apply_without_commit_stops_at_the_persons_untracked_file() {
     assert_eq!(read(&f.source.join("notes.txt")), "the person's notes\n");
     assert_eq!(read(&f.source.join("f1.txt")), "line 1\n", "nothing written");
 }
+
+/// Apply as branch (2026-11-16): the workspace's commits as a new branch of the person's
+/// checkout, which stays on its branch with its files and edits as they were.
+#[test]
+fn apply_as_branch_makes_a_branch_and_leaves_the_checkout_alone() {
+    let f = fixture("branch");
+    let w = session(&f, "s1");
+    let clone = clone_of(&w);
+    let start = git(&f.source, &["rev-parse", "HEAD"]);
+    write(&f.source.join("f2.txt"), "the person's own edit\n");
+    write(&clone.join("f1.txt"), "the agent's work\n");
+    commit(&clone, "agent");
+    let tip = git(&clone, &["rev-parse", "HEAD"]);
+    // on sill's own branch: named for the session's title
+    let made = branch(&f.host, &apply_req("b1", &w, &rev(&f, &w))).unwrap();
+    assert_eq!(made.branch, "session_s1");
+    assert_eq!(git(&f.source, &["rev-parse", "refs/heads/session_s1"]), tip);
+    assert_eq!(git(&f.source, &["rev-parse", "HEAD"]), start, "the checkout stays where it was");
+    assert_eq!(git(&f.source, &["status", "--porcelain"]), "M f2.txt", "and its files with it");
+    assert_eq!(read(&f.source.join("f1.txt")), "line 1\n");
+    assert_eq!(get(&f.host, &w.workspace_id).unwrap().summary.commits, 1, "the work is still there to apply");
+    // again, unchanged: nothing to do
+    assert_eq!(branch(&f.host, &apply_req("b2", &w, &rev(&f, &w))).unwrap().branch, "session_s1");
+    // more work: the name holds other commits now, and is never moved
+    write(&clone.join("f1.txt"), "more of the agent's work\n");
+    commit(&clone, "agent, more");
+    let e = branch(&f.host, &apply_req("b3", &w, &rev(&f, &w))).unwrap_err();
+    assert_eq!(reason(&e), "branch_exists");
+    assert_eq!(git(&f.source, &["rev-parse", "refs/heads/session_s1"]), tip);
+    // the agent's own branch gives the name
+    git(&clone, &["checkout", "-q", "-b", "fix_the_clock"]);
+    let made = branch(&f.host, &apply_req("b4", &w, &rev(&f, &w))).unwrap();
+    assert_eq!(made.branch, "fix_the_clock");
+    assert_eq!(git(&f.source, &["log", "-1", "--format=%s", "fix_the_clock"]), "agent, more");
+    // uncommitted work of a live session is the agent's to commit first
+    write(&clone.join("f1.txt"), "not committed\n");
+    git(&clone, &["checkout", "-q", "-b", "later"]);
+    let e = branch(&f.host, &apply_req("b5", &w, &rev(&f, &w))).unwrap_err();
+    assert_eq!(reason(&e), "uncommitted");
+    assert!(git(&f.source, &["branch", "--list", "later"]).is_empty());
+}

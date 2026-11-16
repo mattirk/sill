@@ -265,6 +265,7 @@ enum Step {
     Rebase,
     Apply,
     Copy,
+    Branch,
     Discard,
 }
 
@@ -276,6 +277,7 @@ impl Step {
             Step::Rebase => "rebase",
             Step::Apply => "apply",
             Step::Copy => "copy",
+            Step::Branch => "branch",
             Step::Discard => "discard",
         }
     }
@@ -1186,6 +1188,80 @@ pub fn apply<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
             let detail = "The Apply stopped part way: check your checkout's branch and the files it changed, then look again.";
             let _ = h.db(|c| {
                 settle(c, &k, Ended::Interrupted, detail)?;
+                receipts(c)?.finish(&a.operation_id, None, Some("operation_failed"))
+            });
+            Err(e.context(detail))
+        }
+    }
+}
+
+/// The branch Apply as branch makes: the one the agent works on when it named one, else the
+/// session's title (or the repository's name) in snake_case.
+fn branch_name<H: Host>(h: &H, r: &Row) -> String {
+    if !r.branch.starts_with("sill/") {
+        return r.branch.clone();
+    }
+    flow::branch_name(&h.title(&r.session_id).unwrap_or_else(|| r.name.clone()))
+}
+
+/// Apply as branch (2026-11-16): the workspace's commits as a new branch in the person's
+/// checkout, which stays on its own branch with its files untouched ([`flow::branch`]). Work
+/// still uncommitted is committed first, as for Apply. A name already taken by other commits is
+/// refused (`branch_exists`), never moved. The workspace keeps its work: until the branch is
+/// merged, the checkout's own branch does not have it.
+pub fn branch<H: Host>(h: &H, a: &api::Apply) -> Result<api::Branched> {
+    const METHOD: &str = "_sill/workspaces.branch";
+    let fingerprint = input(a)?;
+    let k = key(&a.operation_id);
+    let _g = lock();
+    let r = settle_session(h, get_row(h, &a.workspace_id)?)?.ok_or_else(|| not_found("workspace"))?;
+    let name = branch_name(h, &r);
+    if h.db(|c| receipts(c)?.existing(&a.operation_id, METHOD, &fingerprint))?.is_some() {
+        let c = changed(h, Some(&r), Some(&a.operation_id), None)?;
+        return Ok(api::Branched { workspace: c.workspace, operation: c.operation, branch: name });
+    }
+    if h.busy(&r.session_id) {
+        return Err(refuse("writer_active", "The agent is working; apply after its turn.", vec![]));
+    }
+    if rebasing(&r.path) {
+        return Err(refuse("rebase_in_progress", "A rebase is stopped in the workspace: finish it there or abort it.", conflicted(&r.path)));
+    }
+    on_a_branch(&r)?;
+    // the work they saw; where the checkout is does not matter, nothing of it changes
+    let (now_rev, _) = revision_now(&r)?;
+    if (&now_rev.tip, &now_rev.worktree) != (&a.revision.tip, &a.revision.worktree) {
+        return Err(refuse("stale_revision", "The workspace changed since you looked; look again.", vec![]));
+    }
+    commit_leftovers(h, &r)?;
+    h.db(|c| {
+        receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint)?;
+        intent(c, &k, &r.id, Step::Branch, &json!({"name": name}), h.now())
+    })?;
+    match flow::branch(&r.source, &r.path, &r.id, &r.branch, &name) {
+        Ok(Ok(_)) => {
+            h.db(|c| {
+                settle(c, &k, Ended::Done, "")?;
+                receipts(c)?.finish(&a.operation_id, None, None)
+            })?;
+            let c = changed(h, Some(&r), Some(&a.operation_id), None)?;
+            Ok(api::Branched { workspace: c.workspace, operation: c.operation, branch: name })
+        }
+        Ok(Err(stop)) => {
+            let (reason, message) = match &stop {
+                Some(stop) => (stop.reason(), stop_message(stop)),
+                None => ("branch_exists", format!("Your checkout already has a branch {name} at other commits: rename or remove it, then apply as branch again.")),
+            };
+            h.db(|c| {
+                settle(c, &k, Ended::Failed, &message)?;
+                receipts(c)?.finish(&a.operation_id, None, Some("invalid_state"))
+            })?;
+            Err(refuse(reason, message, vec![]))
+        }
+        Err(e) => {
+            // the branch is made by one compare-and-swap: there or not, never part way
+            let detail = "Making the branch failed: nothing in your checkout changed.";
+            let _ = h.db(|c| {
+                settle(c, &k, Ended::Failed, detail)?;
                 receipts(c)?.finish(&a.operation_id, None, Some("operation_failed"))
             });
             Err(e.context(detail))
