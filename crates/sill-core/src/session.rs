@@ -401,6 +401,52 @@ pub fn launch_pins(session: &str) -> Result<Vec<PathBuf>> {
     Ok(policy_snapshot(session)?.map(|s| s.launch_pins).unwrap_or_default())
 }
 
+/// The file in a session's runtime directory that holds what its launch warned about, one
+/// warning a line; the launcher writes it, the daemon serves it with `_sill/policy.snapshot`.
+const LAUNCH_WARNINGS: &str = "launch-warnings";
+const MAX_LAUNCH_WARNINGS: usize = 32;
+const MAX_LAUNCH_WARNING_BYTES: usize = 2048;
+
+/// Record what this launch warned about, replacing the last launch's. A launch with no
+/// warning leaves no file.
+pub fn record_launch_warnings(runtime: &Path, warnings: &[String]) -> Result<()> {
+    let path = runtime.join(LAUNCH_WARNINGS);
+    match std::fs::remove_file(&path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e).context("remove the last launch's warnings"),
+        _ => {}
+    }
+    if warnings.is_empty() {
+        return Ok(());
+    }
+    let text: String = warnings.iter().take(MAX_LAUNCH_WARNINGS).map(|w| {
+        let line: String = w.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        let cut = (0..=line.len().min(MAX_LAUNCH_WARNING_BYTES)).rev().find(|&i| line.is_char_boundary(i)).unwrap_or(0);
+        format!("{}\n", &line[..cut])
+    }).collect();
+    crate::safe_fs::write_file_beneath(runtime, Path::new(LAUNCH_WARNINGS), text.as_bytes(), 0o600).context("record the launch's warnings")
+}
+
+/// What the session's last launch warned about; nothing when it had no warning or never ran.
+pub fn launch_warnings(session: &str) -> Result<Vec<String>> {
+    read_launch_warnings(&shim::runtime_dir(session)?)
+}
+
+fn read_launch_warnings(runtime: &Path) -> Result<Vec<String>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = match std::fs::OpenOptions::new().read(true)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
+        .open(runtime.join(LAUNCH_WARNINGS)) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e).context("open the launch's warnings"),
+    };
+    if !file.metadata()?.is_file() { bail!("the launch's warnings are not a regular file"); }
+    let mut text = String::new();
+    file.take((MAX_LAUNCH_WARNINGS * (MAX_LAUNCH_WARNING_BYTES + 1)) as u64).read_to_string(&mut text).context("read the launch's warnings")?;
+    Ok(text.lines().filter(|l| !l.is_empty()).take(MAX_LAUNCH_WARNINGS).map(str::to_string).collect())
+}
+
 pub fn policy_snapshot(session: &str) -> Result<Option<Resolution>> {
     match read_policy_snapshot(&snapshot_dir(session)?)? {
         Some(snapshot) => Ok(Some(snapshot)),
@@ -811,6 +857,26 @@ pub fn stop(session: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a launch warned about is what the daemon reads back, one launch at a time.
+    #[test]
+    fn a_launch_s_warnings_are_read_back_and_replaced_by_the_next_launch() {
+        let tree = PolicyTestTree::new();
+        let rt = &tree.0;
+        assert!(read_launch_warnings(rt).unwrap().is_empty(), "never launched");
+        let long = "é".repeat(MAX_LAUNCH_WARNING_BYTES);
+        record_launch_warnings(rt, &["a host socket lies in a pinned folder: /pin/a.sock".into(), "two\nlines".into(), long]).unwrap();
+        let read = read_launch_warnings(rt).unwrap();
+        assert_eq!(read[..2], ["a host socket lies in a pinned folder: /pin/a.sock".to_string(), "two lines".to_string()]);
+        assert_eq!(read.len(), 3);
+        assert!(read[2].len() <= MAX_LAUNCH_WARNING_BYTES && read[2].chars().all(|c| c == 'é'), "cut at a character");
+        record_launch_warnings(rt, &(0..MAX_LAUNCH_WARNINGS + 5).map(|i| format!("w{i}")).collect::<Vec<_>>()).unwrap();
+        assert_eq!(read_launch_warnings(rt).unwrap().len(), MAX_LAUNCH_WARNINGS);
+        record_launch_warnings(rt, &[]).unwrap();
+        assert!(read_launch_warnings(rt).unwrap().is_empty(), "the next launch had none");
+        std::os::unix::fs::symlink("/etc/hostname", rt.join(LAUNCH_WARNINGS)).unwrap();
+        assert!(read_launch_warnings(rt).is_err(), "a link is not read");
+    }
 
     struct PolicyTestTree(PathBuf);
     impl PolicyTestTree {

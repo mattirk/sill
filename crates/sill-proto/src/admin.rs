@@ -203,6 +203,11 @@ pub struct PathRule {
 pub struct PolicySnapshot {
     /// Older or never-started sessions may have no retained launch snapshot.
     pub snapshot: Option<PolicyView>,
+    /// What the session's last launch warned about, in the launcher's words: a host socket in a
+    /// pinned folder, missing resource limits, a state filesystem that cannot be hidden. For
+    /// the person to read; empty when the launch had nothing to say.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
