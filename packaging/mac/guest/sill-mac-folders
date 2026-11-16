@@ -5,9 +5,13 @@
 # VM, its jails and the person see one path. Only folders of a Mac user (/Users/…) or on a Mac
 # volume (/Volumes/…): nothing of the guest's own can be covered. A mount left stale (its slot
 # given another folder) is replaced. Asked to `unmount`, it takes paths on stdin, one a line, and
-# unmounts those that are mounted.
+# unmounts those that are mounted. Asked for the `clock`, it takes the Mac's time on stdin (Unix
+# seconds) and sets the VM's clock to it when the two are more than two seconds apart: the VM does
+# not run while the Mac sleeps, so its clock is behind by the length of the sleep when the Mac
+# wakes, until the VM's time service next asks the network (the person, 2026-11-16: every
+# session's timer 11 hours ahead, and the agents' sign-ins refused).
 #
-# This is the one thing Sill.app does as root in its VM, and the VM's account has no sudo
+# These are the only things Sill.app does as root in its VM, and the VM's account has no sudo
 # (docs/sill-mac.md, finding 15): the image installs this root-owned, and root's SSH lets
 # Sill.app's key in for this command only, whatever it asks for (the request is in
 # SSH_ORIGINAL_COMMAND). So nothing here trusts its input further than the checks below.
@@ -33,7 +37,20 @@ case "${SSH_ORIGINAL_COMMAND:-${1:-mount}}" in
         done
         exit $status
         ;;
-    *) echo 'sill-mac-folders: mount or unmount' >&2; exit 2 ;;
+    clock)
+        IFS= read -r now || now=
+        # Unix seconds of this era, nothing else: ten digits
+        case "$now" in
+            *[!0-9]* | '') echo "sill-mac-folders: not a time: $now" >&2; exit 2 ;;
+        esac
+        [ "${#now}" -eq 10 ] || { echo "sill-mac-folders: not a time: $now" >&2; exit 2; }
+        apart=$((now - $(date -u +%s)))
+        if [ "$apart" -gt 2 ] || [ "$apart" -lt -2 ]; then
+            date -u -s "@$now" >/dev/null || { echo 'sill-mac-folders: cannot set the clock' >&2; exit 1; }
+        fi
+        exit 0
+        ;;
+    *) echo 'sill-mac-folders: mount, unmount or clock' >&2; exit 2 ;;
 esac
 while IFS="$tab" read -r slot path; do
     case "$slot" in '' | *[!0-9]*) echo "sill-mac-folders: bad slot: $slot" >&2; status=1; continue ;; esac

@@ -11,6 +11,9 @@
 //! (`expose`), so the VM, its jails and the person see one path; the folders are kept in
 //! `folders.json` by share slot and shared again at each start. Settings can unshare one
 //! (`unshare`): its slot stays empty, so no other folder moves to another slot.
+//!
+//! The VM's clock is the Mac's: set at each start and after each sleep of the Mac (`watch_clock`),
+//! since the VM does not run while the Mac sleeps and its clock stays behind by that long.
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
@@ -80,6 +83,8 @@ pub fn begin() {
     if spawned.is_err() {
         set(Phase::Failed("Sill could not start its VM.".into()));
     }
+    // for as long as the process: the VM may be stopped and started again from Settings
+    let _ = std::thread::Builder::new().name("sill-gui-vm-clock".into()).spawn(watch_clock);
 }
 
 fn run(dir: &std::path::Path) -> Result<(), String> {
@@ -128,6 +133,10 @@ fn run(dir: &std::path::Path) -> Result<(), String> {
     // sill-mac: the Mac's side of Host control's Mac operations, for the daemon in the VM
     if let Err(e) = serve_mac(dir, &vm) {
         eprintln!("sill-gui: Mac operations: {e}");
+    }
+    // the Mac's time, should the VM have started with another
+    if let Err(e) = sync_clock(dir) {
+        eprintln!("sill-gui: the VM's clock: {e}");
     }
     // the person's git identity, so commits made in the VM (agents' in their jails too) are theirs
     if let Err(e) = share_git_identity(dir) {
@@ -586,6 +595,65 @@ fn share_git_identity(dir: &Path) -> Result<(), String> {
     guest(dir, remote, &format!("{name}\n{email}\n"))
 }
 
+/// How often the Mac's two clocks are compared, and how far apart they may move in that time
+/// before it counts as a sleep (or the person setting the Mac's clock).
+const CLOCK_CHECK: Duration = Duration::from_secs(5);
+const CLOCK_SLACK: Duration = Duration::from_secs(2);
+
+/// Whether the Mac's clock moved otherwise than its running time did: `wall` is how far the clock
+/// went (`None`: backwards), `ran` how long the Mac ran meanwhile. The running time stands still
+/// while the Mac sleeps, so a sleep shows as the clock ahead of it; a clock set by hand or by the
+/// network shows either way.
+fn clock_moved(wall: Option<Duration>, ran: Duration) -> bool {
+    wall.is_none_or(|wall| wall.abs_diff(ran) > CLOCK_SLACK)
+}
+
+/// Give the VM the Mac's time whenever the Mac's clock moved without the VM: after a sleep, when
+/// the VM's clock is behind by the length of it. Every session's timer then showed the sleep (the
+/// window counts from the daemon's times by the Mac's clock), and an agent's sign-in was refused,
+/// its token long expired by any clock but the VM's (the person, 2026-11-16, after a night's
+/// sleep: 11 hours). The VM's own time service corrects it only when it next asks the network.
+/// Asked again at the next check until the VM took it; an image without the request is told once.
+fn watch_clock() {
+    let (mut wall, mut ran) = (std::time::SystemTime::now(), std::time::Instant::now());
+    let (mut owed, mut told) = (false, false);
+    loop {
+        std::thread::sleep(CLOCK_CHECK);
+        let (wall_now, ran_now) = (std::time::SystemTime::now(), std::time::Instant::now());
+        owed |= clock_moved(wall_now.duration_since(wall).ok(), ran_now.duration_since(ran));
+        (wall, ran) = (wall_now, ran_now);
+        if phase() != Some(Phase::Ready) {
+            // a VM not up gets the time as it starts (`run`)
+            owed = false;
+        }
+        if !owed {
+            continue;
+        }
+        let Some(dir) = DIR.get() else { return };
+        match sync_clock(dir) {
+            Ok(()) => owed = false,
+            Err(said) => {
+                if !told {
+                    eprintln!("sill-gui: the VM's clock: {said}");
+                    told = true;
+                }
+                // an image without the request never takes it; anything else may pass
+                owed = !said.contains("older than this Sill");
+            }
+        }
+    }
+}
+
+/// Set the VM's clock to the Mac's, by the guest's root helper (which leaves a clock within two
+/// seconds alone).
+fn sync_clock(dir: &Path) -> Result<(), String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "the Mac's clock is before 1970".to_string())?
+        .as_secs();
+    as_root(dir, "clock", &format!("{now}\n")).map_err(older_image)
+}
+
 /// Unmount a shared folder's Mac path in the guest, if it is mounted there; the path on stdin.
 fn unmount_folder(dir: &Path, path: &Path) -> Result<(), String> {
     as_root(dir, "unmount", &format!("{}\n", path.display()))
@@ -597,7 +665,9 @@ fn unmount_folder(dir: &Path, path: &Path) -> Result<(), String> {
 fn older_image(said: String) -> String {
     // no helper there (sh and bash say it differently), or root's SSH never given the key
     let no_helper = said.contains("sill-mac-folders: not found") || said.contains("sill-mac-folders: No such file");
-    if no_helper || said.contains("Permission denied") {
+    // or a helper from before it set the clock (2026-11-16)
+    let no_request = said.contains("sill-mac-folders: mount or unmount");
+    if no_helper || no_request || said.contains("Permission denied") {
         format!("{said} (this VM's system image is older than this Sill: build the image again, packaging/mac-image.sh)")
     } else {
         said
@@ -651,6 +721,19 @@ mod tests {
         for refused in ["/Users", "/usr/local", "/private/tmp", "/opt/homebrew", "/"] {
             assert!(!super::mac_folder(Path::new(refused)), "{refused}");
         }
+    }
+
+    #[test]
+    fn a_sleep_or_a_set_clock_moves_the_clock_and_plain_running_does_not() {
+        use std::time::Duration;
+        let s = Duration::from_secs;
+        assert!(!super::clock_moved(Some(s(5)), s(5)));
+        assert!(!super::clock_moved(Some(Duration::from_millis(6500)), s(5)), "a late wake-up of the thread");
+        assert!(super::clock_moved(Some(s(11 * 3600)), s(5)), "the Mac slept");
+        assert!(super::clock_moved(Some(s(1)), s(5)), "set back a little");
+        assert!(super::clock_moved(None, s(5)), "set back past the last check");
+        let old = super::older_image("sill-mac-folders: mount or unmount".into());
+        assert!(old.contains("older than this Sill"), "{old}");
     }
 
     #[test]
