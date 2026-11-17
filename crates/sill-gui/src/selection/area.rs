@@ -70,6 +70,7 @@ pub struct Area<'a, Message> {
     find: Option<FindQuery>,
     selection: Option<&'a RefCell<Option<String>>>,
     visible_leaves: Option<&'a RefCell<Vec<VisibleLeaf>>>,
+    on_text_change: Option<Box<dyn Fn() -> Message + 'a>>,
 }
 
 pub fn area<'a, Message>(content: impl Into<Element<'a, Message>>) -> Area<'a, Message> {
@@ -80,6 +81,7 @@ pub fn area<'a, Message>(content: impl Into<Element<'a, Message>>) -> Area<'a, M
         find: None,
         selection: None,
         visible_leaves: None,
+        on_text_change: None,
     }
 }
 
@@ -112,6 +114,14 @@ impl<'a, Message> Area<'a, Message> {
     /// Records the rendered leaves with their scrollable content y-offsets on each layout pass.
     pub fn visible_leaves(mut self, visible_leaves: &'a RefCell<Vec<VisibleLeaf>>) -> Self {
         self.visible_leaves = Some(visible_leaves);
+        self
+    }
+
+    /// Published on the first event after a layout whose recorded leaves (`visible_leaves`) hold
+    /// other text than the layout before: Find on a page counts what the page laid out, so it
+    /// counts again once a page changed (another category, a section folded).
+    pub fn on_text_change(mut self, message: impl Fn() -> Message + 'a) -> Self {
+        self.on_text_change = Some(Box::new(message));
         self
     }
 }
@@ -184,6 +194,10 @@ struct State {
     painted: bool,
     /// Whether any leaf may still hold a find highlight.
     find_painted: bool,
+    /// A hash of the recorded leaves' text, and whether it changed since `on_text_change` was
+    /// last published.
+    text_signature: Option<u64>,
+    text_changed: bool,
 }
 
 impl State {
@@ -840,6 +854,20 @@ impl<Message> Widget<Message, Theme, Renderer> for Area<'_, Message> {
         if self.find.is_some() || state.find_painted || self.visible_leaves.is_some() {
             state.find_painted = self.paint_find(child, layout, renderer);
         }
+        if self.on_text_change.is_some()
+            && let Some(slot) = self.visible_leaves
+        {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for leaf in slot.borrow().iter() {
+                leaf.layout.text().hash(&mut hasher);
+            }
+            let signature = hasher.finish();
+            if state.text_signature != Some(signature) {
+                state.text_changed |= state.text_signature.is_some();
+                state.text_signature = Some(signature);
+            }
+        }
         layout::Node::with_children(node.size(), vec![node])
     }
 
@@ -882,6 +910,11 @@ impl<Message> Widget<Message, Theme, Renderer> for Area<'_, Message> {
         let state = state.downcast_mut::<State>();
         let child = &mut children[0];
 
+        if std::mem::take(&mut state.text_changed)
+            && let Some(on_text_change) = &self.on_text_change
+        {
+            shell.publish(on_text_change());
+        }
         if let Event::Window(window::Event::RedrawRequested(now)) = event {
             self.autoscroll(state, child, content, renderer, *now, viewport, shell);
         }

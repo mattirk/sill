@@ -181,8 +181,8 @@ impl App {
                     .style(style::feed_scroll),
             )
             .on_copy(Message::Copy)
-            .selection(&self.find.reader_selected)
-            .find(self.find.reader_query())
+            .selection(&self.find.selected_text)
+            .find(self.find.one_row_query())
             .visible_leaves(&self.find.visible_leaves)
             .into()
         } else if let Some(markdown) = &rendering.markdown {
@@ -216,8 +216,8 @@ impl App {
                 .style(style::feed_scroll),
             )
             .on_copy(Message::Copy)
-            .selection(&self.find.reader_selected)
-            .find(self.find.reader_query())
+            .selection(&self.find.selected_text)
+            .find(self.find.one_row_query())
             .visible_leaves(&self.find.visible_leaves)
             .into()
         } else {

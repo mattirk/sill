@@ -35,6 +35,8 @@ pub enum Event {
     Next,
     Prev,
     ToggleCase,
+    /// The page laid out other text (`selection::Area::on_text_change`): count again.
+    Refresh,
 }
 
 /// Which open set in [`SessionView`] must contain a key for a leaf to be rendered.
@@ -80,6 +82,23 @@ pub enum Surface {
         revision: u64,
         edits: u64,
     },
+    /// The Settings page: the text it lays out, in its current category.
+    Settings,
+}
+
+impl Surface {
+    /// Which surface it is, whatever is in it now: a selection made in another is not this one's.
+    fn identity(&self) -> Surface {
+        match self {
+            Surface::Reader { key, mode, .. } => Surface::Reader {
+                key: key.clone(),
+                mode: *mode,
+                revision: 0,
+                edits: 0,
+            },
+            other => other.clone(),
+        }
+    }
 }
 
 /// How the reader shows its file, as `files::reader_ui` decides it.
@@ -112,12 +131,12 @@ pub struct State {
     pub case_sensitive: bool,
     pub matches: Vec<Match>,
     pub current: Option<usize>,
-    /// The conversation's selected text, mirrored by the selection area for Ctrl+F's query.
+    /// The selected text of what is shown (the conversation, the reader's preview or diff,
+    /// Settings), mirrored by its selection area for Ctrl+F's query. An area mirrors only while
+    /// it holds a selection, so it is cleared when the window shows another surface.
     pub selected_text: RefCell<Option<String>>,
-    /// The same for the reader's preview and diff, and the file it was selected in: an area
-    /// mirrors only while it holds a selection, so another file's would outlive it.
-    pub reader_selected: RefCell<Option<String>>,
-    reader_file: Option<String>,
+    /// The surface the mirror is of: `(session, surface)`.
+    mirrored: Option<(Option<String>, Option<Surface>)>,
     /// The conversation's laid-out leaves, recorded by the selection area on each layout.
     pub visible_leaves: RefCell<Vec<VisibleLeaf>>,
 }
@@ -137,8 +156,9 @@ impl State {
         self.current.and_then(|idx| self.matches.get(idx)).map(|m| m.row)
     }
 
-    /// The query and current match for the reader's preview or diff, whose text is all one row.
-    pub fn reader_query(&self) -> Option<FindQuery> {
+    /// The query and current match for a surface whose text is all one row: the reader's preview
+    /// or diff, Settings.
+    pub fn one_row_query(&self) -> Option<FindQuery> {
         if !self.shown || self.query.is_empty() {
             return None;
         }
@@ -863,19 +883,43 @@ fn reader_first_match(
                 .iter()
                 .position(|m| (m.leaf_in_row, m.range.0) >= at)
         }),
-        ReaderMode::Preview | ReaderMode::Diff if visible_leaves.len() == leaves => {
-            matches.iter().position(|m| {
-                let leaf = &visible_leaves[m.leaf_in_row];
-                leaf.layout
-                    .highlight_rects(m.range)
-                    .into_iter()
-                    .next()
-                    .is_none_or(|rect| leaf.origin_y + rect.y + rect.height > leaf.view_top + 1.0)
-            })
+        ReaderMode::Preview | ReaderMode::Diff => {
+            first_laid_out_match(leaves, matches, visible_leaves)
         }
-        _ => None,
+        ReaderMode::Waiting => None,
     };
     found.unwrap_or(0)
+}
+
+/// The first match at or below the top of the view, from the leaves laid out last, when they are
+/// the `leaves` the index was made of (all of a surface that builds all of its text).
+fn first_laid_out_match(
+    leaves: usize,
+    matches: &[Match],
+    visible_leaves: &[VisibleLeaf],
+) -> Option<usize> {
+    if visible_leaves.len() != leaves {
+        return None;
+    }
+    matches.iter().position(|m| {
+        let leaf = &visible_leaves[m.leaf_in_row];
+        leaf.layout
+            .highlight_rects(m.range)
+            .into_iter()
+            .next()
+            .is_none_or(|rect| leaf.origin_y + rect.y + rect.height > leaf.view_top + 1.0)
+    })
+}
+
+/// Texts as the leaves of one row, none of them folded away.
+fn one_row(texts: Vec<String>) -> Vec<IndexedLeaf> {
+    texts
+        .into_iter()
+        .map(|text| IndexedLeaf {
+            text,
+            open_keys: Vec::new(),
+        })
+        .collect()
 }
 
 /// The rectangles of `marks` (`(line, byte range, current)`, in line order) in the lines the
@@ -932,6 +976,9 @@ impl App {
     /// What Find would search now: the reader when a file is open, else the conversation. Pages,
     /// session details, an annotation and the test desktop are not searched (yet).
     pub fn find_surface(&self) -> Option<Surface> {
+        if self.settings_page.is_some() && self.changes.is_none() && !self.agents_page.shown {
+            return Some(Surface::Settings);
+        }
         if self.backend_shown() || self.details.is_some() {
             return None;
         }
@@ -966,18 +1013,17 @@ impl App {
     /// another file, a page; docs/find.md, decision 3), and looks again when the same file is
     /// shown another way or its text changed.
     pub fn find_follow(&mut self, prior_session: &Option<String>) -> Task<Message> {
-        let file = self
-            .current()
-            .and_then(|v| v.files.reader.as_ref())
-            .map(|f| sill_client::files::key(&f.path).to_string());
-        if file != self.find.reader_file {
-            self.find.reader_file = file;
-            self.find.reader_selected.take();
+        let now = self.find_surface();
+        let identity = Some((self.selected.clone(), now.as_ref().map(Surface::identity)));
+        if self.find.mirrored != identity {
+            if self.find.mirrored.is_some() {
+                self.find.selected_text.take();
+            }
+            self.find.mirrored = identity;
         }
         if !self.find.shown {
             return Task::none();
         }
-        let now = self.find_surface();
         if *prior_session != self.selected || now.is_none() {
             self.find.close();
             return Task::none();
@@ -1034,6 +1080,10 @@ impl App {
         }
         match event {
             Event::Open => {
+                // a page with its own filter field: Ctrl+F is that field (docs/find.md)
+                if self.agents_page.shown && self.changes.is_none() {
+                    return keys::focus_and_select_all("agents-search");
+                }
                 let Some(surface) = self.find_surface() else {
                     return Task::none();
                 };
@@ -1055,8 +1105,7 @@ impl App {
                         .current()
                         .and_then(|v| v.reader.as_ref())
                         .and_then(|r| r.content.selection()),
-                    Surface::Reader { .. } => self.find.reader_selected.borrow().clone(),
-                    Surface::Conversation => self.find.selected_text.borrow().clone(),
+                    _ => self.find.selected_text.borrow().clone(),
                 };
                 if let Some(selected) = selected
                     && !selected.is_empty()
@@ -1082,6 +1131,7 @@ impl App {
                     _ => Task::none(),
                 }
             }
+            Event::Refresh => self.recompute_find(true),
             Event::Input(query) => {
                 self.find.query = query;
                 self.recompute_find(false)
@@ -1116,21 +1166,24 @@ impl App {
         let Some(surface) = self.find.surface.clone() else {
             return Task::none();
         };
-        let Some(view) = self.current() else {
-            return Task::none();
-        };
-        let rows = match (&surface, self.find.query.is_empty()) {
-            (_, true) => Vec::new(),
-            (Surface::Conversation, false) => index_rows(view),
-            (Surface::Reader { mode, .. }, false) => vec![
-                reader_leaves(view, *mode)
-                    .into_iter()
-                    .map(|text| IndexedLeaf {
-                        text,
-                        open_keys: Vec::new(),
-                    })
+        // Settings is the window's, not a session's: only the others need one
+        let view = self.current();
+        let rows = match (&surface, self.find.query.is_empty(), view) {
+            (_, true, _) => Vec::new(),
+            (Surface::Conversation, false, Some(view)) => index_rows(view),
+            (Surface::Reader { mode, .. }, false, Some(view)) => {
+                vec![one_row(reader_leaves(view, *mode))]
+            }
+            (Surface::Conversation | Surface::Reader { .. }, false, None) => Vec::new(),
+            // the page builds all of its text: what it laid out last is the index
+            (Surface::Settings, false, _) => vec![one_row(
+                self.find
+                    .visible_leaves
+                    .borrow()
+                    .iter()
+                    .map(|leaf| leaf.layout.text().to_owned())
                     .collect(),
-            ],
+            )],
         };
         let matches = collect_matches(&rows, &self.find.query, self.find.case_sensitive);
         if matches.is_empty() {
@@ -1154,21 +1207,27 @@ impl App {
             self.find.current = Some(current);
             return Task::none();
         }
-        let initial = match &surface {
-            Surface::Conversation => first_match_at_or_below_top(
+        let initial = match (&surface, view) {
+            (Surface::Conversation, Some(view)) => first_match_at_or_below_top(
                 view,
                 viewport(view, self.height),
                 &rows,
                 &matches,
                 &self.find.visible_leaves.borrow(),
             ),
-            Surface::Reader { mode, .. } => reader_first_match(
+            (Surface::Reader { mode, .. }, Some(view)) => reader_first_match(
                 view,
                 *mode,
                 rows[0].len(),
                 &matches,
                 &self.find.visible_leaves.borrow(),
             ),
+            (Surface::Settings, _) => {
+                first_laid_out_match(rows[0].len(), &matches, &self.find.visible_leaves.borrow())
+                    .unwrap_or(0)
+            }
+            // no session: no conversation or reader rows, so no matches got this far
+            (_, None) => 0,
         };
         self.find.matches = matches;
         self.find.current = Some(initial);
@@ -1183,6 +1242,7 @@ impl App {
         };
         match self.find.surface {
             Some(Surface::Conversation) => {}
+            Some(Surface::Settings) => return reveal_match("settings"),
             Some(Surface::Reader { mode, .. }) => {
                 return match mode {
                     ReaderMode::Preview => reveal_match("markdown-reader"),

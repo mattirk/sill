@@ -1823,6 +1823,10 @@ impl App {
         if !self.backend_shown() && self.current().is_some_and(|v| v.annotation.is_some()) {
             return self.annotation_event(annotation::Event::Cancel);
         }
+        // the find bar, before the page or file it lies over
+        if self.find.shown && !self.terminal_focused() {
+            return self.find_event(find::Event::Close);
+        }
         self.stash_details();
         if self.details.take().is_some() {
             return self.restore_scroll();
@@ -1833,9 +1837,6 @@ impl App {
             | std::mem::take(&mut self.agents_page.shown)
         {
             return self.restore_scroll();
-        }
-        if self.find.shown && !self.terminal_focused() {
-            return self.find_event(find::Event::Close);
         }
         // the session's shell has the keys, Escape included (an editor in it needs it)
         if self.current().is_some_and(|v| v.terminal_shown) {

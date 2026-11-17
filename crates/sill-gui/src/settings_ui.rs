@@ -5,7 +5,7 @@
 //! Shelf width, Interface scale, the shortcuts, the window's modes and sizes) are in
 //! `~/.config/sill/sill-gui.toml`.
 use iced::widget::{
-    Column, button, column, container, pick_list, row, rule, scrollable, space, text,
+    Column, button, column, container, pick_list, row, rule, scrollable, space, stack, text,
     text_editor, text_input, toggler,
 };
 use iced::{Alignment, Border, Color, Element, Fill, Padding, Shrink, Theme};
@@ -283,7 +283,11 @@ fn section<'a>(
         button(
             row![
                 text(if collapsed { "▸" } else { "▾" }).size(style::SMALL),
-                text(title).size(style::SMALL).font(bold()),
+                crate::selection::text(title)
+                    .size(style::SMALL)
+                    .font(bold())
+                    .find_only()
+                    .style(style::selectable(P.fg)),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
@@ -325,11 +329,20 @@ fn bold() -> iced::Font {
 /// The setting's title and its short dim line.
 fn titles<'a>(title: &'a str, sub: Option<&'a str>) -> Element<'a, Message> {
     let mut titles = Column::new().spacing(3);
+    // selectable, and so searched by Find (docs/find.md, pages)
     if !title.is_empty() {
-        titles = titles.push(text(title).size(style::TEXT).color(P.fg));
+        titles = titles.push(
+            crate::selection::text(title)
+                .size(style::TEXT)
+                .style(style::selectable(P.fg)),
+        );
     }
     if let Some(sub) = sub {
-        titles = titles.push(text(sub).size(style::SMALL).color(P.fg_dim));
+        titles = titles.push(
+            crate::selection::text(sub)
+                .size(style::SMALL)
+                .style(style::selectable(P.fg_dim)),
+        );
     }
     titles.width(Fill).into()
 }
@@ -457,16 +470,34 @@ impl App {
             left: 16.0,
             right: 16.0,
         });
-        scrollable(container(page_column).center_x(Fill))
-            .direction(scrollable::Direction::Vertical(style::bar()))
-            .id("settings")
-            .on_scroll(move |viewport| {
-                event(Event::Scrolled(page.category, viewport.absolute_offset().y))
-            })
-            .width(Fill)
-            .height(Fill)
-            .style(style::feed_scroll)
-            .into()
+        // one selection over the whole page; its text is one row for Find, which counts what was
+        // laid out (`find::Surface::Settings`)
+        let finding = self.find.shown && self.find.surface == Some(crate::find::Surface::Settings);
+        let mut area = crate::selection::area(
+            scrollable(crate::rows::scoped(0, container(page_column).center_x(Fill)))
+                .direction(scrollable::Direction::Vertical(style::bar()))
+                .id("settings")
+                .on_scroll(move |viewport| {
+                    event(Event::Scrolled(page.category, viewport.absolute_offset().y))
+                })
+                .width(Fill)
+                .height(Fill)
+                .style(style::feed_scroll),
+        )
+        .on_copy(Message::Copy)
+        .selection(&self.find.selected_text)
+        .visible_leaves(&self.find.visible_leaves);
+        if finding {
+            area = area
+                .find(self.find.one_row_query())
+                .on_text_change(|| Message::Find(crate::find::Event::Refresh));
+        }
+        // the area stays the stack's first layer with the bar open or closed
+        if finding {
+            stack![area, self.find.bar()].into()
+        } else {
+            stack![area].into()
+        }
     }
 
     fn settings_sections<'a>(
@@ -992,9 +1023,7 @@ impl App {
                 page_column = page_column.push(container(card).style(style::fill(P.surface)));
             }
         }
-        crate::selection::area(page_column)
-            .on_copy(Message::Copy)
-            .into()
+        page_column.into()
     }
 }
 
