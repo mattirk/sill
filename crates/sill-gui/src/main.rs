@@ -148,8 +148,6 @@ fn main() -> iced::Result {
     // choices and operate sessions using Desktop development capabilities (docs/protocol.md)
     sill_proto::client::declare_capability(permissions::CAPABILITY);
     sill_proto::client::declare_capability(host_control::CAPABILITY);
-    // a second opinion on a workspace's work, on the shelf above the prompt (docs/crosscheck.md)
-    sill_proto::client::declare_capability(sill_proto::crosscheck::CAPABILITY);
     fonts::install();
     // the Mac's daemon runs in a VM of the window's own
     #[cfg(target_os = "macos")]
