@@ -217,7 +217,6 @@ fn start(
     }
     let operation_id = id.clone();
     let spawned = std::thread::Builder::new().name("sill-host-job".into()).spawn(move || {
-        let _job = job;
         let mut progress = ProgressWriter(Some(writer));
         let (agent_id, code, event) = match run(&mut progress) {
             Ok(agent_id) => (Some(agent_id.clone()), None, api::Progress::Completed { agent_id }),
@@ -232,6 +231,9 @@ fn start(
             eprintln!("sill host operation outcome persistence failed: {error:#}");
             return;
         }
+        // Free the key before the stream says it is over: a client that starts the next job on
+        // the terminal event (or on the end of the stream) must not find this one still running.
+        drop(job);
         progress.send(event);
     });
     if let Err(error) = spawned {
