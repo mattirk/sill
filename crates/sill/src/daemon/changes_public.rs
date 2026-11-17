@@ -163,6 +163,16 @@ mod listings {
     }
 }
 
+/// The requests answered here, each named once (`HANDLERS` in hub.rs holds every such list).
+pub(in crate::daemon) const METHODS: &[&str] = &[
+    method::CHANGES_LIST,
+    method::CHANGES_DIFF,
+    method::CHANGES_KEEP,
+    method::CHANGES_REVERT,
+    method::CHANGES_UNDO,
+    method::CHANGES_GIT_REVERT,
+    method::CHANGES_HISTORY,
+];
 impl Hub {
     /// Every pending entry in the page's order: pinned repositories, each session's writes, what
     /// was kept; and the sessions that could not be read.
@@ -231,16 +241,7 @@ impl Hub {
     }
 
     pub(super) fn changes_public(&self, method: &str, params: Value) -> Option<Result<Value>> {
-        if !matches!(
-            method,
-            method::CHANGES_LIST
-                | method::CHANGES_DIFF
-                | method::CHANGES_KEEP
-                | method::CHANGES_REVERT
-                | method::CHANGES_UNDO
-                | method::CHANGES_GIT_REVERT
-                | method::CHANGES_HISTORY
-        ) {
+        if !METHODS.contains(&method) {
             return None;
         }
         Some((|| match method {

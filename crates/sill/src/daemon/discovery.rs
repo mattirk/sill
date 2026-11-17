@@ -16,11 +16,12 @@ fn value(v: impl serde::Serialize) -> Result<Value> {
     }
     Ok(v)
 }
+
+/// The requests answered here, each named once (`HANDLERS` in hub.rs holds every such list).
+pub(super) const METHODS: &[&str] =
+    &[method::FILES_FIND, method::REPOS_ROOT, method::REPOS_HEAD, method::REPOS_STATUS, method::REPOS_CHANGED_LINES, method::REPOS_SUMMARY];
 pub(super) fn handle(method: &str, params: Value) -> Option<Result<Value>> {
-    if !matches!(
-        method,
-        method::FILES_FIND | method::REPOS_ROOT | method::REPOS_HEAD | method::REPOS_STATUS | method::REPOS_CHANGED_LINES | method::REPOS_SUMMARY
-    ) {
+    if !METHODS.contains(&method) {
         return None;
     }
     Some((|| match method {

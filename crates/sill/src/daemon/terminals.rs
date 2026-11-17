@@ -323,11 +323,24 @@ pub fn forget_session(session: &str) {
     });
 }
 
+/// The requests answered here, each named once (`HANDLERS` in hub.rs holds every such list).
+pub(super) const METHODS: &[&str] = &[
+    method::TERMINALS_OPEN,
+    method::TERMINALS_LIST,
+    method::TERMINALS_GET,
+    method::TERMINALS_ATTACH,
+    method::TERMINALS_RESIZE,
+    method::TERMINALS_CWD,
+    method::TERMINALS_CLOSE,
+];
 pub fn handle(method: &str, params: Value) -> Option<Result<Value>> {
     fn args<T: serde::de::DeserializeOwned>(v: Value) -> Result<T> {
         serde_json::from_value(v).map_err(|e| invalid(&e.to_string()))
     }
     let key = |params: Value| args::<api::TerminalKey>(params).map(|k| k.terminal_id);
+    if !METHODS.contains(&method) {
+        return None;
+    }
     Some(match method {
         method::TERMINALS_OPEN => (|| {
             let a: api::Open = args(params)?;

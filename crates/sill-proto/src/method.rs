@@ -13,6 +13,8 @@ macro_rules! names {
 }
 
 names! {
+    // the handshake, before anything else on a connection
+    INITIALIZE = "_sill/initialize";
 
     // storage
     STORAGE_SPACE = "_sill/storage.space";

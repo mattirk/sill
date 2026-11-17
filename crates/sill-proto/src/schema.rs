@@ -759,6 +759,17 @@ mod tests {
         assert!(crate::rpc::strict::<crate::agent_admin::Definition>(extra).is_err());
     }
 
+    /// A name in `method` without an entry here could be called and never answered; an entry
+    /// here is named through its constant, so the two lists are one.
+    #[test]
+    fn the_names_and_the_table_are_the_same_list() {
+        let mut names: Vec<&str> = crate::method::ALL.to_vec();
+        let mut table: Vec<&str> = METHODS.iter().map(|m| m.name).collect();
+        names.sort_unstable();
+        table.sort_unstable();
+        assert_eq!(names, table);
+    }
+
     #[test]
     fn every_method_is_listed_once_and_the_document_builds() {
         let mut names: Vec<&str> = METHODS.iter().map(|m| m.name).collect();

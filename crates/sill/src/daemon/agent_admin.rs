@@ -40,22 +40,24 @@ fn select(home: &std::path::Path, a: &api::EntryKey) -> Result<sill_core::regist
         .find(|e| e.id == a.entry_id && e.version == a.version && source(e.trust) == a.source)
         .ok_or_else(|| err("not_found", "registry selector no longer exists"))
 }
+
+/// The requests answered here, each named once (`HANDLERS` in hub.rs holds every such list).
+pub(super) const METHODS: &[&str] = &[
+    method::AGENTS_LIST,
+    method::AGENTS_GET,
+    method::AGENTS_SAVE,
+    method::AGENTS_REMOVE,
+    method::AGENTS_AVAILABLE,
+    method::AGENTS_DEFAULTS_GET,
+    method::AGENTS_DEFAULTS_SET,
+    method::AGENTS_DISCOVERED,
+    method::REGISTRY_REFRESH,
+    method::REGISTRY_INSTALLED,
+    method::REGISTRY_UNINSTALL,
+    method::REGISTRY_ICON,
+];
 pub fn handle(hub: &Hub, m: &str, p: Value) -> Option<Result<Value>> {
-    if !matches!(
-        m,
-        method::AGENTS_LIST
-            | method::AGENTS_GET
-            | method::AGENTS_SAVE
-            | method::AGENTS_REMOVE
-            | method::AGENTS_AVAILABLE
-            | method::AGENTS_DEFAULTS_GET
-            | method::AGENTS_DEFAULTS_SET
-            | method::AGENTS_DISCOVERED
-            | method::REGISTRY_REFRESH
-            | method::REGISTRY_INSTALLED
-            | method::REGISTRY_UNINSTALL
-            | method::REGISTRY_ICON
-    ) {
+    if !METHODS.contains(&m) {
         return None;
     }
     Some((|| {

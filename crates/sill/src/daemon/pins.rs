@@ -28,6 +28,9 @@ fn list(store: &Store, a: api::List) -> Result<api::Page> {
     let next = if more { pins.last().map(|p| HostPath::from_path(p)) } else { None };
     Ok(api::Page { pins: pins.iter().map(|p| HostPath::from_path(p)).collect(), next })
 }
+
+/// The requests answered here, each named once (`HANDLERS` in hub.rs holds every such list).
+pub(in crate::daemon) const METHODS: &[&str] = &[method::PINS_LIST, method::PINS_ADD, method::PINS_REMOVE, method::SESSIONS_PIN, method::SESSIONS_UNPIN];
 impl Hub {
     pub(in crate::daemon) fn public_pins(self: &Arc<Self>, method: &str, params: Value) -> Option<Result<Value, Error>> {
         let result = || -> Result<Value> {
@@ -84,11 +87,7 @@ impl Hub {
                 _ => unreachable!(),
             }
         };
-        if matches!(method, method::PINS_LIST | method::PINS_ADD | method::PINS_REMOVE | method::SESSIONS_PIN | method::SESSIONS_UNPIN) {
-            Some(result().map_err(crate::daemon::sfp::failure))
-        } else {
-            None
-        }
+        if METHODS.contains(&method) { Some(result().map_err(crate::daemon::sfp::failure)) } else { None }
     }
 }
 

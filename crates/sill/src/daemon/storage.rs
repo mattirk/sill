@@ -59,8 +59,11 @@ fn clear(hub: &Hub, id: &str) -> Result<()> {
     }
     Ok(())
 }
+
+/// The requests answered here, each named once (`HANDLERS` in hub.rs holds every such list).
+pub(super) const METHODS: &[&str] = &[method::STORAGE_SPACE, method::STORAGE_CACHES, method::STORAGE_CLEAR_BUILD_CACHE];
 pub(super) fn handle(hub: &Hub, conn: &super::Conn, method: &str, params: Value) -> Option<Result<Value>> {
-    if !matches!(method, method::STORAGE_SPACE | method::STORAGE_CACHES | method::STORAGE_CLEAR_BUILD_CACHE) {
+    if !METHODS.contains(&method) {
         return None;
     }
     if !conn.has_capability("sill.storage") {

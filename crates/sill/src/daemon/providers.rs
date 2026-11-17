@@ -48,8 +48,11 @@ fn request_key(home: &std::path::Path, base_url: &str, key: Option<sill_proto::w
     Ok(key)
 }
 
+/// The requests answered here, each named once (`HANDLERS` in hub.rs holds every such list).
+pub(super) const METHODS: &[&str] =
+    &[method::PROVIDERS_LIST, method::PROVIDERS_SAVE, method::PROVIDERS_REMOVE, method::PROVIDERS_TEST, method::PROVIDERS_DETECT_LIMITS];
 pub fn handle(conn: &super::Conn, m: &str, p: Value) -> Option<Result<Value>> {
-    if !matches!(m, method::PROVIDERS_LIST | method::PROVIDERS_SAVE | method::PROVIDERS_REMOVE | method::PROVIDERS_TEST | method::PROVIDERS_DETECT_LIMITS) {
+    if !METHODS.contains(&m) {
         return None;
     }
     Some((|| {

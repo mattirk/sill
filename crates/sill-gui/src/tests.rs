@@ -417,7 +417,7 @@ fn send_now_needs_the_capability() {
         client.initialize().unwrap();
         client
     });
-    let request = daemon.expect("_sill/initialize");
+    let request = daemon.expect(sill_proto::method::INITIALIZE);
     assert_eq!(request["params"]["capabilities"]["sill.send_now"], 1, "offered");
     let answer = sill_proto::initialize::Initialized {
         protocol: sill_proto::initialize::PROTOCOL_ID.into(),

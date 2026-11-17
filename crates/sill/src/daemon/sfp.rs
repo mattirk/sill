@@ -95,6 +95,22 @@ fn args<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, Error> {
     serde_json::from_value(v).map_err(Error::invalid_params)
 }
 
+/// The requests answered here, each named once (`HANDLERS` in hub.rs holds every such list).
+pub(super) const METHODS: &[&str] = &[
+    method::SESSIONS_ATTACH,
+    method::SESSIONS_SNAPSHOT,
+    method::SESSIONS_DETACH,
+    method::UPLOADS_CREATE,
+    method::UPLOADS_GET,
+    method::SESSIONS_CONTROL,
+    method::SESSIONS_CANCEL,
+    method::SESSIONS_SUBMIT,
+    method::SUBMISSIONS_GET,
+    method::SUBMISSIONS_CANCEL,
+    method::SUBMISSIONS_RESUME,
+    method::SUBMISSIONS_SEND_NOW,
+    method::QUESTIONS_ANSWER,
+];
 impl Hub {
     pub(super) fn sfp_lifecycle(&self, session_id: &str, ended: Option<(bool, &str)>, note: Option<String>) -> Result<()> {
         if ended.is_some() {
@@ -202,6 +218,9 @@ impl Hub {
                 Err(error) => Response::err(Some(request_id), failure(error)),
             });
             return Ok(true);
+        }
+        if !METHODS.contains(&method) {
+            return Ok(false);
         }
         if method == method::SESSIONS_ATTACH {
             let result = (|| -> Result<(), Error> {

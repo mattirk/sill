@@ -148,6 +148,34 @@ pub(super) fn probe<T>(m: &Mutex<T>, deadline: std::time::Instant) -> bool {
     }
 }
 
+/// The requests `dispatch` answers itself.
+const DAEMON_METHODS: &[&str] = &[method::DAEMON_STATUS, method::DAEMON_SHUTDOWN, method::DAEMON_SCHEMA];
+
+/// Who answers which request: each part of the daemon with the requests it owns. Every request of
+/// the protocol (`sill_proto::schema::METHODS`) is in exactly one list and no list names anything
+/// else, which a test below holds; a part looks at a request only when its list names it. To add
+/// a request: its name in `sill_proto::method`, its types in `sill_proto::schema::METHODS`, its
+/// name in the owner's list here, and its arm in the owner's `match`.
+const HANDLERS: &[(&str, &[&str])] = &[
+    // the handshake, answered where a connection is read (`serve` in mod.rs)
+    ("connection", &[method::INITIALIZE]),
+    ("sessions", sessions::METHODS),
+    ("pins", pins::METHODS),
+    ("host", super::host::METHODS),
+    ("terminals", super::terminals::METHODS),
+    ("sfp", super::sfp::METHODS),
+    ("crosscheck", crosscheck::METHODS),
+    ("changes_public", changes_public::METHODS),
+    ("storage", super::storage::METHODS),
+    ("agent_admin", super::agent_admin::METHODS),
+    ("providers", super::providers::METHODS),
+    ("host_control", super::host_control::METHODS),
+    ("workspaces", workspaces::METHODS),
+    ("admin", super::admin::METHODS),
+    ("discovery", super::discovery::METHODS),
+    ("memory_api", super::memory_api::METHODS),
+    ("hub", DAEMON_METHODS),
+];
 impl Hub {
     pub fn new(mode: &'static str) -> Result<Hub> {
         let store = Store::open_default()?;
@@ -454,6 +482,9 @@ impl Hub {
     }
 
     pub fn dispatch(self: &Arc<Self>, conn: &Arc<Conn>, m: &str, params: Value) -> Result<Value, Error> {
+        if !HANDLERS.iter().any(|(_, list)| list.contains(&m)) {
+            return Err(Error::method_not_found(m));
+        }
         if let Some(result) = self.crosscheck(conn, m, params.clone()) {
             return result.map_err(super::sfp::failure);
         }
@@ -1563,6 +1594,31 @@ fn args<T: DeserializeOwned>(v: Value) -> Result<T, Error> {
 
 fn to_value<T: serde::Serialize>(t: T) -> Result<Value, Error> {
     serde_json::to_value(t).map_err(|e| Error::new(Error::INTERNAL, e.to_string()))
+}
+
+#[cfg(test)]
+mod handler_tests {
+    use super::HANDLERS;
+    use sill_proto::schema::{Kind, METHODS};
+
+    /// The lists of `HANDLERS` and the protocol's table say the same: a request added to one and
+    /// not the other would be refused as "method not found" by a daemon that builds.
+    #[test]
+    fn every_request_of_the_protocol_has_exactly_one_handler() {
+        let owners = |name: &str| HANDLERS.iter().filter(|(_, list)| list.contains(&name)).map(|(part, _)| *part).collect::<Vec<_>>();
+        for request in METHODS.iter().filter(|m| m.kind == Kind::Request) {
+            assert_eq!(owners(request.name).len(), 1, "{} is answered by {:?}: add it to one list of HANDLERS", request.name, owners(request.name));
+        }
+        for (part, list) in HANDLERS {
+            for name in *list {
+                assert!(
+                    METHODS.iter().any(|m| m.kind == Kind::Request && m.name == *name),
+                    "{part} lists {name}, which is not a request in sill_proto::schema::METHODS"
+                );
+                assert_eq!(list.iter().filter(|n| n == &name).count(), 1, "{part} lists {name} twice");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

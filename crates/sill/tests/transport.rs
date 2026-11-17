@@ -67,7 +67,7 @@ fn stdio_connection_close_leaves_the_daemon_running() {
     let mut fixture = fixture();
     let mut proxy = fixture.command().args(["daemon", "--stdio"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     let mut input = proxy.stdin.take().unwrap();
-    writeln!(input,"{}",json!({"jsonrpc":"2.0","id":0,"method":"_sill/initialize","params":{"protocols":[sill_proto::initialize::PROTOCOL_ID],"client":{"name":"test","version":"1"},"capabilities":{}}})).unwrap();
+    writeln!(input,"{}",json!({"jsonrpc":"2.0","id":0,"method":sill_proto::method::INITIALIZE,"params":{"protocols":[sill_proto::initialize::PROTOCOL_ID],"client":{"name":"test","version":"1"},"capabilities":{}}})).unwrap();
     writeln!(input, "{}", json!({"jsonrpc":"2.0","id":1,"method":sill_proto::method::DAEMON_STATUS,"params":{}})).unwrap();
     let reader = BufReader::new(proxy.stdout.take().unwrap());
     let (tx, rx) = std::sync::mpsc::channel();
@@ -183,14 +183,14 @@ fn stdio_does_not_replace_an_existing_daemon_with_another_protocol() {
         let mut line = String::new();
         BufReader::new(socket).read_line(&mut line).unwrap();
         let req: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(req["method"], "_sill/initialize");
+        assert_eq!(req["method"], sill_proto::method::INITIALIZE);
         writeln!(writer, "{}", json!({"jsonrpc":"2.0","id":req["id"],"result":{"protocol":999}})).unwrap();
     });
     let mut proxy = fixture.command().args(["daemon", "--stdio"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     writeln!(
         proxy.stdin.as_mut().unwrap(),
         "{}",
-        json!({"jsonrpc":"2.0","id":8,"method":"_sill/initialize","params":{"protocols":["sfp/1-dev.1"],"client":{"name":"test","version":"1"}}})
+        json!({"jsonrpc":"2.0","id":8,"method":sill_proto::method::INITIALIZE,"params":{"protocols":["sfp/1-dev.1"],"client":{"name":"test","version":"1"}}})
     )
     .unwrap();
     let (tx, rx) = std::sync::mpsc::channel();

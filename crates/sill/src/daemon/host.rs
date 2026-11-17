@@ -245,19 +245,20 @@ fn start(
     Ok(api::JobStream { token: Some(token), operation })
 }
 
+/// The requests answered here, each named once (`HANDLERS` in hub.rs holds every such list).
+pub(super) const METHODS: &[&str] = &[
+    method::STREAMS_PORT,
+    method::STREAMS_LOGIN_CALLBACK,
+    method::OPERATIONS_CANCEL,
+    method::AGENTS_LOGIN,
+    method::AGENTS_DISCOVER,
+    method::AGENTS_RESET,
+    method::REGISTRY_INSTALL,
+    method::REGISTRY_LIST,
+    method::OPERATIONS_GET,
+];
 pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
-    if !matches!(
-        method,
-        method::STREAMS_PORT
-            | method::STREAMS_LOGIN_CALLBACK
-            | method::OPERATIONS_CANCEL
-            | method::AGENTS_LOGIN
-            | method::AGENTS_DISCOVER
-            | method::AGENTS_RESET
-            | method::REGISTRY_INSTALL
-            | method::REGISTRY_LIST
-            | method::OPERATIONS_GET
-    ) {
+    if !METHODS.contains(&method) {
         return None;
     }
     Some((|| {

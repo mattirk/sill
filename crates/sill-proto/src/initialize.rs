@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const METHOD: &str = "_sill/initialize";
+pub const METHOD: &str = crate::method::INITIALIZE;
 /// Development implementation; the complete sfp/1-draft.1 contract is not frozen or advertised.
 pub const PROTOCOL_ID: &str = "sfp/1-dev.3";
 

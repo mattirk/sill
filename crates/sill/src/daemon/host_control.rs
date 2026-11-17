@@ -269,7 +269,12 @@ pub fn sweep(hub: &Hub) {
     displaying_changed(hub);
 }
 
+/// The requests answered here, each named once (`HANDLERS` in hub.rs holds every such list).
+pub(super) const METHODS: &[&str] = &[method::HOST_CONTROL_ACTIVATE, method::HOST_CONTROL_REVOKE, method::HOST_CONTROL_KEEP, method::HOST_CONTROL_STATE];
 pub fn handle(hub: &std::sync::Arc<Hub>, conn: &Conn, method: &str, params: serde_json::Value) -> Option<Result<serde_json::Value>> {
+    if !METHODS.contains(&method) {
+        return None;
+    }
     let args = |v: serde_json::Value| {
         serde_json::from_value::<sill_proto::sessions::SessionKey>(v).map_err(|e| anyhow::Error::from(Error::invalid_params(e.to_string())))
     };

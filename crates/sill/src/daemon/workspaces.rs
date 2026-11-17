@@ -111,6 +111,21 @@ fn root() -> PathBuf {
         .join("sill/workspaces")
 }
 
+/// The requests answered here, each named once (`HANDLERS` in hub.rs holds every such list).
+pub(in crate::daemon) const METHODS: &[&str] = &[
+    method::WORKSPACES_LIST,
+    method::WORKSPACES_SESSION,
+    method::WORKSPACES_GET,
+    method::WORKSPACES_DIFF,
+    method::WORKSPACES_PREPARE,
+    method::WORKSPACES_APPLY,
+    method::WORKSPACES_COPY,
+    method::WORKSPACES_BRANCH,
+    method::WORKSPACES_DISCARD,
+    method::WORKSPACES_UNDO,
+    method::WORKSPACES_REMOVE,
+    method::WORKSPACES_ABORT,
+];
 impl Hub {
     pub(super) fn workspace_detail_for_crosscheck(&self, id: &str) -> Result<api::Detail> {
         records::get(&Daemon(self), id)
@@ -157,7 +172,7 @@ impl Hub {
     }
 
     pub(super) fn workspaces(self: &Arc<Self>, conn: &Conn, method: &str, params: Value) -> Option<Result<Value>> {
-        if !method.starts_with("_sill/workspaces.") {
+        if !METHODS.contains(&method) {
             return None;
         }
         if !conn.has_capability(api::CAPABILITY) {

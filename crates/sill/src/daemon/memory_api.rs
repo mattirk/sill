@@ -36,20 +36,22 @@ fn bounded(v: impl serde::Serialize) -> Result<Value> {
     }
     Ok(v)
 }
+
+/// The requests answered here, each named once (`HANDLERS` in hub.rs holds every such list).
+pub(super) const METHODS: &[&str] = &[
+    method::MEMORY_TEXT_CLOSE,
+    method::MEMORY_COMPACT,
+    method::MEMORY_FORGET,
+    method::MEMORY_LIST,
+    method::MEMORY_TEXT,
+    method::MEMORY_SEARCH,
+    method::MEMORY_NOTES_LIST,
+    method::MEMORY_NOTES_ADD,
+    method::MEMORY_NOTES_REMOVE,
+    method::MEMORY_REFRESH,
+];
 pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> {
-    if !matches!(
-        m,
-        method::MEMORY_TEXT_CLOSE
-            | method::MEMORY_COMPACT
-            | method::MEMORY_FORGET
-            | method::MEMORY_LIST
-            | method::MEMORY_TEXT
-            | method::MEMORY_SEARCH
-            | method::MEMORY_NOTES_LIST
-            | method::MEMORY_NOTES_ADD
-            | method::MEMORY_NOTES_REMOVE
-            | method::MEMORY_REFRESH
-    ) {
+    if !METHODS.contains(&m) {
         return None;
     }
     Some((|| match m {

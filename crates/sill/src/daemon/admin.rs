@@ -420,6 +420,42 @@ fn session_uses_modes(hub: &Hub, id: &str) -> Result<bool> {
     Ok(sill_core::session::next_build(&row, &sill_core::changes::home()?, &pins, &workspace)?.policy.permissions.uses_modes())
 }
 
+/// The requests answered here, each named once (`HANDLERS` in hub.rs holds every such list).
+pub(super) const METHODS: &[&str] = &[
+    method::FILES_IMAGE,
+    method::DESKTOP_CAPTURE,
+    method::DESKTOP_READ,
+    method::POLICY_DENIED,
+    method::POLICY_QUIET_HOST,
+    method::POLICY_REMEMBER_DENIED,
+    method::POLICY_ALLOW_HOST,
+    method::POLICY_SAVE_HOST,
+    method::PERMISSIONS_SET,
+    method::PERMISSIONS_APPLY_DEVELOPMENT,
+    method::PERMISSIONS_RESTORE_DEFAULTS,
+    method::FILES_HOME,
+    method::FILES_METADATA,
+    method::FILES_LIST,
+    method::FILES_READ,
+    method::FILES_WRITE,
+    method::SETTINGS_GET,
+    method::USAGE_ACTIVE_TIME,
+    method::SETTINGS_PATCH,
+    method::SETTINGS_INSTRUCTIONS_GET,
+    method::SETTINGS_INSTRUCTIONS_SET,
+    method::POLICY_GET,
+    method::POLICY_LIST,
+    method::POLICY_PREVIEW,
+    method::POLICY_SNAPSHOT,
+    method::POLICY_CHECK,
+    method::POLICY_IMPORT,
+    method::PROCS_LIST,
+    method::PROCS_TAIL,
+    method::PROCS_STOP,
+    method::PROCS_RUNNING,
+    method::PROCS_STOP_COMMAND,
+    method::PROCS_DISMISS,
+];
 pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> {
     if let Some(r) = super::discovery::handle(m, p.clone()) {
         return Some(r);
@@ -427,42 +463,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
     if let Some(r) = super::memory_api::handle(hub, conn, m, p.clone()) {
         return Some(r);
     }
-    if !matches!(
-        m,
-        method::FILES_IMAGE
-            | method::DESKTOP_CAPTURE
-            | method::DESKTOP_READ
-            | method::POLICY_DENIED
-            | method::POLICY_QUIET_HOST
-            | method::POLICY_REMEMBER_DENIED
-            | method::POLICY_ALLOW_HOST
-            | method::POLICY_SAVE_HOST
-            | method::PERMISSIONS_SET
-            | method::PERMISSIONS_APPLY_DEVELOPMENT
-            | method::PERMISSIONS_RESTORE_DEFAULTS
-            | method::FILES_HOME
-            | method::FILES_METADATA
-            | method::FILES_LIST
-            | method::FILES_READ
-            | method::FILES_WRITE
-            | method::SETTINGS_GET
-            | method::USAGE_ACTIVE_TIME
-            | method::SETTINGS_PATCH
-            | method::SETTINGS_INSTRUCTIONS_GET
-            | method::SETTINGS_INSTRUCTIONS_SET
-            | method::POLICY_GET
-            | method::POLICY_LIST
-            | method::POLICY_PREVIEW
-            | method::POLICY_SNAPSHOT
-            | method::POLICY_CHECK
-            | method::POLICY_IMPORT
-            | method::PROCS_LIST
-            | method::PROCS_TAIL
-            | method::PROCS_STOP
-            | method::PROCS_RUNNING
-            | method::PROCS_STOP_COMMAND
-            | method::PROCS_DISMISS
-    ) {
+    if !METHODS.contains(&m) {
         return None;
     }
     Some((|| match m {

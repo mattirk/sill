@@ -1179,7 +1179,7 @@ mod tests {
             client.initialize().unwrap();
             client
         });
-        let request = daemon.expect("_sill/initialize");
+        let request = daemon.expect(sill_proto::method::INITIALIZE);
         let answer = sill_proto::initialize::Initialized {
             protocol: sill_proto::initialize::PROTOCOL_ID.into(),
             daemon: sill_proto::initialize::Peer { name: "sill".into(), version: "test".into() },

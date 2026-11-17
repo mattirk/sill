@@ -271,7 +271,7 @@ mod tests {
             client.initialize().unwrap();
             client
         });
-        let request = daemon.expect("_sill/initialize");
+        let request = daemon.expect(sill_proto::method::INITIALIZE);
         assert_eq!(request["params"]["capabilities"][CAPABILITY], 1, "offered by every client");
         let answer = sill_proto::initialize::Initialized {
             protocol: sill_proto::initialize::PROTOCOL_ID.into(),

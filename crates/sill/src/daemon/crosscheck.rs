@@ -67,6 +67,9 @@ fn validate_reviewers(reviewers: &[api::Reviewer]) -> Result<()> {
     Ok(())
 }
 
+/// The requests answered here, each named once (`HANDLERS` in hub.rs holds every such list).
+pub(in crate::daemon) const METHODS: &[&str] =
+    &[method::CROSSCHECK_REVIEWERS, method::CROSSCHECK_SET_REVIEWERS, method::CROSSCHECK_GET, method::CROSSCHECK_START, method::CROSSCHECK_REMOVE];
 impl Hub {
     pub(in crate::daemon) fn crosscheck_worker(&self, id: &str) -> bool {
         self.with_store(|s| Ok(s.conn().query_row("SELECT EXISTS(SELECT 1 FROM crosscheck_workers WHERE session_id=?1)", [id], |r| r.get::<_, bool>(0))?))
@@ -160,7 +163,7 @@ impl Hub {
     }
 
     pub(super) fn crosscheck(self: &Arc<Self>, conn: &Conn, method: &str, params: Value) -> Option<Result<Value>> {
-        if !method.starts_with("_sill/crosscheck.") {
+        if !METHODS.contains(&method) {
             return None;
         }
         if !conn.has_capability(api::CAPABILITY) {

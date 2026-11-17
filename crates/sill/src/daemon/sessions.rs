@@ -142,6 +142,20 @@ fn public_page(store: &Store, after: Option<(i64, &str)>, limit: usize) -> Resul
     Ok(visible)
 }
 
+/// The requests answered here, each named once (`HANDLERS` in hub.rs holds every such list).
+pub(in crate::daemon) const METHODS: &[&str] = &[
+    method::SESSIONS_LIST,
+    method::SESSIONS_GET,
+    method::SESSIONS_CREATE,
+    method::SESSIONS_UPDATE,
+    method::SESSIONS_END,
+    method::SESSIONS_DELETE,
+    method::SESSIONS_RESET,
+    method::SESSIONS_LOG,
+    method::SESSIONS_START,
+    method::SESSIONS_STOP,
+    method::SESSIONS_CHECKPOINT,
+];
 impl Hub {
     pub(in crate::daemon) fn public_sessions(self: &Arc<Self>, method: &str, params: Value) -> Option<Result<Value, Error>> {
         if let Some(result) = self.public_pins(method, params.clone()) {
@@ -316,10 +330,7 @@ impl Hub {
                 _ => unreachable!(),
             }
         };
-        if !["list", "get", "create", "update", "start", "stop", "end", "checkpoint", "delete", "reset", "log"]
-            .iter()
-            .any(|n| method == format!("_sill/sessions.{n}"))
-        {
+        if !METHODS.contains(&method) {
             return None;
         }
         Some(result().map_err(failure))
