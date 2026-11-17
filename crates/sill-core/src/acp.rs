@@ -907,16 +907,17 @@ struct Subagents {
     messages: std::collections::HashMap<(String, String), Relayed>,
 }
 
-/// The card's status for a subagent's state; none when the state says nothing of its work.
-fn subagent_status(state: &acp_v1::StateUpdate) -> Option<&'static str> {
+/// The card's status for a subagent's reported state.
+fn subagent_status(state: &acp_v1::StateUpdate) -> &'static str {
     use acp_v1::{IdleStopReason, StateUpdate};
     match state {
-        StateUpdate::Running(_) | StateUpdate::RequiresAction(_) => Some("InProgress"),
-        StateUpdate::Idle(idle) => Some(match idle.stop_reason {
+        StateUpdate::Running(_) => "InProgress",
+        StateUpdate::RequiresAction(_) => "RequiresAction",
+        StateUpdate::Idle(idle) => match idle.stop_reason {
             None | Some(IdleStopReason::EndTurn) => "Completed",
             Some(_) => "Failed",
-        }),
-        _ => None,
+        },
+        _ => "Unknown",
     }
 }
 
@@ -941,8 +942,9 @@ impl Subagents {
         let session = update.session_id.to_string();
         let id = subagent_card(&session);
         let status = match &update.state {
-            MaybeUndefined::Value(state) => subagent_status(state),
-            _ => None,
+            MaybeUndefined::Value(state) => Some(subagent_status(state)),
+            MaybeUndefined::Null => Some("Unknown"),
+            MaybeUndefined::Undefined => None,
         };
         let known = self.by_session.contains_key(&session);
         let subagent = self.by_session.entry(session).or_insert_with(|| Subagent { parent: announcer.map(str::to_string), ..Subagent::default() });
@@ -1977,6 +1979,8 @@ mod tests {
                 sent("c1", serde_json::json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"thinking aloud"}})),
                 sent("c1", answer(("recipientMessageId", "m2"))),
                 sent("s1", answer(("senderMessageId", "m2"))),
+                sent("s1", serde_json::json!({"sessionUpdate":"subagent_update","sessionId":"c1","state":{"state":"requires_action"}})),
+                sent("s1", serde_json::json!({"sessionUpdate":"subagent_update","sessionId":"c1","state":null})),
                 sent("s1", serde_json::json!({"sessionUpdate":"subagent_update","sessionId":"c1","state":{"state":"idle","stopReason":"end_turn"}})),
                 sent("s1", serde_json::json!({"sessionUpdate":"subagent_update","sessionId":"c1","state":{"state":"idle","stopReason":"cancelled"}})),
             ]
@@ -1994,6 +1998,8 @@ mod tests {
                 "call subagent:c2 [sub-agent · Nested] Pending in subagent:c1",
                 "subagent:c1 said thinking aloud",
                 "subagent:c1 said 2",
+                "update subagent:c1 RequiresAction -",
+                "update subagent:c1 Unknown -",
                 "update subagent:c1 Completed -",
                 "update subagent:c1 Failed -",
             ]

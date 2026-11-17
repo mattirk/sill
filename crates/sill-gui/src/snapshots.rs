@@ -386,10 +386,15 @@ fn render_subagents() {
         });
     };
     card("sub-a", 900, "Delegate", "sub-agent · Review the proxy's allow-list", "InProgress", None);
-    card("sub-b", 901, "Delegate", "sub-agent · Find every caller of run_session", "InProgress", None);
+    card("sub-b", 901, "Delegate", "sub-agent · Find every caller of run_session", "RequiresAction", None);
     card("sub-a1", 902, "Read", "Read crates/sill-core/src/proxy.rs", "Completed", Some("sub-a"));
     card("sub-b1", 903, "Search", "grep -rn run_session crates", "InProgress", Some("sub-b"));
     card("sub-c", 904, "Delegate", "sub-agent · Check the tests", "Pending", Some("sub-b"));
+    let view = app.views.get_mut("demo").unwrap();
+    let now = std::time::Instant::now();
+    for (id, seconds) in [("sub-a", 27), ("sub-b", 8), ("sub-c", 2)] {
+        view.subagent_clocks.observe(&view.conversation, id, now - std::time::Duration::from_secs(seconds));
+    }
     render(&app, "19-subagents");
 }
 

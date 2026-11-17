@@ -444,6 +444,7 @@ pub struct SessionView {
     lane_epoch: u64,
     pub status: Status,
     pub conversation: Conversation,
+    subagent_clocks: subagents::Clocks,
     pub rendered: BTreeMap<String, Rendered>,
     pub draft: editor::Editor,
     pub attachments: Vec<media::DraftAttachment>,
@@ -515,6 +516,7 @@ impl SessionView {
             lane_epoch: 0,
             status: Status::Closed,
             conversation: Conversation::default(),
+            subagent_clocks: subagents::Clocks::default(),
             rendered: BTreeMap::new(),
             draft: editor::Editor::new(),
             attachments: vec![],
@@ -633,9 +635,13 @@ impl SessionView {
         match self.conversation.accept(event) {
             Ok(Some(change)) => {
                 match &change {
-                    Change::Item(id) => self.render(id),
+                    Change::Item(id) => {
+                        self.subagent_clocks.observe(&self.conversation, id, Instant::now());
+                        self.render(id);
+                    }
                     Change::ItemRemoved(id) => {
                         self.rendered.remove(id);
+                        self.subagent_clocks.observe(&self.conversation, id, Instant::now());
                     }
                     Change::Submission(_) => {
                         self.outbox.reconcile(&self.conversation);
@@ -645,7 +651,8 @@ impl SessionView {
                             self.answering.remove(id);
                         }
                     }
-                    Change::Session | Change::Turn(_) => {}
+                    Change::Session => self.subagent_clocks.retain(&self.conversation),
+                    Change::Turn(_) => {}
                 }
                 true
             }
@@ -986,7 +993,7 @@ impl App {
         }
         // While busy, update the timer label and its width together once a second.
         // The spinner and timer reveal animate between these samples.
-        if self.current().is_some_and(|v| v.conversation.busy()) {
+        if self.current().is_some_and(|v| v.conversation.busy() || v.subagent_clocks.ticking()) {
             subscriptions.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick));
         }
         // a Reviewer at work: its line's latest step and time
@@ -1674,6 +1681,11 @@ impl App {
         match update {
             lane::Update::Snapshot(conversation) => {
                 view.conversation = *conversation;
+                view.subagent_clocks.retain(&view.conversation);
+                let now = Instant::now();
+                for id in view.conversation.items().keys() {
+                    view.subagent_clocks.observe(&view.conversation, id, now);
+                }
                 view.rebuild();
                 view.outbox.reconcile(&view.conversation);
                 view.answering.clear();
