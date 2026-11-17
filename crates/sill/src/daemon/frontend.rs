@@ -71,13 +71,21 @@ fn metadata(path: &Path) -> Result<Metadata> {
 }
 
 pub(super) fn head_label(repo: &Path) -> Option<(String, bool)> {
+    let read_small = |path: &Path| -> Option<String> {
+        let bytes = sill_core::safe_fs::read_regular(path, 64 * 1024).ok()??;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    };
     let dot = repo.join(".git");
-    let gitdir = if dot.is_file() {
-        let text = std::fs::read_to_string(&dot).ok()?;
+    // by what `.git` itself is, never through a link
+    let dot_md = std::fs::symlink_metadata(&dot).ok()?;
+    let gitdir = if dot_md.is_dir() {
+        dot
+    } else {
+        let text = read_small(&dot)?;
         let p = Path::new(text.strip_prefix("gitdir:")?.trim());
         if p.is_absolute() { p.to_path_buf() } else { repo.join(p) }
-    } else { dot };
-    let head = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
+    };
+    let head = read_small(&gitdir.join("HEAD"))?;
     let head = head.trim();
     Some(match head.strip_prefix("ref:") {
         Some(r) => (r.trim().strip_prefix("refs/heads/").unwrap_or(r.trim()).to_string(), false),
@@ -310,15 +318,9 @@ pub(super) fn git_summary(path: &std::path::Path, files: bool) -> Option<GitSumm
 /// A new file's lines, all of them added; none when it is not a regular file, is larger than
 /// [`NEW_FILE_MAX`], or holds a NUL in its first bytes (binary, as git judges it).
 fn new_file_lines(path: &std::path::Path) -> Option<(u64, u64)> {
-    use std::io::Read;
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > NEW_FILE_MAX {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    // bounded even when the file grew since it was measured
-    std::fs::File::open(path).ok()?.take(NEW_FILE_MAX + 1).read_to_end(&mut bytes).ok()?;
-    if bytes.len() as u64 > NEW_FILE_MAX || bytes.iter().take(8192).any(|b| *b == 0) {
+    // bounded even when the file grows while it is read; a link or a FIFO is not read at all
+    let bytes = sill_core::safe_fs::read_regular(path, NEW_FILE_MAX).ok()??;
+    if bytes.iter().take(8192).any(|b| *b == 0) {
         return None;
     }
     let lines = bytes.iter().filter(|b| **b == b'\n').count() as u64

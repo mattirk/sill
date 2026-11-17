@@ -56,7 +56,7 @@ pub fn identity(source: &Path) -> Result<Option<(String, String)>> {
     let git = Git::open(source)?;
     let get = |key: &str| -> Result<Option<String>> {
         let mut own = std::process::Command::new("git");
-        own.args(["config", "--file"]).arg(git.dirs().1.join("config")).args(["--get", key]).env("GIT_CONFIG_NOSYSTEM", "1");
+        own.args(["config", "--file"]).arg(git.repo_config()).args(["--get", key]).env("GIT_CONFIG_NOSYSTEM", "1");
         let mut theirs = git.cmd();
         theirs.args(["config", "--get", key]);
         for c in [own, theirs] {
@@ -330,7 +330,7 @@ static INDEXES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new
 /// removed), made through a private index: the repository's index is untouched.
 pub(super) fn build_tree(git: &Git, base: &str, entries: &[(String, Have)]) -> Result<String> {
     let n = INDEXES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let index = git.dirs().0.join(format!("sill-index-{}-{n}", std::process::id()));
+    let index = git.view_dir().join(format!("sill-index-{}-{n}", std::process::id()));
     let _ = std::fs::remove_file(&index);
     let with = |args: &[&str]| {
         let mut c = git.cmd_write();
@@ -581,7 +581,7 @@ pub fn apply(
     copied: &Copied,
 ) -> Result<std::result::Result<Applied, Stop>> {
     let src = Git::open(source)?;
-    let head = std::fs::read_to_string(src.dirs().0.join("HEAD"))?;
+    let head = std::fs::read_to_string(src.view_dir().join("HEAD"))?;
     if head.trim() != format!("ref: refs/heads/{branch}") || rev(&src, &format!("refs/heads/{branch}"))? != expected {
         return Ok(Err(Stop::SourceMoved));
     }
@@ -791,7 +791,7 @@ fn copied_in_the_way(src: &Git, ws: &Git, source: &Path, expected: &str, tip: &s
 /// neither what the last copy wrote nor what this one would — stops it, nothing written.
 pub fn copy(source: &Path, clone: &Path, branch: &str, expected: &str, before: &Copied) -> Result<std::result::Result<Copied, Stop>> {
     let src = Git::open(source)?;
-    let head = std::fs::read_to_string(src.dirs().0.join("HEAD"))?;
+    let head = std::fs::read_to_string(src.view_dir().join("HEAD"))?;
     if head.trim() != format!("ref: refs/heads/{branch}") || rev(&src, &format!("refs/heads/{branch}"))? != expected {
         return Ok(Err(Stop::SourceMoved));
     }

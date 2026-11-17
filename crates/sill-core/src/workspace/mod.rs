@@ -111,7 +111,7 @@ fn config_file(path: &Path) -> Vec<(String, String)> {
 }
 
 /// Filter names `.gitattributes` files at HEAD and `info/attributes` ask for.
-fn attribute_filters(git: &Git, gitdir: &Path) -> Result<Vec<String>> {
+fn attribute_filters(git: &Git, root: &Path) -> Result<Vec<String>> {
     let mut texts = Vec::new();
     let mut c = git.cmd();
     c.args(["ls-tree", "-r", "-z", "--name-only", "HEAD"]);
@@ -120,7 +120,9 @@ fn attribute_filters(git: &Git, gitdir: &Path) -> Result<Vec<String>> {
         c.arg("cat-file").arg("blob").arg(format!("HEAD:{path}"));
         texts.push(ok(c, "cat-file")?);
     }
-    texts.push(std::fs::read_to_string(gitdir.join("info/attributes")).unwrap_or_default());
+    if let Some(bytes) = crate::safe_fs::read_file_beneath(root, Path::new(".git/info/attributes"), 1 << 20)? {
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
     let mut names: Vec<String> = texts
         .iter()
         .flat_map(|t| t.lines())
@@ -137,13 +139,16 @@ fn attribute_filters(git: &Git, gitdir: &Path) -> Result<Vec<String>> {
 pub fn inspect(path: &Path) -> Result<std::result::Result<Source, Refusal>> {
     let Ok(root) = path.canonicalize() else { return Ok(Err(Refusal::NotARepository)) };
     let dot = root.join(".git");
-    if dot.is_file() {
+    // by what `.git` itself is: a link to a git directory elsewhere is not this folder's repository
+    let Ok(dot_md) = std::fs::symlink_metadata(&dot) else { return Ok(Err(Refusal::NotARepository)) };
+    if dot_md.is_file() {
         return Ok(Err(Refusal::LinkedWorktree));
     }
-    if !dot.join("HEAD").is_file() || !dot.join("objects").is_dir() {
+    if !dot_md.is_dir() || !dot.join("HEAD").is_file() || !dot.join("objects").is_dir() {
         return Ok(Err(Refusal::NotARepository));
     }
-    let config = config_file(&dot.join("config"));
+    let git = Git::open(&root)?;
+    let config = config_file(&git.repo_config());
     let get = |key: &str| config.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
     if get("extensions.refstorage").is_some_and(|v| v != "files") {
         return Ok(Err(Refusal::RefFormat));
@@ -156,14 +161,15 @@ pub fn inspect(path: &Path) -> Result<std::result::Result<Source, Refusal>> {
     {
         return Ok(Err(Refusal::PartialClone));
     }
-    if std::fs::read_to_string(dot.join("objects/info/alternates")).is_ok_and(|t| !t.trim().is_empty()) {
+    if crate::safe_fs::read_file_beneath(&root, Path::new(".git/objects/info/alternates"), 64 * 1024)?
+        .is_some_and(|b| !String::from_utf8_lossy(&b).trim().is_empty())
+    {
         return Ok(Err(Refusal::BorrowedObjects));
     }
-    let head_file = std::fs::read_to_string(dot.join("HEAD"))?;
+    let head_file = std::fs::read_to_string(git.view_dir().join("HEAD"))?;
     let Some(branch) = head_file.trim().strip_prefix("ref: refs/heads/").map(str::to_string) else {
         return Ok(Err(Refusal::DetachedHead));
     };
-    let git = Git::open(&root)?;
     let mut c = git.cmd();
     c.args(["rev-parse", "--verify", "-q", "HEAD^{commit}"]);
     let Ok(head) = ok(c, "rev-parse") else { return Ok(Err(Refusal::NoCommits)) };
@@ -172,7 +178,7 @@ pub fn inspect(path: &Path) -> Result<std::result::Result<Source, Refusal>> {
     if run(c)?.status.success() || dot.join("modules").exists() {
         return Ok(Err(Refusal::Submodules));
     }
-    let filters = attribute_filters(&git, &dot)?;
+    let filters = attribute_filters(&git, &root)?;
     if filters.iter().any(|f| f == "lfs") || dot.join("lfs").is_dir() {
         return Ok(Err(Refusal::Lfs));
     }
@@ -253,7 +259,11 @@ const MARKER: &str = "sill-workspace";
 
 /// The operation that made the clone at `path`, if sill made it.
 pub fn marker(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path.join(".git").join(MARKER)).ok().map(|s| s.trim().to_string())
+    crate::safe_fs::read_file_beneath(path, &Path::new(".git").join(MARKER), 1024)
+        .ok()
+        .flatten()
+        .and_then(|b| String::from_utf8(b).ok())
+        .map(|s| s.trim().to_string())
 }
 
 /// A created workspace.
@@ -339,7 +349,7 @@ fn create_as(source: &Source, id: &str, name: &str, path: &Path, operation: &str
 /// files stay** (the warm build output). A file that already is as the base has it is not
 /// written, so it keeps the checkout's time and build tools see it as unchanged.
 fn to_base(git: &Git, path: &Path, branch: &str, head: &str) -> Result<()> {
-    std::fs::write(path.join(".git/HEAD"), format!("ref: refs/heads/{branch}\n"))?;
+    crate::safe_fs::write_file_beneath(path, Path::new(".git/HEAD"), format!("ref: refs/heads/{branch}\n").as_bytes(), 0o644)?;
     let mut c = git.cmd_write();
     c.args(["update-ref", &format!("refs/heads/{branch}"), head]);
     ok(c, "set the branch")?;
@@ -529,11 +539,20 @@ pub fn revision(clone: &Path, branch: &str) -> Result<Revision> {
     hash.update(run(c)?.stdout);
     let mut c = git.cmd();
     c.args(["ls-files", "-z", "--others", "--exclude-standard"]);
+    // the clone is the agent's: content is read below it, never through a link or from a FIFO
+    let root = crate::safe_fs::open_dir_beneath(clone, Path::new(""), false)?;
     for path in ok(c, "ls-files")?.split('\0').filter(|p| !p.is_empty()) {
         hash.update(path.as_bytes());
         hash.update([0]);
         match std::fs::symlink_metadata(clone.join(path)) {
-            Ok(m) if m.is_file() => hash.update(std::fs::read(clone.join(path)).unwrap_or_default()),
+            Ok(m) if m.is_file() => {
+                if let Ok(Some(mut file)) = crate::safe_fs::open_regular_at(&root, Path::new(path)) {
+                    let mut buf = [0u8; 65536];
+                    while let Ok(n @ 1..) = std::io::Read::read(&mut file, &mut buf) {
+                        hash.update(&buf[..n]);
+                    }
+                }
+            }
             Ok(m) if m.is_symlink() => hash.update(std::fs::read_link(clone.join(path)).unwrap_or_default().as_os_str().as_encoded_bytes()),
             _ => {}
         }
@@ -567,14 +586,18 @@ pub fn set_destination(source: &Path, clone: &Path, id: &str, branch: &str, work
 /// Apply all read the same commits — or, while a rebase is stopped, the branch being rebased.
 /// None when HEAD is detached otherwise, or unreadable.
 pub fn clone_branch(clone: &Path) -> Option<String> {
-    let dot = clone.join(".git");
-    // the agent writes this folder: only a regular file is read
-    let text = |p: PathBuf| std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_file()).then(|| std::fs::read_to_string(p).ok()).flatten();
+    // the agent writes this folder: only a regular file is read, never through a link or a FIFO
+    let text = |rel: &str| {
+        crate::safe_fs::read_file_beneath(clone, Path::new(rel), 64 * 1024)
+            .ok()
+            .flatten()
+            .and_then(|b| String::from_utf8(b).ok())
+    };
     let named = |t: String| t.trim().strip_prefix("refs/heads/").filter(|b| !b.is_empty()).map(str::to_string);
-    if let Some(b) = text(dot.join("HEAD")).and_then(|t| named(t.trim().strip_prefix("ref: ").unwrap_or("").to_string())) {
+    if let Some(b) = text(".git/HEAD").and_then(|t| named(t.trim().strip_prefix("ref: ").unwrap_or("").to_string())) {
         return Some(b);
     }
-    ["rebase-merge", "rebase-apply"].iter().find_map(|d| text(dot.join(d).join("head-name")).and_then(named))
+    ["rebase-merge", "rebase-apply"].iter().find_map(|d| text(&format!(".git/{d}/head-name")).and_then(named))
 }
 
 /// The source's checked-out branch (empty when detached) and its tip.
@@ -583,7 +606,7 @@ pub fn source_head(source: &Path) -> Result<(String, String)> {
 }
 
 pub(crate) fn head_of(git: &Git) -> Result<(String, String)> {
-    let head = std::fs::read_to_string(git.dirs().0.join("HEAD"))?;
+    let head = std::fs::read_to_string(git.view_dir().join("HEAD"))?;
     let branch = head.trim().strip_prefix("ref: refs/heads/").unwrap_or("").to_string();
     let mut c = git.cmd();
     c.args(["rev-parse", "HEAD"]);

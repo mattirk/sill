@@ -76,17 +76,21 @@ pub fn ghost_due(changes: &[Change], now: std::time::SystemTime, after: std::tim
 
 static GIT_VIEWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+const HEAD_MAX: u64 = 64 * 1024;
+const CONFIG_MAX: u64 = 1 << 20;
+const SHALLOW_MAX: u64 = 4 << 20;
+const INDEX_MAX: u64 = 128 << 20;
+
 /// A repository's index, or `None` when it has none. In a folder of the Mac shared into its VM
 /// (virtiofs), the name stays bound to the old file for about a second after git there replaced
 /// the index, and opening it fails as if there were none (seen 2026-11-12: 90 of 100 reads while
 /// the Mac's git kept refreshing). Listing the directory looks the name up afresh: only when the
 /// listing has no index either is there none.
-fn read_index(gitdir: &Path) -> Result<Option<Vec<u8>>> {
-    let path = gitdir.join("index");
+fn read_index(gitdir_fd: &std::os::fd::OwnedFd, gitdir: &Path) -> Result<Option<Vec<u8>>> {
     for attempt in 0..5 {
-        match std::fs::read(&path) {
-            Ok(bytes) => return Ok(Some(bytes)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        match crate::safe_fs::read_regular_at(gitdir_fd, Path::new("index"), INDEX_MAX) {
+            Ok(Some(bytes)) => return Ok(Some(bytes)),
+            Ok(None) => {
                 let listed = std::fs::read_dir(gitdir)?
                     .filter_map(|entry| entry.ok())
                     .any(|entry| entry.file_name() == "index");
@@ -95,17 +99,21 @@ fn read_index(gitdir: &Path) -> Result<Option<Vec<u8>>> {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
             }
-            Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+            Err(e) => return Err(e).with_context(|| format!("read {}", gitdir.join("index").display())),
         }
     }
-    bail!("{}: the index is listed but cannot be read", path.display())
+    bail!("{}: the index is listed but cannot be read", gitdir.join("index").display())
 }
 
 /// Git on a repository the agent can write — a pin is live, and a kept overlay copy is the agent's
 /// too. Its `.git/config` (hooks path, fsmonitor, filters, diff drivers, promisor remotes…) can make
 /// git run anything, so git runs here with `--git-dir` at a private directory of sill's: links to
-/// the real objects, refs and packed-refs, copies of HEAD and the index, and a config that keeps only the
-/// repository's format (version, object format, ref storage) — nothing that names a program.
+/// the real objects, refs and packed-refs, copies of HEAD, shallow and the index, and a config
+/// that keeps only the repository's format (version, object format, ref storage) — nothing that
+/// names a program. `.git` is a real directory, or the `gitdir:` file of a linked worktree or
+/// submodule checkout (then objects and refs come from its `commondir`), never a symlink; what is
+/// read or linked from it is opened without following a symlink or blocking on a FIFO, and what is
+/// read is bounded in size.
 /// Hooks and fsmonitor are switched off on the command line as well, diffs never call out
 /// ([`Git::DIFF_SAFE`]), and nothing is written back (`--no-optional-locks`). Every host-side git
 /// goes through here (security.md S1, SPEC §4.11 #3).
@@ -145,45 +153,71 @@ pub fn filter_drivers(config: &[(String, String)]) -> Vec<String> {
 
 impl Git {
     pub fn open(repo: &Path) -> Result<Git> {
-        let dot = repo.join(".git");
-        // a linked worktree's `.git` is a file naming its directory
-        let gitdir = if dot.is_dir() {
-            dot
-        } else {
-            let text = std::fs::read_to_string(&dot).with_context(|| format!("{}: no .git", repo.display()))?;
-            let p = text.trim().strip_prefix("gitdir:").map(str::trim).with_context(|| format!("{}: malformed .git file", repo.display()))?;
-            let p = Path::new(p);
-            if p.is_absolute() { p.to_path_buf() } else { repo.join(p) }
+        use crate::safe_fs::{open_dir_beneath, read_regular_at, stat_nofollow_at};
+        use rustix::fs::FileType;
+        let root = open_dir_beneath(repo, Path::new(""), false).with_context(|| format!("{}: no .git", repo.display()))?;
+        let from = |text: &[u8], base: &Path| -> PathBuf {
+            let p = PathBuf::from(String::from_utf8_lossy(text).trim());
+            if p.is_absolute() { p } else { base.join(p) }
         };
-        // a linked worktree keeps objects and refs in the main repository
-        let common = match std::fs::read_to_string(gitdir.join("commondir")) {
-            Ok(c) => {
-                let p = PathBuf::from(c.trim());
-                if p.is_absolute() { p } else { gitdir.join(p) }
+        // a linked worktree's `.git` (and a submodule checkout's) is a file naming its directory
+        let gitdir = match stat_nofollow_at(&root, std::ffi::OsStr::new(".git"))? {
+            Some(FileType::Directory) => repo.join(".git"),
+            Some(FileType::RegularFile) => {
+                let text = read_regular_at(&root, Path::new(".git"), HEAD_MAX)?.with_context(|| format!("{}: no .git", repo.display()))?;
+                let text = String::from_utf8_lossy(&text);
+                let p = text.trim().strip_prefix("gitdir:").with_context(|| format!("{}: malformed .git file", repo.display()))?;
+                from(p.as_bytes(), repo)
             }
-            Err(_) => gitdir.clone(),
+            Some(_) => bail!("{}: .git is neither a directory nor a gitdir file", repo.display()),
+            None => bail!("{}: no .git", repo.display()),
         };
+        let gitdir_fd = open_dir_beneath(&gitdir, Path::new(""), false).with_context(|| format!("{}: no git directory", repo.display()))?;
+        // a linked worktree keeps objects and refs in the main repository
+        let commondir = read_regular_at(&gitdir_fd, Path::new("commondir"), HEAD_MAX).with_context(|| format!("{}: invalid commondir", repo.display()))?;
+        let common = commondir.map_or_else(|| gitdir.clone(), |text| from(&text, &gitdir));
+        let common_fd = open_dir_beneath(&common, Path::new(""), false).with_context(|| format!("{}: no common git directory", repo.display()))?;
+        let head = read_regular_at(&gitdir_fd, Path::new("HEAD"), HEAD_MAX)
+            .with_context(|| format!("{}: invalid HEAD", repo.display()))?
+            .with_context(|| format!("{}: no HEAD", repo.display()))?;
+        let index = read_index(&gitdir_fd, &gitdir)?;
+        let original = read_regular_at(&common_fd, Path::new("config"), CONFIG_MAX)
+            .with_context(|| format!("{}: invalid config", repo.display()))?
+            .unwrap_or_default();
+        let shallow = read_regular_at(&common_fd, Path::new("shallow"), SHALLOW_MAX)
+            .with_context(|| format!("{}: invalid shallow", repo.display()))?;
+
         let n = GIT_VIEWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("sill-git-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
         std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
         let mut view = Git { work_tree: repo.to_path_buf(), dir, gitdir: gitdir.clone(), common: common.clone(), filters: Vec::new() };
-        for (base, name) in [(&common, "objects"), (&common, "refs"), (&common, "packed-refs"), (&common, "info"), (&common, "shallow"), (&common, "logs")] {
-            let src = base.join(name);
-            if src.exists() {
-                std::os::unix::fs::symlink(&src, view.dir.join(name))?;
+        // linked by name: each must be what it claims at the name itself, not a link elsewhere
+        for (name, kind) in [
+            ("objects", FileType::Directory),
+            ("refs", FileType::Directory),
+            ("info", FileType::Directory),
+            ("logs", FileType::Directory),
+            ("packed-refs", FileType::RegularFile),
+        ] {
+            if let Some(ft) = stat_nofollow_at(&common_fd, std::ffi::OsStr::new(name))? {
+                anyhow::ensure!(ft == kind, "{}: {name} in the git directory is a link or of the wrong kind", repo.display());
+                std::os::unix::fs::symlink(common.join(name), view.dir.join(name))?;
             }
+        }
+        if let Some(shallow) = shallow {
+            std::fs::write(view.dir.join("shallow"), shallow)?;
         }
         // HEAD is copied, not linked: git takes a symlinked HEAD for the ancient `HEAD -> refs/…`
         // form and refuses any other target
-        std::fs::copy(gitdir.join("HEAD"), view.dir.join("HEAD")).with_context(|| format!("{}: no HEAD", repo.display()))?;
+        std::fs::write(view.dir.join("HEAD"), head)?;
         // the index is copied too: a missing one is an empty one to git, every file deleted
-        if let Some(index) = read_index(&gitdir)? {
+        if let Some(index) = index {
             std::fs::write(view.dir.join("index"), index)?;
         }
-        let original = std::fs::read_to_string(common.join("config")).unwrap_or_default();
-        std::fs::write(view.dir.join("config"), format_config(&original))?;
+        std::fs::write(view.dir.join("config"), format_config(&String::from_utf8_lossy(&original)))?;
+        std::fs::write(view.repo_config(), original)?;
         // last: the view as its commands will have it, HEAD and config in place
         view.filters = filter_drivers(&view.config());
         Ok(view)
@@ -310,9 +344,10 @@ impl Git {
         self.common.join("objects")
     }
 
-    /// The repository's real git directory and the one objects and refs live in.
-    pub fn dirs(&self) -> (&Path, &Path) {
-        (&self.gitdir, &self.common)
+    /// The view's copy of the repository's whole `config`, for `git config --file`: the file in
+    /// the repository is the agent's to replace with a link or a FIFO.
+    pub fn repo_config(&self) -> PathBuf {
+        self.dir.join("config.repository")
     }
 
     /// `diff` arguments that keep git from calling out: no external diff, no textconv, no submodules.
@@ -384,7 +419,7 @@ pub fn apply_gitignore(changes: &mut [Change]) {
         }
     }
     for (repo, idxs) in by_repo {
-        let Ok(git) = Git::open(&repo) else { return };
+        let Ok(git) = Git::open(&repo) else { continue };
         let mut child = match git
             .cmd()
             .args(["check-ignore", "--stdin", "-z", "--no-index"])
@@ -394,7 +429,7 @@ pub fn apply_gitignore(changes: &mut [Change]) {
             .spawn()
         {
             Ok(c) => c,
-            Err(_) => return,
+            Err(_) => continue,
         };
         // feed stdin from its own thread: past 64 KiB of matches git blocks on stdout, and a writer
         // that hasn't started reading yet would then block on stdin forever
@@ -474,10 +509,43 @@ pub fn git_status(repo: &Path) -> Vec<(PathBuf, String)> {
 
 /// Unified diff of a file in a live repo (working tree vs HEAD; whole file for untracked).
 pub fn git_diff(repo: &Path, rel: &Path) -> String {
-    let out = Git::open(repo).and_then(|git| Ok(git.cmd().arg("diff").args(Git::DIFF_SAFE).args(["HEAD", "--"]).arg(rel).output()?));
+    let Ok(git) = Git::open(repo) else { return String::new() };
+    let out = git.cmd().arg("diff").args(Git::DIFF_SAFE).args(["HEAD", "--"]).arg(rel).output();
     match out {
         Ok(o) if !o.stdout.is_empty() => String::from_utf8_lossy(&o.stdout).into_owned(),
-        _ => std::fs::read_to_string(repo.join(rel)).map(|t| format!("(untracked)\n{t}")).unwrap_or_default(),
+        _ => read_untracked_diff(repo, rel),
+    }
+}
+
+fn read_untracked_diff(repo: &Path, rel: &Path) -> String {
+    let Some(name) = rel.file_name() else { return String::new() };
+    let parent = rel.parent().unwrap_or(Path::new(""));
+    let Ok(dir) = crate::safe_fs::open_dir_beneath(repo, parent, false) else {
+        return String::new();
+    };
+    let Ok(Some(ft)) = crate::safe_fs::stat_nofollow_at(&dir, name) else {
+        return String::new();
+    };
+    match ft {
+        rustix::fs::FileType::Symlink => {
+            let target = rustix::fs::readlinkat(&dir, name, Vec::new())
+                .map(|t| String::from_utf8_lossy(t.as_bytes()).into_owned())
+                .unwrap_or_default();
+            format!("(untracked)\nsymlink → {target}\n")
+        }
+        rustix::fs::FileType::Directory => "(untracked)\ndirectory\n".into(),
+        rustix::fs::FileType::RegularFile => match crate::safe_fs::read_regular_at(&dir, Path::new(name), DIFF_MAX) {
+            Ok(Some(bytes)) => {
+                if bytes.contains(&0) {
+                    format!("(untracked)\nbinary file ({} bytes)\n", bytes.len())
+                } else {
+                    format!("(untracked)\n{}", String::from_utf8_lossy(&bytes))
+                }
+            }
+            Ok(None) => String::new(),
+            Err(e) => format!("(untracked)\n{e}\n"),
+        },
+        _ => "(untracked)\nspecial file\n".into(),
     }
 }
 
@@ -662,7 +730,6 @@ enum Side {
 /// symlink there planted at a changed path would otherwise read any host file into the diff pane
 /// (SPEC §4.11 #10). Absent = empty.
 fn diff_side(p: &Path) -> Side {
-    use std::os::unix::fs::OpenOptionsExt;
     let md = match p.symlink_metadata() {
         Ok(md) => md,
         Err(_) => return Side::Text(Vec::new()),
@@ -680,13 +747,11 @@ fn diff_side(p: &Path) -> Side {
     if md.len() > DIFF_MAX {
         return Side::Note(format!("{} MB: too large to diff", md.len() / 1_000_000));
     }
-    let mut f = match std::fs::OpenOptions::new().read(true).custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32).open(p) {
-        Ok(f) => f,
-        Err(e) => return Side::Note(format!("unreadable: {e}")),
-    };
-    let mut bytes = Vec::with_capacity(md.len() as usize);
-    match std::io::Read::read_to_end(&mut f, &mut bytes) {
-        Ok(_) => Side::Text(bytes),
+    // by what the opened file is, not what the name was a moment ago: a FIFO swapped in cannot
+    // stall the read, and a file that grew is still bounded
+    match crate::safe_fs::read_regular(p, DIFF_MAX) {
+        Ok(Some(bytes)) => Side::Text(bytes),
+        Ok(None) => Side::Text(Vec::new()),
         Err(e) => Side::Note(format!("unreadable: {e}")),
     }
 }
@@ -740,10 +805,12 @@ mod tests {
     #[test]
     fn an_index_is_read_and_a_missing_one_is_none() {
         let dir = std::env::temp_dir().join(format!("sill-index-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(super::read_index(&dir).unwrap(), None);
+        let fd = crate::safe_fs::open_dir_beneath(&dir, Path::new(""), false).unwrap();
+        assert_eq!(super::read_index(&fd, &dir).unwrap(), None);
         std::fs::write(dir.join("index"), b"DIRC").unwrap();
-        assert_eq!(super::read_index(&dir).unwrap(), Some(b"DIRC".to_vec()));
+        assert_eq!(super::read_index(&fd, &dir).unwrap(), Some(b"DIRC".to_vec()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -941,5 +1008,236 @@ mod tests {
         apply_gitignore(&mut changes);
         assert!(changes.iter().all(|c| c.ignored));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn git_in(dir: &Path, args: &[&str]) {
+        assert!(std::process::Command::new("git").arg("-C").arg(dir).args(["-c", "user.email=t@t", "-c", "user.name=t"]).args(args).status().unwrap().success());
+    }
+
+    /// A repository at `dir` with `name` committed; false without git.
+    fn committed_repo(dir: &Path, name: &str) -> bool {
+        if !init_repo(dir) {
+            return false;
+        }
+        std::fs::write(dir.join(name), "one\n").unwrap();
+        git_in(dir, &["add", name]);
+        git_in(dir, &["commit", "-q", "-m", "init"]);
+        true
+    }
+
+    fn init_repo(dir: &Path) -> bool {
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir).unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["init", "-q"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn git_open_refuses_links_in_the_git_directory() {
+        let base = std::env::temp_dir().join(format!("sill-git-sec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("file"), "secret\n").unwrap();
+        std::fs::create_dir_all(outside.join("dir")).unwrap();
+
+        let repo = base.join("repo");
+        if !committed_repo(&repo, "a.txt") {
+            return;
+        }
+        Git::open(&repo).expect("clean repo opens");
+
+        // 1. .git symlink
+        let sym_repo = base.join("sym-dotgit");
+        std::fs::create_dir_all(&sym_repo).unwrap();
+        std::os::unix::fs::symlink(repo.join(".git"), sym_repo.join(".git")).unwrap();
+        assert!(Git::open(&sym_repo).is_err(), ".git symlink must be refused");
+
+        // 2. a `.git` file that names a symlink, or is not a gitdir file at all
+        let file_repo = base.join("file-dotgit");
+        std::fs::create_dir_all(&file_repo).unwrap();
+        std::os::unix::fs::symlink(repo.join(".git"), base.join("git-link")).unwrap();
+        std::fs::write(file_repo.join(".git"), format!("gitdir: {}\n", base.join("git-link").display())).unwrap();
+        assert!(Git::open(&file_repo).is_err(), "a gitdir that is a symlink must be refused");
+        std::fs::write(file_repo.join(".git"), "nonsense\n").unwrap();
+        assert!(Git::open(&file_repo).is_err(), "a malformed .git file must be refused");
+
+        // helper to clone clean repo, mutate one path under .git, assert Git::open fails
+        let mut idx = 0;
+        let mut check_mutated = |label: &str, mutate: &dyn Fn(&Path)| {
+            idx += 1;
+            let r = base.join(format!("case-{idx}"));
+            assert!(committed_repo(&r, "a.txt"));
+            mutate(&r);
+            assert!(Git::open(&r).is_err(), "{label} must be refused");
+        };
+
+        check_mutated(".git/commondir symlink", &|r| {
+            std::os::unix::fs::symlink(outside.join("file"), r.join(".git/commondir")).unwrap();
+        });
+        check_mutated(".git/commondir naming a symlink", &|r| {
+            std::os::unix::fs::symlink(outside.join("dir"), r.join(".git/common-link")).unwrap();
+            std::fs::write(r.join(".git/commondir"), "common-link\n").unwrap();
+        });
+        check_mutated(".git/objects symlink", &|r| {
+            std::fs::remove_dir_all(r.join(".git/objects")).unwrap();
+            std::os::unix::fs::symlink(outside.join("dir"), r.join(".git/objects")).unwrap();
+        });
+        check_mutated(".git/refs symlink", &|r| {
+            std::fs::remove_dir_all(r.join(".git/refs")).unwrap();
+            std::os::unix::fs::symlink(outside.join("dir"), r.join(".git/refs")).unwrap();
+        });
+        check_mutated(".git/HEAD symlink", &|r| {
+            std::fs::remove_file(r.join(".git/HEAD")).unwrap();
+            std::os::unix::fs::symlink(outside.join("file"), r.join(".git/HEAD")).unwrap();
+        });
+        check_mutated(".git/index symlink", &|r| {
+            std::fs::remove_file(r.join(".git/index")).unwrap();
+            std::os::unix::fs::symlink(outside.join("file"), r.join(".git/index")).unwrap();
+        });
+        check_mutated(".git/config symlink", &|r| {
+            std::fs::remove_file(r.join(".git/config")).unwrap();
+            std::os::unix::fs::symlink(outside.join("file"), r.join(".git/config")).unwrap();
+        });
+        check_mutated(".git/packed-refs symlink", &|r| {
+            std::os::unix::fs::symlink(outside.join("file"), r.join(".git/packed-refs")).unwrap();
+        });
+        check_mutated(".git/shallow symlink", &|r| {
+            std::fs::write(r.join(".git/shallow"), "").unwrap();
+            std::fs::remove_file(r.join(".git/shallow")).unwrap();
+            std::os::unix::fs::symlink(outside.join("file"), r.join(".git/shallow")).unwrap();
+        });
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A linked worktree's `.git` is a file naming its git directory, whose `commondir` names the
+    /// main one: status and diffs of a pinned worktree are its own.
+    #[test]
+    fn a_linked_worktree_opens_through_its_gitdir_file() {
+        let base = std::env::temp_dir().join(format!("sill-git-linked-{}", std::process::id()));
+        let main = base.join("main");
+        if !committed_repo(&main, "a.txt") {
+            return;
+        }
+        let linked = base.join("linked");
+        git_in(&main, &["worktree", "add", "-q", linked.to_str().unwrap(), "-b", "side"]);
+        std::fs::write(linked.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(linked.join("new.txt"), "n\n").unwrap();
+        let view = Git::open(&linked).expect("a linked worktree opens");
+        assert_eq!(view.objects().canonicalize().unwrap(), main.join(".git/objects").canonicalize().unwrap());
+        let mut st = git_status(&linked);
+        st.sort();
+        assert_eq!(st, vec![(PathBuf::from("a.txt"), "M".to_string()), (PathBuf::from("new.txt"), "?".to_string())]);
+        assert!(git_diff(&linked, Path::new("a.txt")).contains("+two"));
+        // the main checkout is untouched by the worktree's edits
+        assert!(git_status(&main).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn git_open_does_not_stall_on_fifos_and_enforces_caps() {
+        let base = std::env::temp_dir().join(format!("sill-git-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let make_fifo = |p: &Path| {
+            let _ = std::fs::remove_file(p);
+            rustix::fs::mknodat(
+                rustix::fs::CWD,
+                p,
+                rustix::fs::FileType::Fifo,
+                rustix::fs::Mode::from_raw_mode(0o600),
+                0,
+            )
+            .unwrap();
+        };
+
+        for (i, rel) in [
+            ".git/HEAD",
+            ".git/index",
+            ".git/config",
+            ".git/packed-refs",
+            ".git/shallow",
+            ".git/commondir",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let r = base.join(format!("fifo-{i}"));
+            if !init_repo(&r) {
+                return;
+            }
+            if let Some(parent) = r.join(rel).parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            make_fifo(&r.join(rel));
+            assert!(Git::open(&r).is_err(), "FIFO at {rel} must fail immediately without stalling");
+        }
+
+        // Size caps: HEAD > 64 KiB, config > 1 MiB
+        let r_head = base.join("big-head");
+        if init_repo(&r_head) {
+            std::fs::write(r_head.join(".git/HEAD"), vec![b'a'; (HEAD_MAX as usize) + 1]).unwrap();
+            assert!(Git::open(&r_head).is_err(), "oversized HEAD must fail");
+        }
+        let r_cfg = base.join("big-config");
+        if init_repo(&r_cfg) {
+            std::fs::write(r_cfg.join(".git/config"), vec![b'#'; (CONFIG_MAX as usize) + 1]).unwrap();
+            assert!(Git::open(&r_cfg).is_err(), "oversized config must fail");
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn git_diff_untracked_safeguards() {
+        let base = std::env::temp_dir().join(format!("sill-gitdiff-sec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret"), "TOP_SECRET_HOST_DATA\n").unwrap();
+        std::fs::create_dir_all(outside.join("dir")).unwrap();
+        std::fs::write(outside.join("dir/inside"), "TOP_SECRET_NESTED\n").unwrap();
+
+        let repo = base.join("repo");
+        if !committed_repo(&repo, "committed") {
+            return;
+        }
+
+        // Untracked symlink does not leak target contents
+        std::os::unix::fs::symlink(outside.join("secret"), repo.join("link.txt")).unwrap();
+        let d_link = git_diff(&repo, Path::new("link.txt"));
+        assert!(d_link.contains("symlink →"), "{d_link}");
+        assert!(!d_link.contains("TOP_SECRET_HOST_DATA"), "{d_link}");
+
+        // Untracked FIFO returns special file immediately
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            repo.join("pipe"),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        let d_fifo = git_diff(&repo, Path::new("pipe"));
+        assert!(d_fifo.contains("special file"), "{d_fifo}");
+
+        // Untracked oversized file reports size cap rather than OOMing
+        std::fs::write(repo.join("huge.bin"), vec![b'x'; (DIFF_MAX as usize) + 1]).unwrap();
+        let d_huge = git_diff(&repo, Path::new("huge.bin"));
+        assert!(d_huge.contains("exceeds"), "{d_huge}");
+
+        // Parent traversal and symlinked subdir return empty
+        assert_eq!(git_diff(&repo, Path::new("../outside/secret")), "");
+        std::os::unix::fs::symlink(outside.join("dir"), repo.join("sub")).unwrap();
+        assert_eq!(git_diff(&repo, Path::new("sub/inside")), "");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

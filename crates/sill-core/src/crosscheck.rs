@@ -122,7 +122,7 @@ fn independent_copy(source: &Path, base: &str, commit: &str, output: &Path) -> R
         }
         let packed = child.wait_with_output()?;
         ensure!(packed.status.success(), "Pack Crosscheck objects: {}", String::from_utf8_lossy(&packed.stderr).trim());
-        if let Ok(shallow) = std::fs::read(source_git.dirs().1.join("shallow")) {
+        if let Ok(shallow) = std::fs::read(source_git.view_dir().join("shallow")) {
             std::fs::write(output.join(".git/shallow"), shallow)?;
         }
         let target = Git::open(output)?;
