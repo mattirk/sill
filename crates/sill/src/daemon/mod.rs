@@ -363,7 +363,9 @@ fn bind_direct() -> Result<UnixListener> {
         std::fs::remove_file(&path)?;
     }
     let l = UnixListener::bind(&path).with_context(|| format!("bind {}", path.display()))?;
-    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    // refused by some shared filesystems (virtiofs: EINVAL), and the socket is not ours alone without it
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .with_context(|| format!("make {} private (is the runtime directory on a shared filesystem?)", path.display()))?;
     Ok(l)
 }
 
