@@ -104,7 +104,9 @@ launch snapshot lists those its build consulted; hosts approved later reach the 
 Preview is prospective; snapshot effective state describes the recorded launch policy, not a
 live Host control activation. Availability describes the current daemon's backend support:
 `public_web` always, `test_desktop` where the daemon's machine has Weston (at least 15) and
-Xwayland (2026-11-06, no schema change), the others not yet.
+Xwayland (2026-11-06, no schema change), `private_bus` where it has `dbus-daemon` (2026-11-07),
+`gpu` where a supported render node is accessible (2026-11-14), `host_control` never: it is
+activated, not selected (below).
 Unavailable capabilities cannot be activated by selecting a policy. Host control never gains
 authority from policy inspection or import.
 
@@ -175,7 +177,7 @@ relay command ID are persisted before sending. A successful ACP prompt result es
 insertion/completion (or the agent's reported cancellation). Prompt RPC errors report uncertainty.
 Replacement holds unsent submissions and marks possibly dispatched work unknown. Old transcript rows are not imported into SFP. A session without canonical SFP state starts
 a new empty conversation view; historical text never establishes continuity. Permission/form answers persist the winning answer
-and delivery intent before sending. Relay protocol 2 requires outcome evidence; its resolution confirms handoff to the ACP question
+and delivery intent before sending. Relay protocol 2 (3 since 2026-11-10) requires outcome evidence; its resolution confirms handoff to the ACP question
 handler, without claiming that the remote agent acted on it. Older relay versions are refused.
 
 Uploads are immutable session-scoped objects with client IDs and bounded base64 data. Inline
@@ -597,7 +599,7 @@ named request/result records. They do not make the development identity a stable
 | `_sill/policy.list`, `_sill/policy.get` | Policy names and the TOML policy document. |
 | `_sill/procs.list`, `_sill/procs.tail`, `_sill/procs.stop`, `_sill/procs.dismiss` | Session managed processes; bounded live pages, tail up to 10,000 lines; stop requests termination, not proof of exit. |
 | `_sill/procs.running`, `_sill/procs.stop_command` | Need `sill.jail_processes`. What runs in the session's jail now, seen from outside the agent: commands (each tree once, at its root) and services (managed processes, programs listening on a port); empty when the jail is not running. Stop ends one command with its tree (asked, then killed after 3 s) by its root's pid in the jail; not proof of exit. |
-| `_sill/pins.list`, `_sill/pins.add`, `_sill/pins.remove`, `_sill/sessions.pin`, `_sill/sessions.unpin` | Global or exact-session pins; live byte-order keyset pages, 1–128 entries; global add canonicalizes. |
+| `_sill/pins.list`, `_sill/pins.add`, `_sill/pins.remove`, `_sill/sessions.pin`, `_sill/sessions.unpin` | Global or exact-session pins; live byte-order keyset pages, 1–128 entries; global add canonicalizes. Since 2026-11-09 the global list is the person's Shortcuts: navigation only, bound into no jail (docs/pins.md). |
 | `_sill/agents.list`, `_sill/agents.get`, `_sill/agents.save`, `_sill/agents.remove`, `_sill/agents.available` | Explicit configured-agent definitions, ID keyset pages (1–128); save/remove user overrides; availability resolves the configured command on the daemon. |
 | `_sill/providers.list`, `_sill/providers.save`, `_sill/providers.remove`, `_sill/providers.test` | Need `sill.providers: 1` (2026-11-14). Records on the daemon host for OpenAI-compatible endpoints. List → `{providers: [{provider, has_key, endpoint}], agents}`: never a key; `endpoint` is the one `host:port` sessions may reach, `agents` the ids the daemon hands providers to. Save `{provider, key?, clear_key?}` → `{endpoint}`: unknown record fields and loopback addresses are refused; at most 64 providers. Remove `{provider_id}` → `{removed}`, with the key. Test `{base_url, key?, provider_id?}` → `{models, endpoint}`: `GET <base_url>/models` from the daemon host with the given key or the saved one; changes nothing. |
 | `_sill/agents.defaults.get`, `_sill/agents.defaults.set` | Named agent default controls; unknown agents refused. |
@@ -626,8 +628,11 @@ be used on that connection. A method that needs a missing capability returns `un
 `details.capability`. The exported schema lists the daemon's capabilities under
 `capabilities.offered` and each method's requirement under `methods[].capabilities`.
 
-The sfp/1 baseline needs no optional capability. The current registry is `sill.send_now`
-and `sill.permission_modes`; `sill.internal` and the `_sill/internal/*` methods have been
+The sfp/1 baseline needs no optional capability. The current registry (by 2026-11-15) is
+`sill.send_now`, `sill.permission_modes`, `sill.desktop_view`, `sill.host_control`,
+`sill.agent_setup`, `sill.workspaces`, `sill.network_quiet`, `sill.usage`, `sill.login_browser`,
+`sill.jail_processes`, `sill.crosscheck`, `sill.providers`, `sill.provider_limits` and
+`sill.storage`, each at version 1 (`initialize::CAPABILITIES`); `sill.internal` and the `_sill/internal/*` methods have been
 removed. A frontend-declared capability (`initialize::FRONTEND_DECLARED`) states the client's
 own user-facing contract, so the shared client offers it only after the program declares it.
 
