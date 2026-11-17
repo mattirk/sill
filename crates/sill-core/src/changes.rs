@@ -33,7 +33,12 @@ pub struct SessionView {
 pub fn session_view(policy: &Policy, state_dir: &Path, home: &Path, filesystem: &crate::agent_storage::Plan) -> Result<SessionView> {
     let layout = jail::layout(policy, home, state_dir, &crate::mounts::host_mounts()?, &jail::read_root_entries()?)?;
     let masked = filesystem.policy_paths.masks.iter().chain(&filesystem.agent_masks).map(|m| m.path.to_path()).collect::<Result<_>>()?;
-    let mut direct: Vec<PathBuf> = filesystem.bindings.iter().map(|b| b.target.to_path()).chain(filesystem.policy_paths.direct.iter().chain(&filesystem.policy_paths.read_only).map(|p| p.to_path())).collect::<Result<_>>()?;
+    let mut direct: Vec<PathBuf> = filesystem
+        .bindings
+        .iter()
+        .map(|b| b.target.to_path())
+        .chain(filesystem.policy_paths.direct.iter().chain(&filesystem.policy_paths.read_only).map(|p| p.to_path()))
+        .collect::<Result<_>>()?;
     // a workspace's clone is bound over its repository (docs/parallel-coding.md §12): what the
     // upper tree holds below it is hidden from the agent and no change against the host — listing
     // it offered a revert that went through the bind into the clone
@@ -64,12 +69,8 @@ pub fn ghost_due(changes: &[Change], now: std::time::SystemTime, after: std::tim
     let written = |c: &Change| std::fs::symlink_metadata(&c.upper).ok().and_then(|m| m.modified().ok());
     let is_due = |c: &Change| written(c).is_some_and(|t| now.duration_since(t).unwrap_or_default() >= after);
     let fresh: Vec<&Path> = changes.iter().filter(|c| !is_due(c)).map(|c| c.path.as_path()).collect();
-    let mut due: Vec<Change> = changes
-        .iter()
-        .filter(|c| is_due(c))
-        .filter(|c| !fresh.iter().any(|f| *f != c.path && f.starts_with(&c.path)))
-        .cloned()
-        .collect();
+    let mut due: Vec<Change> =
+        changes.iter().filter(|c| is_due(c)).filter(|c| !fresh.iter().any(|f| *f != c.path && f.starts_with(&c.path))).cloned().collect();
     due.sort_by_key(|c| std::cmp::Reverse(c.path.components().count()));
     due
 }
@@ -91,9 +92,7 @@ fn read_index(gitdir_fd: &std::os::fd::OwnedFd, gitdir: &Path) -> Result<Option<
         match crate::safe_fs::read_regular_at(gitdir_fd, Path::new("index"), INDEX_MAX) {
             Ok(Some(bytes)) => return Ok(Some(bytes)),
             Ok(None) => {
-                let listed = std::fs::read_dir(gitdir)?
-                    .filter_map(|entry| entry.ok())
-                    .any(|entry| entry.file_name() == "index");
+                let listed = std::fs::read_dir(gitdir)?.filter_map(|entry| entry.ok()).any(|entry| entry.file_name() == "index");
                 if !listed {
                     return Ok(None);
                 }
@@ -181,11 +180,9 @@ impl Git {
             .with_context(|| format!("{}: invalid HEAD", repo.display()))?
             .with_context(|| format!("{}: no HEAD", repo.display()))?;
         let index = read_index(&gitdir_fd, &gitdir)?;
-        let original = read_regular_at(&common_fd, Path::new("config"), CONFIG_MAX)
-            .with_context(|| format!("{}: invalid config", repo.display()))?
-            .unwrap_or_default();
-        let shallow = read_regular_at(&common_fd, Path::new("shallow"), SHALLOW_MAX)
-            .with_context(|| format!("{}: invalid shallow", repo.display()))?;
+        let original =
+            read_regular_at(&common_fd, Path::new("config"), CONFIG_MAX).with_context(|| format!("{}: invalid config", repo.display()))?.unwrap_or_default();
+        let shallow = read_regular_at(&common_fd, Path::new("shallow"), SHALLOW_MAX).with_context(|| format!("{}: invalid shallow", repo.display()))?;
 
         let n = GIT_VIEWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("sill-git-{}-{n}", std::process::id()));
@@ -446,8 +443,7 @@ pub fn apply_gitignore(changes: &mut [Change]) {
         });
         let Ok(out) = child.wait_with_output() else { continue };
         let _ = feeder.join();
-        let ignored: std::collections::HashSet<Vec<u8>> =
-            out.stdout.split(|b| *b == 0).filter(|s| !s.is_empty()).map(|s| s.to_vec()).collect();
+        let ignored: std::collections::HashSet<Vec<u8>> = out.stdout.split(|b| *b == 0).filter(|s| !s.is_empty()).map(|s| s.to_vec()).collect();
         for &i in &idxs {
             if let Ok(rel) = changes[i].path.strip_prefix(&repo)
                 && ignored.contains(rel.as_os_str().as_encoded_bytes())
@@ -501,7 +497,13 @@ pub fn git_status(repo: &Path) -> Vec<(PathBuf, String)> {
         if x == 'R' || x == 'C' {
             let _ = it.next();
         }
-        let st = if x == '?' { "?".to_string() } else if y != ' ' { y.to_string() } else { x.to_string() };
+        let st = if x == '?' {
+            "?".to_string()
+        } else if y != ' ' {
+            y.to_string()
+        } else {
+            x.to_string()
+        };
         v.push((PathBuf::from(rel), st));
     }
     v
@@ -528,9 +530,7 @@ fn read_untracked_diff(repo: &Path, rel: &Path) -> String {
     };
     match ft {
         rustix::fs::FileType::Symlink => {
-            let target = rustix::fs::readlinkat(&dir, name, Vec::new())
-                .map(|t| String::from_utf8_lossy(t.as_bytes()).into_owned())
-                .unwrap_or_default();
+            let target = rustix::fs::readlinkat(&dir, name, Vec::new()).map(|t| String::from_utf8_lossy(t.as_bytes()).into_owned()).unwrap_or_default();
             format!("(untracked)\nsymlink → {target}\n")
         }
         rustix::fs::FileType::Directory => "(untracked)\ndirectory\n".into(),
@@ -870,10 +870,8 @@ mod tests {
             ch("mixed/fresh", FileType::File),
             ch("lone", FileType::File),
         ];
-        let due: Vec<String> = ghost_due(&all, now, std::time::Duration::from_secs(3600))
-            .iter()
-            .map(|c| c.path.strip_prefix("/home/me").unwrap().display().to_string())
-            .collect();
+        let due: Vec<String> =
+            ghost_due(&all, now, std::time::Duration::from_secs(3600)).iter().map(|c| c.path.strip_prefix("/home/me").unwrap().display().to_string()).collect();
         assert_eq!(due, ["old/sub/a", "old/sub", "mixed/stale", "old", "lone"], "mixed waits for mixed/fresh; a conflict reverts too");
         assert!(ghost_due(&all, now, std::time::Duration::from_secs(3 * 3600)).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
@@ -888,7 +886,15 @@ mod tests {
         std::fs::write(dir.join("secret"), "the key\n").unwrap();
         std::fs::write(dir.join("host.txt"), "old\n").unwrap();
         std::os::unix::fs::symlink(dir.join("secret"), dir.join("upper.txt")).unwrap();
-        let c = Change { path: dir.join("host.txt"), upper: dir.join("upper.txt"), kind: Kind::Modified, file_type: FileType::Symlink, size: 0, conflict: false, ignored: false };
+        let c = Change {
+            path: dir.join("host.txt"),
+            upper: dir.join("upper.txt"),
+            kind: Kind::Modified,
+            file_type: FileType::Symlink,
+            size: 0,
+            conflict: false,
+            ignored: false,
+        };
         let d = unified_diff(&c).unwrap();
         assert!(d.contains("symlink →") && !d.contains("the key"), "{d}");
         // plain files diff as before
@@ -952,7 +958,14 @@ mod tests {
         assert!(git(&["-c", "user.email=t@t", "-c", "user.name=t", "add", "."]));
         assert!(git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "one"]));
         let s = script.display();
-        for kv in [format!("core.fsmonitor={s}"), format!("filter.evil.clean={s}"), format!("filter.evil.smudge={s}"), format!("diff.evil.command={s}"), format!("diff.evil.textconv={s}"), format!("core.hooksPath={}", dir.display())] {
+        for kv in [
+            format!("core.fsmonitor={s}"),
+            format!("filter.evil.clean={s}"),
+            format!("filter.evil.smudge={s}"),
+            format!("diff.evil.command={s}"),
+            format!("diff.evil.textconv={s}"),
+            format!("core.hooksPath={}", dir.display()),
+        ] {
             let (k, v) = kv.split_once('=').unwrap();
             assert!(git(&["config", k, v]));
         }
@@ -1011,7 +1024,9 @@ mod tests {
     }
 
     fn git_in(dir: &Path, args: &[&str]) {
-        assert!(std::process::Command::new("git").arg("-C").arg(dir).args(["-c", "user.email=t@t", "-c", "user.name=t"]).args(args).status().unwrap().success());
+        assert!(
+            std::process::Command::new("git").arg("-C").arg(dir).args(["-c", "user.email=t@t", "-c", "user.name=t"]).args(args).status().unwrap().success()
+        );
     }
 
     /// A repository at `dir` with `name` committed; false without git.
@@ -1028,13 +1043,7 @@ mod tests {
     fn init_repo(dir: &Path) -> bool {
         let _ = std::fs::remove_dir_all(dir);
         std::fs::create_dir_all(dir).unwrap();
-        std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(["init", "-q"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        std::process::Command::new("git").arg("-C").arg(dir).args(["init", "-q"]).status().map(|s| s.success()).unwrap_or(false)
     }
 
     #[test]
@@ -1148,27 +1157,10 @@ mod tests {
 
         let make_fifo = |p: &Path| {
             let _ = std::fs::remove_file(p);
-            rustix::fs::mknodat(
-                rustix::fs::CWD,
-                p,
-                rustix::fs::FileType::Fifo,
-                rustix::fs::Mode::from_raw_mode(0o600),
-                0,
-            )
-            .unwrap();
+            rustix::fs::mknodat(rustix::fs::CWD, p, rustix::fs::FileType::Fifo, rustix::fs::Mode::from_raw_mode(0o600), 0).unwrap();
         };
 
-        for (i, rel) in [
-            ".git/HEAD",
-            ".git/index",
-            ".git/config",
-            ".git/packed-refs",
-            ".git/shallow",
-            ".git/commondir",
-        ]
-        .iter()
-        .enumerate()
-        {
+        for (i, rel) in [".git/HEAD", ".git/index", ".git/config", ".git/packed-refs", ".git/shallow", ".git/commondir"].iter().enumerate() {
             let r = base.join(format!("fifo-{i}"));
             if !init_repo(&r) {
                 return;
@@ -1217,14 +1209,7 @@ mod tests {
         assert!(!d_link.contains("TOP_SECRET_HOST_DATA"), "{d_link}");
 
         // Untracked FIFO returns special file immediately
-        rustix::fs::mknodat(
-            rustix::fs::CWD,
-            repo.join("pipe"),
-            rustix::fs::FileType::Fifo,
-            rustix::fs::Mode::from_raw_mode(0o600),
-            0,
-        )
-        .unwrap();
+        rustix::fs::mknodat(rustix::fs::CWD, repo.join("pipe"), rustix::fs::FileType::Fifo, rustix::fs::Mode::from_raw_mode(0o600), 0).unwrap();
         let d_fifo = git_diff(&repo, Path::new("pipe"));
         assert!(d_fifo.contains("special file"), "{d_fifo}");
 

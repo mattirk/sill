@@ -24,6 +24,7 @@ pub mod actions;
 pub mod agents;
 pub mod changes;
 pub mod conversation;
+pub mod crosscheck;
 pub mod files;
 pub mod lane;
 pub mod login;
@@ -35,7 +36,6 @@ pub mod settings;
 pub mod supervision;
 pub mod terminal;
 pub mod workspaces;
-pub mod crosscheck;
 
 use std::sync::Arc;
 
@@ -56,14 +56,8 @@ pub fn connect() -> Connector {
 pub fn request_id(kind: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    format!(
-        "gui-{kind}-{}-{nanos:x}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    format!("gui-{kind}-{}-{nanos:x}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 /// The connection went with this request (or the daemon did not answer it in time): it may or
@@ -76,12 +70,7 @@ pub fn connection_lost(error: &anyhow::Error) -> bool {
 /// The domain code of a daemon refusal (`not_found`, `stale_answer`, `limit_exceeded`…), if the
 /// error is one.
 pub fn refusal_code(error: &anyhow::Error) -> Option<String> {
-    error
-        .downcast_ref::<sill_proto::rpc::Error>()
-        .and_then(|e| e.data.as_ref())
-        .and_then(|d| d.get("code"))
-        .and_then(|c| c.as_str())
-        .map(str::to_owned)
+    error.downcast_ref::<sill_proto::rpc::Error>().and_then(|e| e.data.as_ref()).and_then(|d| d.get("code")).and_then(|c| c.as_str()).map(str::to_owned)
 }
 
 #[cfg(all(test, unix))]

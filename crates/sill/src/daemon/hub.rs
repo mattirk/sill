@@ -39,14 +39,14 @@ use super::runner::{Runner, SummaryDone, SummaryKind};
 mod changes;
 #[path = "changes_public.rs"]
 mod changes_public;
-#[path = "sessions.rs"]
-mod sessions;
-#[path = "pins.rs"]
-mod pins;
-#[path = "workspaces.rs"]
-mod workspaces;
 #[path = "crosscheck.rs"]
 mod crosscheck;
+#[path = "pins.rs"]
+mod pins;
+#[path = "sessions.rs"]
+mod sessions;
+#[path = "workspaces.rs"]
+mod workspaces;
 
 /// What an end that waits for the agent's summary needs once the answer is in (the facts as they
 /// were when the end was asked for; the row's summary is replaced only when memory is on).
@@ -163,7 +163,10 @@ impl Hub {
             let mut stmt = store.conn().prepare("SELECT id,context FROM daemon_ends")?;
             let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
             let mut ending = HashMap::new();
-            for row in rows { let (id, ctx) = row?; ending.insert(id, serde_json::from_str(&ctx)?); }
+            for row in rows {
+                let (id, ctx) = row?;
+                ending.insert(id, serde_json::from_str(&ctx)?);
+            }
             ending
         };
         let launcher = sill_core::launcher::current();
@@ -207,19 +210,28 @@ impl Hub {
             // Missing launch evidence is never reconstructed from today's definitions.
             let Ok(plan) = sill_core::session::recorded_filesystem(&row.id) else { continue };
             let profile = plan.profile.to_path()?;
-            if !profile.is_dir() { continue; }
+            if !profile.is_dir() {
+                continue;
+            }
             let base = plan.normal_profile.to_path()?;
             if let Some((_, _, ghosts)) = groups.iter_mut().find(|(rules, normal, _)| *rules == plan.credentials && *normal == base) {
                 ghosts.push(profile);
-            } else { groups.push((plan.credentials, base, vec![profile])); }
+            } else {
+                groups.push((plan.credentials, base, vec![profile]));
+            }
         }
         let mut first_error = None;
         for (rules, base, ghosts) in groups {
             if let Err(e) = sync.reconcile(&rules, &base, &ghosts) {
-                if first_error.is_none() { first_error = Some(e); }
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
             }
         }
-        match first_error { Some(e) => Err(e), None => Ok(()) }
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     pub fn session_count(&self) -> usize {
@@ -316,7 +328,7 @@ impl Hub {
     /// A connection closed: it is subscribed nowhere any more.
     pub fn disconnect(&self, conn: u64) {
         super::memory_api::disconnect(conn);
-        let public_ids=self.sfp.lock().unwrap().sessions_for(conn);
+        let public_ids = self.sfp.lock().unwrap().sessions_for(conn);
         self.sfp.lock().unwrap().disconnect(conn);
         self.conns.lock().unwrap().retain(|w| w.upgrade().is_some_and(|c| c.id != conn));
         for id in public_ids {
@@ -386,7 +398,9 @@ impl Hub {
                 Ok(Some(snapshot)) => snapshot.policy,
                 _ => {
                     let Ok(mut policy) = Policy::load(&s.policy, &self.home) else { continue };
-                    if s.ghost { policy.ghostly(&self.home); }
+                    if s.ghost {
+                        policy.ghostly(&self.home);
+                    }
                     policy
                 }
             };
@@ -443,28 +457,48 @@ impl Hub {
         if let Some(result) = self.crosscheck(conn, m, params.clone()) {
             return result.map_err(super::sfp::failure);
         }
-        if let Some(result) = self.changes_public(m, params.clone()) { return result.map_err(super::sfp::failure); }
-        if let Some(result) = super::storage::handle(self, conn, m, params.clone()) { return result.map_err(super::sfp::failure); }
-        if let Some(result) = super::agent_admin::handle(self, m, params.clone()) { return result.map_err(super::sfp::failure); }
-        if let Some(result) = super::providers::handle(conn, m, params.clone()) { return result.map_err(super::sfp::failure); }
+        if let Some(result) = self.changes_public(m, params.clone()) {
+            return result.map_err(super::sfp::failure);
+        }
+        if let Some(result) = super::storage::handle(self, conn, m, params.clone()) {
+            return result.map_err(super::sfp::failure);
+        }
+        if let Some(result) = super::agent_admin::handle(self, m, params.clone()) {
+            return result.map_err(super::sfp::failure);
+        }
+        if let Some(result) = super::providers::handle(conn, m, params.clone()) {
+            return result.map_err(super::sfp::failure);
+        }
         if let Some(result) = super::host_control::handle(self, conn, m, params.clone()) {
             return result.map_err(|e| {
-                if let Some(e) = e.downcast_ref::<Error>() { return e.clone(); }
-                if e.downcast_ref::<sill_core::sfp::DomainError>().is_some() { return super::sfp::failure(e); }
+                if let Some(e) = e.downcast_ref::<Error>() {
+                    return e.clone();
+                }
+                if e.downcast_ref::<sill_core::sfp::DomainError>().is_some() {
+                    return super::sfp::failure(e);
+                }
                 Error::domain("operation_failed", format!("{e:#}"))
             });
         }
         if let Some(result) = self.workspaces(conn, m, params.clone()) {
             return result.map_err(|e| {
-                if let Some(e) = e.downcast_ref::<Error>() { return e.clone(); }
-                if e.downcast_ref::<sill_core::sfp::DomainError>().is_some() { return super::sfp::failure(e); }
+                if let Some(e) = e.downcast_ref::<Error>() {
+                    return e.clone();
+                }
+                if e.downcast_ref::<sill_core::sfp::DomainError>().is_some() {
+                    return super::sfp::failure(e);
+                }
                 Error::domain("operation_failed", format!("{e:#}"))
             });
         }
         if let Some(result) = super::admin::handle(self, conn.id, m, params.clone()) {
             return result.map_err(|e| {
-                if let Some(e) = e.downcast_ref::<Error>() { return e.clone(); }
-                if e.downcast_ref::<sill_core::sfp::DomainError>().is_some() { return super::sfp::failure(e); }
+                if let Some(e) = e.downcast_ref::<Error>() {
+                    return e.clone();
+                }
+                if e.downcast_ref::<sill_core::sfp::DomainError>().is_some() {
+                    return super::sfp::failure(e);
+                }
                 Error::domain("operation_failed", format!("{e:#}"))
             });
         }
@@ -537,28 +571,41 @@ impl Hub {
     pub(super) fn ensure_runner(self: &Arc<Self>, id: &str, fresh: bool) -> Result<Arc<Runner>> {
         if fresh {
             let existing = self.runners.lock().unwrap().get(id).cloned();
-            if let Some(r) = existing { r.retire(self)?; }
-            else if sill_proto::runtime_dir()?.join(id).join("relay.sock").exists() {
-                if let Ok(r) = self.ensure_runner(id, false) { r.retire(self)?; }
+            if let Some(r) = existing {
+                r.retire(self)?;
+            } else if sill_proto::runtime_dir()?.join(id).join("relay.sock").exists() {
+                if let Ok(r) = self.ensure_runner(id, false) {
+                    r.retire(self)?;
+                }
             }
         }
         let _one_at_a_time = self.starting.lock().unwrap();
         let running = self.runners.lock().unwrap().get(id).cloned();
         let running = running.filter(|r| r.alive());
-        if !fresh && let Some(r) = running { return Ok(r); }
-        if fresh { self.retire_runner(id); }
+        if !fresh && let Some(r) = running {
+            return Ok(r);
+        }
+        if fresh {
+            self.retire_runner(id);
+        }
         let dir = sill_proto::runtime_dir()?.join(id);
         let socket = dir.join("relay.sock");
         let mut snapshot = self.with_store(|s| Runner::load(id, s))?;
         if fresh {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while socket.exists() {
-                if std::os::unix::net::UnixStream::connect(&socket).is_err() { break; }
-                if std::time::Instant::now() >= deadline { bail!("previous ACP relay has not stopped; refusing a second connection"); }
+                if std::os::unix::net::UnixStream::connect(&socket).is_err() {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    bail!("previous ACP relay has not stopped; refusing a second connection");
+                }
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
         }
-        let existing = if fresh { None } else {
+        let existing = if fresh {
+            None
+        } else {
             match super::relay::connect(&socket, Runner::cursor(&snapshot)) {
                 Ok(connection) => Some(connection),
                 // it answers but will not cooperate (another build's relay after a deploy, a
@@ -568,7 +615,9 @@ impl Hub {
                     super::relay::evict(&dir, id)?;
                     None
                 }
-                Err(e) if std::os::unix::net::UnixStream::connect(&socket).is_ok() => return Err(e.context("existing ACP relay did not accept recovery; refusing to replace it")),
+                Err(e) if std::os::unix::net::UnixStream::connect(&socket).is_ok() => {
+                    return Err(e.context("existing ACP relay did not accept recovery; refusing to replace it"));
+                }
                 Err(_) => None,
             }
         };
@@ -598,33 +647,63 @@ impl Hub {
                 let mut control = sill_core::shim::Control::connect(&started.socket)?;
                 // Without a usable relay, a surviving agent may still hold the
                 // failed SDK connection. Restart it before opening a new stream.
-                if control.status()?.running { control.kill(3000)?; }
+                if control.status()?.running {
+                    control.kill(3000)?;
+                }
                 if !control.status()?.running {
                     // model providers first (docs/model-providers.md): what the person set for the
                     // agent itself wins over what sill derives
                     let mut env = sill_core::providers::agent_env(&self.home, &agent.id)?;
-                    env.extend(agent.env.clone()); env.extend(agent.sandbox_off_env.clone());
+                    env.extend(agent.env.clone());
+                    env.extend(agent.sandbox_off_env.clone());
                     control.spawn(&agent.command, &env, Some(&self.home))?;
                 }
                 // A new relay is a new stream epoch. Its cursor starts at zero; old transient
                 // snapshots cannot describe its initialization, but pending end intent stays.
-                self.with_store(|s| { s.conn().execute("DELETE FROM daemon_runners WHERE id=?1", [id])?; Ok(()) })?;
+                self.with_store(|s| {
+                    s.conn().execute("DELETE FROM daemon_runners WHERE id=?1", [id])?;
+                    Ok(())
+                })?;
                 snapshot = serde_json::Value::Null;
                 std::fs::create_dir_all(&dir)?;
                 let _ = std::fs::remove_file(&socket);
                 let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("relay.log"))?;
                 let mut cmd = std::process::Command::new(&self.exe);
-                cmd.args(["daemon", "relay", "--session", id, "--socket"]).arg(&socket)
-                    .arg("--agent-socket").arg(&started.socket).arg("--cwd").arg(&self.home)
-                    .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(log)
-                    .env_remove("SILL_SESSION").env_remove("NOTIFY_SOCKET").env_remove("LISTEN_PID").env_remove("LISTEN_FDS");
-                for root in &roots { cmd.arg("--root").arg(root); }
-                if agent.experimental_acp_v2 { cmd.arg("--experimental-acp-v2"); }
-                if (agent.supports_load || agent.experimental_acp_v2) && let Some(resume) = s.acp_session_id { cmd.arg("--resume").arg(resume); }
+                cmd.args(["daemon", "relay", "--session", id, "--socket"])
+                    .arg(&socket)
+                    .arg("--agent-socket")
+                    .arg(&started.socket)
+                    .arg("--cwd")
+                    .arg(&self.home)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(log)
+                    .env_remove("SILL_SESSION")
+                    .env_remove("NOTIFY_SOCKET")
+                    .env_remove("LISTEN_PID")
+                    .env_remove("LISTEN_FDS");
+                for root in &roots {
+                    cmd.arg("--root").arg(root);
+                }
+                if agent.experimental_acp_v2 {
+                    cmd.arg("--experimental-acp-v2");
+                }
+                if (agent.supports_load || agent.experimental_acp_v2)
+                    && let Some(resume) = s.acp_session_id
+                {
+                    cmd.arg("--resume").arg(resume);
+                }
                 use std::os::unix::process::CommandExt;
-                unsafe { cmd.pre_exec(|| { rustix::process::setsid().map_err(std::io::Error::from)?; Ok(()) }); }
+                unsafe {
+                    cmd.pre_exec(|| {
+                        rustix::process::setsid().map_err(std::io::Error::from)?;
+                        Ok(())
+                    });
+                }
                 let mut child = cmd.spawn()?;
-                std::thread::spawn(move || { let _ = child.wait(); });
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
                 loop {
                     match super::relay::connect(&socket, 0) {
@@ -637,14 +716,21 @@ impl Hub {
         };
         let runner = Runner::new(id, relay, snapshot)?;
         self.runners.lock().unwrap().insert(id.into(), runner.clone());
-        let hub = self.clone(); let r = runner.clone();
+        let hub = self.clone();
+        let r = runner.clone();
         std::thread::Builder::new().name(format!("sill-conv-{id}")).spawn(move || r.run(hub, events))?;
         self.presence(id);
         Ok(runner)
     }
 
     fn remember_end(&self, id: &str, ctx: EndCtx) -> Result<()> {
-        self.with_store(|s| { s.conn().execute("INSERT INTO daemon_ends(id,context) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET context=excluded.context", rusqlite::params![id, serde_json::to_string(&ctx)?])?; Ok(()) })?;
+        self.with_store(|s| {
+            s.conn().execute(
+                "INSERT INTO daemon_ends(id,context) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET context=excluded.context",
+                rusqlite::params![id, serde_json::to_string(&ctx)?],
+            )?;
+            Ok(())
+        })?;
         self.ending.lock().unwrap().insert(id.into(), ctx);
         Ok(())
     }
@@ -664,7 +750,18 @@ impl Hub {
             vec![]
         } else if n.pins.is_empty() && n.remember_pins {
             // Sessions are newest first; saved shortcuts never enter this list.
-            store.sessions()?.into_iter().filter(|x| x.id != s.id && !store.conn().query_row("SELECT EXISTS(SELECT 1 FROM crosscheck_workers WHERE session_id=?1)", [&x.id], |r| r.get::<_, bool>(0)).unwrap_or(true)).find_map(|x| store.pins(&x.id).ok().filter(|p| !p.is_empty())).unwrap_or_default()
+            store
+                .sessions()?
+                .into_iter()
+                .filter(|x| {
+                    x.id != s.id
+                        && !store
+                            .conn()
+                            .query_row("SELECT EXISTS(SELECT 1 FROM crosscheck_workers WHERE session_id=?1)", [&x.id], |r| r.get::<_, bool>(0))
+                            .unwrap_or(true)
+                })
+                .find_map(|x| store.pins(&x.id).ok().filter(|p| !p.is_empty()))
+                .unwrap_or_default()
         } else {
             n.pins
         };
@@ -823,7 +920,9 @@ impl Hub {
     /// ghost's tightened).
     fn session_changes(&self, s: &sill_core::store::Session, uid: u32) -> Result<Vec<sill_core::ledger::Change>> {
         let sdir = sill_core::session::state_dir_path(uid, &s.id)?;
-        if !sdir.is_dir() { return Ok(vec![]); }
+        if !sdir.is_dir() {
+            return Ok(vec![]);
+        }
         let launch = sill_core::session::policy_snapshot(&s.id)?.context("launch not recorded; rebuild the session")?;
         let filesystem = launch.filesystem.context("filesystem plan not recorded; rebuild the session")?;
         let policy = launch.policy;
@@ -953,8 +1052,7 @@ impl Hub {
         let dir = sill_proto::runtime_dir()?.join(id);
         // Quit is asynchronous. A successful jail stop must also make the old
         // agent connection unavailable before a subsequent start can reuse it.
-        super::relay::wait_stopped(&dir.join("relay.sock"))
-            .or_else(|_| super::relay::evict(&dir, id))?;
+        super::relay::wait_stopped(&dir.join("relay.sock")).or_else(|_| super::relay::evict(&dir, id))?;
         sill_core::session::stop(id)
     }
 
@@ -1190,7 +1288,9 @@ impl Hub {
                     .ok();
                     refresh_memory();
                 }
-                if let Err(e)=self.sfp_lifecycle(id,None,None){eprintln!("sill daemon: publishing summary: {e:#}");}
+                if let Err(e) = self.sfp_lifecycle(id, None, None) {
+                    eprintln!("sill daemon: publishing summary: {e:#}");
+                }
             }
         }
     }
@@ -1224,7 +1324,9 @@ impl Hub {
             })
             .ok();
         }
-        if let Err(e)=self.sfp_lifecycle(id,Some((delete,reason)),None){eprintln!("sill daemon: publishing session end: {e:#}");}
+        if let Err(e) = self.sfp_lifecycle(id, Some((delete, reason)), None) {
+            eprintln!("sill daemon: publishing session end: {e:#}");
+        }
         // a deletion retires the runner itself and then waits for its relay to leave; retired
         // here, the relay was always halfway out when the deletion connected to it as an unowned
         // one — a reset connection, and before docs/daemon.md §3.11 a jail left running
@@ -1235,7 +1337,11 @@ impl Hub {
         // The terminal runner cursor survives until session deletion/retention. The relay may
         // still be delivering Ended when this daemon stops; deleting its cursor now strands that
         // worker with an already-acknowledged stream and nothing to reconnect from.
-        self.with_store(|s| { s.conn().execute("DELETE FROM daemon_ends WHERE id=?1", [id])?; Ok(()) }).ok();
+        self.with_store(|s| {
+            s.conn().execute("DELETE FROM daemon_ends WHERE id=?1", [id])?;
+            Ok(())
+        })
+        .ok();
         let hub = self.clone();
         let id = id.to_string();
         let _ = std::thread::Builder::new().name(format!("sill-end-{id}")).spawn(move || {
@@ -1278,7 +1384,9 @@ impl Hub {
         if std::env::var("SILL_LAUNCHER").is_ok_and(|v| v == "attach") {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while !sill_core::session::is_running(id) {
-                if std::time::Instant::now() >= deadline { bail!("SILL_LAUNCHER=attach: nothing answered on session {id}'s shim socket"); }
+                if std::time::Instant::now() >= deadline {
+                    bail!("SILL_LAUNCHER=attach: nothing answered on session {id}'s shim socket");
+                }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             return Ok(Started { socket: sill_core::shim::runtime_dir(id)?.join("shim.sock"), fresh: false });
@@ -1317,7 +1425,9 @@ impl Hub {
         };
         let started = sill_core::session::ensure_started(&opts, &self.home, &self.exe).context("starting the jail")?;
         // the pinned repositories' HEAD when this open period began (kept across restarts)
-        if !self.crosscheck_worker(id) && let Err(e) = self.with_store(|st| sill_core::history::note_pin_starts(st, &s)) {
+        if !self.crosscheck_worker(id)
+            && let Err(e) = self.with_store(|st| sill_core::history::note_pin_starts(st, &s))
+        {
             eprintln!("sill daemon: session {id}: noting the pins' HEAD: {e:#}");
         }
         let fresh = started.child.is_some();
@@ -1343,13 +1453,16 @@ impl Hub {
     }
 
     pub fn reconnect_runner(self: &Arc<Self>, id: &str) {
-        let hub = self.clone(); let id = id.to_string();
+        let hub = self.clone();
+        let id = id.to_string();
         std::thread::spawn(move || {
             let mut wait = std::time::Duration::from_millis(100);
             loop {
                 std::thread::sleep(wait);
                 let open = hub.with_store(|s| Ok(s.sessions()?.into_iter().any(|s| s.id == id && s.ended_at.is_none()))).unwrap_or(false);
-                if !open { return; }
+                if !open {
+                    return;
+                }
                 match hub.ensure_runner(&id, false) {
                     Ok(_) => return,
                     Err(e) => eprintln!("sill daemon: reconnecting session {id}: {e:#}"),

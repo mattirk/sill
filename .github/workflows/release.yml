@@ -39,7 +39,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.100.0
       - name: Build dependencies
         run: |
           sudo apt-get update -q
@@ -70,7 +70,7 @@ jobs:
       SILL_IMAGE_BINARIES: ${{ github.workspace }}/target/mac-prebuilt
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.100.0
       - name: Image tools
         run: |
           sudo apt-get update -q
@@ -118,7 +118,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: actions/download-artifact@v4
         with:
           name: mac-system-image

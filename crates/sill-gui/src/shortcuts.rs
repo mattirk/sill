@@ -29,10 +29,7 @@ pub const ACTIONS: &[(&str, &str, &str)] = &[
 ];
 pub type Bindings = std::collections::BTreeMap<String, String>;
 pub fn value<'a>(bindings: &'a Bindings, index: usize) -> &'a str {
-    bindings
-        .get(ACTIONS[index].0)
-        .map(String::as_str)
-        .unwrap_or(ACTIONS[index].2)
+    bindings.get(ACTIONS[index].0).map(String::as_str).unwrap_or(ACTIONS[index].2)
 }
 #[derive(Debug, PartialEq, Eq)]
 struct Chord {
@@ -46,12 +43,7 @@ fn parse(value: &str) -> Result<Option<Chord>, String> {
         return Ok(None);
     }
     let parts: Vec<_> = value.trim().split('+').collect();
-    let mut chord = Chord {
-        key: parts.last().unwrap().trim().to_lowercase(),
-        ctrl: false,
-        alt: false,
-        shift: false,
-    };
+    let mut chord = Chord { key: parts.last().unwrap().trim().to_lowercase(), ctrl: false, alt: false, shift: false };
     for modifier in &parts[..parts.len() - 1] {
         match modifier.trim().to_lowercase().as_str() {
             "ctrl" => chord.ctrl = true,
@@ -66,16 +58,10 @@ fn parse(value: &str) -> Result<Option<Chord>, String> {
         chord.shift = false;
     }
     if chord.key.chars().count() != 1 || (!chord.ctrl && !chord.alt) {
-        return Err(format!(
-            "Use {} or Alt with a letter, number or punctuation; write Plus for +.",
-            crate::keys::PRIMARY
-        ));
+        return Err(format!("Use {} or Alt with a letter, number or punctuation; write Plus for +.", crate::keys::PRIMARY));
     }
     // These belong to text editing, terminal copy/paste, or existing navigation.
-    if chord.ctrl
-        && !chord.alt
-        && ["a", "c", "v", "x", "z", "y", "s", "q"].contains(&chord.key.as_str())
-    {
+    if chord.ctrl && !chord.alt && ["a", "c", "v", "x", "z", "y", "s", "q"].contains(&chord.key.as_str()) {
         return Err("This shortcut is reserved for editing or application commands.".into());
     }
     Ok(Some(chord))
@@ -101,19 +87,9 @@ pub fn message(bindings: &Bindings, key: &Key, modifiers: Modifiers) -> Option<M
     let Key::Character(key) = key else {
         return None;
     };
-    let key = if key == "=" {
-        "+".into()
-    } else {
-        key.to_lowercase()
-    };
-    let pressed = Chord {
-        shift: modifiers.shift() && key != "+",
-        key,
-        ctrl: modifiers.command(),
-        alt: modifiers.alt(),
-    };
-    let index = (0..ACTIONS.len())
-        .find(|i| parse(value(bindings, *i)).ok().flatten().as_ref() == Some(&pressed))?;
+    let key = if key == "=" { "+".into() } else { key.to_lowercase() };
+    let pressed = Chord { shift: modifiers.shift() && key != "+", key, ctrl: modifiers.command(), alt: modifiers.alt() };
+    let index = (0..ACTIONS.len()).find(|i| parse(value(bindings, *i)).ok().flatten().as_ref() == Some(&pressed))?;
     Some(match index {
         0 => Message::NewSession,
         1 => Message::CloseCurrent,
@@ -137,25 +113,15 @@ mod tests {
     #[test]
     fn remapping_removes_defaults_and_survives_serialization() {
         let mut settings = crate::settings::Settings::default();
-        settings
-            .shortcuts
-            .insert("new_session".into(), "Alt+N".into());
-        settings
-            .shortcuts
-            .insert("close_session".into(), String::new());
+        settings.shortcuts.insert("new_session".into(), "Alt+N".into());
+        settings.shortcuts.insert("close_session".into(), String::new());
         let saved = toml::to_string(&settings).unwrap();
         let back: crate::settings::Settings = toml::from_str(&saved).unwrap();
         let key = |s: &str| Key::Character(s.into());
-        assert!(matches!(
-            message(&back.shortcuts, &key("n"), Modifiers::ALT),
-            Some(Message::NewSession)
-        ));
+        assert!(matches!(message(&back.shortcuts, &key("n"), Modifiers::ALT), Some(Message::NewSession)));
         assert!(message(&back.shortcuts, &key("t"), Modifiers::COMMAND).is_none());
         assert!(message(&back.shortcuts, &key("w"), Modifiers::COMMAND).is_none());
-        assert!(matches!(
-            message(&Bindings::new(), &key("t"), Modifiers::COMMAND),
-            Some(Message::NewSession)
-        ));
+        assert!(matches!(message(&Bindings::new(), &key("t"), Modifiers::COMMAND), Some(Message::NewSession)));
     }
     #[test]
     fn conflicts_include_defaults_and_scale_aliases() {

@@ -24,20 +24,13 @@ impl App {
         // file worker (including workspace aliases), never the GUI's local filesystem.
         let source = HostPath::from_path(std::path::Path::new("/"));
         if let Ok(LinkTarget::File(path, fragment)) = resolve_link(&source, &target) {
-            return self.update(Message::Files(Action::Navigate {
-                session, path, fragment, history: true,
-            }));
+            return self.update(Message::Files(Action::Navigate { session, path, fragment, history: true }));
         }
         Task::none()
     }
 
     pub(super) fn follow_link(&mut self, session: String, source: HostPath, target: String) -> Task<Message> {
-        if !self
-            .views
-            .get(&session)
-            .and_then(|v| v.files.reader.as_ref())
-            .is_some_and(|f| files::key(&f.path) == files::key(&source))
-        {
+        if !self.views.get(&session).and_then(|v| v.files.reader.as_ref()).is_some_and(|f| files::key(&f.path) == files::key(&source)) {
             return Task::none();
         }
         match resolve_link(&source, &target) {
@@ -45,14 +38,7 @@ impl App {
                 crate::terminal::open_link(url);
                 Task::none()
             }
-            Ok(LinkTarget::File(path, fragment)) => {
-                self.update(Message::Files(Action::Navigate {
-                    session,
-                    path,
-                    fragment,
-                    history: true,
-                }))
-            }
+            Ok(LinkTarget::File(path, fragment)) => self.update(Message::Files(Action::Navigate { session, path, fragment, history: true })),
             Err(error) => {
                 if let Some(view) = self.views.get_mut(&session) {
                     if let Some(reader) = &mut view.reader {
@@ -68,58 +54,27 @@ impl App {
         let Some(session) = self.selected.clone() else {
             return Task::none();
         };
-        let nav = self
-            .drawer
-            .navigation
-            .entry(session.clone())
-            .or_default();
-        let path = if forward {
-            nav.forward.pop()
-        } else {
-            nav.back.pop()
-        };
+        let nav = self.drawer.navigation.entry(session.clone()).or_default();
+        let path = if forward { nav.forward.pop() } else { nav.back.pop() };
         let Some(path) = path else {
             return Task::none();
         };
-        if let Some(file) = self
-            .views
-            .get(&session)
-            .and_then(|v| v.files.reader.as_ref())
-        {
+        if let Some(file) = self.views.get(&session).and_then(|v| v.files.reader.as_ref()) {
             if forward {
                 nav.back.push(file.path.clone());
             } else {
                 nav.forward.push(file.path.clone());
             }
         }
-        self.files_action(Action::Navigate {
-            session,
-            path,
-            fragment: String::new(),
-            history: false,
-        })
+        self.files_action(Action::Navigate { session, path, fragment: String::new(), history: false })
     }
 
-    pub(super) fn navigate(
-        &mut self,
-        session: String,
-        path: HostPath,
-        fragment: String,
-        history: bool,
-    ) -> Task<Message> {
+    pub(super) fn navigate(&mut self, session: String, path: HostPath, fragment: String, history: bool) -> Task<Message> {
         let Some(view) = self.views.get_mut(&session) else {
             return Task::none();
         };
-        let same = view
-            .files
-            .reader
-            .as_ref()
-            .is_some_and(|f| files::key(&f.path) == files::key(&path));
-        let nav = self
-            .drawer
-            .navigation
-            .entry(session.clone())
-            .or_default();
+        let same = view.files.reader.as_ref().is_some_and(|f| files::key(&f.path) == files::key(&path));
+        let nav = self.drawer.navigation.entry(session.clone()).or_default();
         nav.anchor = Some((files::key(&path).into(), fragment));
         if !same {
             if history {
@@ -138,20 +93,8 @@ impl App {
     }
 
     pub(super) fn anchor_offset(&mut self, session: String, key: String, y: f32) -> Task<Message> {
-        if self.selected.as_deref() == Some(&session)
-            && self
-                .views
-                .get(&session)
-                .and_then(|v| v.reader.as_ref())
-                .is_some_and(|r| r.key == key)
-        {
-            iced::widget::operation::scroll_to(
-                "markdown-reader",
-                iced::widget::scrollable::AbsoluteOffset {
-                    x: None,
-                    y: Some(y),
-                },
-            )
+        if self.selected.as_deref() == Some(&session) && self.views.get(&session).and_then(|v| v.reader.as_ref()).is_some_and(|r| r.key == key) {
+            iced::widget::operation::scroll_to("markdown-reader", iced::widget::scrollable::AbsoluteOffset { x: None, y: Some(y) })
         } else {
             Task::none()
         }
@@ -186,13 +129,7 @@ impl App {
         let fragment = fragment.clone();
         nav.anchor = None;
         if fragment.is_empty() {
-            return iced::widget::operation::scroll_to(
-                "markdown-reader",
-                iced::widget::scrollable::AbsoluteOffset {
-                    x: None,
-                    y: Some(0.0),
-                },
-            );
+            return iced::widget::operation::scroll_to("markdown-reader", iced::widget::scrollable::AbsoluteOffset { x: None, y: Some(0.0) });
         }
         let Some(index) = heading_index(markdown.items(), &fragment) else {
             reader.notice = Some(format!("Heading not found: #{fragment}"));
@@ -233,11 +170,7 @@ pub(super) fn resolve_link(source: &HostPath, target: &str) -> Result<LinkTarget
         source.clone()
     } else {
         let decoded = std::path::PathBuf::from(std::ffi::OsString::from_vec(decoded));
-        if decoded.is_absolute() {
-            decoded
-        } else {
-            source.parent().ok_or("Document has no parent directory")?.join(decoded)
-        }
+        if decoded.is_absolute() { decoded } else { source.parent().ok_or("Document has no parent directory")?.join(decoded) }
     };
     // Normalize lexically: the daemon resolves and reads host paths, never this GUI process.
     let mut normalized = std::path::PathBuf::new();
@@ -250,10 +183,7 @@ pub(super) fn resolve_link(source: &HostPath, target: &str) -> Result<LinkTarget
             part => normalized.push(part.as_os_str()),
         }
     }
-    let fragment = percent_encoding::percent_decode_str(fragment)
-        .decode_utf8()
-        .map_err(|_| "Heading link is not UTF-8")?
-        .into_owned();
+    let fragment = percent_encoding::percent_decode_str(fragment).decode_utf8().map_err(|_| "Heading link is not UTF-8")?.into_owned();
     Ok(LinkTarget::File(HostPath::from_path(&normalized), fragment))
 }
 
@@ -261,11 +191,7 @@ pub(super) fn heading_index(items: &[markdown::Item], fragment: &str) -> Option<
     let mut used = std::collections::BTreeSet::new();
     for (index, item) in items.iter().enumerate() {
         if let markdown::Item::Heading(_, text) = item {
-            let text = text
-                .spans(crate::ui::markdown_settings().style)
-                .iter()
-                .map(|span| span.text.as_ref())
-                .collect::<String>();
+            let text = text.spans(crate::ui::markdown_settings().style).iter().map(|span| span.text.as_ref()).collect::<String>();
             let slug: String = text
                 .to_lowercase()
                 .chars()
@@ -302,10 +228,7 @@ pub(super) struct FindHeading {
     pub(super) y: Option<f32>,
 }
 impl iced::advanced::widget::operation::Operation<Message> for FindHeading {
-    fn traverse(
-        &mut self,
-        operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::operation::Operation<Message>),
-    ) {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::operation::Operation<Message>)) {
         operate(self);
     }
     fn scrollable(
@@ -327,13 +250,11 @@ impl iced::advanced::widget::operation::Operation<Message> for FindHeading {
     }
     fn finish(&self) -> iced::advanced::widget::operation::Outcome<Message> {
         match self.y {
-            Some(y) => iced::advanced::widget::operation::Outcome::Some(Message::Files(
-                Action::AnchorOffset {
-                    session: self.session.clone(),
-                    key: self.key.clone(),
-                    y,
-                },
-            )),
+            Some(y) => iced::advanced::widget::operation::Outcome::Some(Message::Files(Action::AnchorOffset {
+                session: self.session.clone(),
+                key: self.key.clone(),
+                y,
+            })),
             None => iced::advanced::widget::operation::Outcome::None,
         }
     }

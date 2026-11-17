@@ -131,11 +131,7 @@ pub fn path() -> Result<PathBuf> {
 }
 
 pub fn load() -> Config {
-    path()
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|t| toml::from_str(&t).ok())
-        .unwrap_or_default()
+    path().ok().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| toml::from_str(&t).ok()).unwrap_or_default()
 }
 
 /// A duration setting (`30d`, `2y`, `0`): seconds, or `default` when unset or unreadable.

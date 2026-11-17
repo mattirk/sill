@@ -24,22 +24,13 @@ pub fn key(path: &HostPath) -> &str {
 
 /// The last component, for display.
 pub fn name(path: &HostPath) -> &str {
-    path.display
-        .trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("/")
+    path.display.trim_end_matches('/').rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("/")
 }
 
 /// `path` below `base`, for display; the whole path when it is not below it.
 pub fn relative(path: &HostPath, base: &HostPath) -> String {
     let base = base.display.trim_end_matches('/');
-    path.display
-        .strip_prefix(base)
-        .and_then(|rest| rest.strip_prefix('/'))
-        .filter(|rest| !rest.is_empty())
-        .map_or_else(|| path.display.clone(), str::to_owned)
+    path.display.strip_prefix(base).and_then(|rest| rest.strip_prefix('/')).filter(|rest| !rest.is_empty()).map_or_else(|| path.display.clone(), str::to_owned)
 }
 
 pub fn is_markdown(path: &HostPath) -> bool {
@@ -214,12 +205,7 @@ impl Files {
                     if result.as_ref().is_err_and(crate::connection_lost) {
                         client = None;
                     }
-                    let reply = Reply {
-                        session,
-                        serial,
-                        request,
-                        result: result.map_err(|e| format!("{e:#}")),
-                    };
+                    let reply = Reply { session, serial, request, result: result.map_err(|e| format!("{e:#}")) };
                     if !sink(reply) {
                         break;
                     }
@@ -244,9 +230,7 @@ impl Files {
 
     /// False when the worker has gone.
     pub fn send(&self, session: &str, serial: u64, request: Request) -> bool {
-        self.requests
-            .send((session.to_string(), serial, request))
-            .is_ok()
+        self.requests.send((session.to_string(), serial, request)).is_ok()
     }
 }
 
@@ -302,9 +286,7 @@ pub struct Reader {
 impl Reader {
     /// Rendering is offered: Markdown, or a diff small enough for rows.
     pub fn renderable(&self) -> bool {
-        self.text.len() <= RENDER_LIMIT
-            && (self.repo.is_none() || self.text.lines().count() <= 2000)
-            && (self.repo.is_some() || is_markdown(&self.path))
+        self.text.len() <= RENDER_LIMIT && (self.repo.is_none() || self.text.lines().count() <= 2000) && (self.repo.is_some() || is_markdown(&self.path))
     }
 }
 
@@ -351,10 +333,7 @@ pub enum Change {
 
 /// A repository's status by path: each entry's own state, and `Below` for every folder between
 /// it and the repository's root.
-fn index(
-    root: Option<&HostPath>,
-    entries: &[discovery::StatusEntry],
-) -> BTreeMap<std::path::PathBuf, Change> {
+fn index(root: Option<&HostPath>, entries: &[discovery::StatusEntry]) -> BTreeMap<std::path::PathBuf, Change> {
     let mut changes = BTreeMap::new();
     let Some(root) = root.and_then(|r| r.to_path().ok()) else {
         return changes;
@@ -387,9 +366,7 @@ impl FilesState {
     /// The path's git state, from the status of the pinned repository it is in.
     pub fn change(&self, path: &HostPath) -> Option<Change> {
         let path = path.to_path().ok()?;
-        self.repos
-            .values()
-            .find_map(|r| r.changes.get(&path).copied())
+        self.repos.values().find_map(|r| r.changes.get(&path).copied())
     }
 
     /// The repository a pinned folder is in: its head and line totals.
@@ -399,24 +376,14 @@ impl FilesState {
 
     /// Pinned to this session (not only globally).
     pub fn pinned(&self, path: &HostPath) -> bool {
-        self.roots
-            .iter()
-            .any(|r| !r.global && key(&r.path) == key(path))
+        self.roots.iter().any(|r| !r.global && key(&r.path) == key(path))
     }
 
     /// Record `request` as the one awaited, under `serial`; what to send.
     pub fn prepare(&mut self, serial: u64, mut request: Request) -> Request {
-        if let Request::Directory {
-            path,
-            after: None,
-            pages,
-        } = &mut request
-        {
+        if let Request::Directory { path, after: None, pages } = &mut request {
             // a refresh reloads as many pages as were loaded, so "load more" survives it
-            *pages = self
-                .directories
-                .get(key(path))
-                .map_or(1, |d| d.entries.len().div_ceil(PAGE).max(1));
+            *pages = self.directories.get(key(path)).map_or(1, |d| d.entries.len().div_ceil(PAGE).max(1));
         }
         match &request {
             Request::Roots => self.roots_pending = Some(serial),
@@ -456,16 +423,7 @@ impl FilesState {
             return vec![];
         }
         let mut requests = vec![Request::Roots];
-        requests.extend(
-            self.expanded
-                .iter()
-                .filter_map(|k| self.paths.get(k).cloned())
-                .map(|path| Request::Directory {
-                    path,
-                    after: None,
-                    pages: 1,
-                }),
-        );
+        requests.extend(self.expanded.iter().filter_map(|k| self.paths.get(k).cloned()).map(|path| Request::Directory { path, after: None, pages: 1 }));
         requests
     }
 
@@ -476,36 +434,20 @@ impl FilesState {
             return None;
         }
         self.expanded.insert(key(&path).to_string());
-        Some(Request::Directory {
-            path,
-            after: None,
-            pages: 1,
-        })
+        Some(Request::Directory { path, after: None, pages: 1 })
     }
 
     pub fn more(&self, path: HostPath) -> Option<Request> {
         let dir = self.directories.get(key(&path))?;
         let after = dir.next.clone().filter(|_| dir.pending.is_none())?;
-        Some(Request::Directory {
-            path,
-            after: Some(after),
-            pages: 1,
-        })
+        Some(Request::Directory { path, after: Some(after), pages: 1 })
     }
 
     /// Show a file (or its diff in `repo`) in the reader; its text to load.
     pub fn open(&mut self, path: HostPath, repo: Option<HostPath>) -> Request {
         self.inspect_pending = None;
         let source = repo.is_none() && !is_markdown(&path);
-        self.reader = Some(Reader {
-            path: path.clone(),
-            repo: repo.clone(),
-            pending: None,
-            error: None,
-            text: String::new(),
-            source,
-            revision: 0,
-        });
+        self.reader = Some(Reader { path: path.clone(), repo: repo.clone(), pending: None, error: None, text: String::new(), source, revision: 0 });
         Request::File { path, repo }
     }
 
@@ -516,10 +458,7 @@ impl FilesState {
 
     pub fn reload(&self) -> Option<Request> {
         let file = self.reader.as_ref()?;
-        Some(Request::File {
-            path: file.path.clone(),
-            repo: file.repo.clone(),
-        })
+        Some(Request::File { path: file.path.clone(), repo: file.repo.clone() })
     }
 
     pub fn toggle_source(&mut self) {
@@ -537,16 +476,11 @@ impl FilesState {
     pub fn typed_path(&mut self, pin: bool) -> Option<Request> {
         let path = HostPath::from_path(std::path::Path::new(self.path_input.trim()));
         if path.to_path().is_err() {
-            self.error = Some(
-                "Enter an absolute path on the daemon host (for example /home/me/project).".into(),
-            );
+            self.error = Some("Enter an absolute path on the daemon host (for example /home/me/project).".into());
             return None;
         }
         if pin {
-            return self
-                .pin_pending
-                .is_none()
-                .then_some(Request::Pin { path, on: true });
+            return self.pin_pending.is_none().then_some(Request::Pin { path, on: true });
         }
         Some(Request::Inspect(path))
     }
@@ -576,19 +510,14 @@ impl FilesState {
     }
 
     fn directory_roots(&self) -> impl Iterator<Item = HostPath> + '_ {
-        self.roots
-            .iter()
-            .filter(|r| r.metadata.as_ref().is_some_and(|m| m.directory))
-            .map(|r| r.path.clone())
+        self.roots.iter().filter(|r| r.metadata.as_ref().is_some_and(|m| m.directory)).map(|r| r.path.clone())
     }
 
     /// Apply a reply addressed to this state, if it is the one awaited.
     pub fn accept(&mut self, reply: Reply) -> Effects {
         let awaited = match &reply.request {
             Request::Roots => self.roots_pending,
-            Request::Directory { path, .. } => {
-                self.directories.get(key(path)).and_then(|d| d.pending)
-            }
+            Request::Directory { path, .. } => self.directories.get(key(path)).and_then(|d| d.pending),
             Request::Repo { path, .. } => self.repos.get(key(path)).and_then(|r| r.pending),
             Request::File { .. } => self.reader.as_ref().and_then(|f| f.pending),
             Request::Inspect(_) => self.inspect_pending,
@@ -605,19 +534,10 @@ impl FilesState {
                     Ok(Data::Roots { roots, home }) => {
                         // the first session folder opens by itself, once
                         for root in &roots {
-                            if root.metadata.as_ref().is_some_and(|m| m.directory)
-                                && !root.global
-                                && !self.initialized
-                                && self.expanded.is_empty()
-                            {
-                                self.paths
-                                    .insert(key(&root.path).to_string(), root.path.clone());
+                            if root.metadata.as_ref().is_some_and(|m| m.directory) && !root.global && !self.initialized && self.expanded.is_empty() {
+                                self.paths.insert(key(&root.path).to_string(), root.path.clone());
                                 self.expanded.insert(key(&root.path).to_string());
-                                effects.follow.push(Request::Directory {
-                                    path: root.path.clone(),
-                                    after: None,
-                                    pages: 1,
-                                });
+                                effects.follow.push(Request::Directory { path: root.path.clone(), after: None, pages: 1 });
                             }
                         }
                         self.roots = roots;
@@ -641,11 +561,7 @@ impl FilesState {
                             dir.entries.clear();
                         }
                         for entry in page.entries {
-                            match dir
-                                .entries
-                                .iter_mut()
-                                .find(|e| key(&e.path) == key(&entry.path))
-                            {
+                            match dir.entries.iter_mut().find(|e| key(&e.path) == key(&entry.path)) {
                                 Some(old) => *old = entry,
                                 None => dir.entries.push(entry),
                             }
@@ -672,15 +588,7 @@ impl FilesState {
                 repo.pending = None;
                 repo.read = true;
                 match reply.result {
-                    Ok(Data::Repo {
-                        root,
-                        head,
-                        entries,
-                        summary,
-                        lines,
-                        counts,
-                        truncated,
-                    }) => {
+                    Ok(Data::Repo { root, head, entries, summary, lines, counts, truncated }) => {
                         repo.root = root;
                         repo.head = head;
                         repo.entries = entries;
@@ -705,9 +613,7 @@ impl FilesState {
                 match reply.result {
                     Ok(Data::File(text)) => {
                         // large text stays in a source editor's viewport, not thousands of rows
-                        if text.len() > RENDER_LIMIT
-                            || (file.repo.is_some() && text.lines().count() > 2000)
-                        {
+                        if text.len() > RENDER_LIMIT || (file.repo.is_some() && text.lines().count() > 2000) {
                             file.source = true;
                         }
                         file.text = text;
@@ -726,11 +632,7 @@ impl FilesState {
                         // browsing a path makes it the drawer's Browse root; pinning stays explicit
                         self.home = Some(path.clone());
                         effects.reveal = true;
-                        effects.follow.push(Request::Directory {
-                            path,
-                            after: None,
-                            pages: 1,
-                        });
+                        effects.follow.push(Request::Directory { path, after: None, pages: 1 });
                     }
                     Ok(Data::Metadata(_)) => effects.follow.push(self.open(path, None)),
                     Err(error) => self.error = Some(error),
@@ -748,11 +650,7 @@ impl FilesState {
                         }
                         effects.follow.push(Request::Roots);
                     }
-                    Err(error) => {
-                        self.error = Some(format!(
-                            "Pin change: {error}. Refresh to check the current pins before trying again."
-                        ))
-                    }
+                    Err(error) => self.error = Some(format!("Pin change: {error}. Refresh to check the current pins before trying again.")),
                     _ => {}
                 }
             }
@@ -770,96 +668,53 @@ pub fn execute(client: &Client, session: &str, request: &Request) -> anyhow::Res
                 loop {
                     let page: pins::Page = client.call(
                         "_sill/pins.list",
-                        pins::List {
-                            session_id: (!global).then(|| session.to_string()),
-                            after: after.clone(),
-                            limit: Some(PAGE as u16),
-                        },
+                        pins::List { session_id: (!global).then(|| session.to_string()), after: after.clone(), limit: Some(PAGE as u16) },
                     )?;
                     for path in page.pins {
                         if roots.iter().any(|r| key(&r.path) == key(&path)) {
                             continue;
                         }
-                        let metadata = client.call(
-                            "_sill/files.metadata",
-                            admin::FileKey { path: path.clone() },
-                        );
+                        let metadata = client.call("_sill/files.metadata", admin::FileKey { path: path.clone() });
                         let (metadata, error) = match metadata {
                             Ok(m) => (Some(m), None),
                             Err(e) => (None, Some(format!("{e:#}"))),
                         };
-                        roots.push(Root {
-                            path,
-                            global,
-                            metadata,
-                            error,
-                        });
+                        roots.push(Root { path, global, metadata, error });
                     }
                     anyhow::ensure!(roots.len() <= 4096, "too many pins to display");
                     if page.next.is_none() {
                         break;
                     }
-                    anyhow::ensure!(
-                        page.next.as_ref().map(key) != after.as_ref().map(key),
-                        "pin listing did not advance"
-                    );
+                    anyhow::ensure!(page.next.as_ref().map(key) != after.as_ref().map(key), "pin listing did not advance");
                     after = page.next;
                 }
             }
-            Data::Roots {
-                roots,
-                home: client.call("_sill/files.home", Empty::default())?,
-            }
+            Data::Roots { roots, home: client.call("_sill/files.home", Empty::default())? }
         }
         Request::Directory { path, after, pages } => {
             let mut cursor = after.clone();
             let mut entries = Vec::new();
             for _ in 0..*pages {
-                let page: admin::FilesPage = client.call(
-                    "_sill/files.list",
-                    admin::FilesList {
-                        path: path.clone(),
-                        after: cursor.clone(),
-                        limit: Some(PAGE as u16),
-                    },
-                )?;
-                anyhow::ensure!(
-                    page.next.is_none() || page.next.as_ref().map(key) != cursor.as_ref().map(key),
-                    "directory listing did not advance"
-                );
+                let page: admin::FilesPage =
+                    client.call("_sill/files.list", admin::FilesList { path: path.clone(), after: cursor.clone(), limit: Some(PAGE as u16) })?;
+                anyhow::ensure!(page.next.is_none() || page.next.as_ref().map(key) != cursor.as_ref().map(key), "directory listing did not advance");
                 entries.extend(page.entries);
                 cursor = page.next;
                 if cursor.is_none() {
                     break;
                 }
             }
-            Data::Directory(admin::FilesPage {
-                entries,
-                next: cursor,
-            })
+            Data::Directory(admin::FilesPage { entries, next: cursor })
         }
-        Request::Inspect(path) => Data::Metadata(client.call(
-            "_sill/files.metadata",
-            admin::FileKey { path: path.clone() },
-        )?),
+        Request::Inspect(path) => Data::Metadata(client.call("_sill/files.metadata", admin::FileKey { path: path.clone() })?),
         Request::Pin { path, on } => {
-            let _: serde_json::Value = client.call(
-                if *on {
-                    "_sill/sessions.pin"
-                } else {
-                    "_sill/sessions.unpin"
-                },
-                pins::SessionPin {
-                    session_id: session.into(),
-                    path: path.clone(),
-                },
-            )?;
+            let _: serde_json::Value = client
+                .call(if *on { "_sill/sessions.pin" } else { "_sill/sessions.unpin" }, pins::SessionPin { session_id: session.into(), path: path.clone() })?;
             Data::Pinned
         }
         Request::File { path, repo } => Data::File(read_text(client, path, repo.as_ref())?),
         Request::Repo { path, counts: files } => {
-            let root: discovery::Root =
-                client.call("_sill/repos.root", discovery::PathKey { path: path.clone() })?;
+            let root: discovery::Root = client.call("_sill/repos.root", discovery::PathKey { path: path.clone() })?;
             let mut head = String::new();
             let mut entries = Vec::new();
             let mut summary = String::new();
@@ -867,15 +722,10 @@ pub fn execute(client: &Client, session: &str, request: &Request) -> anyhow::Res
             let mut counts = Vec::new();
             let mut truncated = false;
             if let Some(repo) = &root.path {
-                let h: discovery::HeadResult = client.call(
-                    "_sill/repos.head",
-                    discovery::PathKey { path: repo.clone() },
-                )?;
+                let h: discovery::HeadResult = client.call("_sill/repos.head", discovery::PathKey { path: repo.clone() })?;
                 head = h.head.map_or_else(String::new, |h| h.label);
-                let s: discovery::SummaryResult = client.call(
-                    "_sill/repos.summary",
-                    discovery::SummaryKey { path: repo.clone(), files: files.then_some(true) },
-                )?;
+                let s: discovery::SummaryResult =
+                    client.call("_sill/repos.summary", discovery::SummaryKey { path: repo.clone(), files: files.then_some(true) })?;
                 if let Some(s) = s.summary {
                     summary = format!("+{} −{}  ?{}", s.insertions, s.deletions, s.untracked);
                     lines = Some((s.insertions, s.deletions));
@@ -892,46 +742,25 @@ pub fn execute(client: &Client, session: &str, request: &Request) -> anyhow::Res
                 }
                 let mut after = None;
                 loop {
-                    let page: discovery::StatusPage = client.call(
-                        "_sill/repos.status",
-                        discovery::Status {
-                            repo: repo.clone(),
-                            after: after.clone(),
-                            limit: Some(PAGE as u16),
-                        },
-                    )?;
+                    let page: discovery::StatusPage =
+                        client.call("_sill/repos.status", discovery::Status { repo: repo.clone(), after: after.clone(), limit: Some(PAGE as u16) })?;
                     entries.extend(page.entries);
                     anyhow::ensure!(entries.len() <= 10_000, "too many changed files to display");
                     if page.next.is_none() {
                         break;
                     }
-                    anyhow::ensure!(
-                        page.next.as_ref().map(key) != after.as_ref().map(key),
-                        "repository status did not advance"
-                    );
+                    anyhow::ensure!(page.next.as_ref().map(key) != after.as_ref().map(key), "repository status did not advance");
                     after = page.next;
                 }
             }
-            Data::Repo {
-                root: root.path,
-                head,
-                entries,
-                summary,
-                lines,
-                counts,
-                truncated,
-            }
+            Data::Repo { root: root.path, head, entries, summary, lines, counts, truncated }
         }
     })
 }
 
 /// A file's text, or its live diff in `repo`, read page by page against one revision: a file that
 /// changes meanwhile is an error, never a mix of two versions. Bounded; binary is refused.
-pub fn read_text(
-    client: &Client,
-    path: &HostPath,
-    repo: Option<&HostPath>,
-) -> anyhow::Result<String> {
+pub fn read_text(client: &Client, path: &HostPath, repo: Option<&HostPath>) -> anyhow::Result<String> {
     let mut bytes = Vec::new();
     let mut offset = "0".to_string();
     let mut revision = None;
@@ -940,10 +769,7 @@ pub fn read_text(
             let page: changes::DiffPage = client.call(
                 "_sill/changes.diff",
                 changes::Diff {
-                    target: changes::Target::Live {
-                        repo: repo.clone(),
-                        path: path.clone(),
-                    },
+                    target: changes::Target::Live { repo: repo.clone(), path: path.clone() },
                     offset: Some(offset.clone()),
                     fingerprint: revision.clone(),
                 },
@@ -952,51 +778,26 @@ pub fn read_text(
         } else {
             let page: admin::FileBytes = client.call(
                 "_sill/files.read",
-                admin::FileRead {
-                    path: path.clone(),
-                    offset: offset.clone(),
-                    length: Some(RENDER_LIMIT as u32),
-                    revision: revision.clone(),
-                },
+                admin::FileRead { path: path.clone(), offset: offset.clone(), length: Some(RENDER_LIMIT as u32), revision: revision.clone() },
             )?;
-            (
-                admin::decode_bytes(&page.bytes_base64)?,
-                (!page.eof).then_some(page.next_offset),
-                page.revision,
-            )
+            (admin::decode_bytes(&page.bytes_base64)?, (!page.eof).then_some(page.next_offset), page.revision)
         };
         if let Some(expected) = &revision {
-            anyhow::ensure!(
-                expected == &fingerprint,
-                "File changed while reading. Refresh to read it again."
-            );
+            anyhow::ensure!(expected == &fingerprint, "File changed while reading. Refresh to read it again.");
         }
         bytes.extend(chunk);
-        anyhow::ensure!(
-            bytes.len() <= MAX_TEXT,
-            "This file exceeds the 2 MiB preview limit."
-        );
+        anyhow::ensure!(bytes.len() <= MAX_TEXT, "This file exceeds the 2 MiB preview limit.");
         if let Some(next) = next {
-            anyhow::ensure!(
-                next.parse::<u64>()? > offset.parse::<u64>()?,
-                "file read did not advance"
-            );
+            anyhow::ensure!(next.parse::<u64>()? > offset.parse::<u64>()?, "file read did not advance");
             offset = next;
             revision = Some(fingerprint);
         } else {
             break;
         }
     }
-    anyhow::ensure!(
-        !bytes.contains(&0),
-        "Binary file — text preview is unavailable."
-    );
-    let text = String::from_utf8(bytes)
-        .map_err(|_| anyhow::anyhow!("Binary or non-UTF-8 file — text preview is unavailable."))?;
-    anyhow::ensure!(
-        text.lines().count() <= MAX_LINES,
-        "This file exceeds the 20,000-line preview limit."
-    );
+    anyhow::ensure!(!bytes.contains(&0), "Binary file — text preview is unavailable.");
+    let text = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("Binary or non-UTF-8 file — text preview is unavailable."))?;
+    anyhow::ensure!(text.lines().count() <= MAX_LINES, "This file exceeds the 20,000-line preview limit.");
     if repo.is_some() && text.is_empty() {
         return Ok("No text diff available (the file may be binary or unchanged).".into());
     }
@@ -1012,30 +813,15 @@ mod tests {
     use super::*;
 
     fn path(s: &str) -> HostPath {
-        HostPath {
-            bytes_base64: s.into(),
-            display: s.into(),
-        }
+        HostPath { bytes_base64: s.into(), display: s.into() }
     }
 
     fn meta(directory: bool) -> admin::FileMetadata {
-        admin::FileMetadata {
-            file: !directory,
-            directory,
-            symlink: false,
-            target: None,
-            length: "1".into(),
-            readonly: false,
-        }
+        admin::FileMetadata { file: !directory, directory, symlink: false, target: None, length: "1".into(), readonly: false }
     }
 
     fn reply(serial: u64, request: Request, result: Result<Data, String>) -> Reply {
-        Reply {
-            session: "a".into(),
-            serial,
-            request,
-            result,
-        }
+        Reply { session: "a".into(), serial, request, result }
     }
 
     #[test]
@@ -1044,16 +830,11 @@ mod tests {
         state.set_path("/home/me/project".into());
         let request = state.typed_path(false).unwrap();
         let request = state.prepare(1, request);
-        let Request::Inspect(asked) = request.clone() else {
-            panic!()
-        };
+        let Request::Inspect(asked) = request.clone() else { panic!() };
         let effects = state.accept(reply(1, request.clone(), Ok(Data::Metadata(meta(true)))));
         assert!(effects.reveal);
         assert!(state.expanded.contains(key(&asked)));
-        assert!(matches!(
-            effects.follow.as_slice(),
-            [Request::Directory { .. }]
-        ));
+        assert!(matches!(effects.follow.as_slice(), [Request::Directory { .. }]));
         // the person typed again meanwhile: the old answer is not awaited any more
         state.prepare(2, Request::Inspect(asked.clone()));
         state.set_path("/elsewhere".into());
@@ -1067,29 +848,12 @@ mod tests {
         let folder = path("/p");
         let request = state.toggle(folder.clone()).unwrap();
         let request = state.prepare(1, request);
-        let entries = (0..200)
-            .map(|i| admin::FileEntry {
-                path: path(&format!("/p/{i:03}")),
-                metadata: meta(false),
-            })
-            .collect();
-        state.accept(reply(
-            1,
-            request,
-            Ok(Data::Directory(admin::FilesPage {
-                entries,
-                next: Some(path("/p/199")),
-            })),
-        ));
+        let entries = (0..200).map(|i| admin::FileEntry { path: path(&format!("/p/{i:03}")), metadata: meta(false) }).collect();
+        state.accept(reply(1, request, Ok(Data::Directory(admin::FilesPage { entries, next: Some(path("/p/199")) }))));
         let again = state.refresh();
-        let Request::Directory { .. } = &again[1] else {
-            panic!("{again:?}")
-        };
+        let Request::Directory { .. } = &again[1] else { panic!("{again:?}") };
         let prepared = state.prepare(2, again[1].clone());
-        assert!(
-            matches!(prepared, Request::Directory { pages: 2, .. }),
-            "{prepared:?}"
-        );
+        assert!(matches!(prepared, Request::Directory { pages: 2, .. }), "{prepared:?}");
         assert_eq!(relative(&path("/p/x/y"), &path("/p/")), "x/y");
     }
 }

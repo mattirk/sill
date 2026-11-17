@@ -68,19 +68,14 @@ impl Settings {
 
     /// Shelf mode's share of `display`'s width: its own, else the default.
     pub fn shelf_share_on(&self, display: &str) -> f32 {
-        self.displays
-            .get(display)
-            .and_then(|prefs| shelf_share(prefs.shelf_width))
-            .unwrap_or_else(|| self.shelf_share())
+        self.displays.get(display).and_then(|prefs| shelf_share(prefs.shelf_width)).unwrap_or_else(|| self.shelf_share())
     }
 }
 
 /// A kept Shelf share, held to 15–40 % (a hand-edited file included); `None` when it is no number.
 fn shelf_share(share: Option<f32>) -> Option<f32> {
     use crate::layout::{SHELF_MAX, SHELF_MIN};
-    share
-        .filter(|s| s.is_finite())
-        .map(|s| s.clamp(SHELF_MIN, SHELF_MAX))
+    share.filter(|s| s.is_finite()).map(|s| s.clamp(SHELF_MIN, SHELF_MAX))
 }
 
 /// The preset `step` places from `scale` (the nearest preset when it is between two), held to
@@ -89,23 +84,13 @@ pub fn step_scale(scale: f32, step: i32) -> f32 {
     if step == 0 {
         return 1.0;
     }
-    let at = (0..SCALES.len())
-        .min_by(|a, b| {
-            (SCALES[*a] - scale)
-                .abs()
-                .total_cmp(&(SCALES[*b] - scale).abs())
-        })
-        .unwrap_or(2) as i32;
+    let at = (0..SCALES.len()).min_by(|a, b| (SCALES[*a] - scale).abs().total_cmp(&(SCALES[*b] - scale).abs())).unwrap_or(2) as i32;
     SCALES[(at + step).clamp(0, SCALES.len() as i32 - 1) as usize]
 }
 
 /// `scale` when it is a finite number within bounds, else 1.0.
 pub fn valid_scale(scale: f32) -> f32 {
-    if scale.is_finite() && (SCALE_BOUNDS.0..=SCALE_BOUNDS.1).contains(&scale) {
-        scale
-    } else {
-        1.0
-    }
+    if scale.is_finite() && (SCALE_BOUNDS.0..=SCALE_BOUNDS.1).contains(&scale) { scale } else { 1.0 }
 }
 
 fn path() -> Option<PathBuf> {
@@ -118,10 +103,7 @@ fn path() -> Option<PathBuf> {
 
 /// The settings, or the defaults when there are none or they cannot be read.
 pub fn load() -> Settings {
-    let mut settings: Settings = path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|text| toml::from_str(&text).ok())
-        .unwrap_or_default();
+    let mut settings: Settings = path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|text| toml::from_str(&text).ok()).unwrap_or_default();
     if crate::shortcuts::validate(&settings.shortcuts).is_err() {
         settings.shortcuts.clear();
     }
@@ -152,20 +134,8 @@ mod tests {
 
     #[test]
     fn settings_read_back_and_the_shelf_share_stays_sensible() {
-        let mut settings = Settings {
-            shelf_width: Some(0.9),
-            mode: Some("drawer".into()),
-            display: Some("eDP-1".into()),
-            ..Settings::default()
-        };
-        settings.displays.insert(
-            "DP-1".into(),
-            DisplayPrefs {
-                shelf_width: Some(0.3),
-                work_width: Some(0.6),
-                ..DisplayPrefs::default()
-            },
-        );
+        let mut settings = Settings { shelf_width: Some(0.9), mode: Some("drawer".into()), display: Some("eDP-1".into()), ..Settings::default() };
+        settings.displays.insert("DP-1".into(), DisplayPrefs { shelf_width: Some(0.3), work_width: Some(0.6), ..DisplayPrefs::default() });
         let text = toml::to_string_pretty(&settings).unwrap();
         assert!(text.contains("[displays.DP-1]"), "{text}");
         let back: Settings = toml::from_str(&text).unwrap();
@@ -177,8 +147,7 @@ mod tests {
         assert_eq!(back.shelf_share_on("HDMI-1"), 0.4, "else the default");
         assert_eq!(Settings::default().shelf_share(), 0.35);
         // the single-monitor keys before 2026-11-07 are dropped, not read
-        let old: Settings =
-            toml::from_str("window_x = 300\nwindow_width_share = 0.5\nmode = \"full\"").unwrap();
+        let old: Settings = toml::from_str("window_x = 300\nwindow_width_share = 0.5\nmode = \"full\"").unwrap();
         assert_eq!(old.mode.as_deref(), Some("full"));
         assert!(old.displays.is_empty());
         assert!(!toml::to_string_pretty(&old).unwrap().contains("window_x"));
@@ -186,18 +155,8 @@ mod tests {
 
     #[test]
     fn interface_scale_defaults_to_the_desktop_size_and_is_bounded() {
-        assert_eq!(
-            Settings::default().scale(),
-            1.0,
-            "an existing file keeps today's size"
-        );
-        let at = |v: f32| {
-            Settings {
-                interface_scale: Some(v),
-                ..Settings::default()
-            }
-            .scale()
-        };
+        assert_eq!(Settings::default().scale(), 1.0, "an existing file keeps today's size");
+        let at = |v: f32| Settings { interface_scale: Some(v), ..Settings::default() }.scale();
         assert_eq!(at(1.25), 1.25);
         for broken in [f32::NAN, f32::INFINITY, 0.0, -1.0, 9.0] {
             assert_eq!(at(broken), 1.0, "{broken}");
@@ -215,11 +174,7 @@ mod tests {
         assert_eq!(step_scale(1.0, -1), 0.9);
         assert_eq!(step_scale(1.5, 1), 1.5, "held at the largest");
         assert_eq!(step_scale(0.75, -1), 0.75, "and the smallest");
-        assert_eq!(
-            step_scale(1.2, 1),
-            1.5,
-            "from between two, the nearest is the start"
-        );
+        assert_eq!(step_scale(1.2, 1), 1.5, "from between two, the nearest is the start");
         assert_eq!(step_scale(1.25, 0), 1.0);
     }
 }

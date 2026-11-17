@@ -2,9 +2,7 @@
 //! hierarchy by tone and a thin left rule. Corners are square on Linux and slightly round on the
 //! Mac (`CONTROL`, `CARD`). Every theme is here, the
 //! same struct with other values.
-use iced::widget::{
-    button, container, overlay::menu, pick_list, rule, scrollable, svg, text_editor, text_input,
-};
+use iced::widget::{button, container, overlay::menu, pick_list, rule, scrollable, svg, text_editor, text_input};
 use iced::{Background, Border, Color, Shadow, Theme};
 
 /// One theme: the values everything else is derived from.
@@ -27,11 +25,7 @@ pub struct Palette {
 }
 
 const fn rgb(hex: u32) -> Color {
-    Color::from_rgb(
-        ((hex >> 16) & 0xff) as f32 / 255.0,
-        ((hex >> 8) & 0xff) as f32 / 255.0,
-        (hex & 0xff) as f32 / 255.0,
-    )
+    Color::from_rgb(((hex >> 16) & 0xff) as f32 / 255.0, ((hex >> 8) & 0xff) as f32 / 255.0, (hex & 0xff) as f32 / 255.0)
 }
 
 /// The themes, by id; the daemon's `theme` setting picks one. Miasma is the one sill is developed
@@ -293,23 +287,13 @@ pub const MONO: f32 = TEXT * 0.82;
 pub const TINY: f32 = TEXT * 0.8;
 
 pub fn alpha(color: Color, a: f32) -> Color {
-    Color {
-        a: color.a * a,
-        ..color
-    }
+    Color { a: color.a * a, ..color }
 }
 
 pub fn theme() -> Theme {
     Theme::custom(
         format!("Sill {}", theme_id()),
-        iced::theme::Palette {
-            background: P.bg,
-            text: P.fg,
-            primary: P.accent,
-            success: P.success,
-            warning: P.warning,
-            danger: P.error,
-        },
+        iced::theme::Palette { background: P.bg, text: P.fg, primary: P.accent, success: P.success, warning: P.warning, danger: P.error },
     )
 }
 
@@ -321,23 +305,12 @@ pub const CARD: f32 = if cfg!(target_os = "macos") { 6.0 } else { 0.0 };
 
 /// A control's border: `CONTROL`'s corners.
 fn control_border() -> Border {
-    Border {
-        color: Color::TRANSPARENT,
-        width: 0.0,
-        radius: CONTROL.into(),
-    }
+    Border { color: Color::TRANSPARENT, width: 0.0, radius: CONTROL.into() }
 }
 
 /// A surface in `color` with a card's corners.
 pub fn card(color: Color) -> impl Fn(&Theme) -> container::Style {
-    move |_| container::Style {
-        background: Some(color.into()),
-        border: Border {
-            radius: CARD.into(),
-            ..Border::default()
-        },
-        ..container::Style::default()
-    }
+    move |_| container::Style { background: Some(color.into()), border: Border { radius: CARD.into(), ..Border::default() }, ..container::Style::default() }
 }
 
 /// A card behind a left rule (`ui::ruled`): only its right corners are a card's, so the rule
@@ -345,39 +318,24 @@ pub fn card(color: Color) -> impl Fn(&Theme) -> container::Style {
 pub fn card_right(color: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(color.into()),
-        border: Border {
-            radius: iced::border::Radius::default().top_right(CARD).bottom_right(CARD),
-            ..Border::default()
-        },
+        border: Border { radius: iced::border::Radius::default().top_right(CARD).bottom_right(CARD), ..Border::default() },
         ..container::Style::default()
     }
 }
 
 fn square(color: Color, width: f32) -> Border {
-    Border {
-        color,
-        width,
-        radius: 0.0.into(),
-    }
+    Border { color, width, radius: 0.0.into() }
 }
 
 /// A plain surface in `color`.
 pub fn fill(color: Color) -> impl Fn(&Theme) -> container::Style {
-    move |_| container::Style {
-        background: Some(color.into()),
-        ..container::Style::default()
-    }
+    move |_| container::Style { background: Some(color.into()), ..container::Style::default() }
 }
 
 /// The left rule of a block: the person's message (accent), a tool row (faint), a question
 /// (warning), an error (error).
 pub fn rule_style(color: Color) -> impl Fn(&Theme) -> rule::Style {
-    move |_| rule::Style {
-        color,
-        radius: 0.0.into(),
-        fill_mode: rule::FillMode::Full,
-        snap: true,
-    }
+    move |_| rule::Style { color, radius: 0.0.into(), fill_mode: rule::FillMode::Full, snap: true }
 }
 
 pub fn icon(color: Color) -> impl Fn(&Theme, svg::Status) -> svg::Style {
@@ -496,21 +454,12 @@ pub fn send(_: &Theme, status: button::Status) -> button::Style {
 pub fn solid(color: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| {
         let background = match status {
-            button::Status::Hovered => Color {
-                a: 1.0,
-                ..mix(color, P.fg, 0.15)
-            },
+            button::Status::Hovered => Color { a: 1.0, ..mix(color, P.fg, 0.15) },
             button::Status::Pressed => mix(color, P.bg, 0.15),
             button::Status::Disabled => alpha(color, 0.35),
             button::Status::Active => color,
         };
-        button::Style {
-            background: Some(background.into()),
-            text_color: P.bg,
-            border: control_border(),
-            shadow: Shadow::default(),
-            snap: true,
-        }
+        button::Style { background: Some(background.into()), text_color: P.bg, border: control_border(), shadow: Shadow::default(), snap: true }
     }
 }
 
@@ -519,24 +468,10 @@ pub fn solid(color: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
 pub fn floating(_: &Theme, status: button::Status) -> button::Style {
     let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
     button::Style {
-        background: Some(
-            if hovered {
-                mix(P.surface, P.fg, 0.08)
-            } else {
-                P.surface
-            }
-            .into(),
-        ),
+        background: Some(if hovered { mix(P.surface, P.fg, 0.08) } else { P.surface }.into()),
         text_color: if hovered { P.fg } else { alpha(P.fg, 0.85) },
-        border: Border {
-            radius: CONTROL.into(),
-            ..square(P.border, 1.0)
-        },
-        shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
-            offset: iced::Vector::new(0.0, 2.0),
-            blur_radius: 8.0,
-        },
+        border: Border { radius: CONTROL.into(), ..square(P.border, 1.0) },
+        shadow: Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.35), offset: iced::Vector::new(0.0, 2.0), blur_radius: 8.0 },
         snap: true,
     }
 }
@@ -551,17 +486,10 @@ pub fn yellow() -> Color {
 /// yellow in a theme's own tone, whatever hues the theme happens to have (Miasma's error and
 /// warning are both orange).
 pub fn with_hue(color: Color, degrees: f32) -> Color {
-    let (max, min) = (
-        color.r.max(color.g).max(color.b),
-        color.r.min(color.g).min(color.b),
-    );
+    let (max, min) = (color.r.max(color.g).max(color.b), color.r.min(color.g).min(color.b));
     let lightness = (max + min) / 2.0;
     let chroma = max - min;
-    let saturation = if chroma == 0.0 {
-        0.0
-    } else {
-        chroma / (1.0 - (2.0 * lightness - 1.0).abs())
-    };
+    let saturation = if chroma == 0.0 { 0.0 } else { chroma / (1.0 - (2.0 * lightness - 1.0).abs()) };
     let c = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
     let h = degrees.rem_euclid(360.0) / 60.0;
     let x = c * (1.0 - (h % 2.0 - 1.0).abs());
@@ -578,12 +506,7 @@ pub fn with_hue(color: Color, degrees: f32) -> Color {
 }
 
 pub fn mix(a: Color, b: Color, t: f32) -> Color {
-    Color::from_rgba(
-        a.r + (b.r - a.r) * t,
-        a.g + (b.g - a.g) * t,
-        a.b + (b.b - a.b) * t,
-        a.a,
-    )
+    Color::from_rgba(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.a)
 }
 
 /// The prompt: no box of its own, it sits on the composer's surface (`.sill-prompt`).
@@ -610,19 +533,12 @@ pub fn reader(_: &Theme, _: text_editor::Status) -> text_editor::Style {
 
 /// An ACP control in the composer row: text only, a dim handle, no frame.
 pub fn control(_: &Theme, status: pick_list::Status) -> pick_list::Style {
-    let hovered = matches!(
-        status,
-        pick_list::Status::Hovered | pick_list::Status::Opened { .. }
-    );
+    let hovered = matches!(status, pick_list::Status::Hovered | pick_list::Status::Opened { .. });
     pick_list::Style {
         text_color: if hovered { P.fg } else { alpha(P.fg, 0.7) },
         placeholder_color: P.fg_dim,
         handle_color: alpha(P.fg, 0.45),
-        background: Background::Color(if hovered {
-            alpha(P.fg, 0.06)
-        } else {
-            Color::TRANSPARENT
-        }),
+        background: Background::Color(if hovered { alpha(P.fg, 0.06) } else { Color::TRANSPARENT }),
         border: control_border(),
     }
 }
@@ -636,11 +552,7 @@ pub fn control_menu(_: &Theme) -> menu::Style {
         text_color: alpha(P.fg, 0.85),
         selected_text_color: P.fg,
         selected_background: alpha(P.accent, 0.22).into(),
-        shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
-            offset: iced::Vector::new(0.0, 2.0),
-            blur_radius: 12.0,
-        },
+        shadow: Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.45), offset: iced::Vector::new(0.0, 2.0), blur_radius: 12.0 },
     }
 }
 
@@ -653,48 +565,30 @@ pub fn bar() -> scrollable::Scrollbar {
 /// reference's note on `02`: the overlay scrollbar autohides).
 pub fn feed_scroll(_: &Theme, status: scrollable::Status) -> scrollable::Style {
     let shown = !matches!(status, scrollable::Status::Active { .. });
-    let bar = if shown {
-        alpha(P.fg, 0.35)
-    } else {
-        Color::TRANSPARENT
-    };
+    let bar = if shown { alpha(P.fg, 0.35) } else { Color::TRANSPARENT };
     let rail = scrollable::Rail {
         background: None,
         border: square(Color::TRANSPARENT, 0.0),
-        scroller: scrollable::Scroller {
-            background: bar.into(),
-            border: square(Color::TRANSPARENT, 0.0),
-        },
+        scroller: scrollable::Scroller { background: bar.into(), border: square(Color::TRANSPARENT, 0.0) },
     };
     scrollable::Style {
         container: container::Style::default(),
         vertical_rail: rail,
         horizontal_rail: rail,
         gap: None,
-        auto_scroll: scrollable::AutoScroll {
-            background: P.surface.into(),
-            border: square(P.border, 1.0),
-            shadow: Shadow::default(),
-            icon: P.fg,
-        },
+        auto_scroll: scrollable::AutoScroll { background: P.surface.into(), border: square(P.border, 1.0), shadow: Shadow::default(), icon: P.fg },
     }
 }
 
 /// Selectable text in `color` (iced_selection's text has a style, not a colour of its own).
 pub fn selectable(color: Color) -> impl Fn(&Theme) -> iced_selection::text::Style {
-    move |_| iced_selection::text::Style {
-        color: Some(color),
-        selection: selection(),
-    }
+    move |_| iced_selection::text::Style { color: Some(color), selection: selection() }
 }
 
 /// Selectable text in the colour it inherits: Markdown, whose spans colour themselves. One
 /// selection crosses messages, so every text is selected in the same tint.
 pub fn selectable_inherited(_: &Theme) -> iced_selection::text::Style {
-    iced_selection::text::Style {
-        color: None,
-        selection: selection(),
-    }
+    iced_selection::text::Style { color: None, selection: selection() }
 }
 
 /// What selected text lies on.
@@ -704,26 +598,15 @@ fn selection() -> Color {
 
 /// Find match background: `current` in the accent tint, all other matches in the warning tint.
 pub fn find_match(current: bool) -> Color {
-    if current {
-        alpha(P.accent, 0.50)
-    } else {
-        alpha(P.warning, 0.25)
-    }
+    if current { alpha(P.accent, 0.50) } else { alpha(P.warning, 0.25) }
 }
 
 /// The floating Find bar card in the top-right corner of the active content pane.
 pub fn find_bar(_: &Theme) -> container::Style {
     container::Style {
         background: Some(P.surface.into()),
-        border: Border {
-            radius: CARD.into(),
-            ..square(P.border, 1.0)
-        },
-        shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
-            offset: iced::Vector::new(0.0, 2.0),
-            blur_radius: 10.0,
-        },
+        border: Border { radius: CARD.into(), ..square(P.border, 1.0) },
+        shadow: Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.35), offset: iced::Vector::new(0.0, 2.0), blur_radius: 10.0 },
         ..container::Style::default()
     }
 }

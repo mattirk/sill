@@ -24,10 +24,7 @@ pub fn entries(items: &[&Item], stands_alone: impl Fn(&Item) -> bool) -> Vec<Ran
     let mut entries: Vec<Range<usize>> = Vec::new();
     for (index, item) in items.iter().enumerate() {
         let previous = entries.last().map(|last| items[last.end - 1]);
-        let together = previous.is_some_and(|previous| {
-            (joins(item) && joins(previous) && previous.turn_id == item.turn_id)
-                || (host(item) && host(previous))
-        });
+        let together = previous.is_some_and(|previous| (joins(item) && joins(previous) && previous.turn_id == item.turn_id) || (host(item) && host(previous)));
         match entries.last_mut() {
             Some(last) if together => last.end = index + 1,
             _ => entries.push(index..index + 1),
@@ -47,20 +44,12 @@ impl Group<'_> {
     /// The status the group's line shows: running while any call runs, then failed if any failed,
     /// then waiting if any waits, else completed.
     pub fn status(&self) -> &'static str {
-        let has = |wanted: &str| {
-            self.members
-                .iter()
-                .any(|(_, tool)| normal_status(&tool.status) == wanted)
-        };
+        let has = |wanted: &str| self.members.iter().any(|(_, tool)| normal_status(&tool.status) == wanted);
         if has("inprogress") {
             "in_progress"
         } else if has("failed") {
             "failed"
-        } else if self
-            .members
-            .iter()
-            .any(|(_, tool)| normal_status(&tool.status) != "completed")
-        {
+        } else if self.members.iter().any(|(_, tool)| normal_status(&tool.status) != "completed") {
             "pending"
         } else {
             "completed"
@@ -69,10 +58,7 @@ impl Group<'_> {
 
     /// The latest call's title after the group's name: what it ran this time.
     pub fn latest(&self) -> String {
-        self.members
-            .last()
-            .map(|(_, tool)| classify(tool).1)
-            .unwrap_or_default()
+        self.members.last().map(|(_, tool)| classify(tool).1).unwrap_or_default()
     }
 }
 
@@ -87,16 +73,9 @@ pub fn groups<'a>(run: &[&'a Item]) -> Vec<Group<'a>> {
         let Some(tool) = &item.tool else { continue };
         let (name, _) = classify(tool);
         let kind = tool.kind.as_str();
-        match groups
-            .iter_mut()
-            .find(|g| g.name == name && g.kind.eq_ignore_ascii_case(kind))
-        {
+        match groups.iter_mut().find(|g| g.name == name && g.kind.eq_ignore_ascii_case(kind)) {
             Some(group) => group.members.push((item, tool)),
-            None => groups.push(Group {
-                name,
-                kind,
-                members: vec![(item, tool)],
-            }),
+            None => groups.push(Group { name, kind, members: vec![(item, tool)] }),
         }
     }
     groups
@@ -106,10 +85,7 @@ pub fn groups<'a>(run: &[&'a Item]) -> Vec<Group<'a>> {
 /// fills from the call's input for calls of kind `execute`). Never the title: that is display
 /// text, and an agent may word it as it likes.
 fn shell(tool: &Tool) -> Option<&str> {
-    tool.command
-        .as_deref()
-        .map(str::trim)
-        .filter(|command| !command.is_empty())
+    tool.command.as_deref().map(str::trim).filter(|command| !command.is_empty())
 }
 
 /// What a call's row shows, line by line. A shell call that ran several commands has one line
@@ -161,10 +137,7 @@ pub fn classify(tool: &Tool) -> (String, String) {
 /// (`sed -n 1p a` beside `sed` is `-n 1p a`); otherwise it is the whole command, so the name
 /// and the text together always hold all of it.
 fn program(command: &str) -> Option<(String, String)> {
-    let whole = [Step {
-        text: command.trim(),
-        operator: "",
-    }];
+    let whole = [Step { text: command.trim(), operator: "" }];
     let steps = crate::shell::steps(command);
     let steps = steps.as_deref().unwrap_or(&whole);
     steps.iter().enumerate().find_map(|(index, step)| {
@@ -228,10 +201,7 @@ fn is_assignment(word: &str) -> bool {
         return false;
     };
     let mut chars = name.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[cfg(test)]
@@ -253,10 +223,7 @@ mod tests {
     /// A shell call as Claude's and Codex's adapters report one: the command declared, and the
     /// same text as the title.
     fn shell_call(command: &str) -> Tool {
-        Tool {
-            command: Some(command.into()),
-            ..tool("execute", command)
-        }
+        Tool { command: Some(command.into()), ..tool("execute", command) }
     }
 
     fn pair(name: &str, beside: &str) -> (String, String) {
@@ -266,30 +233,18 @@ mod tests {
     #[test]
     fn a_command_is_named_by_the_program_it_runs() {
         let named = |command: &str| classify(&shell_call(command));
-        assert_eq!(
-            named("sed -n 960,1257p crates/x.rs"),
-            pair("sed", "-n 960,1257p crates/x.rs")
-        );
+        assert_eq!(named("sed -n 960,1257p crates/x.rs"), pair("sed", "-n 960,1257p crates/x.rs"));
         assert_eq!(named("git status"), pair("git", "status"));
         assert_eq!(named("cd crates"), pair("cd", "crates"));
         assert_eq!(named("ls"), pair("ls", ""));
         // past the steps that only lead to it
-        assert_eq!(
-            named("cd /home/me/GIT/sill && grep -rn foo crates"),
-            pair("grep", "-rn foo crates")
-        );
+        assert_eq!(named("cd /home/me/GIT/sill && grep -rn foo crates"), pair("grep", "-rn foo crates"));
         assert_eq!(named("# look first\nls -la"), pair("ls", "-la"));
         assert_eq!(named("X=1; make"), pair("make", ""));
         // the first of several
-        assert_eq!(
-            named("sed -n 1,2p a && grep x b; cat c"),
-            pair("sed", "-n 1,2p a")
-        );
+        assert_eq!(named("sed -n 1,2p a && grep x b; cat c"), pair("sed", "-n 1,2p a"));
         // a loop is not divided, and is named by what it starts with
-        assert_eq!(
-            named("for f in a b; do cat $f; done"),
-            pair("for", "f in a b; do cat $f; done")
-        );
+        assert_eq!(named("for f in a b; do cat $f; done"), pair("for", "f in a b; do cat $f; done"));
     }
 
     /// The name and the text beside it hold the whole command: the text loses the name only
@@ -297,27 +252,12 @@ mod tests {
     #[test]
     fn the_text_beside_a_name_is_the_whole_command_unless_it_starts_with_the_name() {
         let named = |command: &str| classify(&shell_call(command));
-        assert_eq!(
-            named("RUST_LOG=debug cargo test -p sill-gui"),
-            pair("cargo", "RUST_LOG=debug cargo test -p sill-gui")
-        );
-        assert_eq!(
-            named("./scripts/check.sh --all"),
-            pair("check.sh", "./scripts/check.sh --all")
-        );
-        assert_eq!(
-            named("/usr/bin/bash -lc 'cat crates/a.rs\ncat crates/b.rs'"),
-            pair(
-                "cat",
-                "/usr/bin/bash -lc 'cat crates/a.rs\ncat crates/b.rs'"
-            )
-        );
+        assert_eq!(named("RUST_LOG=debug cargo test -p sill-gui"), pair("cargo", "RUST_LOG=debug cargo test -p sill-gui"));
+        assert_eq!(named("./scripts/check.sh --all"), pair("check.sh", "./scripts/check.sh --all"));
+        assert_eq!(named("/usr/bin/bash -lc 'cat crates/a.rs\ncat crates/b.rs'"), pair("cat", "/usr/bin/bash -lc 'cat crates/a.rs\ncat crates/b.rs'"));
         assert_eq!(
             named("/usr/bin/bash -lc \"rg -n 'a|b' docs | head\nsed -n 1p x\""),
-            pair(
-                "rg",
-                "/usr/bin/bash -lc \"rg -n 'a|b' docs | head\nsed -n 1p x\""
-            )
+            pair("rg", "/usr/bin/bash -lc \"rg -n 'a|b' docs | head\nsed -n 1p x\"")
         );
     }
 
@@ -326,73 +266,30 @@ mod tests {
     /// no name and is shown by its title, whatever the title looks like.
     #[test]
     fn a_title_is_never_read_as_a_command() {
-        assert_eq!(
-            classify(&tool("execute", "sed -n 1,2p a && grep x b")),
-            pair("", "sed -n 1,2p a && grep x b")
-        );
+        assert_eq!(classify(&tool("execute", "sed -n 1,2p a && grep x b")), pair("", "sed -n 1,2p a && grep x b"));
         assert_eq!(classify(&tool("Execute", "Terminal")), pair("", "Terminal"));
-        assert_eq!(
-            lines(&tool("execute", "sed -n 1,2p a && grep x b")),
-            vec![Step {
-                text: "sed -n 1,2p a && grep x b",
-                operator: ""
-            }]
-        );
+        assert_eq!(lines(&tool("execute", "sed -n 1,2p a && grep x b")), vec![Step { text: "sed -n 1,2p a && grep x b", operator: "" }]);
         // a title that became a description changes nothing while the command is declared
-        let described = Tool {
-            title: "Show the first lines; then search".into(),
-            ..shell_call("sed -n 1,2p a && grep x b")
-        };
+        let described = Tool { title: "Show the first lines; then search".into(), ..shell_call("sed -n 1,2p a && grep x b") };
         assert_eq!(classify(&described), pair("sed", "-n 1,2p a"));
         assert_eq!(lines(&described).len(), 2);
     }
 
     #[test]
     fn other_calls_are_named_by_their_kind() {
-        assert_eq!(
-            classify(&tool("Read", "Read file '/home/me/a.rs'")),
-            pair("read", "file '/home/me/a.rs'")
-        );
-        assert_eq!(
-            classify(&tool("search", "grep -n foo src")),
-            pair("search", "grep -n foo src")
-        );
-        assert_eq!(
-            classify(&tool("other", "mcp__docs__batch {…}")),
-            pair("mcp__docs__batch", "{…}")
-        );
+        assert_eq!(classify(&tool("Read", "Read file '/home/me/a.rs'")), pair("read", "file '/home/me/a.rs'"));
+        assert_eq!(classify(&tool("search", "grep -n foo src")), pair("search", "grep -n foo src"));
+        assert_eq!(classify(&tool("other", "mcp__docs__batch {…}")), pair("mcp__docs__batch", "{…}"));
     }
 
     #[test]
     fn a_call_that_ran_several_commands_has_a_line_for_each() {
         let call = shell_call("git for-each-ref | head -20; echo \"--- remotes:\"; git remote -v");
-        let shown: Vec<(&str, &str)> = lines(&call)
-            .iter()
-            .map(|step| (step.text, step.operator))
-            .collect();
-        assert_eq!(
-            shown,
-            vec![
-                ("git for-each-ref | head -20", ";"),
-                ("echo \"--- remotes:\"", ";"),
-                ("git remote -v", ""),
-            ]
-        );
+        let shown: Vec<(&str, &str)> = lines(&call).iter().map(|step| (step.text, step.operator)).collect();
+        assert_eq!(shown, vec![("git for-each-ref | head -20", ";"), ("echo \"--- remotes:\"", ";"), ("git remote -v", ""),]);
         // one command, and what is not divided, stay one line: the command whole
-        for whole in [
-            "sed -i 's/a/b/; s/c/d/' file",
-            "ls;",
-            "python3 - <<'PY'\nprint(1); print(2)\nPY",
-            "/usr/bin/bash -lc 'cat a\ncat b'",
-        ] {
-            assert_eq!(
-                lines(&shell_call(whole)),
-                vec![Step {
-                    text: whole,
-                    operator: ""
-                }],
-                "{whole}"
-            );
+        for whole in ["sed -i 's/a/b/; s/c/d/' file", "ls;", "python3 - <<'PY'\nprint(1); print(2)\nPY", "/usr/bin/bash -lc 'cat a\ncat b'"] {
+            assert_eq!(lines(&shell_call(whole)), vec![Step { text: whole, operator: "" }], "{whole}");
         }
     }
 
@@ -439,10 +336,7 @@ mod tests {
         ];
         let refs: Vec<&Item> = items.iter().collect();
         let groups = groups(&refs);
-        let shape: Vec<(&str, usize)> = groups
-            .iter()
-            .map(|g| (g.name.as_str(), g.members.len()))
-            .collect();
+        let shape: Vec<(&str, usize)> = groups.iter().map(|g| (g.name.as_str(), g.members.len())).collect();
         assert_eq!(shape, vec![("sed", 2), ("grep", 1), ("read", 1), ("", 1)]);
         assert_eq!(groups[0].latest(), "-n 3,4p b");
     }

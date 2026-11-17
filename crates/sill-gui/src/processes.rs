@@ -10,9 +10,7 @@
 //! ends, the session stops or its tab goes. sill-client's `processes` does the relaying.
 use std::collections::{BTreeMap, BTreeSet};
 
-use iced::widget::{
-    Column, button, column, container, row, rule, scrollable, space, text, text_editor,
-};
+use iced::widget::{Column, button, column, container, row, rule, scrollable, space, text, text_editor};
 use iced::{Alignment, Element, Fill, Font, Task};
 use sill_client::actions::Outcome;
 use sill_client::processes::{self as procs, Bridge, Process};
@@ -31,13 +29,7 @@ pub enum Event {
     StopCommand(String, u32),
     /// A session's list (an error: no jail to ask, so no ports either) and, when a running port
     /// waited for a decision, the expose specs of its launch policy.
-    Read(
-        String,
-        u64,
-        Result<Vec<Process>, String>,
-        Option<Vec<String>>,
-        JailProcesses,
-    ),
+    Read(String, u64, Result<Vec<Process>, String>, Option<Vec<String>>, JailProcesses),
     /// Show or hide the list.
     Toggle(String),
     /// Expose a port the person was asked about, or one shown as not exposed.
@@ -79,37 +71,23 @@ pub struct Procs {
 
 impl Procs {
     fn running_ports(&self) -> Vec<(u16, String)> {
-        self.list
-            .iter()
-            .filter(|p| procs::running(p))
-            .filter_map(|p| p.port.map(|port| (port, p.name.clone())))
-            .collect()
+        self.list.iter().filter(|p| procs::running(p)).filter_map(|p| p.port.map(|port| (port, p.name.clone()))).collect()
     }
 
     /// Ports already bridged or asked about: the policy is read only for a port not among them.
     fn known(&self) -> BTreeSet<u16> {
-        self.bridges
-            .keys()
-            .copied()
-            .chain(self.asked.iter().copied())
-            .collect()
+        self.bridges.keys().copied().chain(self.asked.iter().copied()).collect()
     }
 
     /// The list came back: ports of ended processes close, new ones are exposed or asked about.
     /// What to expose comes back, for the caller to bridge (it holds the connection).
-    pub(crate) fn read(
-        &mut self,
-        list: Vec<Process>,
-        specs: Option<&[String]>,
-    ) -> Vec<(u16, String)> {
+    pub(crate) fn read(&mut self, list: Vec<Process>, specs: Option<&[String]>) -> Vec<(u16, String)> {
         self.reading = None;
         self.refresh_pending = false;
         self.list = list;
         let running = self.running_ports();
-        self.bridges
-            .retain(|port, _| running.iter().any(|(p, _)| p == port));
-        self.questions
-            .retain(|(port, _)| running.iter().any(|(p, _)| p == port));
+        self.bridges.retain(|port, _| running.iter().any(|(p, _)| p == port));
+        self.questions.retain(|(port, _)| running.iter().any(|(p, _)| p == port));
         let mut expose = vec![];
         for (port, name) in running {
             if self.bridges.contains_key(&port) {
@@ -121,11 +99,7 @@ impl Procs {
                 self.questions.push((port, name));
             }
         }
-        if self
-            .log
-            .as_ref()
-            .is_some_and(|(name, _)| !self.list.iter().any(|p| &p.name == name))
-        {
+        if self.log.as_ref().is_some_and(|(name, _)| !self.list.iter().any(|p| &p.name == name)) {
             self.log = None;
             self.log_reading = None;
         }
@@ -139,17 +113,12 @@ impl Procs {
 
 /// A running port neither bridged nor asked about: reading the policy is needed for it.
 fn undecided(known: &BTreeSet<u16>, list: &[Process]) -> bool {
-    list.iter()
-        .filter(|p| procs::running(p))
-        .filter_map(|p| p.port)
-        .any(|port| !known.contains(&port))
+    list.iter().filter(|p| procs::running(p)).filter_map(|p| p.port).any(|port| !known.contains(&port))
 }
 
 impl App {
     fn session_running(&self, id: &str) -> bool {
-        self.all_sessions
-            .iter()
-            .any(|s| s.session_id == id && s.running && s.ended_at.is_none())
+        self.all_sessions.iter().any(|s| s.session_id == id && s.running && s.ended_at.is_none())
     }
 
     pub(crate) fn processes_event(&mut self, event: Event) -> Task<Message> {
@@ -175,18 +144,12 @@ impl App {
                     return self.poll_one(&id);
                 }
                 view.processes.jail = jail;
-                let expose = view
-                    .processes
-                    .read(result.unwrap_or_default(), specs.as_deref());
+                let expose = view.processes.read(result.unwrap_or_default(), specs.as_deref());
                 let mut tasks = vec![];
                 for (port, name) in expose {
                     tasks.push(self.expose_port(&id, port, &name));
                 }
-                if let Some(name) = self
-                    .views
-                    .get(&id)
-                    .and_then(|view| view.processes.log.as_ref().map(|(name, _)| name.clone()))
-                {
+                if let Some(name) = self.views.get(&id).and_then(|view| view.processes.log.as_ref().map(|(name, _)| name.clone())) {
                     tasks.push(self.read_log(&id, name));
                 }
                 return Task::batch(tasks);
@@ -207,22 +170,12 @@ impl App {
                 let Some(view) = self.views.get_mut(&id) else {
                     return Task::none();
                 };
-                if !view
-                    .processes
-                    .running_ports()
-                    .iter()
-                    .any(|(p, _)| *p == port)
-                {
+                if !view.processes.running_ports().iter().any(|(p, _)| *p == port) {
                     return Task::none();
                 }
                 view.processes.approved.insert(port);
                 view.processes.questions.retain(|(p, _)| *p != port);
-                let name = view
-                    .processes
-                    .list
-                    .iter()
-                    .find(|p| p.port == Some(port))
-                    .map_or_else(|| format!("port {port}"), |p| p.name.clone());
+                let name = view.processes.list.iter().find(|p| p.port == Some(port)).map_or_else(|| format!("port {port}"), |p| p.name.clone());
                 return self.expose_port(&id, port, &name);
             }
             Event::NotNow(id, port) => {
@@ -240,8 +193,7 @@ impl App {
                     return Task::none();
                 }
                 view.processes.log_reading = None;
-                view.processes.log =
-                    Some((name.clone(), text_editor::Content::with_text("Reading…")));
+                view.processes.log = Some((name.clone(), text_editor::Content::with_text("Reading…")));
                 return self.read_log(&id, name);
             }
             Event::LogRead(id, name, serial, result) => {
@@ -251,18 +203,12 @@ impl App {
                     && *shown == name
                 {
                     view.processes.log_reading = None;
-                    let text =
-                        result.unwrap_or_else(|e| format!("The output could not be read: {e}"));
-                    let text = if text.trim().is_empty() {
-                        "No output yet.".to_string()
-                    } else {
-                        text
-                    };
+                    let text = result.unwrap_or_else(|e| format!("The output could not be read: {e}"));
+                    let text = if text.trim().is_empty() { "No output yet.".to_string() } else { text };
                     let text = text.trim_end();
                     if content.text() != text {
                         *content = text_editor::Content::with_text(text);
-                        content
-                            .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+                        content.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
                     }
                 }
             }
@@ -278,14 +224,7 @@ impl App {
             Event::Stop(id, name) => {
                 // Stop all: each running one by name (the daemon takes no empty name)
                 let names = if name.is_empty() {
-                    self.views.get(&id).map_or_else(Vec::new, |v| {
-                        v.processes
-                            .list
-                            .iter()
-                            .filter(|p| procs::running(p))
-                            .map(|p| p.name.clone())
-                            .collect()
-                    })
+                    self.views.get(&id).map_or_else(Vec::new, |v| v.processes.list.iter().filter(|p| procs::running(p)).map(|p| p.name.clone()).collect())
                 } else {
                     vec![name]
                 };
@@ -321,11 +260,7 @@ impl App {
             Event::OpenUrl(url) => crate::terminal::open_link(url),
             Event::NoticeExpired(id, serial) => {
                 if let Some(view) = self.views.get_mut(&id)
-                    && view
-                        .processes
-                        .notice
-                        .as_ref()
-                        .is_some_and(|(n, _, _)| *n == serial)
+                    && view.processes.notice.as_ref().is_some_and(|(n, _, _)| *n == serial)
                 {
                     view.processes.notice = None;
                 }
@@ -360,23 +295,14 @@ impl App {
         let serial = self.process_serial;
         view.processes.reading = Some(serial);
         let known = view.processes.known();
-        let policy = self
-            .all_sessions
-            .iter()
-            .find(|s| s.session_id == id)
-            .map(|s| s.policy.clone())
-            .unwrap_or_default();
+        let policy = self.all_sessions.iter().find(|s| s.session_id == id).map(|s| s.policy.clone()).unwrap_or_default();
         let session = id.to_string();
         let id = id.to_string();
         blocking(
             move || {
-                let list = actions
-                    .reading(|client| procs::list(client, &session))
-                    .map_err(|e| format!("{e:#}"));
+                let list = actions.reading(|client| procs::list(client, &session)).map_err(|e| format!("{e:#}"));
                 let specs = match &list {
-                    Ok(list) if undecided(&known, list) => actions
-                        .reading(|client| procs::session_exposable(client, &session, &policy))
-                        .ok(),
+                    Ok(list) if undecided(&known, list) => actions.reading(|client| procs::session_exposable(client, &session, &policy)).ok(),
                     _ => None,
                 };
                 let jail = actions.reading(|client| procs::jail(client, &session)).unwrap_or_default();
@@ -405,10 +331,7 @@ impl App {
                 let name = name.clone();
                 move || {
                     actions
-                        .read::<sill_proto::Text>(
-                            "_sill/procs.tail",
-                            json!({"session_id": session, "name": name, "lines": procs::LOG_LINES}),
-                        )
+                        .read::<sill_proto::Text>("_sill/procs.tail", json!({"session_id": session, "name": name, "lines": procs::LOG_LINES}))
                         .map(|t| t.text)
                         .map_err(|e| format!("{e:#}"))
                 }
@@ -418,12 +341,7 @@ impl App {
     }
 
     /// `method` for each of `names`, once each; the first that did not take effect is the outcome.
-    fn process_action(
-        &mut self,
-        id: String,
-        method: &'static str,
-        names: Vec<String>,
-    ) -> Task<Message> {
+    fn process_action(&mut self, id: String, method: &'static str, names: Vec<String>) -> Task<Message> {
         let Some(actions) = self.actions.clone() else {
             return Task::none();
         };
@@ -446,11 +364,7 @@ impl App {
     fn expose_port(&mut self, id: &str, port: u16, name: &str) -> Task<Message> {
         // A second queued click (or two process rows declaring the same port) reuses the
         // existing listener instead of moving the URL to a fallback port.
-        if self
-            .views
-            .get(id)
-            .is_none_or(|view| view.processes.bridges.contains_key(&port))
-        {
+        if self.views.get(id).is_none_or(|view| view.processes.bridges.contains_key(&port)) {
             return Task::none();
         }
         let Some(actions) = self.actions.clone() else {
@@ -460,25 +374,16 @@ impl App {
         let (said, failed) = match procs::expose(port, opener) {
             Ok(bridge) => {
                 let said = if bridge.host_port == port {
-                    format!(
-                        "{name}: port {port} is open on this machine at {}",
-                        bridge.url()
-                    )
+                    format!("{name}: port {port} is open on this machine at {}", bridge.url())
                 } else {
-                    format!(
-                        "{name}: port {port} is open on this machine at {} ({port} was taken)",
-                        bridge.url()
-                    )
+                    format!("{name}: port {port} is open on this machine at {} ({port} was taken)", bridge.url())
                 };
                 if let Some(view) = self.views.get_mut(id) {
                     view.processes.bridges.insert(port, bridge);
                 }
                 (said, false)
             }
-            Err(e) => (
-                format!("{name}: port {port} could not be exposed: {e:#}"),
-                true,
-            ),
+            Err(e) => (format!("{name}: port {port} could not be exposed: {e:#}"), true),
         };
         self.process_note(id, said, failed)
     }
@@ -491,10 +396,7 @@ impl App {
         };
         view.processes.note(serial, said, failed);
         let id = id.to_string();
-        blocking(
-            move || std::thread::sleep(NOTICE),
-            move |()| Message::Procs(Event::NoticeExpired(id, serial)),
-        )
+        blocking(move || std::thread::sleep(NOTICE), move |()| Message::Procs(Event::NoticeExpired(id, serial)))
     }
 }
 
@@ -549,9 +451,7 @@ pub fn indicator(view: &SessionView) -> Option<Element<'_, Message>> {
     // a count behind each kind's own icon: commands running now, then services (the only one
     // shown when no command runs, so ended managed processes keep their place)
     let counted = |icon: &'static str, n: usize| {
-        row![icons::glyph(icon, crate::ui::BAR_ICON, color), text(n.to_string()).size(style::TINY).color(color)]
-            .spacing(3)
-            .align_y(Alignment::Center)
+        row![icons::glyph(icon, crate::ui::BAR_ICON, color), text(n.to_string()).size(style::TINY).color(color)].spacing(3).align_y(Alignment::Center)
     };
     let mut content = iced::widget::Row::new().spacing(8).align_y(Alignment::Center);
     if commands > 0 {
@@ -560,8 +460,7 @@ pub fn indicator(view: &SessionView) -> Option<Element<'_, Message>> {
     if services > 0 || commands == 0 {
         content = content.push(counted("processes", services));
     }
-    let mut tip: Vec<String> =
-        view.processes.jail.commands.iter().map(|c| format!("running: {}", command_name(&c.argv))).collect();
+    let mut tip: Vec<String> = view.processes.jail.commands.iter().map(|c| format!("running: {}", command_name(&c.argv))).collect();
     tip.extend(list.iter().filter(|p| procs::running(p)).map(|p| format!("service: {}", p.name)));
     tip.extend(unmanaged_services(view).iter().map(|s| format!("service: {}", command_name(&s.argv))));
     if failed {
@@ -570,15 +469,10 @@ pub fn indicator(view: &SessionView) -> Option<Element<'_, Message>> {
     Some(
         iced::widget::tooltip(
             keys::press(
-                button(container(content).center_y(Fill))
-                    .height(crate::ui::BAR_BUTTON)
-                    .padding([0, 6])
-                    .style(style::quiet),
+                button(container(content).center_y(Fill)).height(crate::ui::BAR_BUTTON).padding([0, 6]).style(style::quiet),
                 Message::Procs(Event::Toggle(view.id.clone())),
             ),
-            container(text(tip.join("\n")).size(style::SMALL))
-                .padding([4, 8])
-                .style(style::fill(P.code_bg)),
+            container(text(tip.join("\n")).size(style::SMALL)).padding([4, 8]).style(style::fill(P.code_bg)),
             iced::widget::tooltip::Position::Top,
         )
         .into(),
@@ -586,12 +480,7 @@ pub fn indicator(view: &SessionView) -> Option<Element<'_, Message>> {
 }
 
 fn small_button(label: &str, message: Message) -> Element<'_, Message> {
-    keys::press(
-        button(text(label).size(style::TINY))
-            .padding([2, 8])
-            .style(style::quiet),
-        message,
-    )
+    keys::press(button(text(label).size(style::TINY)).padding([2, 8]).style(style::quiet), message)
 }
 
 /// The cards asking about ports, the note on the last exposure or action, and the list when shown.
@@ -605,52 +494,29 @@ pub fn panel(view: &SessionView) -> Element<'_, Message> {
     let mut content = Column::new().spacing(6);
     for (port, name) in &state.questions {
         let card = column![
-            text(format!(
-                "{name} listens on port {port} inside the jail. Expose it on this machine, loopback only (http://127.0.0.1:{port})?"
-            ))
-            .size(style::SMALL),
+            text(format!("{name} listens on port {port} inside the jail. Expose it on this machine, loopback only (http://127.0.0.1:{port})?"))
+                .size(style::SMALL),
             row![
                 keys::press(
-                    button(text("Expose").size(style::SMALL))
-                        .padding([4, 10])
-                        .style(style::solid(P.accent)),
+                    button(text("Expose").size(style::SMALL)).padding([4, 10]).style(style::solid(P.accent)),
                     Message::Procs(Event::Expose(id.clone(), *port)),
                 ),
-                keys::press(
-                    button(text("Not now").size(style::SMALL))
-                        .padding([4, 10])
-                        .style(style::quiet),
-                    Message::Procs(Event::NotNow(id.clone(), *port)),
-                ),
+                keys::press(button(text("Not now").size(style::SMALL)).padding([4, 10]).style(style::quiet), Message::Procs(Event::NotNow(id.clone(), *port)),),
             ]
             .spacing(8),
         ]
         .spacing(8);
-        content = content.push(crate::ui::ruled(
-            2.0,
-            P.accent,
-            container(card)
-                .padding([6, 10])
-                .width(Fill)
-                .style(style::card_right(alpha(P.accent, 0.08))),
-        ));
+        content = content.push(crate::ui::ruled(2.0, P.accent, container(card).padding([6, 10]).width(Fill).style(style::card_right(alpha(P.accent, 0.08)))));
     }
     if state.open && anything {
         content = content.push(list(view));
     }
     if let Some((_, note, failed)) = &state.notice {
-        content = content.push(text(note).size(style::TINY).color(if *failed {
-            P.error
-        } else {
-            alpha(P.fg, 0.7)
-        }));
+        content = content.push(text(note).size(style::TINY).color(if *failed { P.error } else { alpha(P.fg, 0.7) }));
     }
     // set off from the prompt as the queued prompts are: a faint band, a rule, a gap
     column![
-        container(content)
-            .padding([6, 12])
-            .width(Fill)
-            .style(style::fill(alpha(P.accent, 0.05))),
+        container(content).padding([6, 12]).width(Fill).style(style::fill(alpha(P.accent, 0.05))),
         rule::horizontal(1).style(style::rule_style(P.border)),
         space().height(4),
     ]
@@ -660,9 +526,7 @@ pub fn panel(view: &SessionView) -> Element<'_, Message> {
 fn list(view: &SessionView) -> Element<'_, Message> {
     let state = &view.processes;
     let id = &view.id;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let mono = Font::with_name(crate::fonts::MONO_FAMILY);
     let mut rows = Column::new().spacing(8);
     let now_ms = now * 1000;
@@ -679,21 +543,16 @@ fn list(view: &SessionView) -> Element<'_, Message> {
             rows = rows.push(
                 column![
                     row![
-                        text(command_name(&c.argv)).size(style::SMALL).font(Font {
-                            weight: iced::font::Weight::Bold,
-                            ..Font::with_name(crate::fonts::SANS_FAMILY)
-                        }),
+                        text(command_name(&c.argv))
+                            .size(style::SMALL)
+                            .font(Font { weight: iced::font::Weight::Bold, ..Font::with_name(crate::fonts::SANS_FAMILY) }),
                         text(said).size(style::TINY).color(P.fg_dim),
                         space().width(Fill),
                         small_button("Stop", Message::Procs(Event::StopCommand(id.clone(), c.pid))),
                     ]
                     .spacing(8)
                     .align_y(Alignment::Center),
-                    text(crate::ui::one_line(&c.argv.join(" "), 100))
-                        .size(style::TINY)
-                        .font(mono)
-                        .color(P.fg_dim)
-                        .wrapping(text::Wrapping::None),
+                    text(crate::ui::one_line(&c.argv.join(" "), 100)).size(style::TINY).font(mono).color(P.fg_dim).wrapping(text::Wrapping::None),
                 ]
                 .spacing(2),
             );
@@ -711,19 +570,14 @@ fn list(view: &SessionView) -> Element<'_, Message> {
         rows = rows.push(
             column![
                 row![
-                    text(command_name(&s.argv)).size(style::SMALL).font(Font {
-                        weight: iced::font::Weight::Bold,
-                        ..Font::with_name(crate::fonts::SANS_FAMILY)
-                    }),
+                    text(command_name(&s.argv))
+                        .size(style::SMALL)
+                        .font(Font { weight: iced::font::Weight::Bold, ..Font::with_name(crate::fonts::SANS_FAMILY) }),
                     text(said).size(style::TINY).color(P.fg_dim),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
-                text(crate::ui::one_line(&s.argv.join(" "), 100))
-                    .size(style::TINY)
-                    .font(mono)
-                    .color(P.fg_dim)
-                    .wrapping(text::Wrapping::None),
+                text(crate::ui::one_line(&s.argv.join(" "), 100)).size(style::TINY).font(mono).color(P.fg_dim).wrapping(text::Wrapping::None),
             ]
             .spacing(2),
         );
@@ -732,51 +586,25 @@ fn list(view: &SessionView) -> Element<'_, Message> {
         let running = procs::running(p);
         let shown = state.log.as_ref().is_some_and(|(n, _)| *n == p.name);
         let head = row![
-            text(&p.name).size(style::SMALL).font(Font {
-                weight: iced::font::Weight::Bold,
-                ..Font::with_name(crate::fonts::SANS_FAMILY)
-            }),
-            text(procs::state(p, now))
-                .size(style::TINY)
-                .color(if procs::failed(p) {
-                    P.warning
-                } else {
-                    P.fg_dim
-                }),
+            text(&p.name).size(style::SMALL).font(Font { weight: iced::font::Weight::Bold, ..Font::with_name(crate::fonts::SANS_FAMILY) }),
+            text(procs::state(p, now)).size(style::TINY).color(if procs::failed(p) { P.warning } else { P.fg_dim }),
             space().width(Fill),
-            small_button(
-                if shown { "Hide log" } else { "Log" },
-                Message::Procs(Event::Log(id.clone(), p.name.clone())),
-            ),
+            small_button(if shown { "Hide log" } else { "Log" }, Message::Procs(Event::Log(id.clone(), p.name.clone())),),
             if running {
-                small_button(
-                    "Stop",
-                    Message::Procs(Event::Stop(id.clone(), p.name.clone())),
-                )
+                small_button("Stop", Message::Procs(Event::Stop(id.clone(), p.name.clone())))
             } else {
-                small_button(
-                    "Dismiss",
-                    Message::Procs(Event::Dismiss(id.clone(), p.name.clone())),
-                )
+                small_button("Dismiss", Message::Procs(Event::Dismiss(id.clone(), p.name.clone())))
             },
         ]
         .spacing(8)
         .align_y(Alignment::Center);
-        let mut entry = Column::new().spacing(2).push(head).push(
-            text(crate::ui::one_line(&p.argv.join(" "), 100))
-                .size(style::TINY)
-                .font(mono)
-                .color(P.fg_dim)
-                .wrapping(text::Wrapping::None),
-        );
+        let mut entry = Column::new()
+            .spacing(2)
+            .push(head)
+            .push(text(crate::ui::one_line(&p.argv.join(" "), 100)).size(style::TINY).font(mono).color(P.fg_dim).wrapping(text::Wrapping::None));
         if !p.last_line.is_empty() {
-            entry = entry.push(
-                text(crate::ui::one_line(&p.last_line, 100))
-                    .size(style::TINY)
-                    .font(mono)
-                    .color(alpha(P.fg, 0.7))
-                    .wrapping(text::Wrapping::None),
-            );
+            entry =
+                entry.push(text(crate::ui::one_line(&p.last_line, 100)).size(style::TINY).font(mono).color(alpha(P.fg, 0.7)).wrapping(text::Wrapping::None));
         }
         if let Some(port) = p.port {
             match state.bridges.get(&port) {
@@ -785,9 +613,7 @@ fn list(view: &SessionView) -> Element<'_, Message> {
                     entry = entry.push(
                         row![
                             keys::press(
-                                button(text(url.clone()).size(style::TINY).color(P.link))
-                                    .padding(0)
-                                    .style(style::quiet),
+                                button(text(url.clone()).size(style::TINY).color(P.link)).padding(0).style(style::quiet),
                                 Message::Procs(Event::OpenUrl(url.clone())),
                             ),
                             small_button("Copy", Message::Link(url)),
@@ -799,9 +625,7 @@ fn list(view: &SessionView) -> Element<'_, Message> {
                 None if running => {
                     entry = entry.push(
                         row![
-                            text(format!("port {port} inside the jail, not exposed"))
-                                .size(style::TINY)
-                                .color(P.fg_dim),
+                            text(format!("port {port} inside the jail, not exposed")).size(style::TINY).color(P.fg_dim),
                             small_button("Expose", Message::Procs(Event::Expose(id.clone(), port))),
                         ]
                         .spacing(6)
@@ -827,19 +651,12 @@ fn list(view: &SessionView) -> Element<'_, Message> {
         rows = rows.push(entry);
     }
     if state.list.iter().filter(|p| procs::running(p)).count() > 1 {
-        rows = rows.push(small_button(
-            "Stop all",
-            Message::Procs(Event::Stop(id.clone(), String::new())),
-        ));
+        rows = rows.push(small_button("Stop all", Message::Procs(Event::Stop(id.clone(), String::new()))));
     }
     crate::ui::ruled(
         2.0,
         P.fg_dim,
-        container(scrollable(rows).style(style::feed_scroll))
-            .padding([6, 10])
-            .max_height(420)
-            .width(Fill)
-            .style(style::card_right(P.surface)),
+        container(scrollable(rows).style(style::feed_scroll)).padding([6, 10]).max_height(420).width(Fill).style(style::card_right(P.surface)),
     )
 }
 
@@ -869,13 +686,7 @@ mod tests {
         app.views.get_mut("demo").unwrap().processes.reading = Some(7);
         app.views.insert("demo".into(), SessionView::new("demo"));
         app.views.get_mut("demo").unwrap().processes.reading = Some(8);
-        let _ = app.update(Message::Procs(Event::Read(
-            "demo".into(),
-            7,
-            Ok(vec![process("old", "running", Some(3000))]),
-            Some(vec![]),
-            Default::default(),
-        )));
+        let _ = app.update(Message::Procs(Event::Read("demo".into(), 7, Ok(vec![process("old", "running", Some(3000))]), Some(vec![]), Default::default())));
         let state = &app.views["demo"].processes;
         assert!(state.list.is_empty());
         assert!(state.questions.is_empty());
@@ -904,20 +715,11 @@ mod tests {
     fn an_action_completion_does_not_clear_an_outstanding_poll() {
         let (mut app, _) = App::new(true, None);
         app.views.get_mut("demo").unwrap().processes.reading = Some(7);
-        let _ = app.update(Message::Procs(Event::Done(
-            "demo".into(),
-            Outcome::Done(json!({})),
-        )));
+        let _ = app.update(Message::Procs(Event::Done("demo".into(), Outcome::Done(json!({})))));
         assert_eq!(app.views["demo"].processes.reading, Some(7));
         assert!(app.views["demo"].processes.refresh_pending);
         // Its pre-action list must not bring the stopped process back into the UI.
-        let _ = app.update(Message::Procs(Event::Read(
-            "demo".into(),
-            7,
-            Ok(vec![process("old", "running", Some(3000))]),
-            Some(vec![]),
-            Default::default(),
-        )));
+        let _ = app.update(Message::Procs(Event::Read("demo".into(), 7, Ok(vec![process("old", "running", Some(3000))]), Some(vec![]), Default::default())));
         assert!(app.views["demo"].processes.list.is_empty());
         assert_eq!(app.views["demo"].processes.reading, None);
     }
@@ -967,25 +769,12 @@ mod tests {
         let state = &mut app.views.get_mut("demo").unwrap().processes;
         state.log = Some(("web".into(), text_editor::Content::with_text("current")));
         state.log_reading = Some(8);
-        let _ = app.update(Message::Procs(Event::LogRead(
-            "demo".into(),
-            "web".into(),
-            7,
-            Ok("old".into()),
-        )));
+        let _ = app.update(Message::Procs(Event::LogRead("demo".into(), "web".into(), 7, Ok("old".into()))));
         let state = &app.views["demo"].processes;
         assert_eq!(state.log.as_ref().unwrap().1.text(), "current");
         assert_eq!(state.log_reading, Some(8));
-        let _ = app.update(Message::Procs(Event::LogRead(
-            "demo".into(),
-            "web".into(),
-            8,
-            Ok("new".into()),
-        )));
-        assert_eq!(
-            app.views["demo"].processes.log.as_ref().unwrap().1.text(),
-            "new"
-        );
+        let _ = app.update(Message::Procs(Event::LogRead("demo".into(), "web".into(), 8, Ok("new".into()))));
+        assert_eq!(app.views["demo"].processes.log.as_ref().unwrap().1.text(), "new");
     }
 
     #[test]
@@ -993,45 +782,25 @@ mod tests {
         let (mut app, _) = App::new(true, None);
         let state = &mut app.views.get_mut("demo").unwrap().processes;
         let mut content = text_editor::Content::with_text("first\nlast");
-        content.perform(text_editor::Action::Move(
-            text_editor::Motion::DocumentStart,
-        ));
+        content.perform(text_editor::Action::Move(text_editor::Motion::DocumentStart));
         let cursor = content.cursor();
         state.log = Some(("web".into(), content));
         state.log_reading = Some(8);
-        let _ = app.update(Message::Procs(Event::LogRead(
-            "demo".into(),
-            "web".into(),
-            8,
-            Ok("first\nlast\n".into()),
-        )));
-        assert_eq!(
-            app.views["demo"].processes.log.as_ref().unwrap().1.cursor(),
-            cursor
-        );
+        let _ = app.update(Message::Procs(Event::LogRead("demo".into(), "web".into(), 8, Ok("first\nlast\n".into()))));
+        assert_eq!(app.views["demo"].processes.log.as_ref().unwrap().1.cursor(), cursor);
     }
 
     #[test]
     fn repeated_exposure_reuses_the_existing_listener() {
         let (mut app, _) = App::new(true, None);
         let (client, _daemon) = crate::tests::daemon();
-        app.actions = Some(sill_client::actions::Actions::new(crate::tests::connector(
-            vec![client],
-        )));
+        app.actions = Some(sill_client::actions::Actions::new(crate::tests::connector(vec![client])));
         let open: procs::Opener = std::sync::Arc::new(|| anyhow::bail!("not in this test"));
         let bridge = procs::expose(0, open).unwrap();
         let host_port = bridge.host_port;
-        app.views
-            .get_mut("demo")
-            .unwrap()
-            .processes
-            .bridges
-            .insert(3000, bridge);
+        app.views.get_mut("demo").unwrap().processes.bridges.insert(3000, bridge);
         let _ = app.expose_port("demo", 3000, "web");
-        assert_eq!(
-            app.views["demo"].processes.bridges[&3000].host_port,
-            host_port
-        );
+        assert_eq!(app.views["demo"].processes.bridges[&3000].host_port, host_port);
     }
 
     #[test]
@@ -1058,10 +827,7 @@ mod tests {
     #[test]
     fn a_new_port_is_exposed_by_policy_or_asked_about_once() {
         let mut state = Procs::default();
-        let list = vec![
-            process("web", "running", Some(3000)),
-            process("api", "running", Some(9000)),
-        ];
+        let list = vec![process("web", "running", Some(3000)), process("api", "running", Some(9000))];
         assert!(undecided(&state.known(), &list));
         let specs = vec!["3000-3999".to_string()];
         let expose = state.read(list.clone(), Some(&specs));
@@ -1069,10 +835,7 @@ mod tests {
         assert_eq!(state.questions, vec![(9000, "api".to_string())]);
         // asked once: a later read neither asks again nor needs the policy for it
         state.questions.clear();
-        assert!(
-            undecided(&state.known(), &list),
-            "3000 is not bridged in this test"
-        );
+        assert!(undecided(&state.known(), &list), "3000 is not bridged in this test");
         let expose = state.read(list.clone(), Some(&specs));
         assert_eq!(expose, vec![(3000, "web".to_string())]);
         assert!(state.questions.is_empty());
@@ -1089,10 +852,7 @@ mod tests {
         let list = vec![process("web", "running", Some(3000))];
         assert!(state.read(list.clone(), None).is_empty());
         assert!(state.questions.is_empty());
-        assert!(
-            undecided(&state.known(), &list),
-            "asked when the policy can be read"
-        );
+        assert!(undecided(&state.known(), &list), "asked when the policy can be read");
     }
 
     #[test]
@@ -1116,11 +876,8 @@ mod tests {
         let (mut app, _) = App::new(true, None);
         app.demo = false;
         app.actions = Some(sill_client::actions::Actions::new(connector(vec![client])));
-        app.views.get_mut("demo").unwrap().processes.list = vec![
-            process("api", "running", None),
-            process("old", "exited", None),
-            process("web", "running", Some(3000)),
-        ];
+        app.views.get_mut("demo").unwrap().processes.list =
+            vec![process("api", "running", None), process("old", "exited", None), process("web", "running", Some(3000))];
         let fake = std::thread::spawn(move || {
             let mut stopped = vec![];
             for _ in 0..2 {

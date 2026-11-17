@@ -16,11 +16,7 @@ pub struct Loaded {
 impl Loaded {
     /// The (repository path, workspace folder) pairs the file worker reads through.
     pub fn aliases(&self) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
-        self.view
-            .workspaces
-            .iter()
-            .filter_map(|w| Some((w.source.to_path().ok()?, w.path.to_path().ok()?)))
-            .collect()
+        self.view.workspaces.iter().filter_map(|w| Some((w.source.to_path().ok()?, w.path.to_path().ok()?))).collect()
     }
 
     pub fn detail(&self, workspace_id: &str) -> Option<&api::Detail> {
@@ -108,8 +104,10 @@ pub fn all(actions: &Actions) -> anyhow::Result<(api::Listed, Vec<api::Detail>)>
 
 /// What an Apply would bring, as a unified diff: all of it, or `path`'s alone.
 pub fn diff(actions: &Actions, workspace_id: &str, path: Option<&sill_proto::sessions::HostPath>) -> anyhow::Result<String> {
-    let d: api::DiffText =
-        actions.read("_sill/workspaces.diff", serde_json::json!(api::DiffRequest { workspace_id: workspace_id.into(), against: api::Against::Applied, path: path.cloned() }))?;
+    let d: api::DiffText = actions.read(
+        "_sill/workspaces.diff",
+        serde_json::json!(api::DiffRequest { workspace_id: workspace_id.into(), against: api::Against::Applied, path: path.cloned() }),
+    )?;
     Ok(if d.truncated { format!("{}\n… (cut at 4 MiB)", d.text) } else { d.text })
 }
 
@@ -203,7 +201,10 @@ pub enum BranchOutcome {
 /// tip, and the checkout's branch is not compared.
 pub fn branch(actions: &Actions, workspace_id: &str, seen: &api::Revision) -> anyhow::Result<BranchOutcome> {
     actions.once(|c| {
-        match c.call::<api::Branched>("_sill/workspaces.branch", serde_json::json!(api::Apply { operation_id: crate::request_id("branch"), workspace_id: workspace_id.into(), revision: seen.clone() })) {
+        match c.call::<api::Branched>(
+            "_sill/workspaces.branch",
+            serde_json::json!(api::Apply { operation_id: crate::request_id("branch"), workspace_id: workspace_id.into(), revision: seen.clone() }),
+        ) {
             Ok(b) => Ok(BranchOutcome::Made(b.branch)),
             Err(e) if refused_for(&e, "uncommitted") => Ok(BranchOutcome::Uncommitted),
             Err(e) => Err(e),
@@ -212,7 +213,9 @@ pub fn branch(actions: &Actions, workspace_id: &str, seen: &api::Revision) -> an
 }
 
 pub fn discard(actions: &Actions, workspace_id: &str, seen: &api::Revision) -> anyhow::Result<api::Changed> {
-    actions.once(|c| c.call("_sill/workspaces.discard", api::Apply { operation_id: crate::request_id("discard"), workspace_id: workspace_id.into(), revision: seen.clone() }))
+    actions.once(|c| {
+        c.call("_sill/workspaces.discard", api::Apply { operation_id: crate::request_id("discard"), workspace_id: workspace_id.into(), revision: seen.clone() })
+    })
 }
 
 pub fn undo(actions: &Actions, discard_id: &str) -> anyhow::Result<api::Changed> {
@@ -309,7 +312,12 @@ mod tests {
     #[test]
     fn only_the_uncommitted_refusal_asks_for_the_agents_commit() {
         let refusal = |reason: &str| -> anyhow::Error {
-            sill_proto::rpc::Error { code: -32000, message: "refused".into(), data: Some(serde_json::json!({"code": "invalid_state", "details": {"reason": reason, "paths": []}})) }.into()
+            sill_proto::rpc::Error {
+                code: -32000,
+                message: "refused".into(),
+                data: Some(serde_json::json!({"code": "invalid_state", "details": {"reason": reason, "paths": []}})),
+            }
+            .into()
         };
         assert!(refused_for(&refusal("uncommitted"), "uncommitted"));
         assert!(refused_for(&refusal("uncommitted").context("_sill/workspaces.apply"), "uncommitted"), "under the method's context too");

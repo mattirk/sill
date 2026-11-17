@@ -16,20 +16,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let art = size as f32 * 824.0 / 1024.0;
         let fit = art / tree.size().width().max(tree.size().height());
         let offset = (size as f32 - art) / 2.0;
-        resvg::render(
-            &tree,
-            tiny_skia::Transform::from_scale(fit, fit).post_translate(offset, offset),
-            &mut canvas.as_mut(),
-        );
+        resvg::render(&tree, tiny_skia::Transform::from_scale(fit, fit).post_translate(offset, offset), &mut canvas.as_mut());
         let mut rgba = Vec::with_capacity((size * size * 4) as usize);
         for pixel in canvas.pixels() {
             let c = pixel.demultiply();
             rgba.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
         }
         let name = if scale == 1 { format!("icon_{points}x{points}.png") } else { format!("icon_{points}x{points}@2x.png") };
-        image::RgbaImage::from_raw(size, size, rgba)
-            .ok_or("pixels")?
-            .save(std::path::Path::new(&out).join(name))?;
+        image::RgbaImage::from_raw(size, size, rgba).ok_or("pixels")?.save(std::path::Path::new(&out).join(name))?;
     }
     Ok(())
 }

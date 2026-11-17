@@ -19,15 +19,20 @@ fn open_beneath(root: &Path, path: &Path) -> Result<OwnedFd, Errno> {
     if path.starts_with("/.sill") {
         return Err(Errno::ACCESS);
     }
-    let image = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp")
-    });
-    if !image { return Err(Errno::INVAL); }
+    let image = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp"));
+    if !image {
+        return Err(Errno::INVAL);
+    }
     let root = open(root, OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())?;
     let file = openat2(
-        &root, path.strip_prefix("/").map_err(|_| Errno::INVAL)?,
+        &root,
+        path.strip_prefix("/").map_err(|_| Errno::INVAL)?,
         OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-        Mode::empty(), ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
     )?;
     if FileType::from_raw_mode(fstat(&file)?.st_mode) != FileType::RegularFile {
         return Err(Errno::OPNOTSUPP);

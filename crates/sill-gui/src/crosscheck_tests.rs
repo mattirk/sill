@@ -5,22 +5,39 @@ use sill_client::crosscheck::Seen;
 pub(crate) fn run(state: &str, stale: bool, problems: &[(&str, Option<(&str, u32)>)], steps: &[&str]) -> api::Run {
     let now = now_secs();
     api::Run {
-        run_id: format!("run-{state}"), workspace_id: "ws-1".into(), session_id: "demo".into(), state_tree: "tree".into(), base: "base".into(),
+        run_id: format!("run-{state}"),
+        workspace_id: "ws-1".into(),
+        session_id: "demo".into(),
+        state_tree: "tree".into(),
+        base: "base".into(),
         state: state.into(),
         detail: if state == "failed" { "Stopped after 20 minutes".into() } else { String::new() },
         reviewers: vec![api::Participant {
             reviewer: api::Reviewer { name: String::new(), agent: "codex".into(), options: Default::default() },
-            session_id: Some("worker".into()), state: "running".into(),
+            session_id: Some("worker".into()),
+            state: "running".into(),
             summary: if state == "complete" {
                 "The change does what was asked: the layers test no longer fails where /mnt holds a sill-named directory. Two things are worth a look before applying; neither changes how jails are built.".into()
-            } else { String::new() },
+            } else {
+                String::new()
+            },
             activity: steps.iter().map(|s| s.to_string()).collect(),
             error: (state == "failed").then(|| "Stopped after 20 minutes: the Reviewer was still running the jail tests".into()),
         }],
-        problems: problems.iter().enumerate().map(|(i, (title, place))| api::Problem {
-            id: format!("r0-p{i}"), reviewer_index: 0, title: title.to_string(), path: place.map(|(p, _)| p.to_string()), line: place.map(|(_, l)| l), detail: "Why.".into(),
-        }).collect(),
-        created_at: (now - 75).to_string(), stale,
+        problems: problems
+            .iter()
+            .enumerate()
+            .map(|(i, (title, place))| api::Problem {
+                id: format!("r0-p{i}"),
+                reviewer_index: 0,
+                title: title.to_string(),
+                path: place.map(|(p, _)| p.to_string()),
+                line: place.map(|(_, l)| l),
+                detail: "Why.".into(),
+            })
+            .collect(),
+        created_at: (now - 75).to_string(),
+        stale,
     }
 }
 
@@ -31,16 +48,21 @@ fn seen(run: Option<api::Run>) -> Result<Seen, String> {
 pub(crate) fn setup() -> api::Reviewers {
     let option = |id: &str, title: &str, value: &str, choices: &[(&str, &str)]| -> ControlOption {
         serde_json::from_value(serde_json::json!({"option_id": id, "title": title, "category": id, "value": {"type": "id", "value": value},
-            "choices": choices.iter().map(|(v, t)| serde_json::json!({"value": v, "title": t, "description": ""})).collect::<Vec<_>>()})).unwrap()
+            "choices": choices.iter().map(|(v, t)| serde_json::json!({"value": v, "title": t, "description": ""})).collect::<Vec<_>>()}))
+        .unwrap()
     };
     api::Reviewers {
         reviewers: vec![],
         agents: vec![
             api::AgentOptions { agent: "claude".into(), title: "Claude Code".into(), options: vec![] },
-            api::AgentOptions { agent: "codex".into(), title: "Codex".into(), options: vec![
-                option("model", "Model", "small", &[("small", "Small"), ("large", "Large")]),
-                option("effort", "Reasoning effort", "medium", &[("low", "Low"), ("medium", "Medium"), ("high", "High")]),
-            ] },
+            api::AgentOptions {
+                agent: "codex".into(),
+                title: "Codex".into(),
+                options: vec![
+                    option("model", "Model", "small", &[("small", "Small"), ("large", "Large")]),
+                    option("effort", "Reasoning effort", "medium", &[("low", "Low"), ("medium", "Medium"), ("high", "High")]),
+                ],
+            },
         ],
     }
 }
@@ -96,7 +118,10 @@ fn a_start_that_fails_says_why_and_a_started_review_is_shown() {
 fn the_reviewer_setting_is_an_agent_and_that_agents_options() {
     let (mut app, _) = App::new(true, None);
     let _ = app.crosscheck_event(Event::Reviewers(Ok(setup())));
-    let saved = |app: &App| match &app.crosscheck.reviewers { Some(Ok(s)) => s.reviewers.clone(), other => panic!("{other:?}") };
+    let saved = |app: &App| match &app.crosscheck.reviewers {
+        Some(Ok(s)) => s.reviewers.clone(),
+        other => panic!("{other:?}"),
+    };
     // an option without a Reviewer is nobody's
     let _ = app.crosscheck_event(Event::Choose("model".into(), "large".into()));
     assert!(saved(&app).is_empty());

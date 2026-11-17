@@ -193,7 +193,11 @@ fn npm_exact_version(spec: &str) -> Option<&str> {
     let numeric = |s: Option<&str>| s.is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()));
     // `1.2.3` or `1.2.3-pre.1`: three numeric parts, the last may carry a prerelease
     let third = parts.nth(2).map(|t| t.split('-').next().unwrap_or(""));
-    (numeric(Some(v.split('.').next().unwrap_or(""))) && numeric(v.split('.').nth(1)) && numeric(third) && !v.contains(['^', '~', '>', '<', '*', ' ', 'x', 'X'])).then_some(v)
+    (numeric(Some(v.split('.').next().unwrap_or("")))
+        && numeric(v.split('.').nth(1))
+        && numeric(third)
+        && !v.contains(['^', '~', '>', '<', '*', ' ', 'x', 'X']))
+    .then_some(v)
 }
 
 /// The exact version a Python spec pins (`name==1.2.3` → `1.2.3`).
@@ -243,11 +247,7 @@ pub fn builtin_for(entry: &Entry) -> Option<&'static str> {
 /// The live index and icons: under the state directory, which every jail masks (security.md S13 —
 /// a cache the agent could write would be the index the next Install reads).
 fn cache_dir(home: &Path) -> PathBuf {
-    std::env::var("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home.join(".local/state"))
-        .join("sill")
-        .join("registry")
+    std::env::var("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|_| home.join(".local/state")).join("sill").join("registry")
 }
 
 pub fn cache_path(home: &Path) -> PathBuf {
@@ -260,11 +260,7 @@ pub fn icon_cache_dir(home: &Path) -> PathBuf {
 }
 
 pub fn tools_dir(home: &Path) -> PathBuf {
-    std::env::var("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home.join(".local/state"))
-        .join("sill")
-        .join("tools")
+    std::env::var("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|_| home.join(".local/state")).join("sill").join("tools")
 }
 
 // --- the index --------------------------------------------------------------------------------------
@@ -330,9 +326,7 @@ pub fn fetch(home: &Path) -> Result<Registry> {
 /// An address the index may send curl to: `https://`, no blanks or control characters, so it is
 /// one argument that is never an option, a file or a local protocol.
 fn https_url(url: &str) -> bool {
-    url.len() <= 2048
-        && url.get(..8).is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
-        && !url.chars().any(|c| c.is_control() || c.is_whitespace())
+    url.len() <= 2048 && url.get(..8).is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://")) && !url.chars().any(|c| c.is_control() || c.is_whitespace())
 }
 
 /// Fetch an entry's icon into the icon cache; the path if it is there afterwards.
@@ -358,7 +352,12 @@ pub fn fetch_icon(home: &Path, entry: &Entry) -> Option<PathBuf> {
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
-    if ok && std::fs::rename(&tmp, &p).is_ok() { Some(p) } else { let _ = std::fs::remove_file(&tmp); None }
+    if ok && std::fs::rename(&tmp, &p).is_ok() {
+        Some(p)
+    } else {
+        let _ = std::fs::remove_file(&tmp);
+        None
+    }
 }
 
 /// An agent's icon by its registry id, whatever version is installed: the cached file when it is
@@ -423,13 +422,14 @@ pub fn install(home: &Path, entry: &Entry, log: &mut dyn FnMut(String)) -> Resul
                 false
             }
         }
-    } else { match probe_load_session(&command, &env, home) {
-        Ok(b) => b,
-        Err(e) => {
-            log(format!("probe (in a throwaway jail) failed: {e:#}"));
-            false
+    } else {
+        match probe_load_session(&command, &env, home) {
+            Ok(b) => b,
+            Err(e) => {
+                log(format!("probe (in a throwaway jail) failed: {e:#}"));
+                false
+            }
         }
-    }
     };
     log(format!("session resume: {}", if supports_load { "resumes sessions" } else { "no session resume" }));
 
@@ -509,7 +509,9 @@ fn run_logged(cmd: &mut Command, log: &mut dyn FnMut(String)) -> Result<()> {
 
 /// A live-index `npx` entry: the index's exact version, dependencies resolved by npm now.
 fn install_npm(dir: &Path, d: &PackageDist, log: &mut dyn FnMut(String)) -> Result<(Vec<String>, BTreeMap<String, String>)> {
-    let version = npm_exact_version(&d.package).ok_or_else(|| anyhow!("{}: the index pins no exact version; refusing to install whatever npm resolves", d.package))?.to_string();
+    let version = npm_exact_version(&d.package)
+        .ok_or_else(|| anyhow!("{}: the index pins no exact version; refusing to install whatever npm resolves", d.package))?
+        .to_string();
     // no lifecycle scripts: nothing from the package runs on the host at install time
     let mut cmd = Command::new("npm");
     cmd.args(["install", "--prefix"])
@@ -569,11 +571,7 @@ fn npm_command(dir: &Path, d: &PackageDist, version: &str) -> Result<(Vec<String
         Some(serde_json::Value::String(_)) => name.rsplit('/').next().unwrap_or(&name).to_string(),
         Some(serde_json::Value::Object(m)) => {
             let keys: Vec<&String> = m.keys().collect();
-            keys.iter()
-                .find(|k| k.contains("acp"))
-                .or_else(|| keys.first())
-                .map(|k| k.to_string())
-                .ok_or_else(|| anyhow!("package has no executable"))?
+            keys.iter().find(|k| k.contains("acp")).or_else(|| keys.first()).map(|k| k.to_string()).ok_or_else(|| anyhow!("package has no executable"))?
         }
         _ => bail!("package {name} has no executable"),
     };
@@ -650,11 +648,7 @@ fn install_uv(dir: &Path, d: &PackageDist, log: &mut dyn FnMut(String)) -> Resul
     uv_exact_version(&d.package).ok_or_else(|| anyhow!("{}: no `==` version pin; refusing to install whatever uv resolves", d.package))?;
     // wheels only: an sdist's build backend is arbitrary code, and this runs on the host
     let mut cmd = Command::new("uv");
-    cmd.args(["tool", "install", "--force", "--no-build"])
-        .arg(&d.package)
-        .env("UV_TOOL_DIR", dir.join("uv"))
-        .env("UV_TOOL_BIN_DIR", &bin_dir)
-        .current_dir(dir);
+    cmd.args(["tool", "install", "--force", "--no-build"]).arg(&d.package).env("UV_TOOL_DIR", dir.join("uv")).env("UV_TOOL_BIN_DIR", &bin_dir).current_dir(dir);
     run_logged(&mut cmd, log).context("uv tool install")?;
     let mut exes: Vec<PathBuf> = std::fs::read_dir(&bin_dir)?.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_file()).collect();
     exes.sort();
@@ -677,8 +671,7 @@ fn install_binary(dir: &Path, d: &BinaryDist, log: &mut dyn FnMut(String)) -> Re
     }
     // The command is a path inside the install directory, nothing above or outside it: a raw
     // download is renamed to it and it is made executable (audit 2026-11-15 A6).
-    let cmd_rel = crate::agents::relative_path(d.cmd.trim_start_matches("./"))
-        .with_context(|| format!("the registry names {:?} as the command", d.cmd))?;
+    let cmd_rel = crate::agents::relative_path(d.cmd.trim_start_matches("./")).with_context(|| format!("the registry names {:?} as the command", d.cmd))?;
     let file = url.rsplit('/').next().unwrap_or("archive").split('?').next().unwrap_or("archive").to_string();
     let file = if file.is_empty() || file == "." || file == ".." { "archive".to_string() } else { file };
     let archive = dir.join(&file);
@@ -758,7 +751,12 @@ fn probe_load_session(command: &[String], env: &BTreeMap<String, String>, home: 
 /// an empty tmpfs. The second value: the directories under the home bound into the jail (the
 /// tools dir and the command's runtime), relative to the home — bwrap creates them as
 /// mountpoints, so they are not the agent's own writes.
-fn throwaway_jail(command: &[String], env: &BTreeMap<String, String>, home: &Path, scratch: Option<&Path>) -> Result<(Command, Vec<PathBuf>, Option<std::os::fd::OwnedFd>)> {
+fn throwaway_jail(
+    command: &[String],
+    env: &BTreeMap<String, String>,
+    home: &Path,
+    scratch: Option<&Path>,
+) -> Result<(Command, Vec<PathBuf>, Option<std::os::fd::OwnedFd>)> {
     let Some(first) = command.first() else { bail!("no command") };
     let Base { mut b, bound, seccomp, prog, path, .. } = jail_base(first, home, scratch, false)?;
     b.arg("--setenv").arg("HOME").arg(home).arg("--setenv").arg("PATH").arg(path).arg("--chdir").arg(home);
@@ -818,8 +816,12 @@ fn jail_base(program: &str, home: &Path, scratch: Option<&Path>, share_net: bool
         b.arg("--seccomp").arg(std::os::fd::AsRawFd::as_raw_fd(f).to_string());
     }
     match scratch {
-        Some(dir) => { b.arg("--bind").arg(dir).arg(home); }
-        None => { b.arg("--tmpfs").arg(home); }
+        Some(dir) => {
+            b.arg("--bind").arg(dir).arg(home);
+        }
+        None => {
+            b.arg("--tmpfs").arg(home);
+        }
     }
     let mut bound = Vec::new();
     if tools.starts_with(home) {
@@ -828,7 +830,8 @@ fn jail_base(program: &str, home: &Path, scratch: Option<&Path>, share_net: bool
     b.arg("--ro-bind").arg(&tools).arg(&tools);
     // the runtime the command needs may live under the home (nvm's node, a venv): just those dirs
     let mut path_dirs: Vec<PathBuf> = ["/usr/local/bin", "/usr/bin", "/bin"].iter().map(PathBuf::from).collect();
-    let programs: Vec<PathBuf> = std::iter::once(prog.clone()).chain(["node", "python3", "uv"].iter().filter_map(|runtime| resolve_program(runtime, home))).collect();
+    let programs: Vec<PathBuf> =
+        std::iter::once(prog.clone()).chain(["node", "python3", "uv"].iter().filter_map(|runtime| resolve_program(runtime, home))).collect();
     // directories for PATH, then what their links point at (bound, not on PATH)
     let mut needed: Vec<(PathBuf, bool)> = programs.iter().filter_map(|p| p.parent()).map(|d| (d.to_path_buf(), true)).collect();
     needed.extend(programs.iter().filter_map(|p| link_target_root(p, home)).map(|d| (d, false)));
@@ -839,7 +842,12 @@ fn jail_base(program: &str, home: &Path, scratch: Option<&Path>, share_net: bool
         if covered && !d.starts_with(&tools) && !binds.iter().any(|done| d.starts_with(done)) {
             if home.starts_with(&d) || hidden.iter().any(|h| h.starts_with(&d)) {
                 // the program's own directory: without it there is nothing to run
-                anyhow::ensure!(prog.parent() != Some(d.as_path()), "{} is in {}, which holds your files: put it in a folder of its own", prog.display(), d.display());
+                anyhow::ensure!(
+                    prog.parent() != Some(d.as_path()),
+                    "{} is in {}, which holds your files: put it in a folder of its own",
+                    prog.display(),
+                    d.display()
+                );
                 continue;
             }
             b.arg("--ro-bind").arg(&d).arg(&d);
@@ -908,15 +916,32 @@ fn advertised_program(command: &str, path: &std::ffi::OsStr, scratch: &Path, cov
         "the login command {command:?} is not a plain path"
     );
     let inside = given.starts_with(scratch) || shown.iter().any(|d| given.starts_with(d)) || !covered.iter().any(|d| given.starts_with(d));
-    anyhow::ensure!(inside, "the login command {command} is among your files, which the login jail does not show: it holds the system's programs and the agent's own");
+    anyhow::ensure!(
+        inside,
+        "the login command {command} is among your files, which the login jail does not show: it holds the system's programs and the agent's own"
+    );
     Ok(given.to_path_buf())
 }
 
 /// What a jailed login keeps of the daemon's environment: the language, and how to reach the
 /// network. Everything else of it stays out.
 const LOGIN_ENV: &[&str] = &[
-    "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy",
-    "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "TERM",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
 ];
 
 /// The jail used for every login, regardless of agent or installation source. The person's
@@ -1009,11 +1034,19 @@ fn acp_first_start(child: &mut std::process::Child, home: &Path, open_session: b
     };
     let answer = wait_for(1, Duration::from_secs(20)).context("initialize")?;
     let supports_load = answer.pointer("/result/agentCapabilities/loadSession").and_then(|b| b.as_bool()).unwrap_or(false);
-    let methods = answer.pointer("/result/authMethods").and_then(|m| m.as_array()).into_iter().flatten().filter_map(|m| Some(AuthMethodInfo {
-        id: m.get("id").and_then(|v| v.as_str())?.to_string(),
-        name: m.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-        description: m.get("description").and_then(|v| v.as_str()).map(str::to_string),
-    })).collect();
+    let methods = answer
+        .pointer("/result/authMethods")
+        .and_then(|m| m.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            Some(AuthMethodInfo {
+                id: m.get("id").and_then(|v| v.as_str())?.to_string(),
+                name: m.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                description: m.get("description").and_then(|v| v.as_str()).map(str::to_string),
+            })
+        })
+        .collect();
     if open_session {
         let new = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "session/new", "params": { "cwd": home, "mcpServers": [] }});
         let _ = writeln!(stdin, "{new}");
@@ -1099,7 +1132,14 @@ pub fn discover(home: &Path, agent: &Agent, log: &mut dyn FnMut(String)) -> Resu
     discover_into(home, &agent.id, &version, &agent.command, &agent.env, log).map(|(d, _)| d)
 }
 
-fn discover_into(home: &Path, id: &str, version: &str, command: &[String], env: &BTreeMap<String, String>, log: &mut dyn FnMut(String)) -> Result<(Discovery, bool)> {
+fn discover_into(
+    home: &Path,
+    id: &str,
+    version: &str,
+    command: &[String],
+    env: &BTreeMap<String, String>,
+    log: &mut dyn FnMut(String),
+) -> Result<(Discovery, bool)> {
     let dir = tools_dir(home).join(id);
     std::fs::create_dir_all(&dir)?;
     let scratch = dir.join("probe-home");
@@ -1145,7 +1185,10 @@ fn discover_into(home: &Path, id: &str, version: &str, command: &[String], env: 
 fn remove_empty_chain(scratch: &Path, rel: &Path) {
     let mut p = scratch.join(rel);
     while p != scratch && std::fs::remove_dir(&p).is_ok() {
-        match p.parent() { Some(parent) => p = parent.to_path_buf(), None => break }
+        match p.parent() {
+            Some(parent) => p = parent.to_path_buf(),
+            None => break,
+        }
     }
 }
 
@@ -1153,8 +1196,23 @@ fn remove_empty_chain(scratch: &Path, rel: &Path) {
 /// shared parent `home_paths` refuses).
 const CONTAINERS: &[&str] = &[".config", ".local", ".local/share", ".local/state"];
 /// Never an agent's persistent state: tool caches (session-private already), shell leftovers.
-const IGNORED: &[&str] = &[".cache", ".npm", ".bun", ".yarn", ".pnpm-store", ".local/bin", ".local/share/pnpm", ".local/share/Trash",
-    ".bash_history", ".node_repl_history", ".python_history", ".lesshst", ".wget-hsts", ".Xauthority", ".sudo_as_admin_successful"];
+const IGNORED: &[&str] = &[
+    ".cache",
+    ".npm",
+    ".bun",
+    ".yarn",
+    ".pnpm-store",
+    ".local/bin",
+    ".local/share/pnpm",
+    ".local/share/Trash",
+    ".bash_history",
+    ".node_repl_history",
+    ".python_history",
+    ".lesshst",
+    ".wget-hsts",
+    ".Xauthority",
+    ".sudo_as_admin_successful",
+];
 
 /// The proposals in a home tree an agent wrote: its top-level entries, and inside the container
 /// directories their children. A directory holding nothing but one directory stands for that
@@ -1185,9 +1243,15 @@ pub fn proposals_from(scratch: &Path, real_home: &Path) -> Vec<Proposal> {
                 walk(scratch, real_home, &child, out);
                 continue;
             }
-            let kind = if meta.is_dir() { agents::HomePathKind::Directory } else if meta.is_file() { agents::HomePathKind::File } else { continue };
-            let initial_content = (kind == agents::HomePathKind::File && meta.len() <= MAX_INITIAL_CONTENT)
-                .then(|| std::fs::read_to_string(entry.path()).ok()).flatten();
+            let kind = if meta.is_dir() {
+                agents::HomePathKind::Directory
+            } else if meta.is_file() {
+                agents::HomePathKind::File
+            } else {
+                continue;
+            };
+            let initial_content =
+                (kind == agents::HomePathKind::File && meta.len() <= MAX_INITIAL_CONTENT).then(|| std::fs::read_to_string(entry.path()).ok()).flatten();
             let mut child = child;
             if kind == agents::HomePathKind::Directory {
                 while let Some(only) = single_child_dir(&scratch.join(&child)) {
@@ -1208,7 +1272,8 @@ pub fn proposals_from(scratch: &Path, real_home: &Path) -> Vec<Proposal> {
 fn incidental(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     [".log", ".sqlite", ".sqlite-wal", ".sqlite-shm", ".db", ".db-journal", ".tmp", ".lock", ".pid"].iter().any(|e| lower.ends_with(e))
-        || lower.starts_with("tmp") || lower.contains(".log.")
+        || lower.starts_with("tmp")
+        || lower.contains(".log.")
 }
 
 /// The regular files under the proposed directories in `scratch`, relative to the home: what a
@@ -1249,7 +1314,13 @@ mod discovery_tests {
         let dir = std::env::temp_dir().join(format!("sill-registry-cmd-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let dist = |cmd: &str, archive: &str| super::BinaryDist { archive: archive.into(), cmd: cmd.into(), sha256: Some("00".into()), args: vec![], env: Default::default() };
+        let dist = |cmd: &str, archive: &str| super::BinaryDist {
+            archive: archive.into(),
+            cmd: cmd.into(),
+            sha256: Some("00".into()),
+            args: vec![],
+            env: Default::default(),
+        };
         // refused before anything is downloaded
         for cmd in ["../../../.bashrc", "/etc/cron.d/x", "a/../../b", ""] {
             let err = super::install_binary(&dir, &dist(cmd, "https://example.invalid/agent"), &mut |_| {}).unwrap_err();
@@ -1270,7 +1341,16 @@ mod discovery_tests {
         let _ = fs::remove_dir_all(&t);
         let scratch = t.join("scratch");
         let real = t.join("real");
-        for d in [".antigravity/logs", ".config/antigravity", ".config/sill", ".local/share/agent", ".local/state/sill/tools/x", ".cache/stuff", ".npm/_cacache", ".local/bin"] {
+        for d in [
+            ".antigravity/logs",
+            ".config/antigravity",
+            ".config/sill",
+            ".local/share/agent",
+            ".local/state/sill/tools/x",
+            ".cache/stuff",
+            ".npm/_cacache",
+            ".local/bin",
+        ] {
             fs::create_dir_all(scratch.join(d)).unwrap();
         }
         fs::write(scratch.join(".antigravity/settings.json"), "{}").unwrap();
@@ -1327,7 +1407,12 @@ mod discovery_tests {
         let mut a = agents::builtin().remove(0);
         a.login_files.clear();
         a.home_env = None;
-        a.home_paths = Some(proposals_from(&t.join("s"), &t.join("none")).iter().map(|p| agents::HomePath { path: p.path.clone(), kind: p.kind, initial_content: p.initial_content.clone() }).collect());
+        a.home_paths = Some(
+            proposals_from(&t.join("s"), &t.join("none"))
+                .iter()
+                .map(|p| agents::HomePath { path: p.path.clone(), kind: p.kind, initial_content: p.initial_content.clone() })
+                .collect(),
+        );
         a.validate().unwrap();
         fs::remove_dir_all(&t).unwrap();
     }
@@ -1343,7 +1428,15 @@ mod platform_optional_tests {
         let t = tempdir();
         let sdk = t.join("node_modules/@acme/sdk");
         fs::create_dir_all(&sdk).unwrap();
-        let tag = format!("{}-{}", std::env::consts::OS, match std::env::consts::ARCH { "x86_64" => "x64", "aarch64" => "arm64", o => o });
+        let tag = format!(
+            "{}-{}",
+            std::env::consts::OS,
+            match std::env::consts::ARCH {
+                "x86_64" => "x64",
+                "aarch64" => "arm64",
+                o => o,
+            }
+        );
         fs::write(
             sdk.join("package.json"),
             format!(r#"{{"name":"@acme/sdk","optionalDependencies":{{"@acme/sdk-{tag}":"1","@acme/sdk-{tag}-musl":"1","@acme/sdk-darwin-arm64":"1"}}}}"#),
@@ -1498,7 +1591,8 @@ mod snapshot_tests {
         let entry: Entry = serde_json::from_value(serde_json::json!({
             "id": "kimi-code", "name": "Kimi Code", "version": "2.5.2",
             "distribution": {"npx": {"package": "@moonshot-ai/kimi-code@2.5.2"}}
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(is_tested(&entry.id));
         assert_eq!(builtin_for(&entry), Some("kimi-code"));
         let agent = agents::builtin().into_iter().find(|a| a.id == "kimi-code").unwrap();

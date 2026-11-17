@@ -97,10 +97,7 @@ impl link::Screen for Feed {
         let mut term = self.term.lock();
         term.resize(TermSize::new(cols as usize, rows as usize));
         if discarded {
-            self.parser.advance(
-                &mut *term,
-                b"\x1b[2m[earlier output was not kept]\x1b[0m\r\n",
-            );
+            self.parser.advance(&mut *term, b"\x1b[2m[earlier output was not kept]\x1b[0m\r\n");
         }
     }
 
@@ -129,26 +126,13 @@ pub struct Pane {
 
 impl Pane {
     /// A pane whose terminal `connect` opens (or finds) off the GUI thread.
-    pub fn open(
-        cols: u16,
-        rows: u16,
-        connect: impl FnOnce(u16, u16) -> anyhow::Result<Connection> + Send + 'static,
-    ) -> (Self, async_channel::Receiver<Event>) {
+    pub fn open(cols: u16, rows: u16, connect: impl FnOnce(u16, u16) -> anyhow::Result<Connection> + Send + 'static) -> (Self, async_channel::Receiver<Event>) {
         let replies = Arc::new(OnceLock::new());
         let size = TermSize::new(cols as usize, rows as usize);
-        let term = Arc::new(FairMutex::new(Term::new(
-            Config::default(),
-            &size,
-            Listener(replies.clone()),
-        )));
+        let term = Arc::new(FairMutex::new(Term::new(Config::default(), &size, Listener(replies.clone()))));
         let pending = Arc::new(AtomicBool::new(false));
         let (events, receiver) = async_channel::unbounded();
-        let feed = Feed {
-            term: term.clone(),
-            parser: Processor::new(),
-            pending: pending.clone(),
-            events: events.clone(),
-        };
+        let feed = Feed { term: term.clone(), parser: Processor::new(), pending: pending.clone(), events: events.clone() };
         let link = Link::open(cols, rows, connect, feed, move |event| {
             let event = match event {
                 link::Event::Opened => Event::Opened,
@@ -158,17 +142,7 @@ impl Pane {
             events.send_blocking(event).is_ok()
         });
         let _ = replies.set(link.replies());
-        let pane = Self {
-            term,
-            link,
-            pending,
-            cols,
-            rows,
-            status: Status::Opening,
-            focused: true,
-            pasted: None,
-            cache: canvas::Cache::new(),
-        };
+        let pane = Self { term, link, pending, cols, rows, status: Status::Opening, focused: true, pasted: None, cache: canvas::Cache::new() };
         (pane, receiver)
     }
 
@@ -193,8 +167,7 @@ impl Pane {
             Action::Scroll(lines) => self.term.lock().scroll_display(Scroll::Delta(lines)),
             Action::Press(point, side) => {
                 self.focused = true;
-                self.term.lock().selection =
-                    Some(Selection::new(SelectionType::Simple, point, side));
+                self.term.lock().selection = Some(Selection::new(SelectionType::Simple, point, side));
             }
             Action::Drag(point, side) => {
                 if let Some(selection) = &mut self.term.lock().selection {
@@ -238,9 +211,7 @@ impl Pane {
             return;
         }
         (self.cols, self.rows) = (cols, rows);
-        self.term
-            .lock()
-            .resize(TermSize::new(cols as usize, rows as usize));
+        self.term.lock().resize(TermSize::new(cols as usize, rows as usize));
         self.link.resize(cols, rows);
         self.cache.clear();
     }
@@ -251,10 +222,7 @@ impl Pane {
     }
 
     pub fn selection(&self) -> Option<String> {
-        self.term
-            .lock()
-            .selection_to_string()
-            .filter(|s| !s.is_empty())
+        self.term.lock().selection_to_string().filter(|s| !s.is_empty())
     }
 
     /// The visible screen as text, one line per row (tests and the snapshot check).
@@ -265,11 +233,7 @@ impl Pane {
         (0..grid.screen_lines() as i32)
             .map(|line| {
                 let row = &grid[Line(line)];
-                (0..grid.columns())
-                    .map(|c| row[Column(c)].c)
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string()
+                (0..grid.columns()).map(|c| row[Column(c)].c).collect::<String>().trim_end().to_string()
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -295,63 +259,56 @@ pub fn demo_shell(cols: u16, rows: u16) -> anyhow::Result<Connection> {
     use std::os::unix::net::UnixStream;
     const PROMPT: &str = "\x1b[32mdemo@jail\x1b[0m:\x1b[34m~/project\x1b[0m$ ";
     let (ours, mut theirs) = UnixStream::pair()?;
-    std::thread::Builder::new()
-        .name("sill-gui-demo-shell".into())
-        .spawn(move || {
-            let mut line = String::new();
-            let mut bytes = [0u8; 1024];
-            let _ = write!(
-                theirs,
-                "\x1b[2mA pretend shell: attach to a session for a real one.\x1b[0m\r\n{PROMPT}"
-            );
-            while let Ok(n) = theirs.read(&mut bytes) {
-                if n == 0 {
-                    break;
-                }
-                let mut reply = String::new();
-                for &b in &bytes[..n] {
-                    match b {
-                        b'\r' => {
-                            reply.push_str("\r\n");
-                            match line.trim() {
-                                "" => {}
-                                "exit" => {
-                                    let _ = theirs.write_all(reply.as_bytes());
-                                    return;
-                                }
-                                "ls" => reply.push_str(
-                                    "\x1b[1;34msrc\x1b[0m  \x1b[1;34mtests\x1b[0m  Cargo.toml  \
+    std::thread::Builder::new().name("sill-gui-demo-shell".into()).spawn(move || {
+        let mut line = String::new();
+        let mut bytes = [0u8; 1024];
+        let _ = write!(theirs, "\x1b[2mA pretend shell: attach to a session for a real one.\x1b[0m\r\n{PROMPT}");
+        while let Ok(n) = theirs.read(&mut bytes) {
+            if n == 0 {
+                break;
+            }
+            let mut reply = String::new();
+            for &b in &bytes[..n] {
+                match b {
+                    b'\r' => {
+                        reply.push_str("\r\n");
+                        match line.trim() {
+                            "" => {}
+                            "exit" => {
+                                let _ = theirs.write_all(reply.as_bytes());
+                                return;
+                            }
+                            "ls" => reply.push_str(
+                                "\x1b[1;34msrc\x1b[0m  \x1b[1;34mtests\x1b[0m  Cargo.toml  \
                                      README.md  \x1b[1;32mbuild.sh\x1b[0m\r\n",
-                                ),
-                                other => reply.push_str(&format!(
-                                    "\x1b[31m{other}\x1b[0m: not in the demo\r\n"
-                                )),
-                            }
-                            line.clear();
-                            reply.push_str(PROMPT);
+                            ),
+                            other => reply.push_str(&format!("\x1b[31m{other}\x1b[0m: not in the demo\r\n")),
                         }
-                        0x7f | 0x08 => {
-                            if line.pop().is_some() {
-                                reply.push_str("\x08 \x08");
-                            }
-                        }
-                        0x03 => {
-                            line.clear();
-                            reply.push_str("^C\r\n");
-                            reply.push_str(PROMPT);
-                        }
-                        b if b >= 0x20 && b != 0x7f => {
-                            line.push(b as char);
-                            reply.push(b as char);
-                        }
-                        _ => {}
+                        line.clear();
+                        reply.push_str(PROMPT);
                     }
-                }
-                if theirs.write_all(reply.as_bytes()).is_err() {
-                    break;
+                    0x7f | 0x08 => {
+                        if line.pop().is_some() {
+                            reply.push_str("\x08 \x08");
+                        }
+                    }
+                    0x03 => {
+                        line.clear();
+                        reply.push_str("^C\r\n");
+                        reply.push_str(PROMPT);
+                    }
+                    b if b >= 0x20 && b != 0x7f => {
+                        line.push(b as char);
+                        reply.push(b as char);
+                    }
+                    _ => {}
                 }
             }
-        })?;
+            if theirs.write_all(reply.as_bytes()).is_err() {
+                break;
+            }
+        }
+    })?;
     let close = ours.try_clone()?;
     Ok(Connection {
         discarded: false,
@@ -393,20 +350,13 @@ pub struct Gesture {
 impl canvas::Program<Action> for Pane {
     type State = Gesture;
 
-    fn update(
-        &self,
-        state: &mut Gesture,
-        event: &canvas::Event,
-        bounds: Rectangle,
-        cursor: mouse::Cursor,
-    ) -> Option<canvas::Action<Action>> {
+    fn update(&self, state: &mut Gesture, event: &canvas::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action<Action>> {
         use iced::Event as E;
         let publish = |a| Some(canvas::Action::publish(a).and_capture());
         match event {
             E::Window(iced::window::Event::RedrawRequested(_)) => {
                 let (cols, rows) = grid_size(bounds.size());
-                ((cols, rows) != (self.cols, self.rows))
-                    .then(|| canvas::Action::publish(Action::Resize(cols, rows)))
+                ((cols, rows) != (self.cols, self.rows)).then(|| canvas::Action::publish(Action::Resize(cols, rows)))
             }
             E::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
                 state.modifiers = *modifiers;
@@ -421,9 +371,7 @@ impl canvas::Program<Action> for Pane {
             {
                 publish(Action::Open(url))
             }
-            E::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle))
-                if cursor.is_over(bounds) && self.status == Status::Running =>
-            {
+            E::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle)) if cursor.is_over(bounds) && self.status == Status::Running => {
                 publish(Action::PastePrimary)
             }
             E::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
@@ -459,42 +407,24 @@ impl canvas::Program<Action> for Pane {
                 if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
                     // a full-screen program (less, vim) scrolls by its arrow keys
                     let key = if lines > 0 { b'A' } else { b'B' };
-                    let prefix: &[u8] = if mode.contains(TermMode::APP_CURSOR) {
-                        b"\x1bO"
-                    } else {
-                        b"\x1b["
-                    };
-                    let bytes = (0..lines.abs())
-                        .flat_map(|_| prefix.iter().copied().chain([key]))
-                        .collect();
+                    let prefix: &[u8] = if mode.contains(TermMode::APP_CURSOR) { b"\x1bO" } else { b"\x1b[" };
+                    let bytes = (0..lines.abs()).flat_map(|_| prefix.iter().copied().chain([key])).collect();
                     publish(Action::Input(bytes))
                 } else {
                     publish(Action::Scroll(lines))
                 }
             }
-            E::Keyboard(keyboard::Event::KeyPressed {
-                key,
-                modifiers,
-                text,
-                ..
-            }) if self.focused && self.status == Status::Running => {
+            E::Keyboard(keyboard::Event::KeyPressed { key, modifiers, text, .. }) if self.focused && self.status == Status::Running => {
                 match key.as_ref() {
                     _ if let Some(action) = clipboard_key(key, *modifiers) => publish(action),
                     // other Cmd chords are the window's shortcuts, never the shell's input
                     _ if cfg!(target_os = "macos") && modifiers.logo() => None,
-                    Key::Named(Named::Insert) if modifiers.shift() && !modifiers.control() => {
-                        publish(Action::Paste)
-                    }
-                    Key::Named(Named::PageUp) if modifiers.shift() => {
-                        publish(Action::Scroll(self.rows as i32 - 1))
-                    }
-                    Key::Named(Named::PageDown) if modifiers.shift() => {
-                        publish(Action::Scroll(1 - self.rows as i32))
-                    }
+                    Key::Named(Named::Insert) if modifiers.shift() && !modifiers.control() => publish(Action::Paste),
+                    Key::Named(Named::PageUp) if modifiers.shift() => publish(Action::Scroll(self.rows as i32 - 1)),
+                    Key::Named(Named::PageDown) if modifiers.shift() => publish(Action::Scroll(1 - self.rows as i32)),
                     _ => {
                         let mode = *self.term.lock().mode();
-                        encode(key, *modifiers, text.as_deref(), mode)
-                            .and_then(|b| publish(Action::Input(b)))
+                        encode(key, *modifiers, text.as_deref(), mode).and_then(|b| publish(Action::Input(b)))
                     }
                 }
             }
@@ -502,14 +432,7 @@ impl canvas::Program<Action> for Pane {
         }
     }
 
-    fn draw(
-        &self,
-        _state: &Gesture,
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<Geometry> {
+    fn draw(&self, _state: &Gesture, renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
         let term = self.term.lock();
         let screen = self.cache.draw(renderer, bounds.size(), |frame| {
             frame.fill_rectangle(iced::Point::ORIGIN, frame.size(), P.bg);
@@ -522,23 +445,14 @@ impl canvas::Program<Action> for Pane {
         vec![screen, cursor.into_geometry()]
     }
 
-    fn mouse_interaction(
-        &self,
-        state: &Gesture,
-        bounds: Rectangle,
-        cursor: mouse::Cursor,
-    ) -> mouse::Interaction {
+    fn mouse_interaction(&self, state: &Gesture, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
         if state.modifiers.command()
             && let Some(at) = cursor.position_in(bounds)
             && self.link_at(self.cell_at(at).0).is_some()
         {
             return mouse::Interaction::Pointer;
         }
-        if cursor.is_over(bounds) {
-            mouse::Interaction::Text
-        } else {
-            mouse::Interaction::default()
-        }
+        if cursor.is_over(bounds) { mouse::Interaction::Text } else { mouse::Interaction::default() }
     }
 }
 
@@ -550,11 +464,7 @@ impl Pane {
         let y = ((at.y - PAD) / CELL_H).max(0.0);
         let column = (x as usize).min(term.columns().saturating_sub(1));
         let row = (y as usize).min(term.screen_lines().saturating_sub(1));
-        let side = if x.fract() < 0.5 {
-            Side::Left
-        } else {
-            Side::Right
-        };
+        let side = if x.fract() < 0.5 { Side::Left } else { Side::Right };
         let line = Line(row as i32 - term.grid().display_offset() as i32);
         (Point::new(line, Column(column)), side)
     }
@@ -571,11 +481,7 @@ impl Pane {
             return web(link.uri());
         }
         let columns = term.columns();
-        let wraps = |line: Line| {
-            grid[line][Column(columns - 1)]
-                .flags
-                .contains(Flags::WRAPLINE)
-        };
+        let wraps = |line: Line| grid[line][Column(columns - 1)].flags.contains(Flags::WRAPLINE);
         let mut first = point.line;
         while first > grid.topmost_line() && wraps(Line(first.0 - 1)) {
             first = Line(first.0 - 1);
@@ -695,17 +601,11 @@ pub fn open_link(url: String) {
     };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let mut command = std::process::Command::new("xdg-open");
-    command
-        .arg(&url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+    command.arg(&url).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     match command.spawn() {
         // reaped off the GUI thread, so it leaves no zombie
         Ok(mut child) => {
-            let _ = std::thread::Builder::new()
-                .name("sill-gui-open".into())
-                .spawn(move || child.wait());
+            let _ = std::thread::Builder::new().name("sill-gui-open".into()).spawn(move || child.wait());
         }
         Err(e) => eprintln!("sill-gui: opening {url}: {e}"),
     }
@@ -746,11 +646,7 @@ fn draw_cells(frame: &mut Frame, term: &Term<Listener>) {
         if selection.is_some_and(|s| s.contains(cell.point)) {
             bg = style::alpha(P.accent, 0.35);
         }
-        let width = if flags.contains(Flags::WIDE_CHAR) {
-            2.0
-        } else {
-            1.0
-        };
+        let width = if flags.contains(Flags::WIDE_CHAR) { 2.0 } else { 1.0 };
         if bg != P.bg {
             frame.fill_rectangle(origin(line, column), Size::new(CELL_W * width, CELL_H), bg);
         }
@@ -764,9 +660,7 @@ fn draw_cells(frame: &mut Frame, term: &Term<Listener>) {
         }
         let hidden = flags.contains(Flags::HIDDEN) || cell.c == ' ' || cell.c == '\0';
         let plain = cell.c.is_ascii() && width == 1.0 && cell.zerowidth().is_none();
-        let joins = run.as_ref().is_some_and(|(l, c, s, f, b)| {
-            *l == line && c + s.chars().count() == column && *f == fg && *b == bold
-        });
+        let joins = run.as_ref().is_some_and(|(l, c, s, f, b)| *l == line && c + s.chars().count() == column && *f == fg && *b == bold);
         if hidden || !plain || !joins {
             flush(frame, &mut run);
         }
@@ -788,14 +682,7 @@ fn draw_cells(frame: &mut Frame, term: &Term<Listener>) {
 }
 
 fn put(frame: &mut Frame, line: i32, column: usize, content: String, color: Color, bold: bool) {
-    let font = if bold {
-        Font {
-            weight: iced::font::Weight::Bold,
-            ..MONO
-        }
-    } else {
-        MONO
-    };
+    let font = if bold { Font { weight: iced::font::Weight::Bold, ..MONO } } else { MONO };
     frame.fill_text(canvas::Text {
         content,
         position: origin(line, column),
@@ -817,41 +704,20 @@ fn draw_cursor(frame: &mut Frame, term: &Term<Listener>, focused: bool) {
     let point = content.cursor.point;
     let at = origin(point.line.0, point.column.0);
     let cell = &term.grid()[point];
-    let width = if cell.flags.contains(Flags::WIDE_CHAR) {
-        2.0
-    } else {
-        1.0
-    };
+    let width = if cell.flags.contains(Flags::WIDE_CHAR) { 2.0 } else { 1.0 };
     let size = Size::new(CELL_W * width, CELL_H);
     match content.cursor.shape {
         CursorShape::Hidden => {}
         _ if !focused => {
-            let path = canvas::Path::rectangle(
-                at + iced::Vector::new(0.5, 0.5),
-                size - Size::new(1.0, 1.0),
-            );
-            frame.stroke(
-                &path,
-                Stroke::default().with_color(P.accent).with_width(1.0),
-            );
+            let path = canvas::Path::rectangle(at + iced::Vector::new(0.5, 0.5), size - Size::new(1.0, 1.0));
+            frame.stroke(&path, Stroke::default().with_color(P.accent).with_width(1.0));
         }
         CursorShape::Beam => frame.fill_rectangle(at, Size::new(2.0, CELL_H), P.accent),
-        CursorShape::Underline => frame.fill_rectangle(
-            at + iced::Vector::new(0.0, CELL_H - 2.0),
-            Size::new(size.width, 2.0),
-            P.accent,
-        ),
+        CursorShape::Underline => frame.fill_rectangle(at + iced::Vector::new(0.0, CELL_H - 2.0), Size::new(size.width, 2.0), P.accent),
         _ => {
             frame.fill_rectangle(at, size, P.accent);
             if cell.c != ' ' && cell.c != '\0' {
-                put(
-                    frame,
-                    point.line.0,
-                    point.column.0,
-                    cell.c.to_string(),
-                    P.bg,
-                    false,
-                );
+                put(frame, point.line.0, point.column.0, cell.c.to_string(), P.bg, false);
             }
         }
     }
@@ -862,17 +728,9 @@ fn draw_cursor(frame: &mut Frame, term: &Term<Listener>, focused: bool) {
 /// The 16 ANSI slots mapped onto the theme: red is the error colour, green
 /// success, yellow warning, blue and magenta the accent, cyan the link colour.
 fn ansi16(index: usize) -> Color {
-    let normal = [
-        P.surface, P.error, P.success, P.warning, P.accent, P.accent, P.link, P.fg,
-    ];
-    let bright = [
-        P.fg_dim, P.error, P.success, P.warning, P.accent, P.accent, P.link, P.fg,
-    ];
-    if index < 8 {
-        normal[index]
-    } else {
-        bright[index - 8]
-    }
+    let normal = [P.surface, P.error, P.success, P.warning, P.accent, P.accent, P.link, P.fg];
+    let bright = [P.fg_dim, P.error, P.success, P.warning, P.accent, P.accent, P.link, P.fg];
+    if index < 8 { normal[index] } else { bright[index - 8] }
 }
 
 fn from_rgb(c: Rgb) -> Color {
@@ -929,16 +787,8 @@ fn color(c: Ansi, colors: &Colors) -> Color {
 
 /// The bytes a key sends, as xterm does: cursor keys follow the application-cursor mode and carry
 /// their modifiers (`ESC [1;5A` for Ctrl+Up), Ctrl+letter is its control code, Alt prefixes ESC.
-pub fn encode(
-    key: &Key,
-    modifiers: Modifiers,
-    text: Option<&str>,
-    mode: TermMode,
-) -> Option<Vec<u8>> {
-    let modifier = 1
-        + u8::from(modifiers.shift())
-        + 2 * u8::from(modifiers.alt())
-        + 4 * u8::from(modifiers.control());
+pub fn encode(key: &Key, modifiers: Modifiers, text: Option<&str>, mode: TermMode) -> Option<Vec<u8>> {
+    let modifier = 1 + u8::from(modifiers.shift()) + 2 * u8::from(modifiers.alt()) + 4 * u8::from(modifiers.control());
     let esc = |s: &str| {
         let mut b = Vec::new();
         if modifiers.alt() {
@@ -957,22 +807,8 @@ pub fn encode(
         }
         .into_bytes()
     };
-    let tilde = |n: u8| {
-        if modifier > 1 {
-            format!("\x1b[{n};{modifier}~")
-        } else {
-            format!("\x1b[{n}~")
-        }
-        .into_bytes()
-    };
-    let function = |c: char| {
-        if modifier > 1 {
-            format!("\x1b[1;{modifier}{c}")
-        } else {
-            format!("\x1bO{c}")
-        }
-        .into_bytes()
-    };
+    let tilde = |n: u8| if modifier > 1 { format!("\x1b[{n};{modifier}~") } else { format!("\x1b[{n}~") }.into_bytes();
+    let function = |c: char| if modifier > 1 { format!("\x1b[1;{modifier}{c}") } else { format!("\x1bO{c}") }.into_bytes();
     if let Key::Named(named) = key {
         let bytes = match named {
             Named::Enter => esc("\r"),
@@ -1027,8 +863,7 @@ pub fn encode(
         bytes.push(code);
         return Some(bytes);
     }
-    text.filter(|t| !t.is_empty() && !t.chars().any(char::is_control))
-        .map(esc)
+    text.filter(|t| !t.is_empty() && !t.chars().any(char::is_control)).map(esc)
 }
 
 #[cfg(all(test, unix))]
@@ -1043,24 +878,12 @@ mod link_tests {
     fn a_link_is_found_where_it_is_pressed() {
         let line = chars("Browser didn't open? Use https://claude.ai/oauth?code=1&state=x. Then");
         let on = line.iter().position(|c| *c == 'o').unwrap() + 30;
-        assert_eq!(
-            link_in(&line, on).as_deref(),
-            Some("https://claude.ai/oauth?code=1&state=x"),
-            "the sentence's full stop is not the link's"
-        );
+        assert_eq!(link_in(&line, on).as_deref(), Some("https://claude.ai/oauth?code=1&state=x"), "the sentence's full stop is not the link's");
         assert_eq!(link_in(&line, 3), None, "a press on the words before it");
         let run_in = chars("(see:https://a.example/x)");
-        assert_eq!(
-            link_in(&run_in, 2),
-            None,
-            "text running into it is not the link"
-        );
+        assert_eq!(link_in(&run_in, 2), None, "text running into it is not the link");
         assert_eq!(link_in(&run_in, 10).as_deref(), Some("https://a.example/x"));
-        assert_eq!(
-            link_in(&chars("file:///etc/passwd"), 3),
-            None,
-            "web links only"
-        );
+        assert_eq!(link_in(&chars("file:///etc/passwd"), 3), None, "web links only");
         assert_eq!(web("javascript:alert(1)"), None);
     }
 
@@ -1069,25 +892,14 @@ mod link_tests {
         let (mut app, _) = crate::App::new(true, None);
         let old_events = app.open_terminal("demo");
         let old = app.views["demo"].terminal_generation;
-        app.views
-            .insert("demo".into(), crate::SessionView::new("demo"));
+        app.views.insert("demo".into(), crate::SessionView::new("demo"));
         let new_events = app.open_terminal("demo");
         let current = app.views["demo"].terminal_generation;
         assert_ne!(old, current);
         let _ = app.update(crate::Message::Terminal("demo".into(), old, Event::Ended));
-        assert_eq!(
-            app.views["demo"].terminal.as_ref().unwrap().status,
-            Status::Opening
-        );
-        let _ = app.update(crate::Message::Terminal(
-            "demo".into(),
-            current,
-            Event::Opened,
-        ));
-        assert_eq!(
-            app.views["demo"].terminal.as_ref().unwrap().status,
-            Status::Running
-        );
+        assert_eq!(app.views["demo"].terminal.as_ref().unwrap().status, Status::Opening);
+        let _ = app.update(crate::Message::Terminal("demo".into(), current, Event::Opened));
+        assert_eq!(app.views["demo"].terminal.as_ref().unwrap().status, Status::Running);
         drop((old_events, new_events));
     }
 
@@ -1099,38 +911,17 @@ mod link_tests {
         // Replacing/switching the shell does not redirect the pending paste.
         let second_events = app.open_terminal("demo");
         let second = app.views["demo"].terminal_generation;
-        let _ = app.update(crate::Message::TermPaste(
-            "demo".into(),
-            first,
-            Some("old shell".into()),
-        ));
+        let _ = app.update(crate::Message::TermPaste("demo".into(), first, Some("old shell".into())));
         assert_eq!(app.views["demo"].terminal.as_ref().unwrap().pasted, None);
         // Switching tabs also cannot deliver text into the newly selected terminal.
-        app.views
-            .insert("other".into(), crate::SessionView::new("other"));
+        app.views.insert("other".into(), crate::SessionView::new("other"));
         app.selected = Some("other".into());
         let other_events = app.open_terminal("other");
-        let _ = app.update(crate::Message::TermPaste(
-            "demo".into(),
-            second,
-            Some("old tab".into()),
-        ));
+        let _ = app.update(crate::Message::TermPaste("demo".into(), second, Some("old tab".into())));
         assert_eq!(app.views["other"].terminal.as_ref().unwrap().pasted, None);
         app.selected = Some("demo".into());
-        let _ = app.update(crate::Message::TermPaste(
-            "demo".into(),
-            second,
-            Some("current".into()),
-        ));
-        assert_eq!(
-            app.views["demo"]
-                .terminal
-                .as_ref()
-                .unwrap()
-                .pasted
-                .as_deref(),
-            Some("current")
-        );
+        let _ = app.update(crate::Message::TermPaste("demo".into(), second, Some("current".into())));
+        assert_eq!(app.views["demo"].terminal.as_ref().unwrap().pasted.as_deref(), Some("current"));
         drop((first_events, second_events, other_events));
     }
 
@@ -1149,23 +940,13 @@ mod link_tests {
     /// A login link longer than the pane is wide is one link across its wrapped lines.
     #[test]
     fn a_wrapped_link_is_read_whole() {
-        let url = format!(
-            "https://claude.ai/oauth/authorize?code=true&state={}",
-            "a".repeat(60)
-        );
+        let url = format!("https://claude.ai/oauth/authorize?code=true&state={}", "a".repeat(60));
         let (mut pane, _events) = Pane::open(40, 12, demo_shell);
         crate::tests::settle(&pane, "project$");
         pane.input(url.clone().into_bytes());
         crate::tests::settle(&pane, "aaaa");
         // the prompt line, then the link's rest on the lines under it
-        let line = (0..12)
-            .find(|l| {
-                pane.screen()
-                    .lines()
-                    .nth(*l)
-                    .is_some_and(|t| t.ends_with("aaaa"))
-            })
-            .unwrap();
+        let line = (0..12).find(|l| pane.screen().lines().nth(*l).is_some_and(|t| t.ends_with("aaaa"))).unwrap();
         let found = pane.link_at(Point::new(Line(line as i32), Column(5)));
         assert_eq!(found.as_deref(), Some(url.as_str()));
     }

@@ -12,10 +12,7 @@
 //! pass them (`main.rs` asks iced for an X11 handle only).
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
-use x11rb::protocol::xproto::{
-    AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt, CreateWindowAux, EventMask,
-    PropMode, WindowClass,
-};
+use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt, CreateWindowAux, EventMask, PropMode, WindowClass};
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
@@ -27,51 +24,31 @@ fn connect() -> Option<(RustConnection, usize)> {
 }
 
 fn atom(conn: &RustConnection, name: &[u8]) -> Option<u32> {
-    conn.intern_atom(false, name)
-        .ok()?
-        .reply()
-        .ok()
-        .map(|r| r.atom)
+    conn.intern_atom(false, name).ok()?.reply().ok().map(|r| r.atom)
 }
 
 /// A CARDINAL list property of the root window.
 fn cardinals(conn: &RustConnection, root: u32, name: &[u8]) -> Option<Vec<u32>> {
     let property = atom(conn, name)?;
-    let reply = conn
-        .get_property(false, root, property, AtomEnum::CARDINAL, 0, 1024)
-        .ok()?
-        .reply()
-        .ok()?;
+    let reply = conn.get_property(false, root, property, AtomEnum::CARDINAL, 0, 1024).ok()?.reply().ok()?;
     Some(reply.value32()?.collect())
 }
 
 fn rects(values: &[u32]) -> Vec<Rect> {
     let (areas, _) = values.as_chunks::<4>();
-    areas
-        .iter()
-        .map(|&[x, y, width, height]| Rect {
-            x: x as i32,
-            y: y as i32,
-            width,
-            height,
-        })
-        .collect()
+    areas.iter().map(|&[x, y, width, height]| Rect { x: x as i32, y: y as i32, width, height }).collect()
 }
 
 /// The current desktop's work areas: one per monitor where the window manager gives them
 /// (`_GTK_WORKAREAS_D<n>`, Mutter's and Muffin's), else the one over all (`_NET_WORKAREA`).
 fn work_areas(conn: &RustConnection, root: u32) -> Vec<Rect> {
-    let desktop = cardinals(conn, root, b"_NET_CURRENT_DESKTOP")
-        .and_then(|v| v.first().copied())
-        .unwrap_or(0) as usize;
+    let desktop = cardinals(conn, root, b"_NET_CURRENT_DESKTOP").and_then(|v| v.first().copied()).unwrap_or(0) as usize;
     if let Some(areas) = cardinals(conn, root, format!("_GTK_WORKAREAS_D{desktop}").as_bytes())
         && !areas.is_empty()
     {
         return rects(&areas);
     }
-    cardinals(conn, root, b"_NET_WORKAREA")
-        .map(|v| rects(&v).into_iter().skip(desktop).take(1).collect())
-        .unwrap_or_default()
+    cardinals(conn, root, b"_NET_WORKAREA").map(|v| rects(&v).into_iter().skip(desktop).take(1).collect()).unwrap_or_default()
 }
 
 fn read_displays(conn: &RustConnection, root: u32) -> Option<Vec<Display>> {
@@ -88,18 +65,8 @@ fn read_displays(conn: &RustConnection, root: u32) -> Option<Vec<Display>> {
                 .and_then(|c| c.reply().ok())
                 .map(|r| String::from_utf8_lossy(&r.name).into_owned())
                 .unwrap_or_else(|| format!("{}x{}+{}+{}", m.width, m.height, m.x, m.y));
-            let bounds = Rect {
-                x: m.x as i32,
-                y: m.y as i32,
-                width: m.width as u32,
-                height: m.height as u32,
-            };
-            Display {
-                name,
-                primary: m.primary,
-                bounds,
-                work: crate::geometry::usable(bounds, &areas),
-            }
+            let bounds = Rect { x: m.x as i32, y: m.y as i32, width: m.width as u32, height: m.height as u32 };
+            Display { name, primary: m.primary, bounds, work: crate::geometry::usable(bounds, &areas) }
         })
         .collect::<Vec<_>>();
     (!displays.is_empty()).then_some(displays)
@@ -108,17 +75,8 @@ fn read_displays(conn: &RustConnection, root: u32) -> Option<Vec<Display>> {
 /// Where the window `xid` is on the screen and how large, device pixels.
 fn window_rect(conn: &RustConnection, root: u32, xid: u64) -> Option<Rect> {
     let geometry = conn.get_geometry(xid as u32).ok()?.reply().ok()?;
-    let at = conn
-        .translate_coordinates(xid as u32, root, 0, 0)
-        .ok()?
-        .reply()
-        .ok()?;
-    Some(Rect {
-        x: at.dst_x as i32,
-        y: at.dst_y as i32,
-        width: geometry.width as u32,
-        height: geometry.height as u32,
-    })
+    let at = conn.translate_coordinates(xid as u32, root, 0, 0).ok()?.reply().ok()?;
+    Some(Rect { x: at.dst_x as i32, y: at.dst_y as i32, width: geometry.width as u32, height: geometry.height as u32 })
 }
 
 /// The displays as the desktop has them now.
@@ -143,29 +101,14 @@ pub fn snapshot(xid: u64) -> Option<(Vec<Display>, Option<Rect>)> {
 pub fn place(xid: u64, rect: Rect, limits: Option<Limits>) {
     use x11rb::properties::{WmSizeHints, WmSizeHintsSpecification};
     let Some((conn, _)) = connect() else { return };
-    let mut hints = WmSizeHints::get_normal_hints(&conn, xid as u32)
-        .ok()
-        .and_then(|c| c.reply().ok())
-        .flatten()
-        .unwrap_or_default();
+    let mut hints = WmSizeHints::get_normal_hints(&conn, xid as u32).ok().and_then(|c| c.reply().ok()).flatten().unwrap_or_default();
     let size = |(w, h): (u32, u32)| (w as i32, h as i32);
     hints.position = Some((WmSizeHintsSpecification::UserSpecified, rect.x, rect.y));
-    hints.size = Some((
-        WmSizeHintsSpecification::UserSpecified,
-        rect.width as i32,
-        rect.height as i32,
-    ));
+    hints.size = Some((WmSizeHintsSpecification::UserSpecified, rect.width as i32, rect.height as i32));
     hints.min_size = limits.map(|l| size(l.min));
     hints.max_size = limits.map(|l| size(l.max));
     let _ = hints.set_normal_hints(&conn, xid as u32);
-    let _ = conn.configure_window(
-        xid as u32,
-        &ConfigureWindowAux::new()
-            .x(rect.x)
-            .y(rect.y)
-            .width(rect.width)
-            .height(rect.height),
-    );
+    let _ = conn.configure_window(xid as u32, &ConfigureWindowAux::new().x(rect.x).y(rect.y).width(rect.width).height(rect.height));
     let _ = conn.flush();
 }
 
@@ -179,10 +122,7 @@ pub fn focus(xid: u64) {
     };
     let root = conn.setup().roots[screen].root;
     let time = server_time(&conn, root).unwrap_or(0);
-    let _ = conn.configure_window(
-        xid as u32,
-        &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
-    );
+    let _ = conn.configure_window(xid as u32, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
     let _ = conn.set_input_focus(InputFocus::PARENT, xid as u32, time);
     let _ = conn.flush();
 }
@@ -191,19 +131,8 @@ pub fn focus(xid: u64) {
 fn active_window() -> Option<u64> {
     let (conn, screen) = connect()?;
     let root = conn.setup().roots[screen].root;
-    let atom = conn
-        .intern_atom(false, b"_NET_ACTIVE_WINDOW")
-        .ok()?
-        .reply()
-        .ok()?
-        .atom;
-    conn.get_property(false, root, atom, AtomEnum::WINDOW, 0, 1)
-        .ok()?
-        .reply()
-        .ok()?
-        .value32()?
-        .next()
-        .map(u64::from)
+    let atom = conn.intern_atom(false, b"_NET_ACTIVE_WINDOW").ok()?.reply().ok()?.atom;
+    conn.get_property(false, root, atom, AtomEnum::WINDOW, 0, 1).ok()?.reply().ok()?.value32()?.next().map(u64::from)
 }
 
 /// Is `xid` the window manager's active window?
@@ -215,28 +144,9 @@ pub fn is_active(xid: u64) -> bool {
 /// it. For an activation that no key press of ours dated (`sill toggle` from a desktop shortcut).
 fn server_time(conn: &RustConnection, root: u32) -> Option<u32> {
     let window = conn.generate_id().ok()?;
-    conn.create_window(
-        0,
-        window,
-        root,
-        -1,
-        -1,
-        1,
-        1,
-        0,
-        WindowClass::INPUT_ONLY,
-        0,
-        &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
-    )
-    .ok()?;
-    let atom = conn
-        .intern_atom(false, b"_SILL_TIME")
-        .ok()?
-        .reply()
-        .ok()?
-        .atom;
-    conn.change_property8(PropMode::APPEND, window, atom, AtomEnum::STRING, &[])
-        .ok()?;
+    conn.create_window(0, window, root, -1, -1, 1, 1, 0, WindowClass::INPUT_ONLY, 0, &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE)).ok()?;
+    let atom = conn.intern_atom(false, b"_SILL_TIME").ok()?.reply().ok()?.atom;
+    conn.change_property8(PropMode::APPEND, window, atom, AtomEnum::STRING, &[]).ok()?;
     conn.flush().ok()?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
     let time = loop {
@@ -261,13 +171,7 @@ fn set_user_time(conn: &RustConnection, xid: u64, time: u32) {
     if let Ok(c) = conn.intern_atom(false, b"_NET_WM_USER_TIME")
         && let Ok(r) = c.reply()
     {
-        let _ = conn.change_property32(
-            PropMode::REPLACE,
-            xid as u32,
-            r.atom,
-            AtomEnum::CARDINAL,
-            &[time],
-        );
+        let _ = conn.change_property32(PropMode::REPLACE, xid as u32, r.atom, AtomEnum::CARDINAL, &[time]);
         let _ = conn.flush();
     }
 }
@@ -305,12 +209,7 @@ pub fn activate(xid: u64, time: u32) {
         && let Ok(r) = c.reply()
     {
         let event = ClientMessageEvent::new(32, xid as u32, r.atom, [source, time, 0, 0, 0]);
-        let _ = conn.send_event(
-            false,
-            root,
-            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
-            event,
-        );
+        let _ = conn.send_event(false, root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, event);
         let _ = conn.flush();
     }
 }

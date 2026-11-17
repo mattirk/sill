@@ -1,7 +1,7 @@
 //! Blocking Crosscheck calls for a frontend worker (docs/crosscheck.md). A start is sent once: a
 //! lost connection means reading the workspace's review before deciding to start again.
-use sill_proto::crosscheck as api;
 use crate::actions::Actions;
+use sill_proto::crosscheck as api;
 
 pub fn reviewers(actions: &Actions) -> anyhow::Result<api::Reviewers> {
     actions.reading(|c| c.call("_sill/crosscheck.reviewers", api::Empty {}))
@@ -92,11 +92,26 @@ mod tests {
 
     fn run(state: &str, stale: bool, problems: usize) -> api::Run {
         api::Run {
-            run_id: "run-1".into(), workspace_id: "ws-1".into(), session_id: "session-1".into(), state_tree: "tree".into(), base: "base".into(),
-            state: state.into(), detail: String::new(),
-            reviewers: vec![api::Participant { reviewer: api::Reviewer { name: String::new(), agent: "codex".into(), options: Default::default() }, session_id: None, state: "complete".into(), summary: String::new(), activity: vec![], error: None }],
-            problems: (0..problems).map(|i| api::Problem { id: format!("r0-p{i}"), reviewer_index: 0, title: "A problem.".into(), path: None, line: None, detail: String::new() }).collect(),
-            created_at: "1000".into(), stale,
+            run_id: "run-1".into(),
+            workspace_id: "ws-1".into(),
+            session_id: "session-1".into(),
+            state_tree: "tree".into(),
+            base: "base".into(),
+            state: state.into(),
+            detail: String::new(),
+            reviewers: vec![api::Participant {
+                reviewer: api::Reviewer { name: String::new(), agent: "codex".into(), options: Default::default() },
+                session_id: None,
+                state: "complete".into(),
+                summary: String::new(),
+                activity: vec![],
+                error: None,
+            }],
+            problems: (0..problems)
+                .map(|i| api::Problem { id: format!("r0-p{i}"), reviewer_index: 0, title: "A problem.".into(), path: None, line: None, detail: String::new() })
+                .collect(),
+            created_at: "1000".into(),
+            stale,
         }
     }
 

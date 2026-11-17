@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 struct Temp(PathBuf);
 impl Drop for Temp {
-    fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 fn temp() -> Temp {
     static N: AtomicU32 = AtomicU32::new(0);
@@ -90,7 +92,8 @@ fn changes_during_capture_are_refused_and_output_is_not_created() {
     let output = t.0.join("snapshot");
     let err = capture_with(&source, &base, &output, || {
         std::fs::write(source.join("changed"), "raced\n").unwrap();
-    }).unwrap_err();
+    })
+    .unwrap_err();
     assert!(err.to_string().contains("changed during"));
     assert!(!output.exists());
 }

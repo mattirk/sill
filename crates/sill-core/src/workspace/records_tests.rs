@@ -223,9 +223,12 @@ fn apply_repeatedly_during_the_session() {
     let diff = diff(&f.host, &api::DiffRequest { workspace_id: w.workspace_id.clone(), against: api::Against::Applied, path: None }).unwrap();
     assert!(diff.text.contains("+committed") && diff.text.contains("+uncommitted") && diff.text.contains("+new untracked file"));
     // path by path, committed and uncommitted alike, each with its own diff
-    let listed: Vec<(std::path::PathBuf, &str, &str, &str)> = detail.files.iter().map(|c| (c.path.to_path().unwrap(), c.status.as_str(), c.added.as_str(), c.removed.as_str())).collect();
+    let listed: Vec<(std::path::PathBuf, &str, &str, &str)> =
+        detail.files.iter().map(|c| (c.path.to_path().unwrap(), c.status.as_str(), c.added.as_str(), c.removed.as_str())).collect();
     assert_eq!(listed, [(f.source.join("f1.txt"), "M", "1", "1"), (f.source.join("f2.txt"), "M", "1", "1"), (f.source.join("new.txt"), "A", "1", "0")]);
-    let one = |path: &std::path::Path| super::diff(&f.host, &api::DiffRequest { workspace_id: w.workspace_id.clone(), against: api::Against::Applied, path: Some(HostPath::from_path(path)) });
+    let one = |path: &std::path::Path| {
+        super::diff(&f.host, &api::DiffRequest { workspace_id: w.workspace_id.clone(), against: api::Against::Applied, path: Some(HostPath::from_path(path)) })
+    };
     let only = one(&f.source.join("new.txt")).unwrap().text;
     assert!(only.contains("+new untracked file") && !only.contains("committed"), "{only}");
     assert!(one(&f.source.join("../elsewhere")).is_err(), "not a path of the repository");
@@ -440,7 +443,13 @@ fn a_rebase_finished_in_the_workspace_is_no_longer_shown_as_stopped() {
     // resolved and continued in the workspace, as the agent does
     write(&clone.join("f1.txt"), "both\n");
     git(&clone, &["add", "f1.txt"]);
-    let done = Command::new("git").arg("-C").arg(&clone).args(["-c", "user.name=t", "-c", "user.email=t@t", "rebase", "--continue"]).env("GIT_EDITOR", "true").output().unwrap();
+    let done = Command::new("git")
+        .arg("-C")
+        .arg(&clone)
+        .args(["-c", "user.name=t", "-c", "user.email=t@t", "rebase", "--continue"])
+        .env("GIT_EDITOR", "true")
+        .output()
+        .unwrap();
     assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
     assert_eq!(shown(), None, "finished: Apply");
     let d = get(&f.host, &w.workspace_id).unwrap();
@@ -603,7 +612,12 @@ fn a_workspace_whose_repository_was_replaced_does_not_fail_the_listing() {
     assert_eq!(read(&clone_of(&w).join("f1.txt")), "work\n");
     // unpinned at a later start: the start goes on
     f.host.lives.lock().unwrap().insert("s1".into(), Life::Alive);
-    f.host.db(|c| { c.execute("UPDATE workspaces SET state='open'", [])?; Ok(()) }).unwrap();
+    f.host
+        .db(|c| {
+            c.execute("UPDATE workspaces SET state='open'", [])?;
+            Ok(())
+        })
+        .unwrap();
     f.host.pins.lock().unwrap().insert("s1".into(), vec![]);
     assert!(ensure_for_session(&f.host, "s1").unwrap().is_empty());
     assert!(clone_of(&w).exists());
@@ -795,7 +809,13 @@ fn work_from_before_the_pin_conflicting_with_a_moved_checkout_stops_a_rebase_for
     // the agent resolves as Resolve asks
     write(&clone.join("f1.txt"), "both\n");
     git(&clone, &["add", "f1.txt"]);
-    let out = Command::new("git").arg("-C").arg(&clone).args(["-c", "user.name=t", "-c", "user.email=t@t", "rebase", "--continue"]).env("GIT_EDITOR", "true").output().unwrap();
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&clone)
+        .args(["-c", "user.name=t", "-c", "user.email=t@t", "rebase", "--continue"])
+        .env("GIT_EDITOR", "true")
+        .output()
+        .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(git(&clone, &["rev-parse", "HEAD^"]), theirs);
     assert!(operation(&f, &w).is_none(), "settled once the rebase is finished");
@@ -847,38 +867,17 @@ fn undo_does_not_replace_a_reopened_workspace() {
     let f = fixture("undo-reopened");
     let old = session(&f, "s1");
     write(&clone_of(&old).join("f1.txt"), "old work\n");
-    let d = discard(&f.host, &apply_req("d", &old, &rev(&f, &old)))
-        .unwrap()
-        .discarded
-        .unwrap();
-    f.host
-        .lives
-        .lock()
-        .unwrap()
-        .insert("s1".into(), Life::Ended);
-    list(
-        &f.host,
-        &api::List {
-            session_id: None,
-            after: None,
-            limit: None,
-        },
-    )
-    .unwrap();
+    let d = discard(&f.host, &apply_req("d", &old, &rev(&f, &old))).unwrap().discarded.unwrap();
+    f.host.lives.lock().unwrap().insert("s1".into(), Life::Ended);
+    list(&f.host, &api::List { session_id: None, after: None, limit: None }).unwrap();
     let current = session(&f, "s1");
     write(&clone_of(&current).join("f1.txt"), "new work\n");
-    let req = api::Undo {
-        operation_id: "u".into(),
-        discard_id: d.discard_id,
-    };
+    let req = api::Undo { operation_id: "u".into(), discard_id: d.discard_id };
     f.host.busy.lock().unwrap().push("s1".into());
     assert_eq!(reason(&undo(&f.host, &req).unwrap_err()), "writer_active");
     f.host.busy.lock().unwrap().clear();
     assert_eq!(reason(&undo(&f.host, &req).unwrap_err()), "changed_since");
-    assert_eq!(
-        session_view(&f.host, "s1").unwrap().workspaces[0].workspace_id,
-        current.workspace_id
-    );
+    assert_eq!(session_view(&f.host, "s1").unwrap().workspaces[0].workspace_id, current.workspace_id);
     assert_eq!(read(&clone_of(&current).join("f1.txt")), "new work\n");
 }
 
@@ -887,7 +886,12 @@ fn discard_database_failure_does_not_reset_work() {
     let f = fixture("discard-db-failure");
     let w = session(&f, "s1");
     write(&clone_of(&w).join("f1.txt"), "precious\n");
-    f.host.db(|c| { c.execute_batch("CREATE TRIGGER fail_discard BEFORE INSERT ON workspace_discards BEGIN SELECT RAISE(ABORT, 'injected'); END;")?; Ok(()) }).unwrap();
+    f.host
+        .db(|c| {
+            c.execute_batch("CREATE TRIGGER fail_discard BEFORE INSERT ON workspace_discards BEGIN SELECT RAISE(ABORT, 'injected'); END;")?;
+            Ok(())
+        })
+        .unwrap();
     assert!(discard(&f.host, &apply_req("d", &w, &rev(&f, &w))).is_err());
     assert_eq!(read(&clone_of(&w).join("f1.txt")), "precious\n");
     reconcile(&f.host).unwrap();
@@ -919,15 +923,7 @@ fn discard_interrupted_after_reset_keeps_undo_across_recovery() {
     assert!(discard(&f.host, &apply_req("d", &w, &rev(&f, &w))).is_err());
     assert_eq!(read(&clone_of(&w).join("f1.txt")), "line 1\n");
     reconcile(&f.host).unwrap();
-    let listed = list(
-        &f.host,
-        &api::List {
-            session_id: None,
-            after: None,
-            limit: None,
-        },
-    )
-    .unwrap();
+    let listed = list(&f.host, &api::List { session_id: None, after: None, limit: None }).unwrap();
     assert_eq!(listed.discarded.len(), 1);
     let first = listed.discarded[0].discard_id.clone();
     f.host
@@ -938,14 +934,7 @@ fn discard_interrupted_after_reset_keeps_undo_across_recovery() {
         .unwrap();
     write(&clone_of(&w).join("f1.txt"), "second\n");
     discard(&f.host, &apply_req("d2", &w, &rev(&f, &w))).unwrap();
-    undo(
-        &f.host,
-        &api::Undo {
-            operation_id: "u".into(),
-            discard_id: first,
-        },
-    )
-    .unwrap();
+    undo(&f.host, &api::Undo { operation_id: "u".into(), discard_id: first }).unwrap();
     assert_eq!(read(&clone_of(&w).join("f1.txt")), "precious\n");
 }
 
@@ -1169,7 +1158,10 @@ fn apply_without_commit_copies_the_state_and_a_later_apply_takes_it_over() {
     copy(&f.host, &apply_req("c1", &w, &before)).unwrap();
     assert_eq!(git(&f.source, &["rev-parse", "HEAD"]), start, "no commit arrives");
     assert_eq!(git(&f.source, &["status", "--porcelain"]), "M f1.txt\n M f2.txt\n?? new.txt", "unstaged, the first line's space trimmed by the helper");
-    assert_eq!((read(&f.source.join("f1.txt")), read(&f.source.join("f2.txt")), read(&f.source.join("new.txt"))), ("committed\n".into(), "uncommitted\n".into(), "untracked\n".into()));
+    assert_eq!(
+        (read(&f.source.join("f1.txt")), read(&f.source.join("f2.txt")), read(&f.source.join("new.txt"))),
+        ("committed\n".into(), "uncommitted\n".into(), "untracked\n".into())
+    );
     // the workspace is as it was: its work is still there to apply
     let d = get(&f.host, &w.workspace_id).unwrap();
     assert_eq!(d.revision, before);

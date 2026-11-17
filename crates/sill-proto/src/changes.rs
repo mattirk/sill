@@ -159,31 +159,14 @@ pub struct HistoryEvent {
 }
 impl From<crate::wire::Done> for Done {
     fn from(d: crate::wire::Done) -> Self {
-        let convert = |v: Vec<(std::path::PathBuf, String)>| {
-            v.into_iter()
-                .map(|(p, message)| Outcome {
-                    path: HostPath::from_path(&p),
-                    message,
-                })
-                .collect()
-        };
-        Self {
-            done: convert(d.done),
-            failed: convert(d.failed),
-        }
+        let convert = |v: Vec<(std::path::PathBuf, String)>| v.into_iter().map(|(p, message)| Outcome { path: HostPath::from_path(&p), message }).collect();
+        Self { done: convert(d.done), failed: convert(d.failed) }
     }
 }
 impl TryFrom<Done> for crate::wire::Done {
     type Error = anyhow::Error;
     fn try_from(d: Done) -> anyhow::Result<Self> {
-        let convert = |v: Vec<Outcome>| {
-            v.into_iter()
-                .map(|o| Ok((o.path.to_path()?, o.message)))
-                .collect::<anyhow::Result<_>>()
-        };
-        Ok(Self {
-            done: convert(d.done)?,
-            failed: convert(d.failed)?,
-        })
+        let convert = |v: Vec<Outcome>| v.into_iter().map(|o| Ok((o.path.to_path()?, o.message))).collect::<anyhow::Result<_>>();
+        Ok(Self { done: convert(d.done)?, failed: convert(d.failed)? })
     }
 }

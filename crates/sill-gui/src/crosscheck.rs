@@ -90,12 +90,7 @@ impl std::fmt::Display for Pick {
 }
 
 fn dropdown<'a>(picks: Vec<Pick>, current: Option<Pick>, on: impl Fn(Pick) -> Message + 'a) -> Element<'a, Message> {
-    pick_list(picks, current, on)
-        .text_size(style::TEXT)
-        .padding([6, 12])
-        .style(crate::settings_ui::dropdown)
-        .menu_style(style::control_menu)
-        .into()
+    pick_list(picks, current, on).text_size(style::TEXT).padding([6, 12]).style(crate::settings_ui::dropdown).menu_style(style::control_menu).into()
 }
 
 /// The value an option has for the Reviewer: what was chosen for it, else what the agent starts with.
@@ -210,7 +205,9 @@ impl App {
                 Task::none()
             }
             Event::Fix(session, workspace) => {
-                let Some(run) = self.crosscheck.runs.get(&workspace).filter(|r| cc::stage(r) == Stage::Done && !r.problems.is_empty()) else { return Task::none() };
+                let Some(run) = self.crosscheck.runs.get(&workspace).filter(|r| cc::stage(r) == Stage::Done && !r.problems.is_empty()) else {
+                    return Task::none();
+                };
                 if self.views.get(&session).is_none_or(|v| v.conversation.busy()) {
                     return Task::none();
                 }
@@ -231,9 +228,18 @@ impl App {
                     Some(agent) if setup.reviewers.first().is_some_and(|r| r.agent == agent) => return Task::none(),
                     Some(agent) => {
                         let mut rest = setup.reviewers.clone();
-                        let options = setup.agents.iter().find(|a| a.agent == agent).map(|a| a.options.iter().map(|o| (o.option_id.clone(), chosen(None, o))).collect()).unwrap_or_default();
+                        let options = setup
+                            .agents
+                            .iter()
+                            .find(|a| a.agent == agent)
+                            .map(|a| a.options.iter().map(|o| (o.option_id.clone(), chosen(None, o))).collect())
+                            .unwrap_or_default();
                         let first = api::Reviewer { name: String::new(), agent, options };
-                        if rest.is_empty() { rest.push(first) } else { rest[0] = first }
+                        if rest.is_empty() {
+                            rest.push(first)
+                        } else {
+                            rest[0] = first
+                        }
                         rest
                     }
                     None => setup.reviewers.iter().skip(1).cloned().collect(),
@@ -299,7 +305,9 @@ impl App {
         };
         // what is worth saying beside the verdict, in a few dim words
         let aside = match stage {
-            Stage::Working => run.reviewers.first().and_then(|p| p.activity.last()).cloned().or_else(|| (run.state == "capturing").then(|| "reading the work".to_string())),
+            Stage::Working => {
+                run.reviewers.first().and_then(|p| p.activity.last()).cloned().or_else(|| (run.state == "capturing").then(|| "reading the work".to_string()))
+            }
             Stage::Stale => Some("the work has changed since".to_string()),
             Stage::Failed => Some(run.detail.clone()).filter(|d| !d.trim().is_empty()),
             Stage::Done => None,
@@ -318,7 +326,9 @@ impl App {
             button(container(said).width(Fill).clip(true)).padding([3, 0]).width(Fill).style(style::row_button),
             Message::Crosscheck(Event::Toggle(id.to_string())),
         );
-        let start = |label: &'static str, outlined: bool| small_button(label, outlined, (!self.crosscheck.starting.contains(id)).then(|| Message::Crosscheck(Event::Start(id.to_string()))));
+        let start = |label: &'static str, outlined: bool| {
+            small_button(label, outlined, (!self.crosscheck.starting.contains(id)).then(|| Message::Crosscheck(Event::Start(id.to_string()))))
+        };
         let mut line = row![toggle].spacing(6).align_y(Alignment::Center);
         line = match stage {
             Stage::Working => line.push(text(cc::elapsed(run, now_secs())).size(style::TINY).color(P.fg_dim)),
@@ -328,8 +338,10 @@ impl App {
                 let line = line.push(start("Try again", true));
                 if self.vm_shown() && crate::vm_ui::storage_error(&run.detail) {
                     line.push(crate::settings_ui::quiet_button("Open VM storage", Some(Message::Vm(crate::vm_ui::Event::OpenStorage))))
-                } else { line }
-            },
+                } else {
+                    line
+                }
+            }
         };
         // the one way out, as plain as the cross that closes a session's tab
         line.push(keys::press(
@@ -352,7 +364,9 @@ impl App {
                 let place = problem.line.map_or_else(|| path.clone(), |line| format!("{path}:{line}"));
                 words = words.push(text(place).size(style::TINY).font(crate::ui::MONO_FONT).color(P.fg_dim).wrapping(text::Wrapping::WordOrGlyph));
             }
-            body = body.push(row![text((n + 1).to_string()).size(style::SMALL).color(if stale { P.fg_dim } else { P.warning }).width(18), words].align_y(Alignment::Start));
+            body = body.push(
+                row![text((n + 1).to_string()).size(style::SMALL).color(if stale { P.fg_dim } else { P.warning }).width(18), words].align_y(Alignment::Start),
+            );
         }
         if !run.problems.is_empty() && !stale {
             let agent = self.tabs.iter().find(|t| t.id == view.id).map_or("the agent", |t| t.agent.as_str());
@@ -416,7 +430,9 @@ impl App {
                     let now = chosen(Some(reviewer), option);
                     let id = option.option_id.clone();
                     let picks: Vec<Pick> = match &option.value {
-                        ControlValue::Boolean { .. } => [("On", "true"), ("Off", "false")].into_iter().map(|(l, v)| Pick { label: l.into(), value: Some(v.into()) }).collect(),
+                        ControlValue::Boolean { .. } => {
+                            [("On", "true"), ("Off", "false")].into_iter().map(|(l, v)| Pick { label: l.into(), value: Some(v.into()) }).collect()
+                        }
                         ControlValue::Id { .. } => option.choices.iter().map(|c| Pick { label: c.title.clone(), value: Some(c.value.clone()) }).collect(),
                     };
                     let current = picks.iter().find(|p| p.value.as_deref() == Some(now.as_str())).cloned();
@@ -444,7 +460,8 @@ fn steps<'a>(run: &'a api::Run) -> Element<'a, Message> {
     let mut list = Column::new().spacing(3);
     for (n, step) in shown.iter().enumerate() {
         let last = n + 1 == shown.len();
-        let mark: Element<'a, Message> = if last { crate::ui::dot(P.accent) } else { container(icons::glyph("check", 10.0, alpha(P.fg, 0.4))).center_x(15).into() };
+        let mark: Element<'a, Message> =
+            if last { crate::ui::dot(P.accent) } else { container(icons::glyph("check", 10.0, alpha(P.fg, 0.4))).center_x(15).into() };
         list = list.push(
             row![mark, text(crate::ui::one_line(step, 160)).size(style::TINY).color(if last { P.fg } else { P.fg_dim }).wrapping(text::Wrapping::None)]
                 .spacing(6)

@@ -1,0 +1,3 @@
+# The code is written wide; one style for every crate (checked in CI: cargo fmt --all --check).
+max_width = 160
+use_small_heuristics = "Max"

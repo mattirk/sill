@@ -33,12 +33,16 @@ pub enum Line {
 #[derive(Debug)]
 pub struct Cancelled;
 impl std::fmt::Display for Cancelled {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("the login was cancelled") }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the login was cancelled")
+    }
 }
 impl std::error::Error for Cancelled {}
 
 /// Never cancelled: for callers with no way to cancel.
-pub fn never() -> bool { false }
+pub fn never() -> bool {
+    false
+}
 
 /// Run `method` of `agent` in a login jail; `report` gets progress lines. Blocking.
 pub fn run(agent: &Agent, home: &Path, method: &str, report: impl FnMut(Line)) -> Result<()> {
@@ -52,7 +56,14 @@ pub fn run_into(agent: &Agent, home: &Path, extra_homes: &[(PathBuf, crate::cred
 }
 
 /// [`run_into`], ended with [`Cancelled`] once `cancelled` says so.
-pub fn run_cancellable(agent: &Agent, home: &Path, extra_homes: &[(PathBuf, crate::credentials::Rules)], method: &str, cancelled: &dyn Fn() -> bool, mut report: impl FnMut(Line)) -> Result<()> {
+pub fn run_cancellable(
+    agent: &Agent,
+    home: &Path,
+    extra_homes: &[(PathBuf, crate::credentials::Rules)],
+    method: &str,
+    cancelled: &dyn Fn() -> bool,
+    mut report: impl FnMut(Line),
+) -> Result<()> {
     let paths = agent.ready(home)?;
     anyhow::ensure!(agent.host_login.iter().any(|m| m == method), "host login method is not explicitly declared");
     let scratch = scratch_dir(home, &agent.id)?;
@@ -92,7 +103,13 @@ pub fn setup(agent: &Agent, home: &Path, method: &str, report: impl FnMut(Line))
 }
 
 /// [`setup`], ended with [`Cancelled`] once `cancelled` says so.
-pub fn setup_cancellable(agent: &Agent, home: &Path, method: &str, cancelled: &dyn Fn() -> bool, mut report: impl FnMut(Line)) -> Result<crate::registry::Discovery> {
+pub fn setup_cancellable(
+    agent: &Agent,
+    home: &Path,
+    method: &str,
+    cancelled: &dyn Fn() -> bool,
+    mut report: impl FnMut(Line),
+) -> Result<crate::registry::Discovery> {
     anyhow::ensure!(agent.home_paths.is_none(), "agent {} is set up already", agent.id);
     let scratch = scratch_dir(home, &agent.id)?;
     let result = login_in(agent, home, &scratch, &[], method, cancelled, &mut report).and_then(|()| {
@@ -128,11 +145,7 @@ pub fn setup_cancellable(agent: &Agent, home: &Path, method: &str, cancelled: &d
 /// The login's own home: empty before, removed after. 0700 from `login/` down: what the login
 /// writes is a credential.
 fn scratch_dir(home: &Path, id: &str) -> Result<PathBuf> {
-    let scratch = crate::session::agent_home(home, id)
-        .parent()
-        .and_then(Path::parent)
-        .map(|state| state.join("login").join(id))
-        .context("state dir")?;
+    let scratch = crate::session::agent_home(home, id).parent().and_then(Path::parent).map(|state| state.join("login").join(id)).context("state dir")?;
     let _ = std::fs::remove_dir_all(&scratch);
     private(&scratch)?;
     Ok(scratch)
@@ -174,7 +187,15 @@ fn copy_private(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Start the agent in a jail with `scratch` as its home and run `method`'s `authenticate`.
-fn login_in(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::agents::HomePath], method: &str, cancelled: &dyn Fn() -> bool, report: &mut impl FnMut(Line)) -> Result<()> {
+fn login_in(
+    agent: &Agent,
+    home: &Path,
+    scratch: &Path,
+    paths: &[crate::agents::HomePath],
+    method: &str,
+    cancelled: &dyn Fn() -> bool,
+    report: &mut impl FnMut(Line),
+) -> Result<()> {
     let urls = scratch.with_extension("urls");
     let _ = std::fs::remove_file(&urls);
     let mut watch = Watch { urls: urls.clone(), read: 0, seen: Default::default(), cancelled };
@@ -183,7 +204,15 @@ fn login_in(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::agents::
     result
 }
 
-fn login_watched(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::agents::HomePath], method: &str, watch: &mut Watch, report: &mut impl FnMut(Line)) -> Result<()> {
+fn login_watched(
+    agent: &Agent,
+    home: &Path,
+    scratch: &Path,
+    paths: &[crate::agents::HomePath],
+    method: &str,
+    watch: &mut Watch,
+    report: &mut impl FnMut(Line),
+) -> Result<()> {
     let Some(prog) = agent.command.first() else { bail!("agent {} has no command", agent.id) };
     let mut env = agent.env.clone();
     let shim_dir = browser_shim(home)?;
@@ -208,12 +237,8 @@ fn login_watched(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::age
     // Some agents refuse browser helpers beneath their working directory. The
     // private login home is separate from tools/.browser-shim under the real home.
     let (mut cmd, _seccomp) = login_command(home, prog, None, &agent.command[1..], &env, report)?;
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("start {prog} in the login jail"))?;
+    let mut child =
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().with_context(|| format!("start {prog} in the login jail"))?;
     let mut stdin = child.stdin.take().context("stdin")?;
     let stdout = BufReader::new(child.stdout.take().context("stdout")?);
     let stderr = BufReader::new(child.stderr.take().context("stderr")?);
@@ -240,21 +265,29 @@ fn login_watched(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::age
 
     let result = (|| -> Result<()> {
         let v2 = agent.experimental_acp_v2;
-        let params = if v2 { json!({"protocolVersion":2,"info":{"name":"sill","version":env!("CARGO_PKG_VERSION")},"capabilities":{}}) }
-            else { json!({"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"sill","version":env!("CARGO_PKG_VERSION")}}) };
+        let params = if v2 {
+            json!({"protocolVersion":2,"info":{"name":"sill","version":env!("CARGO_PKG_VERSION")},"capabilities":{}})
+        } else {
+            json!({"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"sill","version":env!("CARGO_PKG_VERSION")}})
+        };
         let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":params});
         writeln!(stdin, "{init}")?;
         let resp = wait_response(&rx, &erx, 1, Duration::from_secs(30), watch, report)?;
-        if v2 && resp.get("protocolVersion").and_then(Value::as_u64)!=Some(2) {
+        if v2 && resp.get("protocolVersion").and_then(Value::as_u64) != Some(2) {
             bail!("the opted-in ACP v2 agent did not select protocolVersion 2");
         }
         let offered = resp.get("authMethods").and_then(Value::as_array);
         let id_field = if v2 { "methodId" } else { "id" };
-        let methods: Vec<String> = offered.into_iter().flatten().filter_map(|m|m.get(id_field).and_then(Value::as_str).map(str::to_string)).collect();
-        if (v2 || !methods.is_empty()) && !methods.iter().any(|m|m==method) {
+        let methods: Vec<String> = offered.into_iter().flatten().filter_map(|m| m.get(id_field).and_then(Value::as_str).map(str::to_string)).collect();
+        if (v2 || !methods.is_empty()) && !methods.iter().any(|m| m == method) {
             bail!("{prog} offers no login method {method:?} (it has: {})", methods.join(", "));
         }
-        if v2 && !offered.into_iter().flatten().any(|m|m.get(id_field).and_then(Value::as_str)==Some(method) && m.get("type").and_then(Value::as_str)==Some("agent")) {
+        if v2
+            && !offered
+                .into_iter()
+                .flatten()
+                .any(|m| m.get(id_field).and_then(Value::as_str) == Some(method) && m.get("type").and_then(Value::as_str) == Some("agent"))
+        {
             bail!("login method {method:?} is not an agent-driven ACP v2 login");
         }
         if !v2 && let Some(offered) = offered.into_iter().flatten().find(|m| m.get("id").and_then(Value::as_str) == Some(method)) {
@@ -304,20 +337,13 @@ fn terminal_login(
     watch: &mut Watch,
     report: &mut impl FnMut(Line),
 ) -> Result<()> {
-    let args: Vec<String> =
-        serde_json::from_value(method.get("args").cloned().unwrap_or(json!([])))
-            .context("terminal login arguments")?;
+    let args: Vec<String> = serde_json::from_value(method.get("args").cloned().unwrap_or(json!([]))).context("terminal login arguments")?;
     let extra_env: std::collections::BTreeMap<String, String> =
-        serde_json::from_value(method.get("env").cloned().unwrap_or(json!({})))
-            .context("terminal login environment")?;
+        serde_json::from_value(method.get("env").cloned().unwrap_or(json!({}))).context("terminal login environment")?;
     // The agent's own program builds the jail; a command its answer names only runs in it.
     let program = agent.command.first().context("agent has no command")?;
     let (advertised, mut all_args) = if legacy {
-        let command = method
-            .get("command")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .context("terminal login command is missing")?;
+        let command = method.get("command").and_then(Value::as_str).filter(|s| !s.is_empty()).context("terminal login command is missing")?;
         (Some(command), Vec::new())
     } else {
         (None, agent.command[1..].to_vec())
@@ -327,19 +353,11 @@ fn terminal_login(
     let mut all_env = extra_env;
     all_env.extend(env.iter().map(|(k, v)| (k.clone(), v.clone())));
     let (mut command, _seccomp) = login_command(home, program, advertised, &all_args, &all_env, report)?;
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("start terminal login")?;
+    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("start terminal login")?;
     let (tx, rx) = std::sync::mpsc::channel();
     let stdout = child.stdout.take().context("terminal login stdout")?;
     let stderr = child.stderr.take().context("terminal login stderr")?;
-    for stream in [
-        Box::new(stdout) as Box<dyn std::io::Read + Send>,
-        Box::new(stderr),
-    ] {
+    for stream in [Box::new(stdout) as Box<dyn std::io::Read + Send>, Box::new(stderr)] {
         let tx = tx.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stream).lines().map_while(Result::ok) {
@@ -350,9 +368,7 @@ fn terminal_login(
         });
     }
     drop(tx);
-    report(Line::Status(
-        "Complete the login in your browser; the login command's progress follows.".into(),
-    ));
+    report(Line::Status("Complete the login in your browser; the login command's progress follows.".into()));
     let deadline = std::time::Instant::now() + TIMEOUT;
     let result = (|| -> Result<()> {
         loop {
@@ -373,10 +389,7 @@ fn terminal_login(
                 anyhow::ensure!(status.success(), "terminal login failed: {status}");
                 return Ok(());
             }
-            anyhow::ensure!(
-                std::time::Instant::now() < deadline,
-                "terminal login timed out"
-            );
+            anyhow::ensure!(std::time::Instant::now() < deadline, "terminal login timed out");
             std::thread::sleep(Duration::from_millis(50));
         }
     })();
@@ -389,12 +402,19 @@ fn terminal_login(
 /// copy. Only helpers whose executable is under `tools`: a browser the login opened is the
 /// person's and stays.
 fn stop_agent(child: &mut std::process::Child, tools: &Path) {
-    let helpers: Vec<i32> = descendants(child.id() as i32).into_iter()
+    let helpers: Vec<i32> = descendants(child.id() as i32)
+        .into_iter()
         .filter(|pid| std::fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|exe| exe.starts_with(tools)))
         .collect();
     let _ = child.kill();
     let _ = child.wait();
-    let signal = |sig| for pid in &helpers { if let Some(p) = rustix::process::Pid::from_raw(*pid) { let _ = rustix::process::kill_process(p, sig); } };
+    let signal = |sig| {
+        for pid in &helpers {
+            if let Some(p) = rustix::process::Pid::from_raw(*pid) {
+                let _ = rustix::process::kill_process(p, sig);
+            }
+        }
+    };
     signal(rustix::process::Signal::TERM);
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     while std::time::Instant::now() < deadline && helpers.iter().any(|pid| Path::new(&format!("/proc/{pid}")).exists()) {
@@ -462,8 +482,14 @@ fn percent_decode(s: &str) -> Option<String> {
                 out.push(u8::from_str_radix(hex, 16).ok()?);
                 i += 3;
             }
-            b'+' => { out.push(b' '); i += 1; }
-            b => { out.push(b); i += 1; }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
         }
     }
     String::from_utf8(out).ok()
@@ -471,24 +497,30 @@ fn percent_decode(s: &str) -> Option<String> {
 
 /// Every process below `root`, by parent links in `/proc`.
 fn descendants(root: i32) -> Vec<i32> {
-    let parents: Vec<(i32, i32)> = std::fs::read_dir("/proc").into_iter().flatten().flatten().filter_map(|e| {
-        let pid: i32 = e.file_name().to_str()?.parse().ok()?;
-        let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
-        // `pid (comm) state ppid …`; comm may hold spaces and parentheses
-        let ppid = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()?;
-        Some((pid, ppid))
-    }).collect();
+    let parents: Vec<(i32, i32)> = std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let pid: i32 = e.file_name().to_str()?.parse().ok()?;
+            let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
+            // `pid (comm) state ppid …`; comm may hold spaces and parentheses
+            let ppid = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()?;
+            Some((pid, ppid))
+        })
+        .collect();
     let mut out = vec![];
     let mut frontier = vec![root];
     while let Some(parent) = frontier.pop() {
         for (pid, _) in parents.iter().filter(|(_, ppid)| *ppid == parent) {
-            if !out.contains(pid) { out.push(*pid); frontier.push(*pid); }
+            if !out.contains(pid) {
+                out.push(*pid);
+                frontier.push(*pid);
+            }
         }
     }
     out
 }
-
-
 
 /// The result object of response `id`; notifications on the way are reported.
 fn wait_response(
@@ -520,11 +552,7 @@ fn wait_response(
                 }
                 if let Some(m) = v.get("method").and_then(|m| m.as_str()) {
                     // e.g. `_auth/status_update` {"authStatus":{"kind":"none","label":"Not logged in"}}
-                    let label = v
-                        .pointer("/params/authStatus/label")
-                        .and_then(|l| l.as_str())
-                        .map(str::to_string)
-                        .unwrap_or_else(|| m.to_string());
+                    let label = v.pointer("/params/authStatus/label").and_then(|l| l.as_str()).map(str::to_string).unwrap_or_else(|| m.to_string());
                     report(Line::Status(label));
                 }
             }
@@ -566,8 +594,7 @@ mod login_copy_tests {
         let scratch = home.join("scratch");
         std::fs::create_dir_all(&scratch).unwrap();
         let urls = home.join("urls");
-        let env = [("HOME".into(), scratch.display().to_string()),
-                   (URLS_ENV.into(), urls.display().to_string())].into_iter().collect();
+        let env = [("HOME".into(), scratch.display().to_string()), (URLS_ENV.into(), urls.display().to_string())].into_iter().collect();
         let (command, _seccomp) = login_command(&home, "/bin/sh", None, &[], &env, &mut |_| {}).unwrap();
         assert_eq!(command.get_program(), "bwrap");
         // Install trust is deliberately absent from command selection.
@@ -583,7 +610,10 @@ mod login_copy_tests {
         let urls = scratch.with_extension("urls");
         let front = home.join("front");
         let env: std::collections::BTreeMap<String, String> =
-            [("HOME", scratch.to_str().unwrap()), ("PATH", "/person/bin"), (URLS_ENV, urls.to_str().unwrap())].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            [("HOME", scratch.to_str().unwrap()), ("PATH", "/person/bin"), (URLS_ENV, urls.to_str().unwrap())]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
         let (command, _seccomp) = crate::registry::login_jail("/bin/sh", None, &["-c".into(), "true".into()], &env, &home, &scratch, &urls, &front).unwrap();
         assert_eq!(command.get_program(), "bwrap");
         let argv: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -655,7 +685,8 @@ mod login_copy_tests {
 
     #[test]
     fn the_callback_port_comes_only_from_a_loopback_redirect() {
-        let codex = "https://auth.openai.com/oauth/authorize?response_type=code&client_id=x&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid";
+        let codex =
+            "https://auth.openai.com/oauth/authorize?response_type=code&client_id=x&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid";
         assert_eq!(callback_port(codex), Some(1455));
         assert_eq!(callback_port("https://a.example/?redirect_uri=http://127.0.0.1:54321/cb"), Some(54321));
         assert_eq!(callback_port("https://a.example/?redirect_uri=https%3A%2F%2Fexample.com%3A1455%2Fcb"), None);
@@ -674,7 +705,9 @@ mod login_copy_tests {
         let tools = crate::registry::tools_dir(&home);
         std::fs::create_dir_all(&tools).unwrap();
         let script = tools.join("agent.py");
-        std::fs::write(&script, r#"import json,os,subprocess,sys
+        std::fs::write(
+            &script,
+            r#"import json,os,subprocess,sys
 request=json.loads(sys.stdin.readline())
 print(json.dumps({'jsonrpc':'2.0','id':1,'result':{'protocolVersion':1,'authMethods':[{'id':'browser','name':'Browser'}]}}),flush=True)
 request=json.loads(sys.stdin.readline())
@@ -683,7 +716,9 @@ for _ in range(2):
     subprocess.run([os.environ['BROWSER'],url],check=True)
 subprocess.run(['xdg-open','https://auth.example/second'],check=True)
 sys.stdin.readline()
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let mut agent = crate::agents::builtin().into_iter().find(|a| a.id == "codex").unwrap();
         agent.host_login = vec!["browser".into()];
         agent.command = vec!["/usr/bin/python3".into(), script.to_string_lossy().into_owned()];
@@ -691,24 +726,30 @@ sys.stdin.readline()
         let cancelled = || opened.borrow().len() >= 2;
         let started = std::time::Instant::now();
         let error = run_cancellable(&agent, &home, &[], "browser", &cancelled, |line| {
-            if let Line::OpenUrl { url, callback_port } = line { opened.borrow_mut().push((url, callback_port)); }
-        }).unwrap_err();
+            if let Line::OpenUrl { url, callback_port } = line {
+                opened.borrow_mut().push((url, callback_port));
+            }
+        })
+        .unwrap_err();
         assert!(error.downcast_ref::<Cancelled>().is_some(), "{error:#}");
         assert!(started.elapsed() < Duration::from_secs(20));
-        assert_eq!(*opened.borrow(), [
-            ("https://auth.example/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fcb".to_string(), Some(1455)),
-            ("https://auth.example/second".to_string(), None),
-        ]);
+        assert_eq!(
+            *opened.borrow(),
+            [
+                ("https://auth.example/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fcb".to_string(), Some(1455)),
+                ("https://auth.example/second".to_string(), None),
+            ]
+        );
         let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]
     #[ignore = "requires working bubblewrap on a host"]
     fn v2_host_login_negotiates_and_uses_only_an_offered_agent_method() {
-        let home=dir("v2-host");
-        let tools=crate::registry::tools_dir(&home);
+        let home = dir("v2-host");
+        let tools = crate::registry::tools_dir(&home);
         std::fs::create_dir_all(&tools).unwrap();
-        let script=tools.join("agent.py");
+        let script = tools.join("agent.py");
         std::fs::write(&script,r#"import json,sys
 request=json.loads(sys.stdin.readline())
 assert request['params']['protocolVersion']==2
@@ -718,31 +759,30 @@ request=json.loads(sys.stdin.readline())
 assert request['method']=='auth/login' and request['params']=={'methodId':'browser'}
 print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{}}),flush=True)
 "#).unwrap();
-        let mut agent=crate::agents::builtin().into_iter().find(|a|a.id=="codex").unwrap();
-        agent.experimental_acp_v2=true;
+        let mut agent = crate::agents::builtin().into_iter().find(|a| a.id == "codex").unwrap();
+        agent.experimental_acp_v2 = true;
         agent.host_login = vec!["browser".into()];
-        agent.command=vec!["/usr/bin/python3".into(),script.to_string_lossy().into_owned(),"2".into(),"agent".into()];
-        run(&agent,&home,"browser",|_|{}).unwrap();
-        agent.command[2]="1".into();
-        assert!(run(&agent,&home,"browser",|_|{}).unwrap_err().to_string().contains("protocolVersion 2"));
-        agent.command[2]="2".into();agent.command[3]="future".into();
-        assert!(run(&agent,&home,"browser",|_|{}).unwrap_err().to_string().contains("not an agent-driven"));
-        let _=std::fs::remove_dir_all(home);
+        agent.command = vec!["/usr/bin/python3".into(), script.to_string_lossy().into_owned(), "2".into(), "agent".into()];
+        run(&agent, &home, "browser", |_| {}).unwrap();
+        agent.command[2] = "1".into();
+        assert!(run(&agent, &home, "browser", |_| {}).unwrap_err().to_string().contains("protocolVersion 2"));
+        agent.command[2] = "2".into();
+        agent.command[3] = "future".into();
+        assert!(run(&agent, &home, "browser", |_| {}).unwrap_err().to_string().contains("not an agent-driven"));
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]
     #[ignore = "requires working bubblewrap on a host"]
     fn terminal_setup_runs_advertised_login_and_keeps_its_files() {
         for legacy in [false, true] {
-            let home = dir(if legacy {
-                "terminal-legacy"
-            } else {
-                "terminal"
-            });
+            let home = dir(if legacy { "terminal-legacy" } else { "terminal" });
             let tools = crate::registry::tools_dir(&home);
             std::fs::create_dir_all(&tools).unwrap();
             let script = tools.join("agent.py");
-            std::fs::write(&script, r#"import json,sys,os,pathlib
+            std::fs::write(
+                &script,
+                r#"import json,sys,os,pathlib
 legacy = sys.argv[1] == 'legacy'
 if '--login' in sys.argv or 'login' in sys.argv:
     assert pathlib.Path.cwd() == pathlib.Path.home()
@@ -770,20 +810,15 @@ else:
 print(json.dumps({'jsonrpc':'2.0','id':1,'result':{'authMethods':[method]}}),flush=True)
 request=sys.stdin.readline()
 assert not request, 'terminal methods must never receive authenticate'
-"#).unwrap();
-            let mut agent = crate::agents::builtin()
-                .into_iter()
-                .find(|a| a.id == "codex")
-                .unwrap();
+"#,
+            )
+            .unwrap();
+            let mut agent = crate::agents::builtin().into_iter().find(|a| a.id == "codex").unwrap();
             agent.id = "terminal-fixture".into();
             agent.home_paths = None;
             agent.home_env = None;
-            agent.command = vec![
-                "/usr/bin/python3".into(),
-                script.to_string_lossy().into_owned(),
-                if legacy { "legacy" } else { "current" }.into(),
-                "acp".into(),
-            ];
+            agent.command =
+                vec!["/usr/bin/python3".into(), script.to_string_lossy().into_owned(), if legacy { "legacy" } else { "current" }.into(), "acp".into()];
             let mut lines = Vec::new();
             let discovery = setup(&agent, &home, "login", |line| {
                 if let Line::Status(line) = line {
@@ -792,36 +827,13 @@ assert not request, 'terminal methods must never receive authenticate'
             })
             .unwrap();
             assert_eq!(discovery.login_method.as_deref(), Some("login"));
-            assert!(
-                discovery
-                    .login_files
-                    .contains(&".fixture/token.json".into())
-            );
-            assert!(
-                crate::session::agent_home(&home, &agent.id)
-                    .join(".fixture/token.json")
-                    .is_file()
-            );
-            assert!(
-                lines
-                    .iter()
-                    .any(|line| line.contains("https://example.invalid/device"))
-            );
+            assert!(discovery.login_files.contains(&".fixture/token.json".into()));
+            assert!(crate::session::agent_home(&home, &agent.id).join(".fixture/token.json").is_file());
+            assert!(lines.iter().any(|line| line.contains("https://example.invalid/device")));
             assert!(lines.iter().any(|line| line == "Authorized"));
             // A failed helper must not become a successful discovery.
-            std::fs::write(
-                &script,
-                std::fs::read_to_string(&script)
-                    .unwrap()
-                    .replace("sys.exit(0)", "sys.exit(7)"),
-            )
-            .unwrap();
-            assert!(
-                setup(&agent, &home, "login", |_| {})
-                    .unwrap_err()
-                    .to_string()
-                    .contains("terminal login failed")
-            );
+            std::fs::write(&script, std::fs::read_to_string(&script).unwrap().replace("sys.exit(0)", "sys.exit(7)")).unwrap();
+            assert!(setup(&agent, &home, "login", |_| {}).unwrap_err().to_string().contains("terminal login failed"));
             let _ = std::fs::remove_dir_all(home);
         }
     }
@@ -829,8 +841,16 @@ assert not request, 'terminal methods must never receive authenticate'
     #[test]
     fn a_login_copies_the_credential_and_never_a_fresh_homes_databases() {
         let (scratch, dst) = (dir("scratch"), dir("dst"));
-        for (f, t) in [(".codex/auth.json", "login"), (".codex/config.toml", "x"), (".codex/state_5.sqlite", "fresh"), (".codex/state_5.sqlite-wal", "fresh"),
-                       (".codex/logs_2.sqlite", "fresh"), (".codex/.tmp/plugins/README.md", "p"), (".codex/tmp/arg0/x", "a"), (".codex/log/codex.log", "l")] {
+        for (f, t) in [
+            (".codex/auth.json", "login"),
+            (".codex/config.toml", "x"),
+            (".codex/state_5.sqlite", "fresh"),
+            (".codex/state_5.sqlite-wal", "fresh"),
+            (".codex/logs_2.sqlite", "fresh"),
+            (".codex/.tmp/plugins/README.md", "p"),
+            (".codex/tmp/arg0/x", "a"),
+            (".codex/log/codex.log", "l"),
+        ] {
             std::fs::create_dir_all(scratch.join(f).parent().unwrap()).unwrap();
             std::fs::write(scratch.join(f), t).unwrap();
         }
@@ -852,19 +872,25 @@ assert not request, 'terminal methods must never receive authenticate'
     fn stopping_the_login_ends_its_installed_helpers_but_not_other_programs() {
         // `sleep` stands in for both: once as a helper from the agent's install, once as a program
         // from elsewhere (the person's browser)
-        let alive = |pid: i32| Path::new(&format!("/proc/{pid}")).exists() && !std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default().contains(") Z ");
+        let alive = |pid: i32| {
+            Path::new(&format!("/proc/{pid}")).exists() && !std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default().contains(") Z ")
+        };
         for (tools, survives) in [(PathBuf::from("/usr"), false), (dir("tools"), true)] {
             let mut child = Command::new("sh").args(["-c", "sleep 30 & wait"]).spawn().unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             let helper = loop {
-                if let Some(pid) = descendants(child.id() as i32).first() { break *pid; }
+                if let Some(pid) = descendants(child.id() as i32).first() {
+                    break *pid;
+                }
                 assert!(std::time::Instant::now() < deadline, "helper never started");
                 std::thread::sleep(Duration::from_millis(20));
             };
             stop_agent(&mut child, &tools);
             std::thread::sleep(Duration::from_millis(100));
             assert_eq!(alive(helper), survives, "tools {}", tools.display());
-            if survives { let _ = rustix::process::kill_process(rustix::process::Pid::from_raw(helper).unwrap(), rustix::process::Signal::KILL); }
+            if survives {
+                let _ = rustix::process::kill_process(rustix::process::Pid::from_raw(helper).unwrap(), rustix::process::Signal::KILL);
+            }
         }
     }
 }

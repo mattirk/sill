@@ -8,12 +8,8 @@ use std::{
 };
 
 pub const BUILD_PARENT: &str = "private/home%sill%.cache/sill-dev";
-const FLAGS: OFlags = OFlags::DIRECTORY
-    .union(OFlags::NOFOLLOW)
-    .union(OFlags::CLOEXEC);
-const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
-    .union(ResolveFlags::NO_SYMLINKS)
-    .union(ResolveFlags::NO_XDEV);
+const FLAGS: OFlags = OFlags::DIRECTORY.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
+const RESOLVE: ResolveFlags = ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS).union(ResolveFlags::NO_XDEV);
 
 pub fn space(path: &Path) -> Result<sill_proto::storage::DiskSpace> {
     let s = fs::statvfs(path).with_context(|| format!("reading space on {}", path.display()))?;
@@ -28,17 +24,10 @@ pub fn space(path: &Path) -> Result<sill_proto::storage::DiskSpace> {
 fn parent(root: &Path, session: &str) -> Result<OwnedFd> {
     ensure!(crate::session::valid_id(session), "invalid session id");
     let root_fd = fs::open(root, FLAGS, Mode::empty())?;
-    Ok(fs::openat2(
-        &root_fd,
-        Path::new(session).join(BUILD_PARENT),
-        FLAGS,
-        Mode::empty(),
-        RESOLVE,
-    )?)
+    Ok(fs::openat2(&root_fd, Path::new(session).join(BUILD_PARENT), FLAGS, Mode::empty(), RESOLVE)?)
 }
 fn missing(e: &anyhow::Error) -> bool {
-    e.chain()
-        .any(|e| e.downcast_ref::<rustix::io::Errno>() == Some(&rustix::io::Errno::NOENT))
+    e.chain().any(|e| e.downcast_ref::<rustix::io::Errno>() == Some(&rustix::io::Errno::NOENT))
 }
 
 /// Missing caches are zero; symlinked paths and unreadable caches are errors, not empty.
@@ -60,12 +49,7 @@ pub fn cache_bytes(root: &Path, session: &str) -> Result<u64> {
     }
     Ok(bytes)
 }
-fn measure(
-    fd: &OwnedFd,
-    budget: &mut usize,
-    seen: &mut std::collections::HashSet<(u64, u64)>,
-    depth: usize,
-) -> Result<u64> {
+fn measure(fd: &OwnedFd, budget: &mut usize, seen: &mut std::collections::HashSet<(u64, u64)>, depth: usize) -> Result<u64> {
     ensure!(depth < 64, "build cache is too deeply nested");
     let mut bytes = 0;
     for entry in Dir::read_from(fd)? {
@@ -101,13 +85,7 @@ pub fn detach(root: &Path, session: &str) -> Result<Option<OwnedFd>> {
         Err(e) if missing(&e) => return Ok(None),
         Err(e) => return Err(e),
     };
-    match fs::openat2(
-        &parent,
-        "target.sill-clearing",
-        FLAGS,
-        Mode::empty(),
-        RESOLVE,
-    ) {
+    match fs::openat2(&parent, "target.sill-clearing", FLAGS, Mode::empty(), RESOLVE) {
         Ok(_) => return Ok(Some(parent)),
         Err(rustix::io::Errno::NOENT) => (),
         Err(e) => return Err(e.into()),
@@ -117,24 +95,12 @@ pub fn detach(root: &Path, session: &str) -> Result<Option<OwnedFd>> {
         Err(rustix::io::Errno::NOENT) => return Ok(None),
         Err(e) => return Err(e.into()),
     }
-    fs::renameat_with(
-        &parent,
-        "target",
-        &parent,
-        "target.sill-clearing",
-        fs::RenameFlags::NOREPLACE,
-    )?;
+    fs::renameat_with(&parent, "target", &parent, "target.sill-clearing", fs::RenameFlags::NOREPLACE)?;
     Ok(Some(parent))
 }
 
 pub fn remove_detached(parent: &OwnedFd) -> Result<()> {
-    let fd = fs::openat2(
-        parent,
-        "target.sill-clearing",
-        FLAGS,
-        Mode::empty(),
-        RESOLVE,
-    )?;
+    let fd = fs::openat2(parent, "target.sill-clearing", FLAGS, Mode::empty(), RESOLVE)?;
     remove_contents(&fd, 0)?;
     fs::unlinkat(parent, "target.sill-clearing", AtFlags::REMOVEDIR)?;
     Ok(())
@@ -166,8 +132,7 @@ mod tests {
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
-            let root =
-                std::env::temp_dir().join(format!("sill-storage-{:032x}", rand::random::<u128>()));
+            let root = std::env::temp_dir().join(format!("sill-storage-{:032x}", rand::random::<u128>()));
             fs::create_dir_all(root.join("one").join(BUILD_PARENT).join("target/debug")).unwrap();
             Self(root)
         }
@@ -186,11 +151,7 @@ mod tests {
         let f = Fixture::new();
         fs::write(f.target().join("debug/old"), vec![1; 8192]).unwrap();
         assert!(cache_bytes(&f.0, "one").unwrap() >= 8192);
-        for rel in [
-            "one/upper/home/source",
-            "one/private/home%sill%.cache/sill-dev/cargo/toolchain",
-            "two/private/cache",
-        ] {
+        for rel in ["one/upper/home/source", "one/private/home%sill%.cache/sill-dev/cargo/toolchain", "two/private/cache"] {
             let path = f.0.join(rel);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, "keep").unwrap();
@@ -199,15 +160,8 @@ mod tests {
         fs::create_dir_all(f.target()).unwrap();
         fs::write(f.target().join("new"), "new build").unwrap();
         remove_detached(&detached).unwrap();
-        assert_eq!(
-            fs::read_to_string(f.target().join("new")).unwrap(),
-            "new build"
-        );
-        for rel in [
-            "one/upper/home/source",
-            "one/private/home%sill%.cache/sill-dev/cargo/toolchain",
-            "two/private/cache",
-        ] {
+        assert_eq!(fs::read_to_string(f.target().join("new")).unwrap(), "new build");
+        for rel in ["one/upper/home/source", "one/private/home%sill%.cache/sill-dev/cargo/toolchain", "two/private/cache"] {
             assert_eq!(fs::read_to_string(f.0.join(rel)).unwrap(), "keep");
         }
     }

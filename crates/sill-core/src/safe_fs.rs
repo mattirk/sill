@@ -16,8 +16,7 @@ const RESOLVE: ResolveFlags = ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLI
 
 /// `root` as a directory fd: symlinks on the way to it are the host's own; one at its end is not.
 fn open_root(root: &Path) -> Result<OwnedFd> {
-    open(root, OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())
-        .with_context(|| format!("open {}", root.display()))
+    open(root, OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty()).with_context(|| format!("open {}", root.display()))
 }
 
 /// The directory `rel` below `root`, every component a real directory (no symlink, nothing outside
@@ -38,8 +37,7 @@ pub fn open_dir_beneath(root: &Path, rel: &Path, create: bool) -> Result<OwnedFd
                     Ok(()) | Err(Errno::EXIST) => {}
                     Err(e) => return Err(e).with_context(|| format!("create {} below {}", rel.display(), root.display())),
                 }
-                openat2(&fd, name, flags, Mode::empty(), RESOLVE)
-                    .with_context(|| format!("open {} below {} (no symlinks)", rel.display(), root.display()))?
+                openat2(&fd, name, flags, Mode::empty(), RESOLVE).with_context(|| format!("open {} below {} (no symlinks)", rel.display(), root.display()))?
             }
             Err(e) => return Err(e).with_context(|| format!("open {} below {} (no symlinks)", rel.display(), root.display())),
         };
@@ -82,7 +80,7 @@ pub fn remove_file_beneath(root: &Path, rel: &Path) -> Result<()> {
 /// Initialize a missing declared file without reading or replacing an existing one. An atomic
 /// no-replace rename prevents a concurrent launcher from overwriting newly saved settings.
 pub fn initialize_private_beneath(root: &Path, rel: &Path, bytes: &[u8]) -> Result<()> {
-    use rustix::fs::{renameat_with, RenameFlags};
+    use rustix::fs::{RenameFlags, renameat_with};
     let dir = open_dir_beneath(root, rel.parent().unwrap_or(Path::new("")), true)?;
     let name = rel.file_name().context("declared file has no name")?;
     let check = || -> Result<bool> {
@@ -95,7 +93,9 @@ pub fn initialize_private_beneath(root: &Path, rel: &Path, bytes: &[u8]) -> Resu
             Err(e) => Err(e.into()),
         }
     };
-    if check()? { return Ok(()); }
+    if check()? {
+        return Ok(());
+    }
     let tmp = format!(".sill-init-{:032x}", rand::random::<u128>());
     let fd = openat2(&dir, tmp.as_str(), OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC, Mode::from_raw_mode(0o600), RESOLVE)?;
     let result = (|| -> Result<()> {
@@ -104,7 +104,10 @@ pub fn initialize_private_beneath(root: &Path, rel: &Path, bytes: &[u8]) -> Resu
         file.sync_all()?;
         match renameat_with(&dir, tmp.as_str(), &dir, name, RenameFlags::NOREPLACE) {
             Ok(()) => Ok(()),
-            Err(Errno::EXIST) => { check()?; Ok(()) }
+            Err(Errno::EXIST) => {
+                check()?;
+                Ok(())
+            }
             Err(e) => Err(e.into()),
         }
     })();
@@ -134,8 +137,7 @@ pub fn replace_file(dir: &Path, name: &std::ffi::OsStr, bytes: &[u8]) -> Result<
     // arbitrary target bytes, and works even when the target is already NAME_MAX long.
     let tmp = format!(".sill-save-{:032x}", rand::random::<u128>());
     let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let fd = openat2(&d, tmp.as_str(), flags, Mode::from_raw_mode(mode), RESOLVE)
-        .with_context(|| format!("create {} in {}", tmp, dir.display()))?;
+    let fd = openat2(&d, tmp.as_str(), flags, Mode::from_raw_mode(mode), RESOLVE).with_context(|| format!("create {} in {}", tmp, dir.display()))?;
     let written = (|| -> Result<()> {
         let mut f = std::fs::File::from(fd);
         f.write_all(bytes)?;
@@ -259,14 +261,20 @@ mod tests {
         let root = scratch("concurrent-replace");
         let name = std::ffi::OsString::from_vec(vec![0xff; 255]);
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
-        let workers: Vec<_> = (0..8u8).map(|byte| {
-            let root = root.clone(); let name = name.clone(); let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                replace_file(&root, &name, &vec![byte; 65536]).unwrap();
+        let workers: Vec<_> = (0..8u8)
+            .map(|byte| {
+                let root = root.clone();
+                let name = name.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    replace_file(&root, &name, &vec![byte; 65536]).unwrap();
+                })
             })
-        }).collect();
-        for worker in workers { worker.join().unwrap(); }
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
         let bytes = std::fs::read(root.join(&name)).unwrap();
         assert_eq!(bytes.len(), 65536);
         assert!(bytes.iter().all(|byte| *byte == bytes[0]));
@@ -356,11 +364,12 @@ pub fn replace_private_beneath(root: &Path, rel: &Path, bytes: &[u8]) -> Result<
     let name = rel.file_name().context("no file name")?;
     match statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(st) if FileType::from_raw_mode(st.st_mode as RawMode) != FileType::RegularFile => bail!("not a regular file"),
-        Ok(_) | Err(Errno::NOENT) => {},
+        Ok(_) | Err(Errno::NOENT) => {}
         Err(e) => return Err(e.into()),
     }
     let tmp = format!(".sill-credential-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-    let fd = openat2(&dir, tmp.as_str(), OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::from_raw_mode(0o600), RESOLVE)?;
+    let fd =
+        openat2(&dir, tmp.as_str(), OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::from_raw_mode(0o600), RESOLVE)?;
     let result = (|| -> Result<()> {
         let mut file = std::fs::File::from(fd);
         file.write_all(bytes)?;
@@ -368,6 +377,8 @@ pub fn replace_private_beneath(root: &Path, rel: &Path, bytes: &[u8]) -> Result<
         renameat(&dir, tmp.as_str(), &dir, name)?;
         Ok(())
     })();
-    if result.is_err() { let _ = unlinkat(&dir, tmp.as_str(), AtFlags::empty()); }
+    if result.is_err() {
+        let _ = unlinkat(&dir, tmp.as_str(), AtFlags::empty());
+    }
     result
 }

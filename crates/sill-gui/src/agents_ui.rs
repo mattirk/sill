@@ -3,9 +3,7 @@ use crate::{
     App, Message, keys,
     style::{self, P},
 };
-use iced::widget::{
-    button, column, container, pick_list, row, scrollable, text, text_input, toggler,
-};
+use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input, toggler};
 use iced::{Alignment, Element, Fill, Task};
 use sill_client::agents::{self, Entry};
 use sill_proto::agent_admin::Definition;
@@ -135,15 +133,16 @@ fn tab_bar(tabs: &[Tab], shown: Tab) -> Element<'static, Message> {
     let mut bar = row![].spacing(14);
     for &tab in tabs {
         let on = tab == shown;
-        bar = bar.push(column![
-            keys::press(
-                button(text(tab.label()).size(style::SMALL).color(if on { P.fg } else { P.fg_dim }))
-                    .padding([4, 2])
-                    .style(style::quiet),
-                msg(Event::Tab(tab)),
-            ),
-            container(iced::widget::Space::new().height(2)).width(Fill).style(style::fill(if on { P.accent } else { iced::Color::TRANSPARENT })),
-        ].width(iced::Shrink));
+        bar = bar.push(
+            column![
+                keys::press(
+                    button(text(tab.label()).size(style::SMALL).color(if on { P.fg } else { P.fg_dim })).padding([4, 2]).style(style::quiet),
+                    msg(Event::Tab(tab)),
+                ),
+                container(iced::widget::Space::new().height(2)).width(Fill).style(style::fill(if on { P.accent } else { iced::Color::TRANSPARENT })),
+            ]
+            .width(iced::Shrink),
+        );
     }
     column![bar, container(iced::widget::Space::new().height(1)).width(Fill).style(style::fill(P.border))].into()
 }
@@ -152,12 +151,7 @@ fn field<'a>(name: &'a str, value: String) -> Element<'a, Message> {
     row![text(name).size(style::SMALL).color(P.fg_dim).width(90), text(value).size(style::SMALL)].spacing(8).into()
 }
 fn control(label: &str, event: Event) -> Element<'_, Message> {
-    keys::press(
-        button(text(label).size(style::SMALL))
-            .padding([4, 8])
-            .style(style::quiet),
-        msg(event),
-    )
+    keys::press(button(text(label).size(style::SMALL)).padding([4, 8]).style(style::quiet), msg(event))
 }
 /// A typed path as a `home_paths` entry: `~/…` (a bare name is taken under the home); a trailing
 /// `/` or a last component without a dot is a directory, otherwise a file. The daemon validates
@@ -199,9 +193,7 @@ fn path_controls(editor: &Editor) -> Element<'_, Message> {
             row![
                 text(label).size(style::TEXT).width(Fill),
                 keys::press(
-                    button(crate::icons::glyph("minus", 13.0, style::alpha(P.fg, 0.7)))
-                        .padding([6, 8])
-                        .style(style::quiet),
+                    button(crate::icons::glyph("minus", 13.0, style::alpha(P.fg, 0.7))).padding([6, 8]).style(style::quiet),
                     msg(Event::RemovePath(entry.path.clone())),
                 ),
             ]
@@ -210,28 +202,20 @@ fn path_controls(editor: &Editor) -> Element<'_, Message> {
         );
     }
     if declared.is_empty() {
-        paths = paths.push(text(if editor.definition.home_paths.is_some() { "None: no persistent state" } else { "Not set up yet" }).size(style::SMALL).color(P.fg_dim));
+        paths = paths
+            .push(text(if editor.definition.home_paths.is_some() { "None: no persistent state" } else { "Not set up yet" }).size(style::SMALL).color(P.fg_dim));
     }
     let candidate = home_path(&editor.path_input);
     let duplicate = candidate.as_ref().is_some_and(|c| declared.iter().any(|d| d.path == c.path));
     let can_add = candidate.is_some() && !duplicate;
-    let mut input = text_input("~/skills", &editor.path_input)
-        .on_input(|s| msg(Event::PathInput(s)))
-        .padding(7)
-        .size(style::SMALL);
+    let mut input = text_input("~/skills", &editor.path_input).on_input(|s| msg(Event::PathInput(s))).padding(7).size(style::SMALL);
     if can_add {
         input = input.on_submit(msg(Event::AddPath));
     }
     paths = paths.push(
-        row![
-            input,
-            keys::press_maybe(
-                button(text("Add").size(style::SMALL)).padding([6, 10]).style(style::quiet),
-                can_add.then(|| msg(Event::AddPath))
-            ),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
+        row![input, keys::press_maybe(button(text("Add").size(style::SMALL)).padding([6, 10]).style(style::quiet), can_add.then(|| msg(Event::AddPath))),]
+            .spacing(8)
+            .align_y(Alignment::Center),
     );
     if let Some(error) = &editor.path_error {
         paths = paths.push(text(error).size(style::SMALL).color(P.error));
@@ -244,16 +228,16 @@ fn path_controls(editor: &Editor) -> Element<'_, Message> {
 fn domain_controls(editor: &Editor) -> Element<'_, Message> {
     let mut domains = column![
         text("Domains this agent may reach. Save applies to new sessions. Running sessions keep their access; policies may allow other domains.")
-            .size(style::SMALL).color(P.fg_dim),
-    ].spacing(4);
+            .size(style::SMALL)
+            .color(P.fg_dim),
+    ]
+    .spacing(4);
     for domain in &editor.definition.domains {
         domains = domains.push(
             row![
                 text(domain).size(style::TEXT).width(Fill),
                 keys::press(
-                    button(crate::icons::glyph("minus", 13.0, style::alpha(P.fg, 0.7)))
-                        .padding([6, 8])
-                        .style(style::quiet),
+                    button(crate::icons::glyph("minus", 13.0, style::alpha(P.fg, 0.7))).padding([6, 8]).style(style::quiet),
                     msg(Event::RemoveDomain(domain.clone())),
                 ),
             ]
@@ -265,45 +249,24 @@ fn domain_controls(editor: &Editor) -> Element<'_, Message> {
         domains = domains.push(text("No domains added").size(style::SMALL).color(P.fg_dim));
     }
     let pattern = agents::domain_pattern(&editor.domain_input);
-    let duplicate = pattern.as_ref().is_some_and(|domain| {
-        editor
-            .definition
-            .domains
-            .iter()
-            .any(|d| d.eq_ignore_ascii_case(domain))
-    });
+    let duplicate = pattern.as_ref().is_some_and(|domain| editor.definition.domains.iter().any(|d| d.eq_ignore_ascii_case(domain)));
     let can_add = pattern.is_some() && !duplicate;
-    let mut input = text_input("example.com or *.example.com", &editor.domain_input)
-        .on_input(|s| msg(Event::DomainInput(s)))
-        .padding(7)
-        .size(style::SMALL);
+    let mut input = text_input("example.com or *.example.com", &editor.domain_input).on_input(|s| msg(Event::DomainInput(s))).padding(7).size(style::SMALL);
     if can_add {
         input = input.on_submit(msg(Event::AddDomain));
     }
     domains = domains.push(
-        row![
-            input,
-            keys::press_maybe(
-                button(text("Add").size(style::SMALL))
-                    .padding([6, 10])
-                    .style(style::quiet),
-                can_add.then(|| msg(Event::AddDomain))
-            ),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
+        row![input, keys::press_maybe(button(text("Add").size(style::SMALL)).padding([6, 10]).style(style::quiet), can_add.then(|| msg(Event::AddDomain))),]
+            .spacing(8)
+            .align_y(Alignment::Center),
     );
     if let Some(error) = &editor.domain_error {
         domains = domains.push(text(error).size(style::SMALL).color(P.error));
     } else if !editor.domain_input.trim().is_empty() && !can_add {
         domains = domains.push(
-            text(if duplicate {
-                "Already in the list"
-            } else {
-                "Use a domain, optionally with :port; leave out https:// and paths"
-            })
-            .size(style::SMALL)
-            .color(P.fg_dim),
+            text(if duplicate { "Already in the list" } else { "Use a domain, optionally with :port; leave out https:// and paths" })
+                .size(style::SMALL)
+                .color(P.fg_dim),
         );
     }
     domains.into()
@@ -329,7 +292,11 @@ fn setup_card<'a>(e: &'a Entry, unticked: Option<&'a BTreeSet<String>>) -> Eleme
                 let name = discovery.auth_methods.iter().find(|m| m.id == method).map(|m| m.name.as_str()).unwrap_or(method);
                 card = card.push(text(format!("Logged in with {name}. It keeps its login and settings here; ticked paths become this agent's own, kept across sessions in sill's storage.")).size(style::SMALL).color(P.fg_dim));
             } else if let Some(note) = &discovery.note {
-                card = card.push(text(format!("The probe could not finish: {note}. Nothing to go on yet; probe again, or log in below if it offered a way.")).size(style::SMALL).color(P.warning));
+                card = card.push(
+                    text(format!("The probe could not finish: {note}. Nothing to go on yet; probe again, or log in below if it offered a way."))
+                        .size(style::SMALL)
+                        .color(P.warning),
+                );
             } else if discovery.proposals.is_empty() {
                 card = card.push(dim("On its first start it created nothing under the home: it writes its state when it logs in. Log in once here, on this machine, and Sill keeps what the login writes."));
             } else {
@@ -341,24 +308,15 @@ fn setup_card<'a>(e: &'a Entry, unticked: Option<&'a BTreeSet<String>>) -> Eleme
                     sill_proto::agent_admin::HomePathKind::Directory => format!("{}/", proposal.path),
                     sill_proto::agent_admin::HomePathKind::File => proposal.path.clone(),
                 };
-                let mut line = row![
-                    iced::widget::checkbox(ticked)
-                        .label(label)
-                        .text_size(style::SMALL)
-                        .on_toggle({
-                            let id = id.clone();
-                            let path = proposal.path.clone();
-                            move |v| msg(Event::Choose(id.clone(), path.clone(), v))
-                        }),
-                ]
+                let mut line = row![iced::widget::checkbox(ticked).label(label).text_size(style::SMALL).on_toggle({
+                    let id = id.clone();
+                    let path = proposal.path.clone();
+                    move |v| msg(Event::Choose(id.clone(), path.clone(), v))
+                }),]
                 .spacing(8)
                 .align_y(Alignment::Center);
                 if proposal.on_host {
-                    line = line.push(
-                        text("exists on this machine: owning it hides the host's copy from this agent")
-                            .size(style::TINY)
-                            .color(P.warning),
-                    );
+                    line = line.push(text("exists on this machine: owning it hides the host's copy from this agent").size(style::TINY).color(P.warning));
                 }
                 card = card.push(line);
                 let root = format!("{}/", proposal.path.trim_start_matches("~/"));
@@ -394,8 +352,7 @@ impl App {
             return Task::none();
         }
         let Some(connect) = self.connect.clone() else {
-            self.agents_page.note =
-                Some("The demo has no daemon; agent management needs a connection.".into());
+            self.agents_page.note = Some("The demo has no daemon; agent management needs a connection.".into());
             return Task::none();
         };
         self.agents_page.loading = true;
@@ -429,12 +386,8 @@ impl App {
     }
     fn agents_icons(&mut self) -> Task<Message> {
         let p = &mut self.agents_page;
-        let selectors: Vec<_> = p
-            .entries
-            .iter()
-            .filter(|e| e.registry.has_icon && !p.icons_queued.contains(&e.registry.entry_id))
-            .map(|e| e.selector())
-            .collect();
+        let selectors: Vec<_> =
+            p.entries.iter().filter(|e| e.registry.has_icon && !p.icons_queued.contains(&e.registry.entry_id)).map(|e| e.selector()).collect();
         if selectors.is_empty() {
             return Task::none();
         }
@@ -457,13 +410,7 @@ impl App {
                 }
             }
         });
-        Task::run(
-            iced::futures::stream::unfold(
-                rx,
-                |rx| async move { rx.recv().await.ok().map(|e| (e, rx)) },
-            ),
-            msg,
-        )
+        Task::run(iced::futures::stream::unfold(rx, |rx| async move { rx.recv().await.ok().map(|e| (e, rx)) }), msg)
     }
     pub fn agents_event(&mut self, event: Event) -> Task<Message> {
         let p = &mut self.agents_page;
@@ -497,8 +444,7 @@ impl App {
             Event::Untested(v) => p.untested = v,
             Event::Icon(id, bytes) => {
                 if let Some(bytes) = bytes {
-                    p.icons
-                        .insert(id, iced::widget::svg::Handle::from_memory(bytes));
+                    p.icons.insert(id, iced::widget::svg::Handle::from_memory(bytes));
                 }
             }
             Event::Log(id, line) => {
@@ -521,8 +467,7 @@ impl App {
                 if result.is_ok() {
                     p.unticked.remove(&id);
                 }
-                p.logs
-                    .insert(id, result.err().unwrap_or_else(|| "Done".into()));
+                p.logs.insert(id, result.err().unwrap_or_else(|| "Done".into()));
                 return self.agents_load(false);
             }
             Event::CloseEditor => {
@@ -537,22 +482,11 @@ impl App {
                 }
                 p.details = Some(id.clone());
                 p.tab = Tab::General;
-                if let Some(d) = p
-                    .entries
-                    .iter()
-                    .find(|e| e.registry.entry_id == id)
-                    .and_then(|e| e.definition.clone())
-                {
+                if let Some(d) = p.entries.iter().find(|e| e.registry.entry_id == id).and_then(|e| e.definition.clone()) {
                     p.editor = Some(Editor {
                         id,
                         command: serde_json::to_string(&d.command).unwrap(),
-                        env: iced::widget::text_editor::Content::with_text(
-                            &d.env
-                                .iter()
-                                .map(|(k, v)| format!("{k}={v}"))
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        ),
+                        env: iced::widget::text_editor::Content::with_text(&d.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("\n")),
                         domain_input: String::new(),
                         domain_error: None,
                         path_input: String::new(),
@@ -583,11 +517,7 @@ impl App {
                         e.domain_error = Some("Use a domain such as example.com or *.example.com, without https:// or a path".into());
                         return Task::none();
                     };
-                    if e.definition
-                        .domains
-                        .iter()
-                        .any(|d| d.eq_ignore_ascii_case(&domain))
-                    {
+                    if e.definition.domains.iter().any(|d| d.eq_ignore_ascii_case(&domain)) {
                         e.domain_error = Some("Already in the list".into());
                         return Task::none();
                     }
@@ -649,8 +579,7 @@ impl App {
                 };
                 let mut env = BTreeMap::new();
                 for line in editor.env.text().lines().filter(|s| !s.trim().is_empty()) {
-                    let Some((k, v)) = line.split_once('=').filter(|(k, _)| !k.trim().is_empty())
-                    else {
+                    let Some((k, v)) = line.split_once('=').filter(|(k, _)| !k.trim().is_empty()) else {
                         p.note = Some("Environment needs one NAME=value per line.".into());
                         return Task::none();
                     };
@@ -666,11 +595,7 @@ impl App {
                     return Task::none();
                 }
                 let id = editor.id.clone();
-                return self.agent_call(
-                    id,
-                    "_sill/agents.save",
-                    serde_json::to_value(definition).unwrap(),
-                );
+                return self.agent_call(id, "_sill/agents.save", serde_json::to_value(definition).unwrap());
             }
             Event::Tab(tab) => p.tab = tab,
             Event::Choose(id, path, ticked) => {
@@ -690,11 +615,7 @@ impl App {
                 };
                 let unticked = p.unticked.get(&id).cloned().unwrap_or_default();
                 let definition = agents::set_up(definition, discovery, &unticked);
-                return self.agent_call(
-                    id,
-                    "_sill/agents.save",
-                    serde_json::to_value(definition).unwrap(),
-                );
+                return self.agent_call(id, "_sill/agents.save", serde_json::to_value(definition).unwrap());
             }
             Event::Discover(id, method) => {
                 if p.busy.contains(&id) {
@@ -705,7 +626,10 @@ impl App {
                 };
                 p.busy.insert(id.clone());
                 p.unticked.remove(&id);
-                p.logs.insert(id.clone(), if method.is_some() { "Logging in on the daemon's machine…".into() } else { "Starting it once in a throwaway jail…".into() });
+                p.logs.insert(
+                    id.clone(),
+                    if method.is_some() { "Logging in on the daemon's machine…".into() } else { "Starting it once in a throwaway jail…".into() },
+                );
                 let (tx, rx) = async_channel::bounded(64);
                 std::thread::spawn(move || {
                     let result = connect()
@@ -721,9 +645,7 @@ impl App {
                         .map_err(|e| format!("{e:#}"));
                     let _ = tx.send_blocking(Event::Done(id, result));
                 });
-                let stream = iced::futures::stream::unfold(rx, |rx| async move {
-                    rx.recv().await.ok().map(|e| (e, rx))
-                });
+                let stream = iced::futures::stream::unfold(rx, |rx| async move { rx.recv().await.ok().map(|e| (e, rx)) });
                 return Task::run(stream, msg);
             }
             Event::Install(id) => {
@@ -736,7 +658,10 @@ impl App {
                 let entry = target(entry).clone();
                 let key = format!("install:{id}:{}:{}", entry.version, entry.source);
                 if entry.source == "live" && !p.armed.press(key) {
-                    p.logs.insert(id, format!("Unreviewed live index: {} v{}; {}. Press the same action again to confirm.", entry.name, entry.version, entry.install_spec));
+                    p.logs.insert(
+                        id,
+                        format!("Unreviewed live index: {} v{}; {}. Press the same action again to confirm.", entry.name, entry.version, entry.install_spec),
+                    );
                     return Task::none();
                 }
                 p.armed.clear();
@@ -756,9 +681,7 @@ impl App {
                         .map_err(|e| format!("{e:#}"));
                     let _ = tx.send_blocking(Event::Done(id, result));
                 });
-                let stream = iced::futures::stream::unfold(rx, |rx| async move {
-                    rx.recv().await.ok().map(|e| (e, rx))
-                });
+                let stream = iced::futures::stream::unfold(rx, |rx| async move { rx.recv().await.ok().map(|e| (e, rx)) });
                 return Task::run(stream, msg);
             }
             Event::Remove(ref id) | Event::Reset(ref id) => {
@@ -786,22 +709,14 @@ impl App {
                         selector.version = i.version.clone();
                         selector.source = i.source.clone();
                     }
-                    (
-                        "_sill/registry.uninstall",
-                        serde_json::to_value(selector).unwrap(),
-                    )
+                    ("_sill/registry.uninstall", serde_json::to_value(selector).unwrap())
                 };
                 return self.agent_call(id, method, params);
             }
         }
         Task::none()
     }
-    fn agent_call(
-        &mut self,
-        id: String,
-        method: &'static str,
-        params: serde_json::Value,
-    ) -> Task<Message> {
+    fn agent_call(&mut self, id: String, method: &'static str, params: serde_json::Value) -> Task<Message> {
         let Some(actions) = self.actions.clone() else {
             return Task::none();
         };
@@ -811,14 +726,7 @@ impl App {
         crate::blocking(
             move || {
                 let outcome = actions.call(method, params);
-                if outcome.is_done() {
-                    Ok(())
-                } else {
-                    Err(outcome
-                        .problem()
-                        .unwrap_or("Unknown outcome; refresh before retrying")
-                        .to_string())
-                }
+                if outcome.is_done() { Ok(()) } else { Err(outcome.problem().unwrap_or("Unknown outcome; refresh before retrying").to_string()) }
             },
             move |result| msg(Event::Done(id.clone(), result)),
         )
@@ -827,18 +735,9 @@ impl App {
         let p = &self.agents_page;
         let mut body = column![
             row![
-                text_input("Search agents…", &p.search)
-                    .id("agents-search")
-                    .on_input(|s| msg(Event::Search(s)))
-                    .padding(8),
-                pick_list(
-                    [Filter::All, Filter::Installed, Filter::Absent],
-                    Some(p.filter),
-                    |f| msg(Event::Filter(f))
-                ),
-                toggler(p.untested)
-                    .label("Untested")
-                    .on_toggle(|v| msg(Event::Untested(v))),
+                text_input("Search agents…", &p.search).id("agents-search").on_input(|s| msg(Event::Search(s))).padding(8),
+                pick_list([Filter::All, Filter::Installed, Filter::Absent], Some(p.filter), |f| msg(Event::Filter(f))),
+                toggler(p.untested).label("Untested").on_toggle(|v| msg(Event::Untested(v))),
                 control("Refresh", Event::Load(true)),
             ]
             .spacing(10)
@@ -859,16 +758,11 @@ impl App {
             if !p.untested && !e.present() && !e.tested() {
                 continue;
             }
-            if (p.filter == Filter::Installed && !e.present())
-                || (p.filter == Filter::Absent && e.present())
-            {
+            if (p.filter == Filter::Installed && !e.present()) || (p.filter == Filter::Absent && e.present()) {
                 continue;
             }
             let r = &e.registry;
-            if !format!("{} {} {}", r.name, r.entry_id, r.description)
-                .to_lowercase()
-                .contains(&needle)
-            {
+            if !format!("{} {} {}", r.name, r.entry_id, r.description).to_lowercase().contains(&needle) {
                 continue;
             }
             count += 1;
@@ -876,17 +770,8 @@ impl App {
             let wanted = target(e);
             let mut top = row![
                 match p.icons.get(id) {
-                    Some(handle) => iced::widget::svg(handle.clone())
-                        .width(16)
-                        .height(16)
-                        .style(style::icon(P.fg))
-                        .into(),
-                    None => crate::icons::tab_agent(
-                        r.builtin_agent_id.as_deref().unwrap_or(id),
-                        None,
-                        P.fg,
-                        false
-                    ),
+                    Some(handle) => iced::widget::svg(handle.clone()).width(16).height(16).style(style::icon(P.fg)).into(),
+                    None => crate::icons::tab_agent(r.builtin_agent_id.as_deref().unwrap_or(id), None, P.fg, false),
                 },
                 text(&r.name).size(style::TEXT).width(Fill),
             ]
@@ -908,23 +793,12 @@ impl App {
                 top = top.push(control("Install", Event::Install(id.clone())));
             }
             let expanded = p.details.as_deref() == Some(id);
-            top = top.push(control(
-                if expanded {
-                    "Settings ▴"
-                } else {
-                    "Settings ▾"
-                },
-                Event::Edit(id.clone()),
-            ));
+            top = top.push(control(if expanded { "Settings ▴" } else { "Settings ▾" }, Event::Edit(id.clone())));
             let mut card = column![top].spacing(6);
             if e.needs_setup() && !p.busy.contains(id) {
                 card = card.push(setup_card(e, p.unticked.get(id)));
             }
-            if let Some(log) = p
-                .logs
-                .get(id)
-                .filter(|log| expanded || log.as_str() != "Done")
-            {
+            if let Some(log) = p.logs.get(id).filter(|log| expanded || log.as_str() != "Done") {
                 card = card.push(crate::selection::text(log.clone()).size(style::SMALL));
             }
             if expanded {
@@ -953,16 +827,22 @@ impl App {
                         };
                         pane = pane.push(field("Version", version));
                         if let Some(editor) = editor {
-                            pane = pane.push(field("Network", match editor.definition.domains.len() {
-                                0 => "No allowed domains".into(),
-                                1 => "1 allowed domain".into(),
-                                n => format!("{n} allowed domains"),
-                            }));
-                            pane = pane.push(field("Directories", match editor.definition.home_paths.as_deref() {
-                                None => "Not set up yet".into(),
-                                Some([]) => "Nothing kept across sessions".into(),
-                                Some(paths) => format!("{} kept across sessions", paths.len()),
-                            }));
+                            pane = pane.push(field(
+                                "Network",
+                                match editor.definition.domains.len() {
+                                    0 => "No allowed domains".into(),
+                                    1 => "1 allowed domain".into(),
+                                    n => format!("{n} allowed domains"),
+                                },
+                            ));
+                            pane = pane.push(field(
+                                "Directories",
+                                match editor.definition.home_paths.as_deref() {
+                                    None => "Not set up yet".into(),
+                                    Some([]) => "Nothing kept across sessions".into(),
+                                    Some(paths) => format!("{} kept across sessions", paths.len()),
+                                },
+                            ));
                             pane = pane.push(
                                 toggler(editor.definition.enabled)
                                     .label("Offer in the new session menu")
@@ -996,13 +876,7 @@ impl App {
                                     .padding(7),
                             );
                             pane = pane.push(text("Environment variables (NAME=value per line; may contain API keys)").size(style::SMALL).color(P.fg_dim));
-                            pane = pane.push(
-                                iced::widget::text_editor(&editor.env)
-                                    .on_action(|a| msg(Event::Env(a)))
-                                    .size(style::SMALL)
-                                    .height(80)
-                                    .padding(7),
-                            );
+                            pane = pane.push(iced::widget::text_editor(&editor.env).on_action(|a| msg(Event::Env(a))).size(style::SMALL).height(80).padding(7));
                         }
                         let mut registry = format!("{} v{} ({})", id, r.version, r.source);
                         if let Some(newer) = &r.newer {
@@ -1013,15 +887,10 @@ impl App {
                         }
                         pane = pane.push(field("Registry", registry));
                         let mut links = row![].spacing(8).align_y(Alignment::Center);
-                        for (label, url) in [
-                            ("Copy source link", &r.repository),
-                            ("Copy website link", &r.website),
-                        ] {
+                        for (label, url) in [("Copy source link", &r.repository), ("Copy website link", &r.website)] {
                             if let Some(url) = url {
-                                links = links.push(keys::press(
-                                    button(text(label).size(style::SMALL)).padding([4, 8]).style(style::quiet),
-                                    Message::Copy(url.clone()),
-                                ));
+                                links = links
+                                    .push(keys::press(button(text(label).size(style::SMALL)).padding([4, 8]).style(style::quiet), Message::Copy(url.clone())));
                             }
                         }
                         pane = pane.push(links.wrap());
@@ -1041,12 +910,7 @@ impl App {
                 }
                 card = card.push(actions);
             }
-            body = body.push(
-                container(card)
-                    .padding([6, 10])
-                    .width(Fill)
-                    .style(style::fill(P.surface)),
-            );
+            body = body.push(container(card).padding([6, 10]).width(Fill).style(style::fill(P.surface)));
         }
         if count == 0 && !p.loading {
             body = body.push(text("No matching agents").color(P.fg_dim));
@@ -1055,10 +919,7 @@ impl App {
         if let Some(agent) = p.providers.agent().and_then(|id| p.entries.iter().find(|e| e.registry.entry_id == id)) {
             body = body.push(container(p.providers.footer(&agent.registry.name)).padding([10, 0]));
         }
-        scrollable(container(body).max_width(960).padding(16).center_x(Fill))
-            .height(Fill)
-            .style(style::feed_scroll)
-            .into()
+        scrollable(container(body).max_width(960).padding(16).center_x(Fill)).height(Fill).style(style::feed_scroll).into()
     }
 }
 
@@ -1087,34 +948,15 @@ mod tests {
         });
         let _ = app.update(msg(Event::DomainInput("https://example.com/".into())));
         let _ = app.update(msg(Event::AddDomain));
-        assert!(
-            app.agents_page
-                .editor
-                .as_ref()
-                .unwrap()
-                .domain_error
-                .is_some()
-        );
+        assert!(app.agents_page.editor.as_ref().unwrap().domain_error.is_some());
         let _ = app.update(msg(Event::DomainInput("GOOGLE.com".into())));
         let _ = app.update(msg(Event::AddDomain));
-        assert_eq!(
-            app.agents_page
-                .editor
-                .as_ref()
-                .unwrap()
-                .definition
-                .domains
-                .len(),
-            2
-        );
+        assert_eq!(app.agents_page.editor.as_ref().unwrap().definition.domains.len(), 2);
         let _ = app.update(msg(Event::RemoveDomain("google.com".into())));
         let _ = app.update(msg(Event::DomainInput("  *.Example.com:8443  ".into())));
         let _ = app.update(msg(Event::AddDomain));
         let editor = app.agents_page.editor.as_ref().unwrap();
-        assert_eq!(
-            editor.definition.domains,
-            ["openai.com", "*.example.com:8443"]
-        );
+        assert_eq!(editor.definition.domains, ["openai.com", "*.example.com:8443"]);
         assert!(editor.domain_input.is_empty());
 
         let (client, mut daemon) = daemon();
@@ -1122,10 +964,7 @@ mod tests {
         let worker = std::thread::spawn(move || {
             let req = daemon.expect("_sill/agents.save");
             assert_eq!(req["params"]["id"], "codex");
-            assert_eq!(
-                req["params"]["domains"],
-                json!(["openai.com", "*.example.com:8443"])
-            );
+            assert_eq!(req["params"]["domains"], json!(["openai.com", "*.example.com:8443"]));
             assert_eq!(req["params"]["env"], json!({"KEEP":"yes"}));
             assert_eq!(req["params"]["command"], json!(["codex-acp"]));
             daemon.refuse(&req, "permission_denied", "Cannot save");
@@ -1133,23 +972,14 @@ mod tests {
         // A typed domain must be added or cleared before Save can send anything.
         let _ = app.update(msg(Event::DomainInput("pending.com".into())));
         let _ = app.update(msg(Event::Save));
-        assert!(
-            app.agents_page
-                .note
-                .as_ref()
-                .unwrap()
-                .contains("Add the typed domain")
-        );
+        assert!(app.agents_page.note.as_ref().unwrap().contains("Add the typed domain"));
         assert!(app.agents_page.busy.is_empty());
         let _ = app.update(msg(Event::DomainInput(String::new())));
         let task = app.update(msg(Event::Save));
         settle_task(&mut app, task);
         worker.join().unwrap();
         assert!(app.agents_page.logs["codex-acp"].contains("Cannot save"));
-        assert_eq!(
-            app.agents_page.editor.as_ref().unwrap().definition.domains,
-            ["openai.com", "*.example.com:8443"]
-        );
+        assert_eq!(app.agents_page.editor.as_ref().unwrap().definition.domains, ["openai.com", "*.example.com:8443"]);
     }
 
     #[test]
@@ -1179,16 +1009,10 @@ mod tests {
         let _ = app.update(Message::Escape);
         assert!(!app.backend_shown());
         assert!(app.agents_page.busy.contains("test"));
-        let _ = app.update(msg(Event::Done(
-            "test".into(),
-            Err("install failed".into()),
-        )));
+        let _ = app.update(msg(Event::Done("test".into(), Err("install failed".into()))));
         assert!(!app.agents_page.busy.contains("test"));
         assert_eq!(app.agents_page.logs.get("test").unwrap(), "install failed");
-        assert!(
-            !app.backend_shown(),
-            "late completion must not reopen the page"
-        );
+        assert!(!app.backend_shown(), "late completion must not reopen the page");
     }
     #[test]
     fn live_install_requires_confirmation_before_starting_work() {
@@ -1200,19 +1024,10 @@ mod tests {
             "has_icon":false, "builtin_agent_id":null, "newer":null
         }))
         .unwrap();
-        app.agents_page.entries.push(Entry {
-            registry,
-            installed: None,
-            definition: None,
-            available: false,
-            discovery: None,
-        });
+        app.agents_page.entries.push(Entry { registry, installed: None, definition: None, available: false, discovery: None });
         let _ = app.update(msg(Event::Install("live-agent".into())));
         assert!(app.agents_page.busy.is_empty());
-        assert_eq!(
-            app.agents_page.armed.get().map(String::as_str),
-            Some("install:live-agent:1:live")
-        );
+        assert_eq!(app.agents_page.armed.get().map(String::as_str), Some("install:live-agent:1:live"));
         assert!(app.agents_page.logs["live-agent"].contains("some-package@1"));
         let _ = app.update(msg(Event::Edit("live-agent".into())));
         assert_eq!(app.agents_page.details.as_deref(), Some("live-agent"));
@@ -1246,20 +1061,11 @@ mod tests {
             }
         }))
         .unwrap();
-        app.agents_page.entries.push(Entry {
-            registry,
-            installed: None,
-            definition: None,
-            available: false,
-            discovery: None,
-        });
+        app.agents_page.entries.push(Entry { registry, installed: None, definition: None, available: false, discovery: None });
         // always the latest: the newer live version, which asks for confirmation first
         assert_eq!(target(&app.agents_page.entries[0]).version, "2");
         let _ = app.update(msg(Event::Install("codex-acp".into())));
-        assert_eq!(
-            app.agents_page.armed.get().map(String::as_str),
-            Some("install:codex-acp:2:live")
-        );
+        assert_eq!(app.agents_page.armed.get().map(String::as_str), Some("install:codex-acp:2:live"));
         assert!(app.agents_page.logs["codex-acp"].contains("codex@2"));
         // with no newer live version, the entry's own
         app.agents_page.entries[0].registry.newer = None;
@@ -1364,12 +1170,15 @@ mod tests {
         app.agents_page.entries.push(entry.clone());
         let _ = app.update(msg(Event::ApplySetup("antigravity-acp".into())));
         assert!(app.agents_page.busy.is_empty());
-        entry.discovery = Some(serde_json::from_value(json!({"at":"1", "version":"1", "proposals":[
+        entry.discovery = Some(
+            serde_json::from_value(json!({"at":"1", "version":"1", "proposals":[
             {"path":"~/.antigravity", "kind":"directory", "on_host":false},
             {"path":"~/.antigravity.json", "kind":"file", "on_host":false, "initial_content":"{}"},
             {"path":"~/.cargo", "kind":"directory", "on_host":true}
         ], "auth_methods":[{"id":"oauth-personal","name":"Log in with Google"}], "login_method":"oauth-personal",
-           "login_files":[".antigravity/oauth_creds.json", ".cargo/credentials.toml"]})).unwrap());
+           "login_files":[".antigravity/oauth_creds.json", ".cargo/credentials.toml"]}))
+            .unwrap(),
+        );
         app.agents_page.entries[0] = entry;
         let _ = app.update(msg(Event::Choose("antigravity-acp".into(), "~/.cargo".into(), false)));
         let _ = app.update(msg(Event::Choose("antigravity-acp".into(), "~/.antigravity".into(), false)));
@@ -1399,29 +1208,21 @@ mod tests {
         let (mut app, _) = App::new(true, None);
         app.agents_page.shown = true;
         app.agents_page.untested = true;
-        for (id, name, source) in [
-            ("codex-acp", "Codex", "snapshot"),
-            ("example-agent", "Example agent with a longer name", "live"),
-        ] {
+        for (id, name, source) in [("codex-acp", "Codex", "snapshot"), ("example-agent", "Example agent with a longer name", "live")] {
             let registry = serde_json::from_value(serde_json::json!({
                 "entry_id":id,"name":name,"version":"1.2.3","source":source,
                 "installable":true,"description":"An agent that works with your code, tools and repository.",
                 "repository":"https://github.com/example/agent","website":null,
                 "install_kind":"npx","install_spec":"example@1.2.3","package_name":"example",
                 "has_icon":false,"builtin_agent_id":null,"newer":null
-            })).unwrap();
+            }))
+            .unwrap();
             let definition = serde_json::from_value(serde_json::json!({
                 "id":id,"name":name,"command":["agent", "--acp"],"env":{"API_KEY":"example"},
                 "domains":["openai.com", "github.com", "google.com"]
             }))
             .unwrap();
-            app.agents_page.entries.push(Entry {
-                registry,
-                definition: Some(definition),
-                installed: None,
-                available: false,
-                discovery: None,
-            });
+            app.agents_page.entries.push(Entry { registry, definition: Some(definition), installed: None, available: false, discovery: None });
         }
         crate::snapshots::render(&app, "compact-agents");
         crate::snapshots::render_size(&app, "narrow-compact-agents", (480.0, 860.0));

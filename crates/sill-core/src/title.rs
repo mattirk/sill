@@ -516,11 +516,7 @@ pub fn unused_name(used: &HashSet<String>) -> String {
 }
 
 pub(crate) fn base_name(index: usize) -> String {
-    format!(
-        "{}-{}",
-        ADJECTIVES[index / NOUNS.len()],
-        NOUNS[index % NOUNS.len()]
-    )
+    format!("{}-{}", ADJECTIVES[index / NOUNS.len()], NOUNS[index % NOUNS.len()])
 }
 
 fn unused_from(used: &HashSet<String>, start: usize) -> String {
@@ -552,11 +548,7 @@ mod tests {
         assert_eq!(NOUNS.len(), 300);
         for words in [ADJECTIVES, NOUNS] {
             assert_eq!(words.iter().collect::<HashSet<_>>().len(), words.len());
-            assert!(
-                words
-                    .iter()
-                    .all(|w| !w.is_empty() && w.bytes().all(|c| c.is_ascii_lowercase()))
-            );
+            assert!(words.iter().all(|w| !w.is_empty() && w.bytes().all(|c| c.is_ascii_lowercase())));
         }
     }
 

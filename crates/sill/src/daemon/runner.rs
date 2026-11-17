@@ -13,11 +13,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
+use super::{context, relay};
 use anyhow::{Result, bail};
 use sill_core::acp::{self, Controls};
-use sill_core::wire::{self, Entry};
 use sill_core::store::Store;
-use super::{context, relay};
+use sill_core::wire::{self, Entry};
 #[path = "runner_sfp.rs"]
 mod sfp_runner;
 pub(in crate::daemon) use sfp_runner::inline_as_uploads;
@@ -33,7 +33,10 @@ pub enum SummaryKind {
 impl SummaryKind {
     /// Its name in the session state's `summarizing` (docs/protocol.md).
     pub fn wire(self) -> &'static str {
-        match self { SummaryKind::End => "end", SummaryKind::Checkpoint => "checkpoint" }
+        match self {
+            SummaryKind::End => "end",
+            SummaryKind::Checkpoint => "checkpoint",
+        }
     }
 }
 
@@ -114,7 +117,9 @@ impl Runner {
 
     pub fn new(id: &str, relay: Arc<relay::Client>, snapshot: serde_json::Value) -> Result<Arc<Runner>> {
         let mut state: State = if snapshot.is_null() { State::default() } else { serde_json::from_value(snapshot)? };
-        if state.generation_id.is_empty() { state.generation_id = super::sfp::id(); }
+        if state.generation_id.is_empty() {
+            state.generation_id = super::sfp::id();
+        }
         // Keep retirement durable until the relay's final event is drained: an ended session may
         // outlive the main daemon briefly, and must never replay as a live conversation.
         Ok(Arc::new(Runner { id: id.into(), relay, st: Mutex::new(state) }))
@@ -125,7 +130,9 @@ impl Runner {
         Ok(())
     }
 
-    pub fn cursor(snapshot: &serde_json::Value) -> u64 { snapshot.get("cursor").and_then(|v| v.as_u64()).unwrap_or(0) }
+    pub fn cursor(snapshot: &serde_json::Value) -> u64 {
+        snapshot.get("cursor").and_then(|v| v.as_u64()).unwrap_or(0)
+    }
 
     pub fn alive(&self) -> bool {
         let st = self.st.lock().unwrap();
@@ -137,9 +144,12 @@ impl Runner {
         // A summary result and its end intent remain recoverable if the daemon stopped between
         // committing the event and applying the end. Finishing an end is idempotent.
         let completed = self.st.lock().unwrap().completed.clone();
-        if let Some(done) = completed { hub.summary_done(&self.id, done); self.summary_applied(&hub); }
-        if let Err(e)=hub.with_store(|store| self.sfp_recover(store,&hub)) {
-            eprintln!("sill daemon: recovering SFP state {}: {e:#}",self.id);
+        if let Some(done) = completed {
+            hub.summary_done(&self.id, done);
+            self.summary_applied(&hub);
+        }
+        if let Err(e) = hub.with_store(|store| self.sfp_recover(store, &hub)) {
+            eprintln!("sill daemon: recovering SFP state {}: {e:#}", self.id);
         }
         self.resume_summary_cap(&hub);
         loop {
@@ -147,7 +157,9 @@ impl Runner {
                 Ok(delivery) => delivery,
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if !self.st.lock().unwrap().context.restoring() { continue; }
+                    if !self.st.lock().unwrap().context.restoring() {
+                        continue;
+                    }
                     if let Err(error) = hub.with_store(|store| {
                         let mut st = self.st.lock().unwrap();
                         if !st.ended && !st.retired && st.context.expire_controls(context::control_now()) {
@@ -159,7 +171,9 @@ impl Runner {
                             self.sfp_dispatch(store, &hub, &mut st)?;
                         }
                         Ok(())
-                    }) { eprintln!("sill daemon: controls timeout: {error:#}"); }
+                    }) {
+                        eprintln!("sill daemon: controls timeout: {error:#}");
+                    }
                     continue;
                 }
             };
@@ -170,10 +184,17 @@ impl Runner {
             let done = hub.with_store(|store| {
                 let tx = store.conn().unchecked_transaction()?;
                 let mut st = self.st.lock().unwrap();
-                if seq > 0 && seq <= st.cursor { return Ok(None); }
+                if seq > 0 && seq <= st.cursor {
+                    return Ok(None);
+                }
                 if st.retired {
-                    if seq > 0 { st.cursor = seq; }
-                    if end { st.ended = true; st.outbox.clear(); }
+                    if seq > 0 {
+                        st.cursor = seq;
+                    }
+                    if end {
+                        st.ended = true;
+                        st.outbox.clear();
+                    }
                     self.save(store, &st)?;
                     tx.commit()?;
                     return Ok(None);
@@ -191,19 +212,28 @@ impl Runner {
                     None => self.sfp_project(store, &mut st, &delivery.event, seq)?,
                 };
                 stopped = matches!(delivery.event, relay::Event::Stopped(_))
-                    || matches!(&delivery.event,relay::Event::V2Update{..}) && public_events.iter().any(|event|matches!(&event.event,sill_proto::sfp::Event::TurnUpdated{turn} if turn.outcome!="pending"));
+                    || matches!(&delivery.event, relay::Event::V2Update { .. })
+                        && public_events.iter().any(|event| matches!(&event.event,sill_proto::sfp::Event::TurnUpdated{turn} if turn.outcome!="pending"));
                 let done = self.handle_locked(store, &mut st, delivery.event.clone(), false)?;
-                if controls_expired { public_events.extend(self.sfp_controls_state(store, &st)?); }
+                if controls_expired {
+                    public_events.extend(self.sfp_controls_state(store, &st)?);
+                }
                 // a stopped summary is still the session's until the hub has applied it
-                if let Some(done) = &done { st.completed = Some(done.clone()); }
+                if let Some(done) = &done {
+                    st.completed = Some(done.clone());
+                }
                 // the summary turn started or changed, or its agent went: the session says so
                 // with the event
                 public_events.extend(self.sfp_summarizing(store, &st)?);
-                if seq > 0 { st.cursor = seq; }
+                if seq > 0 {
+                    st.cursor = seq;
+                }
                 self.save(store, &st)?;
                 tx.commit()?;
                 hub.sfp_publish(&self.id, &public_events);
-                if auto { self.sfp_auto_answer(store, &hub, &mut st, &delivery.event)?; }
+                if auto {
+                    self.sfp_auto_answer(store, &hub, &mut st, &delivery.event)?;
+                }
                 self.sfp_dispatch(store, &hub, &mut st)?;
                 Ok(done)
             });
@@ -211,20 +241,40 @@ impl Runner {
                 Ok(done) => {
                     // Ack only after transcript and snapshot are committed together.
                     self.relay.ack(seq).ok();
-                    hub.with_store(|store| { let mut st = self.st.lock().unwrap(); self.drain(store, &mut st) })
-                        .unwrap_or_else(|e| { eprintln!("sill daemon: delivering queued control: {e:#}"); });
-                    if let Some(done) = done { hub.summary_done(&self.id, done); self.summary_applied(&hub); }
+                    hub.with_store(|store| {
+                        let mut st = self.st.lock().unwrap();
+                        self.drain(store, &mut st)
+                    })
+                    .unwrap_or_else(|e| {
+                        eprintln!("sill daemon: delivering queued control: {e:#}");
+                    });
+                    if let Some(done) = done {
+                        hub.summary_done(&self.id, done);
+                        self.summary_applied(&hub);
+                    }
                 }
-                Err(e) => { eprintln!("sill daemon: saving session {}: {e:#}", self.id); std::process::exit(103); }
+                Err(e) => {
+                    eprintln!("sill daemon: saving session {}: {e:#}", self.id);
+                    std::process::exit(103);
+                }
             }
-            if stopped && !self.st.lock().unwrap().retired { hub.turn_ended(&self.id); }
-            if end { break; }
+            if stopped && !self.st.lock().unwrap().retired {
+                hub.turn_ended(&self.id);
+            }
+            if end {
+                break;
+            }
         }
         // A relay connection disappearing is not an agent ending: leave the snapshot intact and
         // let restart reconnect. Sweeps treat this missing runner as unknown, not idle.
-        let retry = { let st = self.st.lock().unwrap(); !st.ended && !st.retired };
+        let retry = {
+            let st = self.st.lock().unwrap();
+            !st.ended && !st.retired
+        };
         hub.runner_ended(&self);
-        if retry { hub.reconnect_runner(&self.id); }
+        if retry {
+            hub.reconnect_runner(&self.id);
+        }
     }
 
     fn handle_locked(&self, store: &Store, st: &mut State, ev: relay::Event, auto: bool) -> Result<Option<SummaryDone>> {
@@ -242,10 +292,14 @@ impl Runner {
                 // the session opened: a login asked for before is done (an agent that wants one
                 // per prompt asks again there). Kept, it held every prompt in the queue.
                 st.auth = None;
-                if matches!(&ev,relay::Event::V2Ready{resumed:true,..}) { st.busy=true; }
+                if matches!(&ev, relay::Event::V2Ready { resumed: true, .. }) {
+                    st.busy = true;
+                }
             }
             relay::Event::Capabilities { images } => st.images = Some(*images),
-            relay::Event::Controls(c) => { st.controls = Some(c.clone()); },
+            relay::Event::Controls(c) => {
+                st.controls = Some(c.clone());
+            }
             relay::Event::Usage { used, size } => st.usage = Some((*used, *size)),
             // the loop drops a prompt that arrives while it waits for a login (no Stopped follows),
             // so the session is not busy any more — the prompt after the login must not be refused
@@ -274,24 +328,32 @@ impl Runner {
             // the transcript (summaries, memory) notes an image without its bytes
             relay::Event::Image { parent: None, .. } => st.agent_md.push_str("[image]"),
             relay::Event::V2Update { update } => {
-                let native_turn=st.adapter.v2_last_turn().map(str::to_owned);
-                let unflushed=native_turn.is_some() && native_turn!=st.native_flushed_turn;
-                if unflushed && let Some(text)=st.adapter.v2_turn_text() {st.agent_md=text;}
-                if update["sessionUpdate"]=="state_update" {
-                    let state=update["state"].as_str().unwrap_or("unknown");
+                let native_turn = st.adapter.v2_last_turn().map(str::to_owned);
+                let unflushed = native_turn.is_some() && native_turn != st.native_flushed_turn;
+                if unflushed && let Some(text) = st.adapter.v2_turn_text() {
+                    st.agent_md = text;
+                }
+                if update["sessionUpdate"] == "state_update" {
+                    let state = update["state"].as_str().unwrap_or("unknown");
                     // The projector only removes a pending native turn after observing active work.
-                    if state=="idle" && st.adapter.turn_id().is_none() {
-                        st.busy=false;st.last_turn_end=Some(sill_core::store::now());
+                    if state == "idle" && st.adapter.turn_id().is_none() {
+                        st.busy = false;
+                        st.last_turn_end = Some(sill_core::store::now());
                         if unflushed {
-                            flush(store,&id,st)?;st.native_flushed_turn=native_turn;
-                            if let Some((kind,text,_))=st.summary.take(){done=Some(SummaryDone{kind,text:Some(text.trim().to_string())});}
+                            flush(store, &id, st)?;
+                            st.native_flushed_turn = native_turn;
+                            if let Some((kind, text, _)) = st.summary.take() {
+                                done = Some(SummaryDone { kind, text: Some(text.trim().to_string()) });
+                            }
                         }
-                    } else if state!="idle" {st.busy=true;}
+                    } else if state != "idle" {
+                        st.busy = true;
+                    }
                 }
             }
             relay::Event::V2PromptFailed { .. } => {
                 // A failed RPC alone is not a foreground-idle observation.
-                st.busy=true;
+                st.busy = true;
             }
             relay::Event::ToolCall { id: call, title, status, kind, detail, diff, parent, .. } => {
                 flush(store, &id, st)?;
@@ -337,11 +399,7 @@ impl Runner {
         let ev = match ev {
             relay::Event::PermissionRequest { request, tool_call_id, title, options } if auto => {
                 use acp::PermissionOptionKind as K;
-                let pick = options
-                    .iter()
-                    .find(|o| o.kind == K::AllowOnce)
-                    .or_else(|| options.iter().find(|o| o.kind == K::AllowAlways))
-                    .map(|o| o.id.clone());
+                let pick = options.iter().find(|o| o.kind == K::AllowOnce).or_else(|| options.iter().find(|o| o.kind == K::AllowAlways)).map(|o| o.id.clone());
                 let allowed = pick.is_some();
                 self.relay.answer(request, relay::Answer::Permission(pick))?;
                 relay::Event::AutoAnswered { tool_call_id, title, allowed }
@@ -349,9 +407,15 @@ impl Runner {
             other => other,
         };
         match &ev {
-            relay::Event::PermissionRequest { request, .. } | relay::Event::V2PermissionRequest { request, .. } | relay::Event::Elicitation { request, .. } => { st.pending.insert(*request, ev.clone()); }
-            relay::Event::Resolved { request } => { st.pending.remove(request); }
-            relay::Event::V2PermissionsCancelled => {st.pending.retain(|_,p|!matches!(p,relay::Event::V2PermissionRequest{..}));}
+            relay::Event::PermissionRequest { request, .. } | relay::Event::V2PermissionRequest { request, .. } | relay::Event::Elicitation { request, .. } => {
+                st.pending.insert(*request, ev.clone());
+            }
+            relay::Event::Resolved { request } => {
+                st.pending.remove(request);
+            }
+            relay::Event::V2PermissionsCancelled => {
+                st.pending.retain(|_, p| !matches!(p, relay::Event::V2PermissionRequest { .. }));
+            }
             relay::Event::AuthRequired { .. } => st.auth = Some(ev.clone()),
             _ => {}
         }
@@ -360,7 +424,9 @@ impl Runner {
 
     fn restore(&self, store: &Store, st: &mut State, controls: &Controls, initial: bool) -> Result<()> {
         let settings = store.sessions()?.into_iter().find(|s| s.id == self.id).map(|s| s.agent_settings).unwrap_or_default();
-        for command in st.context.restore(controls, &settings, initial).into_iter().map(relay::Command::from_acp_control) { Self::queue(st, command); }
+        for command in st.context.restore(controls, &settings, initial).into_iter().map(relay::Command::from_acp_control) {
+            Self::queue(st, command);
+        }
         Ok(())
     }
 
@@ -376,10 +442,11 @@ impl Runner {
                 self.save(store, &st)?;
                 tx.commit()?;
                 hub.sfp_publish(&self.id, &events);
-                self.sfp_dispatch(store,hub,&mut st)?;
+                self.sfp_dispatch(store, hub, &mut st)?;
             }
             Ok(())
-        }).ok();
+        })
+        .ok();
     }
 
     /// A login request one of whose methods takes an API key the person already gave: that
@@ -399,10 +466,10 @@ impl Runner {
     }
 
     fn drain(&self, store: &Store, st: &mut State) -> Result<()> {
-        while let Some((request, answer)) = st.answer_outbox.first_key_value().map(|(id,a)|(*id,a.clone())) {
-            self.relay.answer(request,answer)?;
+        while let Some((request, answer)) = st.answer_outbox.first_key_value().map(|(id, a)| (*id, a.clone())) {
+            self.relay.answer(request, answer)?;
             st.answer_outbox.remove(&request);
-            self.save(store,st)?;
+            self.save(store, st)?;
         }
         while let Some((id, command)) = st.outbox.first_key_value().map(|(id, cmd)| (*id, cmd.clone())) {
             self.relay.command(id, command)?;
@@ -413,11 +480,18 @@ impl Runner {
     }
 
     fn resume_summary_cap(self: &Arc<Self>, hub: &Arc<Hub>) {
-        let timer = { let st = self.st.lock().unwrap(); st.summary.as_ref().map(|(_,_,g)| (*g, st.summary_deadline)) };
+        let timer = {
+            let st = self.st.lock().unwrap();
+            st.summary.as_ref().map(|(_, _, g)| (*g, st.summary_deadline))
+        };
         if let Some((generation, deadline)) = timer {
-            let remaining = deadline.map(|end| std::time::Duration::from_secs(end.saturating_sub(sill_core::store::now()).max(0) as u64)).unwrap_or(SUMMARY_CAP);
+            let remaining =
+                deadline.map(|end| std::time::Duration::from_secs(end.saturating_sub(sill_core::store::now()).max(0) as u64)).unwrap_or(SUMMARY_CAP);
             let (me, hub) = (self.clone(), hub.clone());
-            std::thread::spawn(move || { std::thread::sleep(remaining); me.cut_summary(&hub, generation, "cut short: summary deadline reached"); });
+            std::thread::spawn(move || {
+                std::thread::sleep(remaining);
+                me.cut_summary(&hub, generation, "cut short: summary deadline reached");
+            });
         }
     }
 
@@ -459,19 +533,29 @@ impl Runner {
     /// The tab closed during a checkpoint: its answer becomes the session's final summary.
     pub fn adopt_checkpoint(&self, hub: &Hub, end_context: &str) -> Result<bool> {
         hub.with_store(|store| {
-        let mut st = self.st.lock().unwrap();
-        if !matches!(st.summary, Some((SummaryKind::Checkpoint, _, _))) { return Ok(false); }
-        let transaction = store.conn().unchecked_transaction()?;
-        st.summary.as_mut().unwrap().0 = SummaryKind::End;
-        let result = (|| -> Result<Vec<sill_proto::sfp::StoredEvent>> {
-            store.conn().execute("INSERT INTO daemon_ends(id,context) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET context=excluded.context", rusqlite::params![self.id, end_context])?;
-            let events = self.sfp_summarizing(store, &st)?;
-            self.save(store, &st)?;
-            transaction.commit()?;
-            Ok(events)
-        })();
-        if result.is_err() { st.summary.as_mut().unwrap().0 = SummaryKind::Checkpoint; }
-        result.map(|events| { hub.sfp_publish(&self.id, &events); true })
+            let mut st = self.st.lock().unwrap();
+            if !matches!(st.summary, Some((SummaryKind::Checkpoint, _, _))) {
+                return Ok(false);
+            }
+            let transaction = store.conn().unchecked_transaction()?;
+            st.summary.as_mut().unwrap().0 = SummaryKind::End;
+            let result = (|| -> Result<Vec<sill_proto::sfp::StoredEvent>> {
+                store.conn().execute(
+                    "INSERT INTO daemon_ends(id,context) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET context=excluded.context",
+                    rusqlite::params![self.id, end_context],
+                )?;
+                let events = self.sfp_summarizing(store, &st)?;
+                self.save(store, &st)?;
+                transaction.commit()?;
+                Ok(events)
+            })();
+            if result.is_err() {
+                st.summary.as_mut().unwrap().0 = SummaryKind::Checkpoint;
+            }
+            result.map(|events| {
+                hub.sfp_publish(&self.id, &events);
+                true
+            })
         })
     }
 
@@ -484,9 +568,15 @@ impl Runner {
     pub fn ask_summary(self: &Arc<Self>, hub: &Arc<Hub>, prompt: &str, note: &str, kind: SummaryKind) -> Result<()> {
         hub.with_store(|store| {
             let mut st = self.st.lock().unwrap();
-            if st.ended || st.retired || st.ready.is_none() { bail!("the agent is not running"); }
-            if st.busy { bail!("the agent is busy"); }
-            if st.summary.is_some() { bail!("a summary is being written already"); }
+            if st.ended || st.retired || st.ready.is_none() {
+                bail!("the agent is not running");
+            }
+            if st.busy {
+                bail!("the agent is busy");
+            }
+            if st.summary.is_some() {
+                bail!("a summary is being written already");
+            }
             let tx = store.conn().unchecked_transaction()?;
             st.busy = true;
             st.summary_gen += 1;
@@ -496,14 +586,22 @@ impl Runner {
             st.adapter.prompt_purpose(Some("summary".into()));
             store.append(&self.id, "note", note, "")?;
             let journal = sill_core::sfp::Journal::new(store)?;
-            let mut events = journal.append(&self.id, None, &[sill_proto::sfp::Event::ItemCreated {
-                item: sill_proto::sfp::Item {
-                    item_id: super::sfp::id(), created_seq: String::new(),
-                    turn_id: None, submission_id: None,
-                    agent_generation_id: st.generation_id.clone(), kind: "note".into(),
-                    content: vec![sill_proto::sfp::Content::text(note)], tool: None,
-                },
-            }])?;
+            let mut events = journal.append(
+                &self.id,
+                None,
+                &[sill_proto::sfp::Event::ItemCreated {
+                    item: sill_proto::sfp::Item {
+                        item_id: super::sfp::id(),
+                        created_seq: String::new(),
+                        turn_id: None,
+                        submission_id: None,
+                        agent_generation_id: st.generation_id.clone(),
+                        kind: "note".into(),
+                        content: vec![sill_proto::sfp::Content::text(note)],
+                        tool: None,
+                    },
+                }],
+            )?;
             events.extend(self.sfp_summarizing(store, &st)?);
             self.save(store, &st)?;
             tx.commit()?;
@@ -520,7 +618,9 @@ impl Runner {
     fn cut_summary(&self, hub: &Arc<Hub>, generation: u64, why: &str) {
         let done = hub.with_store(|store| {
             let mut st = self.st.lock().unwrap();
-            if !st.summary.as_ref().is_some_and(|(_,_,g)| *g == generation) { return Ok(None); }
+            if !st.summary.as_ref().is_some_and(|(_, _, g)| *g == generation) {
+                return Ok(None);
+            }
             let (kind, mut text, _) = st.summary.take().unwrap();
             text.push_str(&st.agent_md);
             let text = text.trim().to_string();
@@ -534,7 +634,10 @@ impl Runner {
             Ok(Some(done))
         });
         match done {
-            Ok(Some(done)) => { hub.summary_done(&self.id, done); self.summary_applied(hub); }
+            Ok(Some(done)) => {
+                hub.summary_done(&self.id, done);
+                self.summary_applied(hub);
+            }
             Ok(None) => {}
             Err(e) => eprintln!("sill daemon: summary deadline for {}: {e:#}", self.id),
         }
@@ -562,16 +665,27 @@ impl Runner {
 
     fn commit_command(&self, store: &Store, home: &std::path::Path, st: &mut State, cmd: wire::Command, live: &[String]) -> Result<Option<String>> {
         // what is the daemon's — the transcript entry — stays here; the rest goes to the relay
-        let entry = match &cmd { wire::Command::Prompt { entry, .. } => entry.clone(), _ => None };
+        let entry = match &cmd {
+            wire::Command::Prompt { entry, .. } => entry.clone(),
+            _ => None,
+        };
         let mut cmd = relay::Command::from(cmd);
         let before = st.clone();
         let result = (|| -> Result<Option<String>> {
-            if st.ended || st.retired { bail!("the session is not running"); }
+            if st.ended || st.retired {
+                bail!("the session is not running");
+            }
             let mut prepared = None;
             if let relay::Command::Prompt { text, .. } = &mut cmd {
-                if st.ready.is_none() { bail!("the agent is starting or needs a login"); }
-                if st.busy { bail!("the agent is busy; wait for the turn to end"); }
-                if st.context.restoring() { bail!("the agent is still confirming its settings; send again when it is ready"); }
+                if st.ready.is_none() {
+                    bail!("the agent is starting or needs a login");
+                }
+                if st.busy {
+                    bail!("the agent is busy; wait for the turn to end");
+                }
+                if st.context.restoring() {
+                    bail!("the agent is still confirming its settings; send again when it is ready");
+                }
                 let p = st.context.prepare(store, &self.id, home, text, live)?;
                 *text = p.text.clone();
                 prepared = Some(p);
@@ -586,11 +700,21 @@ impl Runner {
             st.context.chosen(controls.as_ref(), &remembered);
             // Keep the accepted command and its plain transcript entry together before sending.
             let tx = store.conn().unchecked_transaction()?;
-            if let Some(p) = prepared { st.context.commit(p); }
-            let user = match &entry { Some(Entry::User { text, .. }) => Some(text.clone()), _ => None };
+            if let Some(p) = prepared {
+                st.context.commit(p);
+            }
+            let user = match &entry {
+                Some(Entry::User { text, .. }) => Some(text.clone()),
+                _ => None,
+            };
             match entry {
-                Some(Entry::User { text, names }) => { store.append(&self.id, "user", &text, &names.join("\n"))?; store.touch(&self.id)?; }
-                Some(Entry::Note(note)) => { store.append(&self.id, "note", &note, "")?; }
+                Some(Entry::User { text, names }) => {
+                    store.append(&self.id, "user", &text, &names.join("\n"))?;
+                    store.touch(&self.id)?;
+                }
+                Some(Entry::Note(note)) => {
+                    store.append(&self.id, "note", &note, "")?;
+                }
                 None => {}
             }
             Self::queue(st, cmd);
@@ -599,7 +723,9 @@ impl Runner {
             tx.commit()?;
             Ok(user)
         })();
-        if result.is_err() { *st = before; }
+        if result.is_err() {
+            *st = before;
+        }
         result
     }
 
@@ -607,7 +733,9 @@ impl Runner {
     pub fn retire(&self, hub: &Hub) -> Result<()> {
         hub.with_store(|store| {
             let mut st = self.st.lock().unwrap();
-            if st.retired { return self.drain(store, &mut st); }
+            if st.retired {
+                return self.drain(store, &mut st);
+            }
             st.retired = true;
             st.busy = false;
             st.summary = None;
@@ -627,7 +755,9 @@ impl Runner {
 
     pub fn mark_terminal(store: &Store, id: &str) -> Result<()> {
         let snapshot = Self::load(id, store)?;
-        if snapshot.is_null() { return Ok(()); }
+        if snapshot.is_null() {
+            return Ok(());
+        }
         let mut state: State = serde_json::from_value(snapshot)?;
         state.retired = true;
         state.ended = true;
@@ -717,10 +847,31 @@ mod tests {
             state.busy = true;
             state.summary = Some((SummaryKind::End, String::new(), 7));
             runner.handle_locked(&store, &mut state, relay::Event::Text("first summary segment".into()), false).unwrap();
-            runner.handle_locked(&store, &mut state, relay::Event::ToolCall {
-                id: "tool-1".into(), title: "inspect".into(), status: "running".into(), kind: "read".into(), detail: None, diff: None, parent: Some("delegation".into()), command: None,
-            }, false).unwrap();
-            runner.handle_locked(&store, &mut state, relay::Event::PermissionRequest { request: 19, tool_call_id: "tool-1".into(), title: "inspect".into(), options: vec![] }, false).unwrap();
+            runner
+                .handle_locked(
+                    &store,
+                    &mut state,
+                    relay::Event::ToolCall {
+                        id: "tool-1".into(),
+                        title: "inspect".into(),
+                        status: "running".into(),
+                        kind: "read".into(),
+                        detail: None,
+                        diff: None,
+                        parent: Some("delegation".into()),
+                        command: None,
+                    },
+                    false,
+                )
+                .unwrap();
+            runner
+                .handle_locked(
+                    &store,
+                    &mut state,
+                    relay::Event::PermissionRequest { request: 19, tool_call_id: "tool-1".into(), title: "inspect".into(), options: vec![] },
+                    false,
+                )
+                .unwrap();
             state.cursor = 12;
             runner.save(&store, &state).unwrap();
         }
@@ -732,7 +883,21 @@ mod tests {
             assert!(state.busy);
             assert!(state.pending.contains_key(&19));
             assert!(matches!(&state.summary, Some((SummaryKind::End, text, 7)) if text == "first summary segment"));
-            restored.handle_locked(&store, &mut state, relay::Event::ToolCallUpdate { id: "tool-1".into(), status: Some("completed".into()), title: None, detail: None, diff: None, command: None }, false).unwrap();
+            restored
+                .handle_locked(
+                    &store,
+                    &mut state,
+                    relay::Event::ToolCallUpdate {
+                        id: "tool-1".into(),
+                        status: Some("completed".into()),
+                        title: None,
+                        detail: None,
+                        diff: None,
+                        command: None,
+                    },
+                    false,
+                )
+                .unwrap();
             restored.handle_locked(&store, &mut state, relay::Event::Resolved { request: 19 }, false).unwrap();
             restored.handle_locked(&store, &mut state, relay::Event::Text(" plus second segment".into()), false).unwrap();
             let done = restored.handle_locked(&store, &mut state, relay::Event::Stopped(acp::StopReason::EndTurn), false).unwrap().unwrap();
@@ -850,7 +1015,10 @@ mod tests {
         let mut state = runner.st.lock().unwrap();
         state.ready = Some(("fake-agent-session".into(), false));
         let before = serde_json::to_value(&*state).unwrap();
-        store.conn().execute_batch("CREATE TRIGGER reject_user BEFORE INSERT ON entries WHEN NEW.kind='user' BEGIN SELECT RAISE(ABORT,'reject user for test'); END").unwrap();
+        store
+            .conn()
+            .execute_batch("CREATE TRIGGER reject_user BEFORE INSERT ON entries WHEN NEW.kind='user' BEGIN SELECT RAISE(ABORT,'reject user for test'); END")
+            .unwrap();
         let prompt = || wire::Command::Prompt { text: "work".into(), attachments: vec![], entry: Some(Entry::User { text: "work".into(), names: vec![] }) };
         assert!(runner.commit_command(&store, &dir, &mut state, prompt(), &[]).is_err());
         assert_eq!(serde_json::to_value(&*state).unwrap(), before);

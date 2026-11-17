@@ -26,10 +26,7 @@ fn swim(x: f32, phase: f32) -> f32 {
 
 /// The mark, `size` square in `color`; swimming since `flicked`, if that is under a stroke ago.
 pub fn herring<'a>(size: f32, color: Color, flicked: Option<Instant>) -> Element<'a, Message> {
-    canvas(Herring { color, flicked })
-        .width(size)
-        .height(size)
-        .into()
+    canvas(Herring { color, flicked }).width(size).height(size).into()
 }
 
 struct Herring {
@@ -48,37 +45,16 @@ impl Herring {
 impl canvas::Program<Message> for Herring {
     type State = ();
 
-    fn update(
-        &self,
-        _state: &mut (),
-        event: &iced::Event,
-        _bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Option<canvas::Action<Message>> {
+    fn update(&self, _state: &mut (), event: &iced::Event, _bounds: Rectangle, _cursor: mouse::Cursor) -> Option<canvas::Action<Message>> {
         // during the stroke only: still, it asks for nothing
-        (self.phase().is_some()
-            && matches!(
-                event,
-                iced::Event::Window(iced::window::Event::RedrawRequested(_))
-            ))
-        .then(canvas::Action::request_redraw)
+        (self.phase().is_some() && matches!(event, iced::Event::Window(iced::window::Event::RedrawRequested(_)))).then(canvas::Action::request_redraw)
     }
 
-    fn draw(
-        &self,
-        _state: &(),
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<Geometry> {
+    fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
         let phase = self.phase().unwrap_or(0.0);
         let s = bounds.width.min(bounds.height) / 24.0;
-        let (dx, dy) = (
-            (bounds.width - 24.0 * s) / 2.0,
-            (bounds.height - 24.0 * s) / 2.0,
-        );
+        let (dx, dy) = ((bounds.width - 24.0 * s) / 2.0, (bounds.height - 24.0 * s) / 2.0);
         let at = |x: f32, y: f32| Point::new(dx + x * s, dy + (y + swim(x, phase)) * s);
         let fish = Path::new(|p| {
             // the body: over the back to the tail, the notched tail, back under the belly
@@ -93,13 +69,7 @@ impl canvas::Program<Message> for Herring {
             // the eye: a hole, under the even-odd rule (the nose is pinned, so it stays put)
             p.circle(Point::new(dx + 6.0 * s, dy + 11.0 * s), 1.3 * s);
         });
-        frame.fill(
-            &fish,
-            Fill {
-                style: fill::Style::Solid(self.color),
-                rule: fill::Rule::EvenOdd,
-            },
-        );
+        frame.fill(&fish, Fill { style: fill::Style::Solid(self.color), rule: fill::Rule::EvenOdd });
         vec![frame.into_geometry()]
     }
 }
@@ -114,15 +84,9 @@ mod tests {
         assert!(swim(TAIL, 0.0).abs() < 0.9 && swim(TAIL, 0.0).abs() > 0.5);
         // a whole stroke ends where it began
         assert!((swim(TAIL, 1.0) - swim(TAIL, 0.0)).abs() < 1e-4);
-        let still = Herring {
-            color: Color::WHITE,
-            flicked: None,
-        };
+        let still = Herring { color: Color::WHITE, flicked: None };
         assert_eq!(still.phase(), None);
-        let done = Herring {
-            color: Color::WHITE,
-            flicked: Instant::now().checked_sub(FLICK * 2),
-        };
+        let done = Herring { color: Color::WHITE, flicked: Instant::now().checked_sub(FLICK * 2) };
         assert_eq!(done.phase(), None, "after one stroke it is still again");
     }
 }

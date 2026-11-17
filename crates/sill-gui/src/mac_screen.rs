@@ -155,12 +155,7 @@ pub fn windows() -> Vec<Window> {
             }
             let Some(id) = number(c"kCGWindowNumber") else { continue };
             let bounds = value(entry, c"kCGWindowBounds");
-            let field = |key: &CStr| -> f64 {
-                bounds
-                    .and_then(|b| value(b, key))
-                    .map(|v| msg_send![v, doubleValue])
-                    .unwrap_or(0.0)
-            };
+            let field = |key: &CStr| -> f64 { bounds.and_then(|b| value(b, key)).map(|v| msg_send![v, doubleValue]).unwrap_or(0.0) };
             out.push(Window {
                 id: id as u32,
                 app: string(value(entry, c"kCGWindowOwnerName")),
@@ -215,17 +210,12 @@ pub fn capture(target: &Target) -> Result<(Vec<u8>, u32, u32), String> {
     match target {
         Target::Display(id) => {
             // screencapture numbers the displays 1, 2… in the order the window server lists them
-            let index = displays()
-                .iter()
-                .position(|d| d.id == *id)
-                .ok_or_else(|| format!("the Mac has no display {id}: `sill-mac displays` lists them"))?;
+            let index = displays().iter().position(|d| d.id == *id).ok_or_else(|| format!("the Mac has no display {id}: `sill-mac displays` lists them"))?;
             command.arg("-D").arg((index + 1).to_string());
         }
         Target::Window(id) => {
             if !windows().iter().any(|w| w.id == *id) {
-                return Err(format!(
-                    "the Mac has no window {id} on screen: `sill-mac windows` lists them"
-                ));
+                return Err(format!("the Mac has no window {id} on screen: `sill-mac windows` lists them"));
             }
             command.arg("-o").arg("-l").arg(id.to_string());
         }

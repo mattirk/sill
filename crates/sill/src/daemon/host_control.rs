@@ -89,8 +89,7 @@ fn session_row(hub: &Hub, session: &str) -> Result<sill_core::store::Session> {
 fn forbidden(row: &sill_core::store::Session) -> Result<Option<String>> {
     let home = sill_core::changes::home()?;
     let base = sill_core::session::session_base_policy(&row.policy, &home, row.ghost, Some(&row.agent))?;
-    Ok((base.permissions.host_control == sill_core::permissions::Rule::Forbidden)
-        .then(|| "Host control is forbidden by the session's policy".to_string()))
+    Ok((base.permissions.host_control == sill_core::permissions::Rule::Forbidden).then(|| "Host control is forbidden by the session's policy".to_string()))
 }
 
 /// The state with the session policy's ban, for an answer to a frontend.
@@ -104,10 +103,7 @@ pub fn full_state(hub: &Hub, session: &str) -> Result<api::State> {
 /// For a session record: its active control, if any.
 pub fn brief(session: &str) -> Option<api::Brief> {
     let t = table().lock().unwrap();
-    t.active.get(session).map(|a| api::Brief {
-        generation: a.generation,
-        operations: a.operations.iter().cloned().collect(),
-    })
+    t.active.get(session).map(|a| api::Brief { generation: a.generation, operations: a.operations.iter().cloned().collect() })
 }
 
 /// The named operations, known and at least one.
@@ -119,10 +115,7 @@ fn operations_of(named: &[String]) -> Result<BTreeSet<String>> {
         }
         // the Mac's operations only where there is a Mac: a daemon in Sill.app's VM
         if api::MAC_OPERATIONS.contains(&op.as_str()) && !super::host_mac::attached() {
-            return Err(Error::invalid_params(format!(
-                "{op} needs Sill.app on a Mac: this daemon does not run in its VM"
-            ))
-            .into());
+            return Err(Error::invalid_params(format!("{op} needs Sill.app on a Mac: this daemon does not run in its VM")).into());
         }
         operations.insert(op.clone());
     }
@@ -153,12 +146,22 @@ pub(super) fn note(hub: &Hub, session: &str, text: String) {
         let record = journal.ensure(session, &super::sfp::id())?;
         let mut block = sill_proto::sfp::Content::text(text);
         block.extra.insert("severity".into(), json!("warning"));
-        let events = journal.append(session, None, &[sill_proto::sfp::Event::ItemCreated {
-            item: sill_proto::sfp::Item {
-                item_id: super::sfp::id(), created_seq: String::new(), turn_id: None, submission_id: None,
-                agent_generation_id: record.agent_generation_id, kind: "notice".into(), content: vec![block], tool: None,
-            },
-        }])?;
+        let events = journal.append(
+            session,
+            None,
+            &[sill_proto::sfp::Event::ItemCreated {
+                item: sill_proto::sfp::Item {
+                    item_id: super::sfp::id(),
+                    created_seq: String::new(),
+                    turn_id: None,
+                    submission_id: None,
+                    agent_generation_id: record.agent_generation_id,
+                    kind: "notice".into(),
+                    content: vec![block],
+                    tool: None,
+                },
+            }],
+        )?;
         tx.commit()?;
         hub.sfp_publish(session, &events);
         Ok(())
@@ -266,7 +269,9 @@ pub fn sweep(hub: &Hub) {
 }
 
 pub fn handle(hub: &std::sync::Arc<Hub>, conn: &Conn, method: &str, params: serde_json::Value) -> Option<Result<serde_json::Value>> {
-    let args = |v: serde_json::Value| serde_json::from_value::<sill_proto::sessions::SessionKey>(v).map_err(|e| anyhow::Error::from(Error::invalid_params(e.to_string())));
+    let args = |v: serde_json::Value| {
+        serde_json::from_value::<sill_proto::sessions::SessionKey>(v).map_err(|e| anyhow::Error::from(Error::invalid_params(e.to_string())))
+    };
     Some(match method {
         "_sill/host_control.activate" => serde_json::from_value::<api::Activate>(params)
             .map_err(|e| anyhow::Error::from(Error::invalid_params(e.to_string())))
@@ -279,12 +284,15 @@ pub fn handle(hub: &std::sync::Arc<Hub>, conn: &Conn, method: &str, params: serd
             full_state(hub, &a.session_id).map(|s| json!(s))
         }),
         "_sill/host_control.keep" => serde_json::from_value::<api::Keep>(params).map_err(anyhow::Error::from).and_then(|a| {
-            if !conn.has_capability(CAPABILITY) { return Err(domain("unsupported", "Host control needs a displaying frontend")); }
+            if !conn.has_capability(CAPABILITY) {
+                return Err(domain("unsupported", "Host control needs a displaying frontend"));
+            }
             let _gate = super::host_bridge::gate();
             let id = a.name.strip_prefix("host:").ok_or_else(|| domain("invalid_params", "expected host:<id>"))?;
             hub.with_store(|s| {
                 let p = s.host_processes(&a.session_id)?.into_iter().find(|p| p.id == id).ok_or_else(|| domain("not_found", "host process not found"))?;
-                s.keep_host_process(&p.id, a.keep)?; Ok(())
+                s.keep_host_process(&p.id, a.keep)?;
+                Ok(())
             })?;
             super::host_bridge::publish(hub, &a.session_id);
             note(hub, &a.session_id, format!("Host process {}: keep after revocation = {}", a.name, a.keep));
@@ -292,7 +300,8 @@ pub fn handle(hub: &std::sync::Arc<Hub>, conn: &Conn, method: &str, params: serd
         }),
         "_sill/host_control.state" => args(params).and_then(|a| {
             if !conn.has_capability("sill.permission_modes") {
-                let mut error = Error::domain("unsupported", "Host control state needs a frontend that shows permission state (session records carry the active brief)");
+                let mut error =
+                    Error::domain("unsupported", "Host control state needs a frontend that shows permission state (session records carry the active brief)");
                 error.data.as_mut().unwrap()["details"] = json!({"capability": "sill.permission_modes"});
                 return Err(error.into());
             }
@@ -308,7 +317,9 @@ pub fn shutdown(hub: &Hub) {
     // wait for it, or the exit that follows cuts it off and leaves them running.
     drop(super::host_bridge::gate());
     let sessions: Vec<_> = table().lock().unwrap().active.keys().cloned().collect();
-    for session in sessions { let _ = revoke(hub, &session, "daemon shutdown"); }
+    for session in sessions {
+        let _ = revoke(hub, &session, "daemon shutdown");
+    }
 }
 
 #[cfg(test)]
@@ -324,10 +335,11 @@ mod mac_forward_tests {
             let session = format!("test-mac-forward-{replacement:?}");
             {
                 let _gate = super::super::host_bridge::gate();
-                table().lock().unwrap().active.insert(session.clone(), Activation {
-                    generation: 1, operations: BTreeSet::from(["mac_view".into()]),
-                    since: 0, activator: 0,
-                });
+                table()
+                    .lock()
+                    .unwrap()
+                    .active
+                    .insert(session.clone(), Activation { generation: 1, operations: BTreeSet::from(["mac_view".into()]), since: 0, activator: 0 });
             }
             let (started_tx, started_rx) = mpsc::channel();
             let (reply_tx, reply_rx) = mpsc::channel();
@@ -338,7 +350,9 @@ mod mac_forward_tests {
                     started_tx.send(()).unwrap();
                     reply_rx.recv_timeout(Duration::from_secs(5)).unwrap();
                     Ok(())
-                }).map(|_| ()).map_err(|e| e.to_string())
+                })
+                .map(|_| ())
+                .map_err(|e| e.to_string())
             });
             started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
             let (changed_tx, changed_rx) = mpsc::channel();

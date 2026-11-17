@@ -26,28 +26,13 @@ pub fn token(path: &str) -> &str {
     }
 }
 pub fn theme() -> Theme {
-    if style::theme().palette().background.r > 0.5 {
-        Theme::InspiredGitHub
-    } else {
-        Theme::Base16Ocean
-    }
+    if style::theme().palette().background.r > 0.5 { Theme::InspiredGitHub } else { Theme::Base16Ocean }
 }
 fn stream(path: &str, theme: Theme) -> Stream {
-    Stream::new(&Settings {
-        theme,
-        token: token(path).into(),
-    })
+    Stream::new(&Settings { theme, token: token(path).into() })
 }
 fn line(stream: &mut Stream, source: &str, offset: usize) -> Vec<(Range<usize>, Color)> {
-    let spans = stream
-        .highlight_line(source)
-        .map(|(r, h)| {
-            (
-                (r.start + offset)..(r.end + offset),
-                h.color().unwrap_or(P.fg),
-            )
-        })
-        .collect();
+    let spans = stream.highlight_line(source).map(|(r, h)| ((r.start + offset)..(r.end + offset), h.color().unwrap_or(P.fg))).collect();
     stream.commit();
     spans
 }
@@ -63,21 +48,14 @@ fn parse(source: &str, path: &str, theme: Theme) -> Lines {
         .enumerate()
         .map(|(index, text)| {
             if untracked {
-                return if index == 0 {
-                    vec![]
-                } else {
-                    line(&mut new, text, 0)
-                };
+                return if index == 0 { vec![] } else { line(&mut new, text, 0) };
             }
             if text.starts_with("diff ") {
                 hunk = false;
             }
             if !hunk && (text.starts_with("--- ") || text.starts_with("+++ ")) {
                 let path = text[4..].split('\t').next().unwrap_or("");
-                let path = path
-                    .strip_prefix("a/")
-                    .or_else(|| path.strip_prefix("b/"))
-                    .unwrap_or(path);
+                let path = path.strip_prefix("a/").or_else(|| path.strip_prefix("b/")).unwrap_or(path);
                 if path != "/dev/null" {
                     if text.starts_with("--- ") {
                         old = stream(path, theme);
@@ -116,22 +94,14 @@ pub fn diff(source: &str, path: &str) -> Rc<Lines> {
     }
     DIFFS.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if let Some(index) = cache
-            .iter()
-            .position(|c| c.source == source && c.path == path && c.theme == theme)
-        {
+        if let Some(index) = cache.iter().position(|c| c.source == source && c.path == path && c.theme == theme) {
             let item = cache.remove(index).unwrap();
             let result = item.lines.clone();
             cache.push_front(item);
             return result;
         }
         let lines = Rc::new(parse(source, path, theme));
-        cache.push_front(Cached {
-            source: source.into(),
-            path: path.into(),
-            theme,
-            lines: lines.clone(),
-        });
+        cache.push_front(Cached { source: source.into(), path: path.into(), theme, lines: lines.clone() });
         cache.truncate(4);
         lines
     })
@@ -153,10 +123,7 @@ mod tests {
         assert!(lines[5].iter().all(|(r, _)| r.start >= 1));
         assert!(lines[5].windows(2).any(|w| w[0].1 != w[1].1));
         let again = parse("(untracked)\nlet café = 42;", "a.rs", Theme::Base16Ocean);
-        assert_eq!(
-            lines[5].iter().map(|(_, c)| c).collect::<Vec<_>>(),
-            again[1].iter().map(|(_, c)| c).collect::<Vec<_>>()
-        );
+        assert_eq!(lines[5].iter().map(|(_, c)| c).collect::<Vec<_>>(), again[1].iter().map(|(_, c)| c).collect::<Vec<_>>());
     }
     #[test]
     fn filenames_and_cached_revisions() {

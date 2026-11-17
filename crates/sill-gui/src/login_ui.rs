@@ -77,12 +77,7 @@ impl std::fmt::Debug for Event {
 }
 
 fn methods(view: &SessionView) -> Vec<AuthMethod> {
-    view.conversation
-        .session
-        .as_ref()
-        .and_then(|s| s.authentication.as_ref())
-        .map(|a| a.methods.clone())
-        .unwrap_or_default()
+    view.conversation.session.as_ref().and_then(|s| s.authentication.as_ref()).map(|a| a.methods.clone()).unwrap_or_default()
 }
 
 impl App {
@@ -95,8 +90,7 @@ impl App {
         let login = &mut view.login;
         match event {
             Event::Pick(method_id) => {
-                let Some(method) = methods(view).into_iter().find(|m| m.method_id == method_id)
-                else {
+                let Some(method) = methods(view).into_iter().find(|m| m.method_id == method_id) else {
                     return Task::none();
                 };
                 let login = &mut view.login;
@@ -108,9 +102,7 @@ impl App {
                 }
                 login.keyed = None;
                 let Some(actions) = actions.filter(|_| !demo) else {
-                    login
-                        .notes
-                        .push(("A login needs the daemon; the demo has none.".into(), true));
+                    login.notes.push(("A login needs the daemon; the demo has none.".into(), true));
                     return Task::none();
                 };
                 login.chosen = Some(method.title.clone());
@@ -119,9 +111,7 @@ impl App {
                     move || {
                         actions
                             .once(|client| login::prepare(client, &id))
-                            .map(|(agent, restarted)| {
-                                (agent.id.clone(), login::route(&agent, &method), restarted)
-                            })
+                            .map(|(agent, restarted)| (agent.id.clone(), login::route(&agent, &method), restarted))
                             .map_err(|e| format!("{e:#}"))
                     },
                     move |routed| Message::Login(session, Event::Routed(method_id, routed)),
@@ -138,18 +128,9 @@ impl App {
                 }
                 login.key.clear();
                 login.keyed = None;
-                let chosen = methods(view)
-                    .into_iter()
-                    .find(|m| m.method_id == method_id)
-                    .map(|m| m.title);
+                let chosen = methods(view).into_iter().find(|m| m.method_id == method_id).map(|m| m.title);
                 view.login.chosen = chosen;
-                return self.login_control(
-                    &session,
-                    Control::Authenticate {
-                        method_id,
-                        api_key: Some(sill_proto::wire::Secret(key)),
-                    },
-                );
+                return self.login_control(&session, Control::Authenticate { method_id, api_key: Some(sill_proto::wire::Secret(key)) });
             }
             Event::Routed(_, Err(why)) => {
                 login.chosen = None;
@@ -157,22 +138,12 @@ impl App {
             }
             Event::Routed(method_id, Ok((agent_id, route, restarted))) => {
                 if restarted {
-                    login.notes.push((
-                        "The session started again first: its policy had changed since its jail started."
-                            .into(),
-                        false,
-                    ));
+                    login.notes.push(("The session started again first: its policy had changed since its jail started.".into(), false));
                     // its agent comes back up with the attachment
                     self.reattach(&session);
                 }
                 return match route {
-                    Route::Agent => self.login_control(
-                        &session,
-                        Control::Authenticate {
-                            method_id,
-                            api_key: None,
-                        },
-                    ),
+                    Route::Agent => self.login_control(&session, Control::Authenticate { method_id, api_key: None }),
                     Route::Terminal { argv, env } => self.login_terminal(&session, argv, env),
                     Route::Host => self.host_login(&session, agent_id, method_id),
                 };
@@ -195,11 +166,7 @@ impl App {
                     return Task::none();
                 };
                 return crate::blocking(
-                    move || {
-                        actions
-                            .once(|client| login::cancel(client, &operation))
-                            .map_err(|e| format!("{e:#}"))
-                    },
+                    move || actions.once(|client| login::cancel(client, &operation)).map_err(|e| format!("{e:#}")),
                     move |done| Message::Login(session, Event::Cancelled(done)),
                 );
             }
@@ -213,10 +180,7 @@ impl App {
             Event::HostDone(Ok(())) => {
                 login.operation = None;
                 login.url = None;
-                login.notes.push((
-                    "Logged in; the session starts again with the new login.".into(),
-                    false,
-                ));
+                login.notes.push(("Logged in; the session starts again with the new login.".into(), false));
                 self.reattach(&session);
             }
             Event::HostDone(Err(why)) => {
@@ -233,12 +197,7 @@ impl App {
 
     /// The login terminal's pane has ended (`ended`) or failed: the session goes on, and the
     /// agent says whether the login took.
-    pub fn login_terminal_closed(
-        &mut self,
-        session: &str,
-        generation: u64,
-        failed: Option<String>,
-    ) -> Task<Message> {
+    pub fn login_terminal_closed(&mut self, session: &str, generation: u64, failed: Option<String>) -> Task<Message> {
         let Some(view) = self.views.get_mut(session) else {
             return Task::none();
         };
@@ -248,37 +207,24 @@ impl App {
         view.login.terminal = None;
         if let Some(why) = failed {
             view.login.chosen = None;
-            view.login
-                .notes
-                .push((format!("The login terminal failed: {why}"), true));
+            view.login.notes.push((format!("The login terminal failed: {why}"), true));
             return Task::none();
         }
         if view.terminal_generation == generation {
             view.terminal_shown = false;
         }
-        view.login.notes.push((
-            "The login terminal closed; the session goes on.".into(),
-            false,
-        ));
+        view.login.notes.push(("The login terminal closed; the session goes on.".into(), false));
         self.login_control(session, Control::RetrySession)
     }
 
     fn login_control(&self, session: &str, control: Control) -> Task<Message> {
-        let params = SessionControl {
-            session_id: session.to_string(),
-            control,
-        };
+        let params = SessionControl { session_id: session.to_string(), control };
         self.act(session, Act::Login, "_sill/sessions.control", json!(params))
     }
 
     /// The agent's login command in a terminal of the session's jail, in the terminal pane: the
     /// person finishes it there (a link to open, a code to paste).
-    fn login_terminal(
-        &mut self,
-        session: &str,
-        argv: Vec<String>,
-        env: BTreeMap<String, String>,
-    ) -> Task<Message> {
+    fn login_terminal(&mut self, session: &str, argv: Vec<String>, env: BTreeMap<String, String>) -> Task<Message> {
         let Some(connect) = self.connect.clone() else {
             return Task::none();
         };
@@ -289,23 +235,11 @@ impl App {
         };
         view.select_shell(false);
         view.terminal_generation = generation;
-        let (cols, rows) = view
-            .terminal
-            .as_ref()
-            .map_or((80, 16), |t| (t.cols, t.rows));
+        let (cols, rows) = view.terminal.as_ref().map_or((80, 16), |t| (t.cols, t.rows));
         // the shell's pane detaches (the shell goes on); the login has the pane
         view.terminal = None;
-        let (pane, events) = terminal::Pane::open(
-            cols,
-            rows,
-            sill_client::terminal::jail_terminal(
-                connect,
-                session.to_string(),
-                login::TERMINAL_LABEL,
-                argv,
-                env,
-            ),
-        );
+        let (pane, events) =
+            terminal::Pane::open(cols, rows, sill_client::terminal::jail_terminal(connect, session.to_string(), login::TERMINAL_LABEL, argv, env));
         view.terminal = Some(pane);
         view.terminal_shown = true;
         view.login.terminal = Some(generation);
@@ -314,12 +248,8 @@ impl App {
             false,
         ));
         let session = session.to_string();
-        let stream = iced::futures::stream::unfold(events, |events| async move {
-            events.recv().await.ok().map(|event| (event, events))
-        });
-        Task::run(stream, move |event| {
-            Message::Terminal(session.clone(), generation, event)
-        })
+        let stream = iced::futures::stream::unfold(events, |events| async move { events.recv().await.ok().map(|event| (event, events)) });
+        Task::run(stream, move |event| Message::Terminal(session.clone(), generation, event))
     }
 
     /// The method on the daemon's host, its progress into the card; then the session's jail
@@ -329,52 +259,41 @@ impl App {
             return Task::none();
         };
         if let Some(view) = self.views.get_mut(session) {
-            view.login.notes.push((
-                "The login runs on the daemon's host; its page opens in your browser here.".into(),
-                false,
-            ));
+            view.login.notes.push(("The login runs on the daemon's host; its page opens in your browser here.".into(), false));
         }
         let (tx, rx) = async_channel::unbounded();
         let id = session.to_string();
-        let spawned = std::thread::Builder::new()
-            .name("sill-gui-login".into())
-            .spawn(move || {
-                let done = (|| -> anyhow::Result<()> {
-                    let client = connect()?;
-                    login::host_login(&client, &agent_id, &method_id, |event| {
-                        let _ = tx.send_blocking(match event {
-                            login::HostEvent::Started { operation_id } => Event::Operation(operation_id),
-                            login::HostEvent::Line(line) => Event::Line(line),
-                            login::HostEvent::OpenUrl { url } => Event::OpenUrl(url),
-                        });
-                    })?;
-                    login::restart(&client, &id)
-                })();
-                // a login already running (`busy`): after the failure, so Cancel stops that one
-                let running = done.as_ref().err().and_then(login::busy_login);
-                let _ = tx.send_blocking(Event::HostDone(done.map_err(|e| format!("{e:#}"))));
-                if let Some(running) = running {
-                    let _ = tx.send_blocking(Event::Operation(running));
-                }
-            });
+        let spawned = std::thread::Builder::new().name("sill-gui-login".into()).spawn(move || {
+            let done = (|| -> anyhow::Result<()> {
+                let client = connect()?;
+                login::host_login(&client, &agent_id, &method_id, |event| {
+                    let _ = tx.send_blocking(match event {
+                        login::HostEvent::Started { operation_id } => Event::Operation(operation_id),
+                        login::HostEvent::Line(line) => Event::Line(line),
+                        login::HostEvent::OpenUrl { url } => Event::OpenUrl(url),
+                    });
+                })?;
+                login::restart(&client, &id)
+            })();
+            // a login already running (`busy`): after the failure, so Cancel stops that one
+            let running = done.as_ref().err().and_then(login::busy_login);
+            let _ = tx.send_blocking(Event::HostDone(done.map_err(|e| format!("{e:#}"))));
+            if let Some(running) = running {
+                let _ = tx.send_blocking(Event::Operation(running));
+            }
+        });
         if spawned.is_err() {
             return Task::none();
         }
         let session = session.to_string();
-        let stream = iced::futures::stream::unfold(rx, |rx| async move {
-            rx.recv().await.ok().map(|event| (event, rx))
-        });
+        let stream = iced::futures::stream::unfold(rx, |rx| async move { rx.recv().await.ok().map(|event| (event, rx)) });
         Task::run(stream, move |event| Message::Login(session.clone(), event))
     }
 
     /// The card, while the agent asks for a login or one is under way; none otherwise.
     pub fn login_card<'a>(&'a self, view: &'a SessionView) -> Option<Element<'a, Message>> {
         let login = &view.login;
-        let auth = view
-            .conversation
-            .session
-            .as_ref()
-            .and_then(|s| s.authentication.as_ref());
+        let auth = view.conversation.session.as_ref().and_then(|s| s.authentication.as_ref());
         if auth.is_none() && login.chosen.is_none() && login.notes.is_empty() {
             return None;
         }
@@ -383,11 +302,7 @@ impl App {
         let mut card = Column::new().spacing(8);
         match auth {
             Some(auth) => {
-                let said = if auth.message.is_empty() {
-                    "Login needed".to_string()
-                } else {
-                    format!("Login needed: {}", auth.message)
-                };
+                let said = if auth.message.is_empty() { "Login needed".to_string() } else { format!("Login needed: {}", auth.message) };
                 let said = match &login.chosen {
                     Some(chosen) => format!("{said} → {chosen}"),
                     None => said,
@@ -397,43 +312,28 @@ impl App {
                     let mut methods = row![].spacing(8);
                     for method in &auth.methods {
                         let pick = keys::press(
-                            button(text(&method.title).size(style::TEXT))
-                                .padding([6, 12])
-                                .style(style::solid(P.accent)),
+                            button(text(&method.title).size(style::TEXT)).padding([6, 12]).style(style::solid(P.accent)),
                             event(Event::Pick(method.method_id.clone())),
                         );
                         methods = methods.push(match &method.description {
-                            Some(about) if !about.trim().is_empty() => tooltip(
-                                pick,
-                                container(text(about).size(style::TINY))
-                                    .padding([3, 8])
-                                    .style(style::fill(P.surface)),
-                                tooltip::Position::Top,
-                            )
-                            .into(),
+                            Some(about) if !about.trim().is_empty() => {
+                                tooltip(pick, container(text(about).size(style::TINY)).padding([3, 8]).style(style::fill(P.surface)), tooltip::Position::Top)
+                                    .into()
+                            }
                             _ => pick,
                         });
                     }
                     card = card.push(methods.wrap().vertical_spacing(8));
                 }
                 if let Some(keyed) = &login.keyed {
-                    let provider = auth
-                        .methods
-                        .iter()
-                        .find(|m| &m.method_id == keyed)
-                        .and_then(|m| m.api_key.clone())
-                        .unwrap_or_default();
+                    let provider = auth.methods.iter().find(|m| &m.method_id == keyed).and_then(|m| m.api_key.clone()).unwrap_or_default();
                     let who = match provider.as_str() {
                         "google" => "Google",
                         "openai" => "OpenAI",
                         "anthropic" => "Anthropic",
                         other => other,
                     };
-                    let placeholder = if who.is_empty() {
-                        "Paste your API key".to_string()
-                    } else {
-                        format!("Paste your {who} API key")
-                    };
+                    let placeholder = if who.is_empty() { "Paste your API key".to_string() } else { format!("Paste your {who} API key") };
                     card = card.push(
                         row![
                             text_input(&placeholder, &login.key)
@@ -446,21 +346,13 @@ impl App {
                                     move |key| event(Event::Key(key))
                                 })
                                 .on_submit(event(Event::SubmitKey)),
-                            keys::press(
-                                button(text("Use key").size(style::TEXT))
-                                    .padding([6, 12])
-                                    .style(style::solid(P.accent)),
-                                event(Event::SubmitKey),
-                            ),
+                            keys::press(button(text("Use key").size(style::TEXT)).padding([6, 12]).style(style::solid(P.accent)), event(Event::SubmitKey),),
                         ]
                         .spacing(8)
                         .align_y(Alignment::Center),
                     );
-                    card = card.push(
-                        text("sill keeps the key outside the agent's jail and gives it to the agent only to log in")
-                            .size(style::TINY)
-                            .color(P.fg_dim),
-                    );
+                    card = card
+                        .push(text("sill keeps the key outside the agent's jail and gives it to the agent only to log in").size(style::TINY).color(P.fg_dim));
                 }
             }
             None if login.chosen.is_some() => {
@@ -469,47 +361,23 @@ impl App {
             None => {}
         }
         for (note, failed) in &login.notes {
-            card = card.push(text(note).size(style::SMALL).color(if *failed {
-                P.error
-            } else {
-                alpha(P.fg, 0.7)
-            }));
+            card = card.push(text(note).size(style::SMALL).color(if *failed { P.error } else { alpha(P.fg, 0.7) }));
         }
         let mut actions = row![].spacing(8).align_y(Alignment::Center);
         if let Some(url) = &login.url {
-            actions = actions.push(
-                tooltip(
-                    keys::press(
-                        button(text("Open login page").size(style::SMALL))
-                            .padding([4, 10])
-                            .style(style::solid(P.accent)),
-                        event(Event::Open),
-                    ),
-                    container(text(url).size(style::TINY))
-                        .padding([3, 8])
-                        .max_width(520)
-                        .style(style::fill(P.surface)),
-                    tooltip::Position::Top,
-                ),
-            );
+            actions = actions.push(tooltip(
+                keys::press(button(text("Open login page").size(style::SMALL)).padding([4, 10]).style(style::solid(P.accent)), event(Event::Open)),
+                container(text(url).size(style::TINY)).padding([3, 8]).max_width(520).style(style::fill(P.surface)),
+                tooltip::Position::Top,
+            ));
         }
         if login.operation.is_some() {
-            actions = actions.push(keys::press(
-                button(text("Cancel login").size(style::SMALL)).padding([4, 10]),
-                event(Event::Cancel),
-            ));
+            actions = actions.push(keys::press(button(text("Cancel login").size(style::SMALL)).padding([4, 10]), event(Event::Cancel)));
         }
         if login.url.is_some() || login.operation.is_some() {
             card = card.push(actions);
         }
-        Some(crate::ui::ruled(
-            2.0,
-            P.warning,
-            container(card)
-                .padding([8, 10])
-                .width(Fill)
-                .style(style::card_right(alpha(P.warning, 0.10))),
-        ))
+        Some(crate::ui::ruled(2.0, P.warning, container(card).padding([8, 10]).width(Fill).style(style::card_right(alpha(P.warning, 0.10)))))
     }
 }
 
@@ -535,10 +403,8 @@ mod tests {
         app.demo = false;
         app.actions = Some(Actions::new(connector(clients)));
         let view = app.views.get_mut("demo").unwrap();
-        view.conversation.session.as_mut().unwrap().authentication = Some(
-            serde_json::from_value(json!({"message": "token expired", "methods": methods}))
-                .unwrap(),
-        );
+        view.conversation.session.as_mut().unwrap().authentication =
+            Some(serde_json::from_value(json!({"message": "token expired", "methods": methods})).unwrap());
         app
     }
 
@@ -552,26 +418,17 @@ mod tests {
         let methods = json!([{"method_id": "key", "title": "API key", "description": null,
             "terminal": null, "api_key": "anthropic"}]);
         let mut app = asking(vec![client], methods);
-        assert!(
-            app.login_card(&app.views["demo"]).is_some(),
-            "the card shows"
-        );
+        assert!(app.login_card(&app.views["demo"]).is_some(), "the card shows");
         let _ = update(&mut app, Event::Pick("key".into()));
         let _ = update(&mut app, Event::Key("sk-secret".into()));
         assert_eq!(format!("{:?}", Event::Key("sk-secret".into())), "Key(…)");
         let task = update(&mut app, Event::SubmitKey);
         let request = daemon.expect("_sill/sessions.control");
-        assert_eq!(
-            request["params"]["control"],
-            json!({"type": "authenticate", "method_id": "key", "api_key": "sk-secret"})
-        );
+        assert_eq!(request["params"]["control"], json!({"type": "authenticate", "method_id": "key", "api_key": "sk-secret"}));
         daemon.reply(&request, json!({}));
         settle_task(&mut app, task);
         assert!(app.views["demo"].failed.is_none());
-        assert!(
-            app.views["demo"].login.key.is_empty(),
-            "the field forgets the key"
-        );
+        assert!(app.views["demo"].login.key.is_empty(), "the field forgets the key");
     }
 
     /// A method without a terminal of a curated agent is the agent's own `authenticate`, after the
@@ -602,10 +459,7 @@ mod tests {
         });
         let task = update(&mut app, Event::Pick("plain".into()));
         settle_task(&mut app, task);
-        assert_eq!(
-            fake.join().unwrap(),
-            json!({"type": "authenticate", "method_id": "plain"})
-        );
+        assert_eq!(fake.join().unwrap(), json!({"type": "authenticate", "method_id": "plain"}));
         assert_eq!(app.views["demo"].login.chosen.as_deref(), Some("Plain"));
     }
 
@@ -631,11 +485,7 @@ mod tests {
                 "command": ["claude-acp"], "home_paths": [{"path": "~/.claude", "kind": "directory"}]}),
             );
             let mut seen = vec![];
-            for method in [
-                "_sill/sessions.stop",
-                "_sill/sessions.start",
-                "_sill/sessions.control",
-            ] {
+            for method in ["_sill/sessions.stop", "_sill/sessions.start", "_sill/sessions.control"] {
                 let request = daemon.expect(method);
                 daemon.reply(&request, json!({}));
                 seen.push(method);
@@ -645,14 +495,7 @@ mod tests {
         let task = update(&mut app, Event::Pick("plain".into()));
         settle_task(&mut app, task);
         assert_eq!(fake.join().unwrap().len(), 3, "stop, start, then the login");
-        assert!(
-            app.views["demo"]
-                .login
-                .notes
-                .iter()
-                .any(|(n, _)| n.contains("started again")),
-            "the card says why"
-        );
+        assert!(app.views["demo"].login.notes.iter().any(|(n, _)| n.contains("started again")), "the card says why");
     }
 
     /// The login command's terminal closing lets the session go on; another pane's end does not.
@@ -668,10 +511,7 @@ mod tests {
         assert_eq!(app.views["demo"].login.terminal, Some(7));
         let task = app.update(Message::Terminal("demo".into(), 7, terminal::Event::Ended));
         let request = daemon.expect("_sill/sessions.control");
-        assert_eq!(
-            request["params"]["control"],
-            json!({"type": "retry_session"})
-        );
+        assert_eq!(request["params"]["control"], json!({"type": "retry_session"}));
         daemon.reply(&request, json!({}));
         settle_task(&mut app, task);
         assert_eq!(app.views["demo"].login.terminal, None);

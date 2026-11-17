@@ -24,14 +24,7 @@ unsafe extern "C" {
     fn CGEventSourceCreate(state: i32) -> *const c_void;
     fn CGEventCreateMouseEvent(source: *const c_void, kind: u32, at: Point, button: u32) -> *const c_void;
     fn CGEventCreateKeyboardEvent(source: *const c_void, key: u16, down: bool) -> *const c_void;
-    fn CGEventCreateScrollWheelEvent2(
-        source: *const c_void,
-        units: u32,
-        wheels: u32,
-        wheel1: i32,
-        wheel2: i32,
-        wheel3: i32,
-    ) -> *const c_void;
+    fn CGEventCreateScrollWheelEvent2(source: *const c_void, units: u32, wheels: u32, wheel1: i32, wheel2: i32, wheel3: i32) -> *const c_void;
     fn CGEventSetFlags(event: *const c_void, flags: u64);
     fn CGEventSetIntegerValueField(event: *const c_void, field: u32, value: i64);
     fn CGEventKeyboardSetUnicodeString(event: *const c_void, length: usize, text: *const u16);
@@ -89,8 +82,7 @@ const SESSION_TAP: u32 = 1;
 const HEAD_INSERT: u32 = 0;
 const LISTEN_ONLY: u32 = 1;
 /// The person's mouse: buttons, moves, drags, scrolling. Watching it needs no consent.
-const MOUSE_EVENTS: u64 =
-    (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 22) | (1 << 25) | (1 << 26) | (1 << 27);
+const MOUSE_EVENTS: u64 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 22) | (1 << 25) | (1 << 26) | (1 << 27);
 /// The person's keyboard: keys and modifiers. Watching it needs macOS's Input Monitoring consent.
 const KEY_EVENTS: u64 = (1 << 10) | (1 << 11) | (1 << 12);
 const TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFF_FFFE;
@@ -114,15 +106,14 @@ pub fn ask() -> bool {
             objc2::class!(NSString),
             stringWithUTF8String: c"AXTrustedCheckOptionPrompt".as_ptr()
         ];
-        let yes: *mut objc2::runtime::AnyObject =
-            objc2::msg_send![objc2::class!(NSNumber), numberWithBool: true];
-        let options: *mut objc2::runtime::AnyObject =
-            objc2::msg_send![objc2::class!(NSDictionary), dictionaryWithObject: yes, forKey: key];
+        let yes: *mut objc2::runtime::AnyObject = objc2::msg_send![objc2::class!(NSNumber), numberWithBool: true];
+        let options: *mut objc2::runtime::AnyObject = objc2::msg_send![objc2::class!(NSDictionary), dictionaryWithObject: yes, forKey: key];
         AXIsProcessTrustedWithOptions(options as *const c_void)
     }
 }
 
-pub const NOT_ALLOWED: &str = "macOS does not allow Sill to control the mouse and keyboard: the person turns Sill on in System Settings → Privacy & Security → Accessibility";
+pub const NOT_ALLOWED: &str =
+    "macOS does not allow Sill to control the mouse and keyboard: the person turns Sill on in System Settings → Privacy & Security → Accessibility";
 
 /// The agent is driving the Mac's input: the menu-bar herring shows it.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -169,9 +160,7 @@ extern "C" fn on_event(_proxy: *mut c_void, kind: u32, event: *mut c_void, _info
         }
         _ if !event.is_null() => {
             // SAFETY: the event macOS hands the tap, alive for the call
-            let (user_data, pid) = unsafe {
-                (CGEventGetIntegerValueField(event, SOURCE_USER_DATA), CGEventGetIntegerValueField(event, SOURCE_PID))
-            };
+            let (user_data, pid) = unsafe { (CGEventGetIntegerValueField(event, SOURCE_USER_DATA), CGEventGetIntegerValueField(event, SOURCE_PID)) };
             if !ours(user_data, pid) {
                 PERSON_LAST.store(clock_ms(), Ordering::Release);
             }
@@ -277,8 +266,12 @@ pub fn wait(ms: u64, since: Since, deadline: Instant) -> Result<(), String> {
 }
 
 fn check_input(since: Since, deadline: Instant) -> Result<(), String> {
-    if Instant::now() >= deadline { return Err("input deadline reached".into()); }
-    if person_since(since) { return Err("the person used the mouse or keyboard".into()); }
+    if Instant::now() >= deadline {
+        return Err("input deadline reached".into());
+    }
+    if person_since(since) {
+        return Err("the person used the mouse or keyboard".into());
+    }
     Ok(())
 }
 
@@ -370,14 +363,7 @@ pub fn scroll(at: Point, dy: f64, dx: f64) {
     move_to(at);
     // SAFETY: a scroll event with no source; Core Graphics's wheel 1 is vertical, positive up
     unsafe {
-        let event = CGEventCreateScrollWheelEvent2(
-            std::ptr::null(),
-            SCROLL_PIXELS,
-            2,
-            (-dy).round() as i32,
-            (-dx).round() as i32,
-            0,
-        );
+        let event = CGEventCreateScrollWheelEvent2(std::ptr::null(), SCROLL_PIXELS, 2, (-dy).round() as i32, (-dx).round() as i32, 0);
         post(event);
     }
 }
@@ -390,7 +376,10 @@ pub fn type_text(text: &str, since: Since, deadline: Instant) -> Result<(), Stri
         let source = CGEventSourceCreate(-1);
         let mut result = Ok(());
         for chunk in units.chunks(16) {
-            if let Err(error) = check_input(since, deadline) { result = Err(error); break; }
+            if let Err(error) = check_input(since, deadline) {
+                result = Err(error);
+                break;
+            }
             for down in [true, false] {
                 let event = CGEventCreateKeyboardEvent(source, 0, down);
                 if !event.is_null() {
@@ -438,9 +427,7 @@ pub fn parse_key(combination: &str) -> Result<(u16, u64), String> {
             other => return Err(format!("unknown modifier {other}")),
         };
     }
-    const LETTERS: [u16; 26] = [
-        0, 11, 8, 2, 14, 3, 5, 4, 34, 38, 40, 37, 46, 45, 31, 35, 12, 15, 1, 17, 32, 9, 13, 7, 16, 6,
-    ];
+    const LETTERS: [u16; 26] = [0, 11, 8, 2, 14, 3, 5, 4, 34, 38, 40, 37, 46, 45, 31, 35, 12, 15, 1, 17, 32, 9, 13, 7, 16, 6];
     const DIGITS: [u16; 10] = [29, 18, 19, 20, 21, 23, 22, 26, 28, 25];
     let code = match name.as_str() {
         n if n.len() == 1 && n.as_bytes()[0].is_ascii_lowercase() => LETTERS[(n.as_bytes()[0] - b'a') as usize],
@@ -501,15 +488,9 @@ impl Frame {
     /// A point in the picture's pixels as a point on the Mac's desktop.
     pub fn to_desktop(&self, px: f64, py: f64) -> Result<Point, String> {
         if !(0.0..f64::from(self.pixel_width)).contains(&px) || !(0.0..f64::from(self.pixel_height)).contains(&py) {
-            return Err(format!(
-                "{px},{py} is outside the picture ({}×{} pixels)",
-                self.pixel_width, self.pixel_height
-            ));
+            return Err(format!("{px},{py} is outside the picture ({}×{} pixels)", self.pixel_width, self.pixel_height));
         }
-        Ok(Point {
-            x: self.x + px * self.width / f64::from(self.pixel_width),
-            y: self.y + py * self.height / f64::from(self.pixel_height),
-        })
+        Ok(Point { x: self.x + px * self.width / f64::from(self.pixel_width), y: self.y + py * self.height / f64::from(self.pixel_height) })
     }
 }
 

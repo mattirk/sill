@@ -37,34 +37,17 @@ pub const SPACING: f32 = 12.0;
 /// become gaps. `spacing` is the column's gap between children, which a gap of k rows keeps:
 /// k heights and k − 1 spacings, so the column is as tall as with every row built. With no
 /// viewport known yet, every row is built.
-pub fn plan(
-    heights: &[Option<f32>],
-    spacing: f32,
-    offset: f32,
-    viewport: f32,
-    follow_tail: bool,
-) -> Vec<Slot> {
+pub fn plan(heights: &[Option<f32>], spacing: f32, offset: f32, viewport: f32, follow_tail: bool) -> Vec<Slot> {
     plan_with_pinned(heights, spacing, offset, viewport, follow_tail, None)
 }
 
 /// Like [`plan`], also guaranteeing that `pinned` (the row of the current Find match) is built.
-pub fn plan_with_pinned(
-    heights: &[Option<f32>],
-    spacing: f32,
-    offset: f32,
-    viewport: f32,
-    follow_tail: bool,
-    pinned: Option<usize>,
-) -> Vec<Slot> {
+pub fn plan_with_pinned(heights: &[Option<f32>], spacing: f32, offset: f32, viewport: f32, follow_tail: bool, pinned: Option<usize>) -> Vec<Slot> {
     if viewport <= 0.0 {
         return (0..heights.len()).map(Slot::Row).collect();
     }
     let total: f32 = heights.iter().map(|h| h.unwrap_or(0.0) + spacing).sum();
-    let top = if follow_tail {
-        (total - viewport).max(0.0)
-    } else {
-        offset
-    };
+    let top = if follow_tail { (total - viewport).max(0.0) } else { offset };
     let (low, high) = (top - viewport, top + 2.0 * viewport);
     let mut slots = Vec::new();
     let mut at = 0.0;
@@ -76,10 +59,7 @@ pub fn plan_with_pinned(
         } else {
             match slots.last_mut() {
                 Some(Slot::Gap { height, .. }) => *height += spacing + h,
-                _ => slots.push(Slot::Gap {
-                    first: index,
-                    height: h,
-                }),
+                _ => slots.push(Slot::Gap { first: index, height: h }),
             }
         }
         at += h + spacing;
@@ -112,27 +92,13 @@ pub struct Measured<'a> {
     measure: Option<(&'a str, u64, &'a Heights)>,
 }
 
-pub fn measured<'a>(
-    content: impl Into<Element<'a, Message>>,
-    index: usize,
-    key: &'a str,
-    signature: u64,
-    heights: &'a Heights,
-) -> Measured<'a> {
-    Measured {
-        content: content.into(),
-        index,
-        measure: Some((key, signature, heights)),
-    }
+pub fn measured<'a>(content: impl Into<Element<'a, Message>>, index: usize, key: &'a str, signature: u64, heights: &'a Heights) -> Measured<'a> {
+    Measured { content: content.into(), index, measure: Some((key, signature, heights)) }
 }
 
 /// A row after the measured ones (a question placed at the end, a problem): scoped, not measured.
 pub fn scoped<'a>(index: usize, content: impl Into<Element<'a, Message>>) -> Measured<'a> {
-    Measured {
-        content: content.into(),
-        index,
-        measure: None,
-    }
+    Measured { content: content.into(), index, measure: None }
 }
 
 impl Widget<Message, Theme, Renderer> for Measured<'_> {
@@ -160,32 +126,17 @@ impl Widget<Message, Theme, Renderer> for Measured<'_> {
         self.content.as_widget().size_hint()
     }
 
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) -> layout::Node {
         let node = self.content.as_widget_mut().layout(tree, renderer, limits);
         if let Some((key, signature, heights)) = self.measure {
-            heights
-                .borrow_mut()
-                .insert(key.to_string(), (signature, node.size().height));
+            heights.borrow_mut().insert(key.to_string(), (signature, node.size().height));
         }
         node
     }
 
-    fn operate(
-        &mut self,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        operation: &mut dyn Operation,
-    ) {
+    fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer, operation: &mut dyn Operation) {
         operation.custom(None, layout.bounds(), &mut RowScope(Some(self.index)));
-        self.content
-            .as_widget_mut()
-            .operate(tree, layout, renderer, operation);
+        self.content.as_widget_mut().operate(tree, layout, renderer, operation);
         operation.custom(None, layout.bounds(), &mut RowScope(None));
     }
 
@@ -200,9 +151,7 @@ impl Widget<Message, Theme, Renderer> for Measured<'_> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        self.content.as_widget_mut().update(
-            tree, event, layout, cursor, renderer, clipboard, shell, viewport,
-        );
+        self.content.as_widget_mut().update(tree, event, layout, cursor, renderer, clipboard, shell, viewport);
     }
 
     fn draw(
@@ -215,22 +164,11 @@ impl Widget<Message, Theme, Renderer> for Measured<'_> {
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        self.content
-            .as_widget()
-            .draw(tree, renderer, theme, style, layout, cursor, viewport);
+        self.content.as_widget().draw(tree, renderer, theme, style, layout, cursor, viewport);
     }
 
-    fn mouse_interaction(
-        &self,
-        tree: &Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &Renderer,
-    ) -> mouse::Interaction {
-        self.content
-            .as_widget()
-            .mouse_interaction(tree, layout, cursor, viewport, renderer)
+    fn mouse_interaction(&self, tree: &Tree, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle, renderer: &Renderer) -> mouse::Interaction {
+        self.content.as_widget().mouse_interaction(tree, layout, cursor, viewport, renderer)
     }
 
     fn overlay<'b>(
@@ -241,9 +179,7 @@ impl Widget<Message, Theme, Renderer> for Measured<'_> {
         viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
-        self.content
-            .as_widget_mut()
-            .overlay(tree, layout, renderer, viewport, translation)
+        self.content.as_widget_mut().overlay(tree, layout, renderer, viewport, translation)
     }
 }
 
@@ -273,13 +209,7 @@ mod tests {
         assert_eq!(built.first(), Some(&45));
         assert_eq!(built.last(), Some(&60));
         // the gaps keep the column's height: 45 rows above are 45 heights and 44 spacings
-        assert_eq!(
-            slots[0],
-            Slot::Gap {
-                first: 0,
-                height: 45.0 * 50.0 + 44.0 * 10.0
-            }
-        );
+        assert_eq!(slots[0], Slot::Gap { first: 0, height: 45.0 * 50.0 + 44.0 * 10.0 });
         let column: f32 = slots
             .iter()
             .map(|s| match s {

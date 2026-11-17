@@ -83,10 +83,26 @@ impl Default for Network {
 
 pub fn quiet_default() -> Vec<String> {
     [
-        "*.datadoghq.com", "*.datadoghq.eu", "*.sentry.io", "sentry.io", "*.ingest.sentry.io", "*.statsig.com",
-        "*.segment.io", "*.segment.com", "*.mixpanel.com", "*.posthog.com", "*.amplitude.com", "*.bugsnag.com",
-        "*.launchdarkly.com", "*.google-analytics.com", "*.googletagmanager.com", "*.newrelic.com", "*.nr-data.net",
-        "*.honeycomb.io", "*.rollbar.com", "*.intercom.io",
+        "*.datadoghq.com",
+        "*.datadoghq.eu",
+        "*.sentry.io",
+        "sentry.io",
+        "*.ingest.sentry.io",
+        "*.statsig.com",
+        "*.segment.io",
+        "*.segment.com",
+        "*.mixpanel.com",
+        "*.posthog.com",
+        "*.amplitude.com",
+        "*.bugsnag.com",
+        "*.launchdarkly.com",
+        "*.google-analytics.com",
+        "*.googletagmanager.com",
+        "*.newrelic.com",
+        "*.nr-data.net",
+        "*.honeycomb.io",
+        "*.rollbar.com",
+        "*.intercom.io",
     ]
     .into_iter()
     .map(str::to_string)
@@ -214,7 +230,13 @@ impl Policy {
     /// a normal session), and the idle timeout is at most an hour (0 = never becomes an hour).
     pub fn ghostly(&mut self, home: &Path) {
         use crate::permissions::{Permissions, Rule};
-        self.permissions = Permissions { test_desktop: Rule::Forbidden, private_bus: Rule::Forbidden, gpu: Rule::Forbidden, public_web: Rule::Forbidden, host_control: Rule::Forbidden };
+        self.permissions = Permissions {
+            test_desktop: Rule::Forbidden,
+            private_bus: Rule::Forbidden,
+            gpu: Rule::Forbidden,
+            public_web: Rule::Forbidden,
+            host_control: Rule::Forbidden,
+        };
         let direct = std::mem::take(&mut self.paths.direct);
         for d in direct {
             if !self.paths.ro.contains(&d) {
@@ -242,15 +264,13 @@ impl Policy {
 
     pub fn load(name_or_path: &str, home: &Path) -> Result<Self> {
         if name_or_path.contains('/') || name_or_path.ends_with(".toml") {
-            let text = std::fs::read_to_string(name_or_path)
-                .with_context(|| format!("read policy {name_or_path}"))?;
+            let text = std::fs::read_to_string(name_or_path).with_context(|| format!("read policy {name_or_path}"))?;
             return Self::parse(&text);
         }
         for dir in search_dirs(home) {
             let path = dir.join(format!("{name_or_path}.toml"));
             if path.is_file() {
-                let text = std::fs::read_to_string(&path)
-                    .with_context(|| format!("read policy {}", path.display()))?;
+                let text = std::fs::read_to_string(&path).with_context(|| format!("read policy {}", path.display()))?;
                 return Self::parse(&text);
             }
         }
@@ -285,12 +305,33 @@ pub fn available(home: &Path) -> Vec<String> {
 }
 
 /// A bounded live name page, independent of how many policy files exist on disk.
-pub fn available_page(home:&Path,after:Option<&str>,limit:usize)->(Vec<String>,bool) {
-    let mut names=std::collections::BTreeSet::new();
-    let mut add=|name:String|{if after.is_none_or(|a|name.as_str()>a){names.insert(name);if names.len()>limit+1{names.pop_last();}}};
+pub fn available_page(home: &Path, after: Option<&str>, limit: usize) -> (Vec<String>, bool) {
+    let mut names = std::collections::BTreeSet::new();
+    let mut add = |name: String| {
+        if after.is_none_or(|a| name.as_str() > a) {
+            names.insert(name);
+            if names.len() > limit + 1 {
+                names.pop_last();
+            }
+        }
+    };
     add("default".into());
-    for dir in search_dirs(home) {let Ok(entries)=std::fs::read_dir(dir) else {continue};for e in entries.flatten(){let p=e.path();if p.extension().is_some_and(|x|x=="toml")&&let Some(name)=p.file_stem().and_then(|s|s.to_str()){add(name.into());}}}
-    let more=names.len()>limit;if more{names.pop_last();}(names.into_iter().collect(),more)
+    for dir in search_dirs(home) {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "toml")
+                && let Some(name) = p.file_stem().and_then(|s| s.to_str())
+            {
+                add(name.into());
+            }
+        }
+    }
+    let more = names.len() > limit;
+    if more {
+        names.pop_last();
+    }
+    (names.into_iter().collect(), more)
 }
 
 #[cfg(test)]
@@ -352,5 +393,4 @@ mod tests {
         assert_eq!(policy.network.allow, ["example.com"]);
         assert!(Policy::builtin_default().network.allow_additional_hosts);
     }
-
 }

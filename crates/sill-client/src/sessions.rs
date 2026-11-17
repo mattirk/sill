@@ -44,63 +44,43 @@ pub fn new_here(from: &Session) -> Request {
 
 /// An ended session open again; attaching then starts it.
 pub fn reopen(session_id: &str) -> Request {
-    let update = Update {
-        session_id: session_id.into(),
-        change: Change::Reopen,
-    };
+    let update = Update { session_id: session_id.into(), change: Change::Reopen };
     ("_sill/sessions.update", json!(update))
 }
 
 /// End a session as closing its tab does: the summary, or a ghost's deletion.
 pub fn end(session_id: &str) -> Request {
-    let end = End {
-        session_id: session_id.into(),
-        reason: "close".into(),
-    };
+    let end = End { session_id: session_id.into(), reason: "close".into() };
     ("_sill/sessions.end", json!(end))
 }
 
 /// Delete a session and its recorded changes.
 pub fn delete(session_id: &str) -> Request {
-    let key = SessionKey {
-        session_id: session_id.into(),
-    };
+    let key = SessionKey { session_id: session_id.into() };
     ("_sill/sessions.delete", json!(key))
 }
 
 /// The session a `sessions.create` answered with.
 pub fn created(value: &Value) -> Option<String> {
-    value
-        .get("session_id")
-        .and_then(|id| id.as_str())
-        .map(str::to_owned)
+    value.get("session_id").and_then(|id| id.as_str()).map(str::to_owned)
 }
 
 /// What the Reopen list offers: sessions not open as tabs, newest first, without ended ghosts
 /// (they are gone).
 pub fn reopenable<'a>(all: &'a [Session], open: &[String]) -> Vec<&'a Session> {
-    all.iter()
-        .filter(|s| !open.contains(&s.session_id))
-        .filter(|s| !(s.ghost && s.ended_at.is_some()))
-        .collect()
+    all.iter().filter(|s| !open.contains(&s.session_id)).filter(|s| !(s.ghost && s.ended_at.is_some())).collect()
 }
 
 /// Label outside session tabs: prefer the descriptive title once one has been supplied.
 /// Until then, use the current session name rather than its old generated placeholder.
 pub fn display_title(session: &Session) -> &str {
-    if !session.title_kind.is_empty() && !session.title.trim().is_empty() {
-        &session.title
-    } else {
-        session.name.as_deref().unwrap_or(&session.title)
-    }
+    if !session.title_kind.is_empty() && !session.title.trim().is_empty() { &session.title } else { session.name.as_deref().unwrap_or(&session.title) }
 }
 
 /// `session` matches a typed filter: every word in its title or summary, ignoring case.
 pub fn matches(session: &Session, filter: &str) -> bool {
     let haystack = format!("{} {} {}", session.name.as_deref().unwrap_or(""), session.title, session.summary).to_lowercase();
-    filter
-        .split_whitespace()
-        .all(|word| haystack.contains(&word.to_lowercase()))
+    filter.split_whitespace().all(|word| haystack.contains(&word.to_lowercase()))
 }
 
 /// The agents a new session can start with: enabled, and their command present on the daemon's
@@ -110,13 +90,7 @@ pub fn startable(client: &sill_proto::Client) -> anyhow::Result<Vec<Definition>>
     let mut agents = vec![];
     let mut after = None;
     loop {
-        let page: Page = client.call(
-            "_sill/agents.list",
-            List {
-                after,
-                limit: Some(64),
-            },
-        )?;
+        let page: Page = client.call("_sill/agents.list", List { after, limit: Some(64) })?;
         agents.extend(page.agents.into_iter().filter(|a| a.enabled));
         after = page.next;
         if after.is_none() {
@@ -125,12 +99,7 @@ pub fn startable(client: &sill_proto::Client) -> anyhow::Result<Vec<Definition>>
     }
     let mut startable = vec![];
     for agent in agents {
-        let available: Available = client.call(
-            "_sill/agents.available",
-            AgentKey {
-                agent_id: agent.id.clone(),
-            },
-        )?;
+        let available: Available = client.call("_sill/agents.available", AgentKey { agent_id: agent.id.clone() })?;
         if available.path.is_some() {
             startable.push(agent);
         }
@@ -177,28 +146,15 @@ mod tests {
         let (method, params) = create("codex", true, true, None);
         assert_eq!(method, "_sill/sessions.create");
         let create: Create = serde_json::from_value(params.clone()).unwrap();
-        assert!(
-            create.ghost && !create.remember_pins,
-            "a ghost never takes remembered pins"
-        );
+        assert!(create.ghost && !create.remember_pins, "a ghost never takes remembered pins");
         assert!(create.create_id.starts_with("gui-create-"));
         assert_eq!(super::create("codex", false, true, None).1["remember_pins"], true);
         assert_eq!(super::create("codex", false, false, None).1["remember_pins"], false);
         let from = session("old", true, false);
         let (_, params) = new_here(&from);
         let create: Create = serde_json::from_value(params).unwrap();
-        assert_eq!(
-            (
-                create.follows.as_str(),
-                create.policy.as_str(),
-                create.pins.len()
-            ),
-            ("old", "strict", 0)
-        );
-        assert_eq!(
-            reopen("s").1,
-            json!({"session_id":"s", "change":{"type":"reopen"}})
-        );
+        assert_eq!((create.follows.as_str(), create.policy.as_str(), create.pins.len()), ("old", "strict", 0));
+        assert_eq!(reopen("s").1, json!({"session_id":"s", "change":{"type":"reopen"}}));
         assert_eq!(end("s").1, json!({"session_id":"s", "reason":"close"}));
         assert_eq!(delete("s").1, json!({"session_id":"s"}));
         assert_eq!(created(&json!({"session_id":"n"})).as_deref(), Some("n"));
@@ -206,16 +162,8 @@ mod tests {
 
     #[test]
     fn reopen_lists_closed_sessions_but_not_ended_ghosts_and_filters_by_words() {
-        let all = vec![
-            session("a", true, false),
-            session("b", true, true),
-            session("c", false, true),
-            session("d", false, false),
-        ];
-        let ids: Vec<&str> = reopenable(&all, &["d".into()])
-            .iter()
-            .map(|s| s.session_id.as_str())
-            .collect();
+        let all = vec![session("a", true, false), session("b", true, true), session("c", false, true), session("d", false, false)];
+        let ids: Vec<&str> = reopenable(&all, &["d".into()]).iter().map(|s| s.session_id.as_str()).collect();
         assert_eq!(ids, ["a", "c"]);
         assert!(matches(&all[0], "SEND title"));
         assert!(!matches(&all[0], "send nothing"));

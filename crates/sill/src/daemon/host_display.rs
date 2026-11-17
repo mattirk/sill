@@ -50,11 +50,7 @@ fn windows(conn: &RustConnection, root: Window) -> Result<Vec<Value>> {
     let mut ids: Vec<Window> = if list == none {
         vec![]
     } else {
-        conn.get_property(false, root, list, AtomEnum::WINDOW, 0, 1024)?
-            .reply()?
-            .value32()
-            .map(|v| v.collect())
-            .unwrap_or_default()
+        conn.get_property(false, root, list, AtomEnum::WINDOW, 0, 1024)?.reply()?.value32().map(|v| v.collect()).unwrap_or_default()
     };
     if ids.is_empty() {
         ids = conn.query_tree(root)?.reply()?.children;
@@ -117,19 +113,11 @@ pub fn view(args: &Value) -> Result<View> {
     if width <= 0 || height <= 0 || width as u64 * height as u64 > MAX_PIXELS {
         bail!("unexpected picture size {width}×{height}");
     }
-    let format = conn
-        .setup()
-        .pixmap_formats
-        .iter()
-        .find(|f| f.depth == screen.depth)
-        .context("the display's pixel format")?;
+    let format = conn.setup().pixmap_formats.iter().find(|f| f.depth == screen.depth).context("the display's pixel format")?;
     if format.bits_per_pixel != 32 {
         bail!("the display is not a 32-bit RGB one ({} bits per pixel)", format.bits_per_pixel);
     }
-    let image = conn
-        .get_image(ImageFormat::Z_PIXMAP, root, x as i16, y as i16, width as u16, height as u16, !0)?
-        .reply()
-        .context("reading the display")?;
+    let image = conn.get_image(ImageFormat::Z_PIXMAP, root, x as i16, y as i16, width as u16, height as u16, !0)?.reply().context("reading the display")?;
     let mut bgrx = image.data;
     anyhow::ensure!(bgrx.len() == width as usize * height as usize * 4, "short picture");
     if conn.setup().image_byte_order == x11rb::protocol::xproto::ImageOrder::MSB_FIRST {
@@ -222,18 +210,9 @@ pub fn input(args: &Value) -> Result<Value> {
                 }
             }
             Some(argv) => {
-                let out = std::process::Command::new(xdotool)
-                    .args(&argv)
-                    .stdin(std::process::Stdio::null())
-                    .output()
-                    .context("running xdotool")?;
+                let out = std::process::Command::new(xdotool).args(&argv).stdin(std::process::Stdio::null()).output().context("running xdotool")?;
                 if !out.status.success() {
-                    bail!(
-                        "action {} ({}) failed after {performed} done: {}",
-                        performed + 1,
-                        argv[0],
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    );
+                    bail!("action {} ({}) failed after {performed} done: {}", performed + 1, argv[0], String::from_utf8_lossy(&out.stderr).trim());
                 }
             }
         }
@@ -291,8 +270,13 @@ mod tests {
         let View::Picture { raw, .. } = view(&json!({})).unwrap() else { panic!("picture") };
         assert!(raw.width > 0 && raw.height > 0 && raw.bgrx.len() == raw.width as usize * raw.height as usize * 4);
         let View::Windows(windows) = view(&json!({"list":true})).unwrap() else { panic!("list") };
-        eprintln!("{}×{}, {} windows: {}", raw.width, raw.height, windows.len(),
-            windows.iter().filter(|w| w["visible"] == true).map(|w| w["name"].to_string()).collect::<Vec<_>>().join(", "));
+        eprintln!(
+            "{}×{}, {} windows: {}",
+            raw.width,
+            raw.height,
+            windows.len(),
+            windows.iter().filter(|w| w["visible"] == true).map(|w| w["name"].to_string()).collect::<Vec<_>>().join(", ")
+        );
         assert!(!windows.is_empty());
     }
 }

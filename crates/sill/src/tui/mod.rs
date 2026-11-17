@@ -7,8 +7,8 @@ use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use sill_proto::wire::{Answer, Command, Event, FieldKind, PermissionOptionKind};
 use sill_proto::Client;
+use sill_proto::wire::{Answer, Command, Event, FieldKind, PermissionOptionKind};
 
 /// Whether `> ` is on the screen waiting for a line: a note that arrives then (the daemon's
 /// "N changes pending" after a turn) takes the line over and the mark is shown again after it.
@@ -32,82 +32,141 @@ pub fn line_mode(key: &str, fresh: bool, verbose: bool) -> Result<()> {
     eprintln!("sill: {} — {}; /cancel stops the turn, /quit detaches", id, s.title);
     let pending: Arc<Mutex<Option<Pending>>> = Arc::default();
     let view = Arc::new(Mutex::new(sill_core::sfp_client::View::default()));
-    for event in view.lock().unwrap().attach(&c,&id).context("attaching")? { render_public(event,verbose,&pending); }
+    for event in view.lock().unwrap().attach(&c, &id).context("attaching")? {
+        render_public(event, verbose, &pending);
+    }
     let current = Arc::new(Mutex::new(c));
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
-        let current=current.clone(); let view=view.clone(); let pending=pending.clone(); let done=done.clone(); let id=id.clone();
+        let current = current.clone();
+        let view = view.clone();
+        let pending = pending.clone();
+        let done = done.clone();
+        let id = id.clone();
         std::thread::Builder::new().name("sill-attach-events".into()).spawn(move || {
             loop {
-                let c=current.lock().unwrap().clone();
-                while let Ok((method,params))=c.notifications.lock().unwrap().recv() {
-                    if method!="_sill/session.event" { continue; }
-                    let notification=match serde_json::from_value::<sill_proto::sfp::SessionEvent>(params) {
-                        Ok(notification)=>notification,
-                        Err(e)=>{ eprintln!("sill: unsupported SFP event; synchronization stopped: {e}"); std::process::exit(1); }
+                let c = current.lock().unwrap().clone();
+                while let Ok((method, params)) = c.notifications.lock().unwrap().recv() {
+                    if method != "_sill/session.event" {
+                        continue;
+                    }
+                    let notification = match serde_json::from_value::<sill_proto::sfp::SessionEvent>(params) {
+                        Ok(notification) => notification,
+                        Err(e) => {
+                            eprintln!("sill: unsupported SFP event; synchronization stopped: {e}");
+                            std::process::exit(1);
+                        }
                     };
-                    let mut state=view.lock().unwrap();
-                    match state.accept(notification).or_else(|_|state.attach(&c,&id)) {
-                        Ok(events)=>for event in events { render_public(event,verbose,&pending); },
-                        Err(e)=>eprintln!("sill: synchronizing: {e:#}"),
+                    let mut state = view.lock().unwrap();
+                    match state.accept(notification).or_else(|_| state.attach(&c, &id)) {
+                        Ok(events) => {
+                            for event in events {
+                                render_public(event, verbose, &pending);
+                            }
+                        }
+                        Err(e) => eprintln!("sill: synchronizing: {e:#}"),
                     }
                 }
-                if done.load(std::sync::atomic::Ordering::Acquire) { return; }
-                *pending.lock().unwrap()=None;
+                if done.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                *pending.lock().unwrap() = None;
                 eprintln!("sill: connection lost; reconnecting");
-                let mut delay=std::time::Duration::from_millis(100);
+                let mut delay = std::time::Duration::from_millis(100);
                 loop {
-                    if done.load(std::sync::atomic::Ordering::Acquire) { return; }
+                    if done.load(std::sync::atomic::Ordering::Acquire) {
+                        return;
+                    }
                     std::thread::sleep(delay);
-                    let result=(||->Result<Arc<Client>> {
-                        let c=Arc::new(Client::connect_or_start()?);
-                        for event in view.lock().unwrap().attach(&c,&id)? { render_public(event,verbose,&pending); }
+                    let result = (|| -> Result<Arc<Client>> {
+                        let c = Arc::new(Client::connect_or_start()?);
+                        for event in view.lock().unwrap().attach(&c, &id)? {
+                            render_public(event, verbose, &pending);
+                        }
                         Ok(c)
                     })();
-                    match result { Ok(c)=>{*current.lock().unwrap()=c;break;},Err(e)=>{if verbose {eprintln!("sill: reconnecting: {e:#}");}delay=(delay*2).min(std::time::Duration::from_secs(5));} }
+                    match result {
+                        Ok(c) => {
+                            *current.lock().unwrap() = c;
+                            break;
+                        }
+                        Err(e) => {
+                            if verbose {
+                                eprintln!("sill: reconnecting: {e:#}");
+                            }
+                            delay = (delay * 2).min(std::time::Duration::from_secs(5));
+                        }
+                    }
                 }
             }
         })?;
     }
     prompt_mark();
     for line in std::io::stdin().lock().lines() {
-        let line=line?; let text=line.trim();
+        let line = line?;
+        let text = line.trim();
         let question = pending.lock().unwrap().take();
-        if let Some(q)=question {
-            let choice=match text {
-                ""=>None,
-                "y"|"yes"=>q.options.iter().find(|(_,k)|matches!(k,PermissionOptionKind::AllowOnce)).or(q.options.iter().find(|(_,k)|matches!(k,PermissionOptionKind::AllowAlways))).map(|(id,_)|id.clone()),
-                "n"|"no"=>q.options.iter().find(|(_,k)|matches!(k,PermissionOptionKind::RejectOnce)).or(q.options.iter().find(|(_,k)|matches!(k,PermissionOptionKind::RejectAlways))).map(|(id,_)|id.clone()),
-                n=>n.parse::<usize>().ok().and_then(|n|q.options.get(n.wrapping_sub(1))).map(|(id,_)|id.clone()),
+        if let Some(q) = question {
+            let choice = match text {
+                "" => None,
+                "y" | "yes" => q
+                    .options
+                    .iter()
+                    .find(|(_, k)| matches!(k, PermissionOptionKind::AllowOnce))
+                    .or(q.options.iter().find(|(_, k)| matches!(k, PermissionOptionKind::AllowAlways)))
+                    .map(|(id, _)| id.clone()),
+                "n" | "no" => q
+                    .options
+                    .iter()
+                    .find(|(_, k)| matches!(k, PermissionOptionKind::RejectOnce))
+                    .or(q.options.iter().find(|(_, k)| matches!(k, PermissionOptionKind::RejectAlways)))
+                    .map(|(id, _)| id.clone()),
+                n => n.parse::<usize>().ok().and_then(|n| q.options.get(n.wrapping_sub(1))).map(|(id, _)| id.clone()),
             };
-            let question_id=view.lock().unwrap().question_id(q.request).map(str::to_owned);
-            if let Some(question_id)=question_id {
-                let input=sill_core::sfp_client::answer(question_id,id.clone(),Answer::Permission(choice));
-                if let Err(e)=current.lock().unwrap().call::<serde_json::Value>("_sill/questions.answer",input) {eprintln!("sill: {e:#}");}
+            let question_id = view.lock().unwrap().question_id(q.request).map(str::to_owned);
+            if let Some(question_id) = question_id {
+                let input = sill_core::sfp_client::answer(question_id, id.clone(), Answer::Permission(choice));
+                if let Err(e) = current.lock().unwrap().call::<serde_json::Value>("_sill/questions.answer", input) {
+                    eprintln!("sill: {e:#}");
+                }
             }
             continue;
         }
-        if matches!(text,"/quit"|"/q") {break;}
-        if text.is_empty() {prompt_mark();continue;}
-        let command=if text=="/cancel" { Command::Cancel } else { Command::Prompt {text:text.into(),attachments:vec![],entry:None} };
-        let request=sill_core::sfp_client::command_request(&id,&command,Some(&view.lock().unwrap()));
-        let result=request.and_then(|(method,params)|current.lock().unwrap().call::<serde_json::Value>(method,params));
-        if let Err(e)=result {eprintln!("sill: {e:#}");prompt_mark();}
+        if matches!(text, "/quit" | "/q") {
+            break;
+        }
+        if text.is_empty() {
+            prompt_mark();
+            continue;
+        }
+        let command = if text == "/cancel" { Command::Cancel } else { Command::Prompt { text: text.into(), attachments: vec![], entry: None } };
+        let request = sill_core::sfp_client::command_request(&id, &command, Some(&view.lock().unwrap()));
+        let result = request.and_then(|(method, params)| current.lock().unwrap().call::<serde_json::Value>(method, params));
+        if let Err(e) = result {
+            eprintln!("sill: {e:#}");
+            prompt_mark();
+        }
     }
-    done.store(true,std::sync::atomic::Ordering::Release);
-    let _=view.lock().unwrap().detach(&current.lock().unwrap());
+    done.store(true, std::sync::atomic::Ordering::Release);
+    let _ = view.lock().unwrap().detach(&current.lock().unwrap());
     eprintln!("sill: detached; the session keeps running");
     Ok(())
 }
 fn render_public(event: Event, verbose: bool, pending: &Mutex<Option<Pending>>) {
-    if let Event::Other(text)=&event {
-        if text.starts_with("sill:active-time:") || text.starts_with("sill:held:") || text.starts_with("sill:held-resolved:") { return; }
-        if let Some(json)=text.strip_prefix("sill:replay:") {
-            if let Ok(value)=serde_json::from_str(json) {render_replay(&value);}
+    if let Event::Other(text) = &event {
+        if text.starts_with("sill:active-time:") || text.starts_with("sill:held:") || text.starts_with("sill:held-resolved:") {
+            return;
+        }
+        if let Some(json) = text.strip_prefix("sill:replay:") {
+            if let Ok(value) = serde_json::from_str(json) {
+                render_replay(&value);
+            }
             return;
         }
     }
-    if !render(event,verbose,pending) { std::process::exit(0); }
+    if !render(event, verbose, pending) {
+        std::process::exit(0);
+    }
 }
 
 fn prompt_mark() {
@@ -234,21 +293,30 @@ fn render(ev: Event, verbose: bool, pending: &Mutex<Option<Pending>>) -> bool {
     true
 }
 
-
 /// Stored entries precede the live snapshot on attach, including reconnect. Showing the
 /// transcript explicitly makes terminal reconnection understandable without hiding missed output.
 fn render_replay(replay: &serde_json::Value) {
     let Some(entries) = replay["entries"].as_array() else { return };
-    if entries.is_empty() { return; }
+    if entries.is_empty() {
+        return;
+    }
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "\n\x1b[2m[session history]\x1b[0m");
     for entry in entries {
         let text = entry["text"].as_str().unwrap_or_default();
         match entry["kind"].as_str().unwrap_or_default() {
-            "user" => { let _ = writeln!(out, "> {text}"); }
-            "agent" => { let _ = writeln!(out, "{text}"); }
-            "note" => { let _ = writeln!(out, "\x1b[2m· {text}\x1b[0m"); }
-            "tool" => { let _ = writeln!(out, "\x1b[36m⚙ {text}\x1b[0m"); }
+            "user" => {
+                let _ = writeln!(out, "> {text}");
+            }
+            "agent" => {
+                let _ = writeln!(out, "{text}");
+            }
+            "note" => {
+                let _ = writeln!(out, "\x1b[2m· {text}\x1b[0m");
+            }
+            "tool" => {
+                let _ = writeln!(out, "\x1b[36m⚙ {text}\x1b[0m");
+            }
             _ => {}
         }
     }

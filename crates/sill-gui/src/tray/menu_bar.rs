@@ -75,15 +75,7 @@ pub fn start(asked: async_channel::Sender<Asked>) -> Option<Tray> {
     }
     let toggle = MenuItem::new("Show / hide sill", true, None);
     // with the window's own VM, quitting ends it, and the sessions in it
-    let quit = MenuItem::new(
-        if crate::local_vm::phase().is_some() {
-            "Quit Sill"
-        } else {
-            "Quit the window (sessions go on)"
-        },
-        true,
-        None,
-    );
+    let quit = MenuItem::new(if crate::local_vm::phase().is_some() { "Quit Sill" } else { "Quit the window (sessions go on)" }, true, None);
     let menu = Menu::new();
     if let Err(e) = menu.append_items(&[&toggle, &PredefinedMenuItem::separator(), &quit]) {
         eprintln!("sill-gui: no menu bar icon: {e}");
@@ -100,12 +92,7 @@ pub fn start(asked: async_channel::Sender<Asked>) -> Option<Tray> {
     }));
     // a click shows or hides the window, as on Linux; the menu is on the other button
     TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
-        if let TrayIconEvent::Click {
-            button: MouseButton::Left,
-            button_state: MouseButtonState::Up,
-            ..
-        } = event
-        {
+        if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
             let _ = asked.send_blocking(Asked::Toggle);
         }
     }));
@@ -117,12 +104,7 @@ pub fn start(asked: async_channel::Sender<Asked>) -> Option<Tray> {
         .with_menu_on_left_click(false)
         .build();
     match built {
-        Ok(icon) => Some(Tray {
-            icon,
-            frames: RefCell::new(vec![rest]),
-            frame: Cell::new(0),
-            busy: Cell::new(false),
-        }),
+        Ok(icon) => Some(Tray { icon, frames: RefCell::new(vec![rest]), frame: Cell::new(0), busy: Cell::new(false) }),
         Err(e) => {
             eprintln!("sill-gui: no menu bar icon: {e}");
             None

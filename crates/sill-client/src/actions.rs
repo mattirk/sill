@@ -37,9 +37,7 @@ impl Outcome {
     pub fn problem(&self) -> Option<&str> {
         match self {
             Outcome::Done(_) => None,
-            Outcome::Refused { message, .. }
-            | Outcome::NotSent(message)
-            | Outcome::Uncertain(message) => Some(message),
+            Outcome::Refused { message, .. } | Outcome::NotSent(message) | Outcome::Uncertain(message) => Some(message),
         }
     }
 }
@@ -48,17 +46,11 @@ impl Outcome {
 pub fn classify(error: anyhow::Error) -> Outcome {
     let message = format!("{error:#}");
     if !connection_lost(&error) && error.downcast_ref::<sill_proto::rpc::Error>().is_some() {
-        return Outcome::Refused {
-            code: refusal_code(&error),
-            message,
-        };
+        return Outcome::Refused { code: refusal_code(&error), message };
     }
     if message.contains("exceeds max_message_bytes") {
         // refused locally, before anything was written
-        return Outcome::Refused {
-            code: Some("limit_exceeded".into()),
-            message,
-        };
+        return Outcome::Refused { code: Some("limit_exceeded".into()), message };
     }
     Outcome::Uncertain(message)
 }
@@ -70,10 +62,7 @@ pub struct Actions {
 
 impl Actions {
     pub fn new(connect: Connector) -> Arc<Self> {
-        Arc::new(Self {
-            connect,
-            client: Mutex::new(None),
-        })
+        Arc::new(Self { connect, client: Mutex::new(None) })
     }
 
     /// The connection, made when there is none or the last one closed.
@@ -118,9 +107,7 @@ impl Actions {
         match self.client() {
             Ok(client) if !client.has_capability(capability) => Outcome::Refused {
                 code: Some("needs_capability".into()),
-                message: format!(
-                    "the daemon is older than this window and cannot do that ({capability}); update and restart it"
-                ),
+                message: format!("the daemon is older than this window and cannot do that ({capability}); update and restart it"),
             },
             Ok(_) => self.call(method, params),
             Err(e) => Outcome::NotSent(format!("{e:#}")),
@@ -195,17 +182,8 @@ mod tests {
             // the daemon goes away with the request in hand
         });
         let refused = actions.call("_sill/sessions.submit", json!({"text":"hi"}));
-        assert_eq!(
-            refused,
-            Outcome::Refused {
-                code: Some("invalid_state".into()),
-                message: "_sill/sessions.submit: the session has ended".into()
-            }
-        );
-        assert_eq!(
-            actions.call("_sill/sessions.cancel", json!({})),
-            Outcome::Done(json!({"requested": true}))
-        );
+        assert_eq!(refused, Outcome::Refused { code: Some("invalid_state".into()), message: "_sill/sessions.submit: the session has ended".into() });
+        assert_eq!(actions.call("_sill/sessions.cancel", json!({})), Outcome::Done(json!({"requested": true})));
         let lost = actions.call("_sill/questions.answer", json!({}));
         assert!(matches!(lost, Outcome::Uncertain(_)), "{lost:?}");
         server.join().unwrap();

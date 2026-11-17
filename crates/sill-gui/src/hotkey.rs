@@ -87,27 +87,11 @@ pub fn validate(spec: &str) -> Result<()> {
     if key.is_empty() {
         bail!("no key");
     }
-    if matches!(
-        key.as_str(),
-        "shift_l"
-            | "shift_r"
-            | "control_l"
-            | "control_r"
-            | "alt_l"
-            | "alt_r"
-            | "super_l"
-            | "super_r"
-            | "meta_l"
-            | "meta_r"
-    ) {
-        bail!(
-            "a modifier key (Shift/Ctrl/Alt/Super) can't be the hotkey: other programs would see it as stuck"
-        );
+    if matches!(key.as_str(), "shift_l" | "shift_r" | "control_l" | "control_r" | "alt_l" | "alt_r" | "super_l" | "super_r" | "meta_l" | "meta_r") {
+        bail!("a modifier key (Shift/Ctrl/Alt/Super) can't be the hotkey: other programs would see it as stuck");
     }
     if !has_mod && !BARE_OK.contains(&key.as_str()) {
-        bail!(
-            "'{key}' without a modifier would be swallowed everywhere you type it; add Ctrl/Alt/Super or use an F-key"
-        );
+        bail!("'{key}' without a modifier would be swallowed everywhere you type it; add Ctrl/Alt/Super or use an F-key");
     }
     keysym_from_name(rest).with_context(|| format!("unknown key {rest:?}"))?;
     Ok(())
@@ -162,10 +146,7 @@ fn parse(spec: &str, conn: &RustConnection) -> Result<Binding> {
     let per = map.keysyms_per_keycode as usize;
     for (i, chunk) in map.keysyms.chunks(per).enumerate() {
         if chunk.contains(&keysym) {
-            return Ok(Binding {
-                keycode: min + i as u8,
-                mods,
-            });
+            return Ok(Binding { keycode: min + i as u8, mods });
         }
     }
     bail!("key {rest:?} is not on this keyboard")
@@ -198,26 +179,14 @@ fn keysym_from_name(name: &str) -> Option<u32> {
         "alt_r" => 0xffea,
         "super_l" => 0xffeb,
         "super_r" => 0xffec,
-        s if s.starts_with('f')
-            && s[1..]
-                .parse::<u32>()
-                .map(|n| (1..=24).contains(&n))
-                .unwrap_or(false) =>
-        {
-            0xffbe + s[1..].parse::<u32>().unwrap() - 1
-        }
+        s if s.starts_with('f') && s[1..].parse::<u32>().map(|n| (1..=24).contains(&n)).unwrap_or(false) => 0xffbe + s[1..].parse::<u32>().unwrap() - 1,
         _ => return None,
     })
 }
 
 /// NumLock (Mod2) and CapsLock (Lock) variants, so the key works whatever their state.
 fn variants(mods: ModMask) -> [ModMask; 4] {
-    [
-        mods,
-        mods | ModMask::M2,
-        mods | ModMask::LOCK,
-        mods | ModMask::M2 | ModMask::LOCK,
-    ]
+    [mods, mods | ModMask::M2, mods | ModMask::LOCK, mods | ModMask::M2 | ModMask::LOCK]
 }
 
 fn grab(conn: &RustConnection, root: u32, b: &Binding) -> Result<()> {
@@ -256,9 +225,7 @@ impl Hotkey {
 /// window is gone, and the thread with it). It grabs nothing until it has a spec.
 pub fn start(report: impl Fn(Report) -> bool + Send + 'static) -> Hotkey {
     let (specs, receive) = mpsc::channel::<String>();
-    let spawned = std::thread::Builder::new()
-        .name("sill-gui-hotkey".into())
-        .spawn(move || run(receive, report));
+    let spawned = std::thread::Builder::new().name("sill-gui-hotkey".into()).spawn(move || run(receive, report));
     if spawned.is_err() {
         eprintln!("sill-gui: the hotkey's thread could not start");
     }
@@ -275,10 +242,7 @@ fn run(specs: mpsc::Receiver<String>, report: impl Fn(Report) -> bool) {
         report(Report::Status(status))
     };
     if std::env::var_os("DISPLAY").is_none() {
-        say(
-            "no X11 display: bind `sill toggle` to a key in the desktop's keyboard settings".into(),
-            &mut last_status,
-        );
+        say("no X11 display: bind `sill toggle` to a key in the desktop's keyboard settings".into(), &mut last_status);
         return;
     }
     // the first spec: until the settings are read, nothing to grab
@@ -287,10 +251,7 @@ fn run(specs: mpsc::Receiver<String>, report: impl Fn(Report) -> bool) {
         let (conn, screen) = match x11rb::connect(None) {
             Ok(c) => c,
             Err(e) => {
-                if !say(
-                    format!("cannot reach the X server ({e}); trying again"),
-                    &mut last_status,
-                ) {
+                if !say(format!("cannot reach the X server ({e}); trying again"), &mut last_status) {
                     return;
                 }
                 std::thread::sleep(RETRY);
@@ -298,21 +259,10 @@ fn run(specs: mpsc::Receiver<String>, report: impl Fn(Report) -> bool) {
             }
         };
         let root = conn.setup().roots[screen].root;
-        match serve(
-            &conn,
-            root,
-            &specs,
-            &mut spec,
-            &report,
-            &mut last_status,
-            &say,
-        ) {
+        match serve(&conn, root, &specs, &mut spec, &report, &mut last_status, &say) {
             Served::Gone => return,
             Served::Lost => {
-                if !say(
-                    "the X connection was lost; grabbing again".into(),
-                    &mut last_status,
-                ) {
+                if !say("the X connection was lost; grabbing again".into(), &mut last_status) {
                     return;
                 }
                 std::thread::sleep(Duration::from_secs(1));
@@ -409,14 +359,7 @@ fn serve(
                 Event::MappingNotify(_) => regrab = true,
                 Event::KeyPress(k) => {
                     let Some(b) = &bound else { continue };
-                    let state = ModMask::from(
-                        k.state.bits()
-                            & (KeyButMask::CONTROL
-                                | KeyButMask::SHIFT
-                                | KeyButMask::MOD1
-                                | KeyButMask::MOD4)
-                                .bits(),
-                    );
+                    let state = ModMask::from(k.state.bits() & (KeyButMask::CONTROL | KeyButMask::SHIFT | KeyButMask::MOD1 | KeyButMask::MOD4).bits());
                     if k.detail != b.keycode || state != b.mods || held {
                         continue;
                     }
@@ -431,8 +374,7 @@ fn serve(
                         continue;
                     }
                     // X's repeat: this release and a press of the key at the same time
-                    if matches!(events.peek(), Some(Event::KeyPress(p)) if p.detail == k.detail && p.time == k.time)
-                    {
+                    if matches!(events.peek(), Some(Event::KeyPress(p)) if p.detail == k.detail && p.time == k.time) {
                         events.next();
                         continue;
                     }
@@ -454,16 +396,9 @@ fn serve(
         // wait for the server, waking twice a second for a new spec or a retry
         let stream = conn.stream();
         let mut fds = [PollFd::new(stream, PollFlags::IN)];
-        let timeout = Timespec {
-            tv_sec: 0,
-            tv_nsec: 500_000_000,
-        };
+        let timeout = Timespec { tv_sec: 0, tv_nsec: 500_000_000 };
         match poll(&mut fds, Some(&timeout)) {
-            Ok(_)
-                if fds[0]
-                    .revents()
-                    .intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL) =>
-            {
+            Ok(_) if fds[0].revents().intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL) => {
                 return Served::Lost;
             }
             Ok(_) => {}
@@ -482,10 +417,7 @@ mod tests {
         assert!(validate("<Control>Tab").is_ok());
         assert!(validate("F12").is_ok());
         assert!(validate("a").is_err(), "a bare letter would be swallowed");
-        assert!(
-            validate("<Control>Control_L").is_err(),
-            "a modifier key alone"
-        );
+        assert!(validate("<Control>Control_L").is_err(), "a modifier key alone");
         assert!(validate("<Alt>nosuchkey").is_err());
         assert_eq!(pretty("<Control>Tab"), "Ctrl+Tab");
         assert_eq!(pretty("<Super>grave"), "Super+Grave");

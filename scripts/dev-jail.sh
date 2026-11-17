@@ -14,6 +14,7 @@ dev_root=${SILL_DEV_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/sill-dev}
 case "$dev_root" in /*) ;; *) echo 'SILL_DEV_ROOT must be absolute.' >&2; exit 1 ;; esac
 export CARGO_HOME="$dev_root/cargo" RUSTUP_HOME="$dev_root/rustup"
 export PATH="$CARGO_HOME/bin:$PATH"
+# the version rust-toolchain.toml pins: change both together
 export RUSTUP_TOOLCHAIN=1.100.0
 export CARGO_TARGET_DIR="$dev_root/target"
 # The default Mac VM has 4 GB RAM. Avoid a full CPU-count build exhausting it.

@@ -29,13 +29,22 @@ pub fn breaking_changes(old: &Value, new: &Value) -> Vec<String> {
     names.sort();
     for name in names {
         let o = &old_methods[name];
-        let Some(n) = new_methods.get(name) else { out.push(format!("{name}: method removed")); continue };
-        if o["kind"] != n["kind"] { out.push(format!("{name}: kind changed {} → {}", o["kind"], n["kind"])); }
-        if o["capabilities"] != n["capabilities"] { out.push(format!("{name}: capability requirement changed {} → {}", o["capabilities"], n["capabilities"])); }
+        let Some(n) = new_methods.get(name) else {
+            out.push(format!("{name}: method removed"));
+            continue;
+        };
+        if o["kind"] != n["kind"] {
+            out.push(format!("{name}: kind changed {} → {}", o["kind"], n["kind"]));
+        }
+        if o["capabilities"] != n["capabilities"] {
+            out.push(format!("{name}: capability requirement changed {} → {}", o["capabilities"], n["capabilities"]));
+        }
         for part in ["params", "result"] {
             match (o[part].is_null(), n[part].is_null()) {
                 (true, true) => {}
-                (false, false) => { c.node(&o[part], &n[part], &format!("{name} {part}"), &mut out); }
+                (false, false) => {
+                    c.node(&o[part], &n[part], &format!("{name} {part}"), &mut out);
+                }
                 _ => out.push(format!("{name} {part}: presence changed")),
             }
         }
@@ -50,8 +59,7 @@ pub fn breaking_changes(old: &Value, new: &Value) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut out: Vec<String> = out.into_iter().filter(|line| seen.insert(line.clone())).collect();
     let offered = |doc: &Value| -> HashMap<String, u64> {
-        doc["capabilities"]["offered"].as_array().into_iter().flatten()
-            .filter_map(|c| Some((c["name"].as_str()?.to_owned(), c["version"].as_u64()?))).collect()
+        doc["capabilities"]["offered"].as_array().into_iter().flatten().filter_map(|c| Some((c["name"].as_str()?.to_owned(), c["version"].as_u64()?))).collect()
     };
     let new_offered = offered(new);
     for (name, version) in offered(old) {
@@ -61,25 +69,42 @@ pub fn breaking_changes(old: &Value, new: &Value) -> Vec<String> {
             _ => {}
         }
     }
-    let codes = |doc: &Value| -> BTreeSet<String> { doc["errors"]["codes"].as_array().into_iter().flatten().filter_map(|c| c.as_str().map(str::to_owned)).collect() };
-    for code in codes(old).difference(&codes(new)) { out.push(format!("error code {code} removed")); }
-    if old["errors"]["domain_numeric_code"] != new["errors"]["domain_numeric_code"] { out.push("domain error numeric code changed".into()); }
+    let codes =
+        |doc: &Value| -> BTreeSet<String> { doc["errors"]["codes"].as_array().into_iter().flatten().filter_map(|c| c.as_str().map(str::to_owned)).collect() };
+    for code in codes(old).difference(&codes(new)) {
+        out.push(format!("error code {code} removed"));
+    }
+    if old["errors"]["domain_numeric_code"] != new["errors"]["domain_numeric_code"] {
+        out.push("domain error numeric code changed".into());
+    }
     c.node(&old["errors"]["shape"], &new["errors"]["shape"], "error shape", &mut out);
     c.node(&old["errors"]["domain_data"], &new["errors"]["domain_data"], "error data", &mut out);
     for (code, o) in old["errors"]["details"].as_object().into_iter().flatten() {
         let n = &new["errors"]["details"][code];
-        if n.is_null() { out.push(format!("error details for {code} removed")); continue; }
-        if o["required"] != n["required"] { out.push(format!("error details for {code}: presence changed")); }
+        if n.is_null() {
+            out.push(format!("error details for {code} removed"));
+            continue;
+        }
+        if o["required"] != n["required"] {
+            out.push(format!("error details for {code}: presence changed"));
+        }
         c.node(&o["shape"], &n["shape"], &format!("error details {code}"), &mut out);
     }
     for (name, o) in old["streams"].as_object().into_iter().flatten() {
         let n = &new["streams"][name];
-        if n.is_null() { out.push(format!("stream {name} removed")); continue; }
-        if o["framing"] != n["framing"] { out.push(format!("stream {name}: framing changed")); }
+        if n.is_null() {
+            out.push(format!("stream {name} removed"));
+            continue;
+        }
+        if o["framing"] != n["framing"] {
+            out.push(format!("stream {name}: framing changed"));
+        }
         c.node(&o["event"], &n["event"], &format!("stream {name} event"), &mut out);
     }
     for key in old["limits"].as_object().into_iter().flatten().map(|(k, _)| k) {
-        if new["limits"].get(key).is_none() { out.push(format!("limit {key} removed")); }
+        if new["limits"].get(key).is_none() {
+            out.push(format!("limit {key} removed"));
+        }
     }
     out
 }
@@ -92,7 +117,9 @@ struct Cmp<'a> {
     memo: HashMap<(String, String), Vec<String>>,
 }
 
-fn reference(node: &Value) -> Option<&str> { node.get("$ref")?.as_str()?.strip_prefix("#/$defs/") }
+fn reference(node: &Value) -> Option<&str> {
+    node.get("$ref")?.as_str()?.strip_prefix("#/$defs/")
+}
 fn types(node: &Value) -> BTreeSet<String> {
     match node.get("type") {
         Some(Value::String(s)) => [s.clone()].into(),
@@ -102,7 +129,10 @@ fn types(node: &Value) -> BTreeSet<String> {
 }
 fn short(node: &Value) -> String {
     let mut s = node.to_string();
-    if s.len() > 80 { s.truncate(s.floor_char_boundary(77)); s.push_str("..."); }
+    if s.len() > 80 {
+        s.truncate(s.floor_char_boundary(77));
+        s.push_str("...");
+    }
     s
 }
 
@@ -119,7 +149,11 @@ impl Cmp<'_> {
             let (od, nd) = (&self.old["$defs"][or], &self.new["$defs"][nr]);
             // reasons name the definition, so one root cause reads the same from every use
             let mut reasons = vec![];
-            if nd.is_null() { reasons.push(format!("{or}: definition {nr} missing")); } else { self.node(od, nd, or, &mut reasons); }
+            if nd.is_null() {
+                reasons.push(format!("{or}: definition {nr} missing"));
+            } else {
+                self.node(od, nd, or, &mut reasons);
+            }
             out.extend(reasons.iter().cloned());
             let ok = reasons.is_empty();
             self.memo.insert(key, reasons);
@@ -127,7 +161,9 @@ impl Cmp<'_> {
         }
         let before = out.len();
         let (Some(oo), Some(no)) = (o.as_object(), n.as_object()) else {
-            if o != n { out.push(format!("{path}: changed {} → {}", short(o), short(n))); }
+            if o != n {
+                out.push(format!("{path}: changed {} → {}", short(o), short(n)));
+            }
             return o == n;
         };
         let keys: BTreeSet<&String> = oo.keys().chain(no.keys()).filter(|k| !IGNORED.contains(&k.as_str())).collect();
@@ -140,16 +176,24 @@ impl Cmp<'_> {
                     for (name, schema) in op {
                         match np.get(name) {
                             None => out.push(format!("{path}.{name}: field removed")),
-                            Some(next) => { self.node(schema, next, &format!("{path}.{name}"), out); }
+                            Some(next) => {
+                                self.node(schema, next, &format!("{path}.{name}"), out);
+                            }
                         }
                     }
                 }
                 "required" => {
-                    let set = |v: Option<&Value>| -> BTreeSet<String> { v.and_then(Value::as_array).into_iter().flatten().filter_map(|s| s.as_str().map(str::to_owned)).collect() };
+                    let set = |v: Option<&Value>| -> BTreeSet<String> {
+                        v.and_then(Value::as_array).into_iter().flatten().filter_map(|s| s.as_str().map(str::to_owned)).collect()
+                    };
                     let (or, nr) = (set(ov), set(nv));
-                    for name in nr.difference(&or) { out.push(format!("{path}.{name}: became required")); }
+                    for name in nr.difference(&or) {
+                        out.push(format!("{path}.{name}: became required"));
+                    }
                     let still = no.get("properties").and_then(Value::as_object).unwrap_or(&empty);
-                    for name in or.difference(&nr).filter(|n| still.contains_key(*n)) { out.push(format!("{path}.{name}: no longer always present")); }
+                    for name in or.difference(&nr).filter(|n| still.contains_key(*n)) {
+                        out.push(format!("{path}.{name}: no longer always present"));
+                    }
                 }
                 "anyOf" | "oneOf" | "allOf" => {
                     let (Some(ovs), Some(nvs)) = (ov.and_then(Value::as_array), nv.and_then(Value::as_array)) else {
@@ -161,8 +205,13 @@ impl Cmp<'_> {
                         let mut closest: Option<Vec<String>> = None;
                         for candidate in nvs {
                             let mut reasons = vec![];
-                            if self.node(variant, candidate, path, &mut reasons) { closest = None; break; }
-                            if closest.as_ref().is_none_or(|c| reasons.len() < c.len()) { closest = Some(reasons); }
+                            if self.node(variant, candidate, path, &mut reasons) {
+                                closest = None;
+                                break;
+                            }
+                            if closest.as_ref().is_none_or(|c| reasons.len() < c.len()) {
+                                closest = Some(reasons);
+                            }
                         }
                         if let Some(reasons) = closest {
                             out.push(format!("{path}: {key} variant {i} {} has no compatible counterpart", short(variant)));
@@ -173,21 +222,29 @@ impl Cmp<'_> {
                 "enum" => {
                     let nvs = nv.and_then(Value::as_array);
                     for value in ov.and_then(Value::as_array).into_iter().flatten() {
-                        if !nvs.is_some_and(|n| n.contains(value)) { out.push(format!("{path}: enum value {value} removed")); }
+                        if !nvs.is_some_and(|n| n.contains(value)) {
+                            out.push(format!("{path}: enum value {value} removed"));
+                        }
                     }
                 }
                 "type" => {
-                    if types(o) != types(n) { out.push(format!("{path}: type {:?} → {:?}", types(o), types(n))); }
+                    if types(o) != types(n) {
+                        out.push(format!("{path}: type {:?} → {:?}", types(o), types(n)));
+                    }
                 }
                 "items" | "additionalProperties" => match (ov, nv) {
-                    (Some(a), Some(b)) if a.is_object() && b.is_object() => { self.node(a, b, &format!("{path}[]"), out); }
+                    (Some(a), Some(b)) if a.is_object() && b.is_object() => {
+                        self.node(a, b, &format!("{path}[]"), out);
+                    }
                     // a closed object may open (new fields are additions); an open one may not close
                     (Some(Value::Bool(false)), Some(Value::Bool(true)) | None) if key == "additionalProperties" => {}
                     (a, b) if a != b => out.push(format!("{path}: {key} changed {} → {}", a.map_or("absent".into(), short), b.map_or("absent".into(), short))),
                     _ => {}
                 },
                 _ => {
-                    if ov != nv { out.push(format!("{path}: {key} changed {} → {}", ov.map_or("absent".into(), short), nv.map_or("absent".into(), short))); }
+                    if ov != nv {
+                        out.push(format!("{path}: {key} changed {} → {}", ov.map_or("absent".into(), short), nv.map_or("absent".into(), short)));
+                    }
                 }
             }
         }
@@ -207,10 +264,13 @@ mod tests {
         json!({"name": name, "kind": "request", "capabilities": {}, "params": {"$ref": format!("#/$defs/{params}")}, "result": {"type": "object", "additionalProperties": false}})
     }
     fn base() -> Value {
-        doc(json!({
-            "Get": {"type": "object", "properties": {"id": {"type": "string"}, "kind": {"$ref": "#/$defs/Kind"}, "note": {"type": ["string", "null"]}}, "required": ["id", "kind"]},
-            "Kind": {"oneOf": [{"type": "string", "const": "a"}, {"type": "string", "const": "b"}]},
-        }), json!([method("_sill/x.get", "Get")]))
+        doc(
+            json!({
+                "Get": {"type": "object", "properties": {"id": {"type": "string"}, "kind": {"$ref": "#/$defs/Kind"}, "note": {"type": ["string", "null"]}}, "required": ["id", "kind"]},
+                "Kind": {"oneOf": [{"type": "string", "const": "a"}, {"type": "string", "const": "b"}]},
+            }),
+            json!([method("_sill/x.get", "Get")]),
+        )
     }
 
     #[test]
@@ -245,15 +305,60 @@ mod tests {
     #[test]
     fn removals_retypes_and_new_requirements_break() {
         let cases: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
-            ("field removed", Box::new(|d| { d["$defs"]["Get"]["properties"].as_object_mut().unwrap().remove("note"); })),
-            ("became required", Box::new(|d| { d["$defs"]["Get"]["required"].as_array_mut().unwrap().push(json!("note")); })),
-            ("no longer always present", Box::new(|d| { d["$defs"]["Get"]["required"] = json!(["id"]); })),
-            ("type", Box::new(|d| { d["$defs"]["Get"]["properties"]["note"]["type"] = json!("string"); })),
-            ("no compatible counterpart", Box::new(|d| { d["$defs"]["Kind"]["oneOf"].as_array_mut().unwrap().pop(); })),
-            ("method removed", Box::new(|d| { d["methods"] = json!([]); })),
-            ("must require a capability", Box::new(|d| { d["methods"].as_array_mut().unwrap().push(method("_sill/x.new", "Get")); })),
-            ("error code busy removed", Box::new(|d| { d["errors"]["codes"] = json!([]); })),
-            ("protocol identity changed", Box::new(|d| { d["protocol"] = json!("sfp/2"); })),
+            (
+                "field removed",
+                Box::new(|d| {
+                    d["$defs"]["Get"]["properties"].as_object_mut().unwrap().remove("note");
+                }),
+            ),
+            (
+                "became required",
+                Box::new(|d| {
+                    d["$defs"]["Get"]["required"].as_array_mut().unwrap().push(json!("note"));
+                }),
+            ),
+            (
+                "no longer always present",
+                Box::new(|d| {
+                    d["$defs"]["Get"]["required"] = json!(["id"]);
+                }),
+            ),
+            (
+                "type",
+                Box::new(|d| {
+                    d["$defs"]["Get"]["properties"]["note"]["type"] = json!("string");
+                }),
+            ),
+            (
+                "no compatible counterpart",
+                Box::new(|d| {
+                    d["$defs"]["Kind"]["oneOf"].as_array_mut().unwrap().pop();
+                }),
+            ),
+            (
+                "method removed",
+                Box::new(|d| {
+                    d["methods"] = json!([]);
+                }),
+            ),
+            (
+                "must require a capability",
+                Box::new(|d| {
+                    d["methods"].as_array_mut().unwrap().push(method("_sill/x.new", "Get"));
+                }),
+            ),
+            (
+                "error code busy removed",
+                Box::new(|d| {
+                    d["errors"]["codes"] = json!([]);
+                }),
+            ),
+            (
+                "protocol identity changed",
+                Box::new(|d| {
+                    d["protocol"] = json!("sfp/2");
+                }),
+            ),
         ];
         for (expected, change) in cases {
             let mut new = base();

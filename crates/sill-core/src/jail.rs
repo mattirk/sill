@@ -14,8 +14,8 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -33,10 +33,8 @@ use crate::policy::{NetMode, Policy};
 /// reach and has no path left to remount; one under a later mount at the same path is that mount.
 fn seal_host_view(a: &mut Vec<OsString>, laid: usize, layers: &[Layer], expanded: &[PathBuf]) {
     // (position, path, a tmpfs) of what was laid in the view after its own layout
-    let later: Vec<(usize, PathBuf, bool)> = (laid..a.len())
-        .filter(|&i| Path::new(&a[i]).starts_with(HOST_VIEW) && i > 0)
-        .map(|i| (i, PathBuf::from(&a[i]), a[i - 1] == "--tmpfs"))
-        .collect();
+    let later: Vec<(usize, PathBuf, bool)> =
+        (laid..a.len()).filter(|&i| Path::new(&a[i]).starts_with(HOST_VIEW) && i > 0).map(|i| (i, PathBuf::from(&a[i]), a[i - 1] == "--tmpfs")).collect();
     let mut seal: Vec<PathBuf> = Vec::new();
     for d in expanded.iter().chain(layers.iter().map(|l| &l.host)) {
         let at = host_view(d);
@@ -328,13 +326,7 @@ pub fn layout(policy: &Policy, home: &Path, state_dir: &Path, mounts: &[Mount], 
             hidden.push(alias);
         }
     }
-    let mut walk = Walk {
-        mounts,
-        real: mounts::real_mounts(mounts),
-        hidden,
-        state_dir,
-        out: Layout { warnings, ..Layout::default() },
-    };
+    let mut walk = Walk { mounts, real: mounts::real_mounts(mounts), hidden, state_dir, out: Layout { warnings, ..Layout::default() } };
     for e in root_entries {
         let path = PathBuf::from("/").join(&e.name);
         if let Some(target) = &e.symlink {
@@ -412,7 +404,9 @@ impl JailSpec {
         // the jail never outlives its launcher: without it there is no proxy, no test desktop and
         // nobody waiting on the jail (the launcher spawns bwrap from the thread that waits on it)
         push(&mut a, &[&"--die-with-parent", &"--new-session", &"--cap-drop", &"ALL", &"--clearenv"]);
-        if p.jail.seccomp && let Some(fd) = self.seccomp_fd {
+        if p.jail.seccomp
+            && let Some(fd) = self.seccomp_fd
+        {
             push(&mut a, &[&"--seccomp", &fd.to_string()]);
         }
         for (k, v) in &self.environment() {
@@ -478,7 +472,11 @@ impl JailSpec {
         all_masked.extend(masked.agents.iter().cloned());
         let (fds, mut bound) = self.apply_workspace_binds(&mut a, &all_masked, &mut direct, &mut warnings)?;
         mount_fds.extend(fds);
-        bound.extend(self.binds.iter().filter(|(host, inside)| host == inside).map(|(_, inside)| Bound { at: inside.clone(), backing: inside.clone(), borrowed: None }));
+        bound.extend(self.binds.iter().filter(|(host, inside)| host == inside).map(|(_, inside)| Bound {
+            at: inside.clone(),
+            backing: inside.clone(),
+            borrowed: None,
+        }));
         mount_fds.extend(self.apply_rules_inside_binds(&mut a, &policy_masked, &ro_paths, &masked.agents, &bound, &mut warnings)?);
         seal_host_view(&mut a, host_view_laid, &layers, &expanded);
         // bwrap's root tmpfs is writable by default; make it read-only now that every mount is in place
@@ -555,11 +553,10 @@ impl JailSpec {
     /// The upper trees must not be reachable through a layer of the jail they belong to.
     fn check_state_dir(&self, layers: &[Layer], expanded: &[PathBuf], warnings: &mut Vec<String>) -> Result<()> {
         let state_in_tree = layers.iter().map(|l| &l.host).chain(expanded).find(|h| is_under(&self.state_dir, h));
-        let state_on_submount = self.mounts.iter().any(|m| {
-            m.mount_point != Path::new("/")
-                && is_under(&self.state_dir, &m.mount_point)
-                && !layers.iter().any(|l| l.host == m.mount_point)
-        });
+        let state_on_submount = self
+            .mounts
+            .iter()
+            .any(|m| m.mount_point != Path::new("/") && is_under(&self.state_dir, &m.mount_point) && !layers.iter().any(|l| l.host == m.mount_point));
         if let Some(tree) = state_in_tree
             && !state_on_submount
         {
@@ -581,7 +578,11 @@ impl JailSpec {
         let own = crate::paths::sill_own(&self.home)?.into_iter().chain(self.masks.iter().cloned()).filter(|p| p.exists());
         let expand = |patterns: &[String]| patterns.iter().flat_map(|pat| expand_pattern(pat, &self.home)).map(|p| HostPath::from_path(&p)).collect();
         Ok(PolicyPaths {
-            masks: paths.mask.iter().map(|pat| crate::paths::mask_root(pat, &self.home)).chain(own)
+            masks: paths
+                .mask
+                .iter()
+                .map(|pat| crate::paths::mask_root(pat, &self.home))
+                .chain(own)
                 .map(|p| AgentMask { kind: if p.is_file() { HomePathKind::File } else { HomePathKind::Directory }, path: HostPath::from_path(&p) })
                 .collect(),
             direct: expand(&paths.direct),
@@ -683,13 +684,14 @@ impl JailSpec {
         let mut masked: Vec<(PathBuf, bool)> = Vec::new();
         let mut host_masks: Vec<PathBuf> = Vec::new();
         for (path, is_dir) in masks {
-            if masked.iter().any(|(m, _)| path.starts_with(m)) { continue; }
+            if masked.iter().any(|(m, _)| path.starts_with(m)) {
+                continue;
+            }
             anyhow::ensure!(path.is_absolute() && path != Path::new("/"), "mask must have an absolute, non-root literal prefix: {}", path.display());
             // The host view is read-only: for an absent target hide its nearest existing
             // ancestor, rather than omit the mask and expose files created later.
             let existing = path.ancestors().find(|p| p.symlink_metadata().is_ok()).context("mask has no existing ancestor")?;
-            open_no_symlinks(existing, rustix::fs::OFlags::empty())
-                .with_context(|| format!("mask {} must not contain symlinks", path.display()))?;
+            open_no_symlinks(existing, rustix::fs::OFlags::empty()).with_context(|| format!("mask {} must not contain symlinks", path.display()))?;
             push_mask(a, &path, is_dir);
             host_masks.push(existing.to_path_buf());
             masked.push((path, is_dir));
@@ -697,7 +699,9 @@ impl JailSpec {
         host_masks.sort();
         let mut hidden: Vec<PathBuf> = Vec::new();
         for path in host_masks {
-            if hidden.iter().any(|m| path.starts_with(m)) { continue; }
+            if hidden.iter().any(|m| path.starts_with(m)) {
+                continue;
+            }
             push_mask(a, &host_view(&path), path.is_dir());
             hidden.push(path);
         }
@@ -719,7 +723,9 @@ impl JailSpec {
                 let actual = rustix::fs::FileType::from_raw_mode(rustix::fs::fstat(&fd)?.st_mode);
                 anyhow::ensure!(kind_matches(kind, actual), "host agent root has the wrong type: {}", path.display());
             }
-            if agent_masked.iter().any(|p| path.starts_with(p)) { continue; }
+            if agent_masked.iter().any(|p| path.starts_with(p)) {
+                continue;
+            }
             // An absent root is masked in the jail's own view only (in case it appears on the host
             // later): the host view is read-only, so bwrap could not make a mount point there for
             // it (found 2026-11-07: `~/.gemini`, declared by the built-in gemini, never created).
@@ -738,7 +744,15 @@ impl JailSpec {
     /// (security.md S2). A pin is the one bind that may hold a path the policy masks: the mask is
     /// laid again after it (`apply_rules_inside_binds`). Inside a mask, or over sill's own files
     /// or another agent's, a pin is refused like the rest.
-    fn lay_binds(&self, a: &mut Vec<OsString>, paths: &PolicyPaths, ro_paths: &[PathBuf], masked: &Masked, sill_own: &[PathBuf], mount_fds: &mut Vec<Arc<OwnedFd>>) -> Result<Vec<PathBuf>> {
+    fn lay_binds(
+        &self,
+        a: &mut Vec<OsString>,
+        paths: &PolicyPaths,
+        ro_paths: &[PathBuf],
+        masked: &Masked,
+        sill_own: &[PathBuf],
+        mount_fds: &mut Vec<Arc<OwnedFd>>,
+    ) -> Result<Vec<PathBuf>> {
         let policy_masked = masked.policy_paths();
         let agent_masked = &masked.agents;
         let mut direct = Vec::new();
@@ -778,8 +792,7 @@ impl JailSpec {
                 if let Some((_, expected)) = agent_bind {
                     no_bind_across_mask(inside, sill_own)?;
                     no_bind_across_mask(inside, &self.masks)?;
-                    let fd = open_no_symlinks(host, rustix::fs::OFlags::NOFOLLOW)
-                        .with_context(|| format!("open declared agent storage {}", host.display()))?;
+                    let fd = open_no_symlinks(host, rustix::fs::OFlags::NOFOLLOW).with_context(|| format!("open declared agent storage {}", host.display()))?;
                     let actual = rustix::fs::FileType::from_raw_mode(rustix::fs::fstat(&fd)?.st_mode);
                     anyhow::ensure!(kind_matches(*expected, actual), "agent storage has the wrong type");
                     push(a, &[&"--bind-fd", &fd.as_raw_fd().to_string(), inside]);
@@ -810,7 +823,13 @@ impl JailSpec {
     /// path (from memory, read-only), while on the host it names the real store: one clone, valid
     /// in both views. Every directory is opened without following symlinks and bound from that
     /// descriptor, so a path swapped after planning cannot bind another tree.
-    fn apply_workspace_binds(&self, args: &mut Vec<OsString>, masked: &[PathBuf], direct: &mut Vec<PathBuf>, warnings: &mut Vec<String>) -> Result<(Vec<Arc<OwnedFd>>, Vec<Bound>)> {
+    fn apply_workspace_binds(
+        &self,
+        args: &mut Vec<OsString>,
+        masked: &[PathBuf],
+        direct: &mut Vec<PathBuf>,
+        warnings: &mut Vec<String>,
+    ) -> Result<(Vec<Arc<OwnedFd>>, Vec<Bound>)> {
         use rustix::fs::{CWD, Mode, OFlags, ResolveFlags, openat2};
         let open = |p: &Path| -> Result<Arc<OwnedFd>> {
             let fd = openat2(CWD, p, OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty(), ResolveFlags::NO_SYMLINKS)
@@ -850,14 +869,21 @@ impl JailSpec {
     /// mount point cannot be renamed or removed, so the agent cannot move a rule's path away for
     /// the next build to miss: the way to it stays where the policy names it. Sources are opened
     /// without following symlinks and bound by descriptor.
-    fn apply_rules_inside_binds(&self, args: &mut Vec<OsString>, masks: &[PathBuf], ro: &[PathBuf], agent_masked: &[PathBuf], bound: &[Bound], warnings: &mut Vec<String>) -> Result<Vec<Arc<OwnedFd>>> {
+    fn apply_rules_inside_binds(
+        &self,
+        args: &mut Vec<OsString>,
+        masks: &[PathBuf],
+        ro: &[PathBuf],
+        agent_masked: &[PathBuf],
+        bound: &[Bound],
+        warnings: &mut Vec<String>,
+    ) -> Result<Vec<Arc<OwnedFd>>> {
         use rustix::fs::{CWD, Mode, OFlags, ResolveFlags, openat2};
         // the innermost bound folder a path lies in, and where its files really are
         let home_of = |p: &Path| bound.iter().filter(|b| is_under(p, &b.at)).max_by_key(|b| b.at.components().count());
         let backing = |b: &Bound, p: &Path| b.backing.join(p.strip_prefix(&b.at).unwrap_or(Path::new("")));
-        let between = |b: &Bound, p: &Path| -> Vec<PathBuf> {
-            p.ancestors().skip(1).take_while(|d| is_under(d, &b.at) && *d != b.at).map(Path::to_path_buf).collect()
-        };
+        let between =
+            |b: &Bound, p: &Path| -> Vec<PathBuf> { p.ancestors().skip(1).take_while(|d| is_under(d, &b.at) && *d != b.at).map(Path::to_path_buf).collect() };
         // path → read-only; BTreeMap order lays a folder before what is inside it
         let mut binds: BTreeMap<PathBuf, bool> = BTreeMap::new();
         let mut lay: Vec<(PathBuf, bool)> = Vec::new();
@@ -899,7 +925,11 @@ impl JailSpec {
             let b = home_of(path).expect("a path inside a bound folder");
             // binding a folder again shows the host's own tree below it: never over sill's own
             // tree in a host path's place, a workspace or another agent's files
-            let buried = self.binds.iter().filter(|(host, inside)| host != inside).map(|(_, inside)| inside)
+            let buried = self
+                .binds
+                .iter()
+                .filter(|(host, inside)| host != inside)
+                .map(|(_, inside)| inside)
                 .chain(bound.iter().filter(|w| w.borrowed.is_some() && w.at != *path).map(|w| &w.at))
                 .chain(agent_masked)
                 .find(|t| is_under(t, path));
@@ -942,7 +972,6 @@ impl JailSpec {
         }
         Ok(fds)
     }
-
 }
 
 impl JailPlan {
@@ -984,11 +1013,7 @@ pub fn render(argv: &[OsString]) -> String {
     argv.iter()
         .map(|a| {
             let s = a.to_string_lossy();
-            if s.is_empty() || s.contains([' ', '"', '\'', '$', '*', '?', '[']) {
-                format!("'{}'", s.replace('\'', "'\\''"))
-            } else {
-                s.into_owned()
-            }
+            if s.is_empty() || s.contains([' ', '"', '\'', '$', '*', '?', '[']) { format!("'{}'", s.replace('\'', "'\\''")) } else { s.into_owned() }
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -1058,7 +1083,9 @@ mod tests {
         }
     }
     impl Drop for TempTree {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
@@ -1070,7 +1097,7 @@ mod tests {
         let mut s = spec();
         // A temporary mount's children are expanded exactly as a host /mnt tree is.
         s.root_entries = vec![RootEntry { name: dir.strip_prefix("/").unwrap().as_os_str().to_os_string(), symlink: None, is_dir: true, readable: true }];
-        s.mounts = vec![Mount {mount_point:dir.join("a/b"),fstype:"ext4".into(),source:"test".into(),device:String::new(),root:"/".into()}];
+        s.mounts = vec![Mount { mount_point: dir.join("a/b"), fstype: "ext4".into(), source: "test".into(), device: String::new(), root: "/".into() }];
         assert!(s.plan().unwrap_err().to_string().contains("overlay state name collision"));
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1111,7 +1138,12 @@ mod tests {
         s.binds.push((pin.clone(), pin.clone()));
         assert_eq!(s.live_sockets(&s.plan().unwrap()), None, "no socket, no warning");
 
-        let _held = [listen(pin.join("deep/er/agent.sock")), listen(pin.join("secret/hidden.sock")), listen(pin.join("repo/clone.sock")), listen(other.join("unpinned.sock"))];
+        let _held = [
+            listen(pin.join("deep/er/agent.sock")),
+            listen(pin.join("secret/hidden.sock")),
+            listen(pin.join("repo/clone.sock")),
+            listen(other.join("unpinned.sock")),
+        ];
         std::os::unix::fs::symlink(&other, pin.join("link")).unwrap();
         s.masks.push(pin.join("secret"));
         s.workspace_mask.push((pin.join("repo"), tree.0.join("clone"), pin.join("repo/.git/objects")));
@@ -1305,8 +1337,7 @@ mod tests {
     #[test]
     #[ignore = "host only: requires bubblewrap user namespaces and overlayfs"]
     fn real_agent_storage_keeps_host_cargo_readable_across_restarts() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
-            .join(format!("agent-storage-jail-{:032x}", rand::random::<u128>()));
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target").join(format!("agent-storage-jail-{:032x}", rand::random::<u128>()));
         std::fs::create_dir_all(&root).unwrap();
         let tree = TempTree(root.canonicalize().unwrap());
         let home = tree.0.join("home");
@@ -1330,7 +1361,11 @@ mod tests {
             s.unsafe_state = true;
             s.mounts = crate::mounts::host_mounts().unwrap();
             s.root_entries = read_root_entries().unwrap();
-            s.command = vec!["/bin/sh".into(), "-eu".into(), "-c".into(), r#"
+            s.command = vec![
+                "/bin/sh".into(),
+                "-eu".into(),
+                "-c".into(),
+                r#"
 test "$(cat "$1/.cargo/registry/src/host-marker")" = host-cache
 test "$(cat "/.sill/host$1/.cargo/registry/src/host-marker")" = host-cache
 test ! -s "$1/.cargo/credentials.toml"
@@ -1343,7 +1378,12 @@ mkdir -p "$1/.cargo/new-child"
 printf session-cache > "$1/.cargo/new-child/download"
 test ! -e "/.sill/host$1/.cargo/new-child/download"
 if test "$2" = codex; then test "$(cat "$1/.codex/saved")" = saved-settings; fi
-"#.into(), "storage-fixture".into(), home.clone().into(), agent.into()];
+"#
+                .into(),
+                "storage-fixture".into(),
+                home.clone().into(),
+                agent.into(),
+            ];
             let storage = crate::agent_storage::resolve(&registry[agent], &registry, &s.policy, &s.state_dir, &home, &[], false).unwrap();
             storage.prepare().unwrap();
             storage.apply(&mut s).unwrap();
@@ -1415,7 +1455,9 @@ if test "$2" = codex; then test "$(cat "$1/.codex/saved")" = saved-settings; fi
         s.binds = vec![(repo.clone(), repo.clone())];
         let plan = s.plan().unwrap();
         let a = &plan.argv;
-        let at = |flag: &str, dest: &Path| a.windows(3).rposition(|w| w[0] == flag && w[2] == dest).unwrap_or_else(|| panic!("{flag} {} not in {}", dest.display(), render(a)));
+        let at = |flag: &str, dest: &Path| {
+            a.windows(3).rposition(|w| w[0] == flag && w[2] == dest).unwrap_or_else(|| panic!("{flag} {} not in {}", dest.display(), render(a)))
+        };
         let pin = at("--bind", &repo);
         // the way to each rule, top-down, then the read-only path, all by descriptor after the pin
         let (conf, deep, vendor) = (at("--bind-fd", &repo.join("conf")), at("--bind-fd", &repo.join("conf/deep")), at("--bind-fd", &repo.join("vendor")));
@@ -1430,7 +1472,10 @@ if test "$2" = codex; then test "$(cat "$1/.codex/saved")" = saved-settings; fi
         // a folder on the way to a rule inside a read-only path stays read-only
         s.policy.paths.ro = vec![repo.join("vendor").display().to_string(), lib.display().to_string()];
         let a = s.plan().unwrap().argv;
-        assert!(a.windows(3).any(|w| w[0] == "--ro-bind-fd" && w[2] == repo.join("vendor")) && !a.windows(3).any(|w| w[0] == "--bind-fd" && w[2] == repo.join("vendor")));
+        assert!(
+            a.windows(3).any(|w| w[0] == "--ro-bind-fd" && w[2] == repo.join("vendor"))
+                && !a.windows(3).any(|w| w[0] == "--bind-fd" && w[2] == repo.join("vendor"))
+        );
         // sill's own tree in a host path's place below such a folder would be buried: refused
         s.binds.push((tree.0.join("private"), repo.join("vendor/lib/cache")));
         std::fs::create_dir_all(tree.0.join("private")).unwrap();
@@ -1494,8 +1539,7 @@ if test "$2" = codex; then test "$(cat "$1/.codex/saved")" = saved-settings; fi
     #[test]
     #[ignore = "host only: requires bubblewrap user namespaces and overlayfs"]
     fn real_workspace_jail_puts_the_clone_at_the_repositorys_path() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
-            .join(format!("workspace-jail-{:032x}", rand::random::<u128>()));
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target").join(format!("workspace-jail-{:032x}", rand::random::<u128>()));
         std::fs::create_dir_all(&root).unwrap();
         let tree = TempTree(root.canonicalize().unwrap());
         let home = tree.0.join("home");
@@ -1503,9 +1547,14 @@ if test "$2" = codex; then test "$(cat "$1/.codex/saved")" = saved-settings; fi
         let source = projects.join("src");
         std::fs::create_dir_all(&source).unwrap();
         let git = |dir: &Path, args: &[&str]| {
-            let out = std::process::Command::new("git").arg("-C").arg(dir)
-                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"]).args(args)
-                .env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"])
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
             assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
@@ -1529,7 +1578,11 @@ if test "$2" = codex; then test "$(cat "$1/.codex/saved")" = saved-settings; fi
         s.root_entries = read_root_entries().unwrap();
         s.binds = vec![(projects.clone(), projects.clone())];
         s.workspace_mask = vec![(source.clone(), ws.clone(), source.join(".git/objects"))];
-        s.command = vec!["/bin/sh".into(), "-eu".into(), "-c".into(), r#"
+        s.command = vec![
+            "/bin/sh".into(),
+            "-eu".into(),
+            "-c".into(),
+            r#"
 S=$1; P=$2
 test "$(cat "$S/tracked.txt")" = tracked
 test ! -e "$S/uncommitted.txt"
@@ -1543,7 +1596,12 @@ git -C "$S" log --oneline | grep -q one
 echo two > "$S/tracked.txt"
 git -C "$S" -c user.name=t -c user.email=t@t commit -qam two
 git -C "$S" fsck --full
-"#.into(), "workspace-fixture".into(), source.clone().into(), projects.clone().into()];
+"#
+            .into(),
+            "workspace-fixture".into(),
+            source.clone().into(),
+            projects.clone().into(),
+        ];
         let plan = s.plan().unwrap();
         prepare(&plan).unwrap();
         let output = plan.command().output().unwrap();
@@ -1560,7 +1618,11 @@ git -C "$S" fsck --full
     fn walk(dir: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
         for e in std::fs::read_dir(dir).unwrap().flatten() {
-            if e.path().is_dir() { out.extend(walk(&e.path())); } else { out.push(e.path()); }
+            if e.path().is_dir() {
+                out.extend(walk(&e.path()));
+            } else {
+                out.push(e.path());
+            }
         }
         out.sort();
         out
@@ -1667,7 +1729,8 @@ git -C "$S" fsck --full
     /// A layer under a mask of the host view has no path there: remounting it would fail the launch.
     #[test]
     fn a_host_view_mount_under_a_mask_is_not_remounted() {
-        let (layers, expanded) = ([layer_for(Path::new("/s"), Path::new("/home/me/.config")), layer_for(Path::new("/s"), Path::new("/etc"))], [PathBuf::from("/home/me")]);
+        let (layers, expanded) =
+            ([layer_for(Path::new("/s"), Path::new("/home/me/.config")), layer_for(Path::new("/s"), Path::new("/etc"))], [PathBuf::from("/home/me")]);
         let mut a: Vec<OsString> = ["--tmpfs", "/.sill/host/home/me", "--tmpfs", "/.sill/host/etc"].iter().map(OsString::from).collect();
         seal_host_view(&mut a, 0, &layers, &expanded);
         let r = render(&a[4..]);
@@ -1677,19 +1740,33 @@ git -C "$S" fsck --full
     /// The masks of the host view are tmpfs: writable, and Revert copies from there.
     #[test]
     fn every_mask_of_the_host_view_is_read_only() {
-        let mut a: Vec<OsString> = ["--tmpfs", "/.sill/host/home/me/.ssh", "--ro-bind", "/dev/null", "/.sill/host/home/me/.netrc", "--tmpfs", "/.sill/host/home/me/.config/x", "--tmpfs", "/.sill/host/home/me/.config"]
-            .iter().map(OsString::from).collect();
+        let mut a: Vec<OsString> = [
+            "--tmpfs",
+            "/.sill/host/home/me/.ssh",
+            "--ro-bind",
+            "/dev/null",
+            "/.sill/host/home/me/.netrc",
+            "--tmpfs",
+            "/.sill/host/home/me/.config/x",
+            "--tmpfs",
+            "/.sill/host/home/me/.config",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
         let n = a.len();
         seal_host_view(&mut a, 0, &[layer_for(Path::new("/s"), Path::new("/home"))], &[]);
         assert_eq!(render(&a[n..]), "--remount-ro /.sill/host/home --remount-ro /.sill/host/home/me/.ssh --remount-ro /.sill/host/home/me/.config");
         // a real plan: every tmpfs laid in the view is sealed after the last mount, or lies under a later one
         let plan = spec().plan().unwrap();
         let a: Vec<String> = plan.argv.iter().map(|s| s.to_string_lossy().into_owned()).collect();
-        let masks: Vec<(usize, &String)> = a.windows(2).enumerate().filter(|(_, w)| w[0] == "--tmpfs" && w[1].starts_with(HOST_VIEW)).map(|(i, w)| (i + 1, &w[1])).collect();
+        let masks: Vec<(usize, &String)> =
+            a.windows(2).enumerate().filter(|(_, w)| w[0] == "--tmpfs" && w[1].starts_with(HOST_VIEW)).map(|(i, w)| (i + 1, &w[1])).collect();
         assert!(!masks.is_empty());
         for (i, at) in masks {
             let sealed = a.windows(2).any(|w| w[0] == "--remount-ro" && w[1] == *at);
-            let covered = a.iter().enumerate().any(|(j, c)| j > i && c != at && c.starts_with(HOST_VIEW) && Path::new(at).starts_with(c) && a[j - 1] != "--remount-ro");
+            let covered =
+                a.iter().enumerate().any(|(j, c)| j > i && c != at && c.starts_with(HOST_VIEW) && Path::new(at).starts_with(c) && a[j - 1] != "--remount-ro");
             assert!(sealed || covered, "{at} stays writable");
         }
     }

@@ -12,9 +12,7 @@ const PIXEL_BUDGET: usize = 128 * 1024 * 1024;
 
 fn inline_bytes(a: &Attachment) -> usize {
     match a {
-        Attachment::Inline { data_base64, .. } => {
-            data_base64.len() / 4 * 3 - data_base64.bytes().rev().take_while(|b| *b == b'=').count()
-        }
+        Attachment::Inline { data_base64, .. } => data_base64.len() / 4 * 3 - data_base64.bytes().rev().take_while(|b| *b == b'=').count(),
         _ => 0,
     }
 }
@@ -29,18 +27,10 @@ impl SessionView {
                 bytes += pic.rgba.len();
             }
         };
-        for pic in self
-            .media
-            .values()
-            .filter_map(|v| v.as_ref()?.as_ref().ok())
-        {
+        for pic in self.media.values().filter_map(|v| v.as_ref()?.as_ref().ok()) {
             add(pic);
         }
-        for a in self
-            .attachments
-            .iter()
-            .chain(self.pending_attachments.values().flatten())
-        {
+        for a in self.attachments.iter().chain(self.pending_attachments.values().flatten()) {
             if let Some(saved) = &a.annotation {
                 add(&saved.picture);
             }
@@ -52,14 +42,8 @@ impl SessionView {
     }
 
     pub(crate) fn prune_draft_media(&mut self) {
-        let keep: BTreeSet<_> = self
-            .attachments
-            .iter()
-            .chain(self.pending_attachments.values().flatten())
-            .map(|a| media::key(a))
-            .collect();
-        self.media
-            .retain(|key, _| !key.starts_with("draft:") || keep.contains(key));
+        let keep: BTreeSet<_> = self.attachments.iter().chain(self.pending_attachments.values().flatten()).map(|a| media::key(a)).collect();
+        self.media.retain(|key, _| !key.starts_with("draft:") || keep.contains(key));
     }
 }
 
@@ -67,11 +51,7 @@ impl App {
     pub(crate) fn annotation_event(&mut self, event: Event) -> Task<Message> {
         match event {
             Event::Scoped(revision, event) => {
-                if self
-                    .current()
-                    .and_then(|v| v.annotation.as_ref())
-                    .is_some_and(|e| e.revision == revision)
-                {
+                if self.current().and_then(|v| v.annotation.as_ref()).is_some_and(|e| e.revision == revision) {
                     return self.annotation_event(*event);
                 }
             }
@@ -89,11 +69,7 @@ impl App {
                     return Task::none();
                 }
                 let (original, picture, strokes) = if let Some(saved) = &a.annotation {
-                    (
-                        saved.original.clone(),
-                        saved.picture.clone(),
-                        saved.strokes.clone(),
-                    )
+                    (saved.original.clone(), saved.picture.clone(), saved.strokes.clone())
                 } else {
                     let Some(Some(Ok(pic))) = view.media.get(&media::key(a)) else {
                         return Task::none();
@@ -164,9 +140,7 @@ impl App {
                 let attachment_id = editor.attachment_id.clone();
                 let revision = editor.revision.clone();
                 return crate::blocking(
-                    move || {
-                        annotation::render(&snapshot.original, &snapshot.picture, &snapshot.strokes)
-                    },
+                    move || annotation::render(&snapshot.original, &snapshot.picture, &snapshot.strokes),
                     move |result| {
                         Message::Annotation(Event::Saved {
                             session: session.clone(),
@@ -178,31 +152,21 @@ impl App {
                     },
                 );
             }
-            Event::Saved {
-                session,
-                token,
-                attachment_id,
-                revision,
-                result,
-            } => {
+            Event::Saved { session, token, attachment_id, revision, result } => {
                 let Some(view) = self.views.get_mut(&session) else {
                     return Task::none();
                 };
                 if view.media_token != token
-                    || !view.annotation.as_ref().is_some_and(|e| {
-                        e.attachment_id == attachment_id && e.revision == revision && e.saving
-                    })
+                    || !view.annotation.as_ref().is_some_and(|e| e.attachment_id == attachment_id && e.revision == revision && e.saving)
                 {
                     return Task::none();
                 }
-                let Some(index) = view.attachments.iter().position(|a| a.id == attachment_id)
-                else {
+                let Some(index) = view.attachments.iter().position(|a| a.id == attachment_id) else {
                     view.annotation = None;
                     return Task::none();
                 };
                 let result = result.and_then(|(a, pic)| {
-                    let total = view.attachments.iter().enumerate()
-                        .map(|(i, old)| inline_bytes(if i == index { &a } else { &old.attachment })).sum::<usize>();
+                    let total = view.attachments.iter().enumerate().map(|(i, old)| inline_bytes(if i == index { &a } else { &old.attachment })).sum::<usize>();
                     if total > sill_proto::initialize::MAX_INLINE_BYTES {
                         return Err("Images together exceed 10 MiB; cancel and remove an image first.".into());
                     }
@@ -214,11 +178,12 @@ impl App {
                         || view.pending_attachments.values().flatten().any(|a| media::key(a) == old_key);
                     let new_key = media::key(&a);
                     let released_key = !shared && old_key != new_key;
-                    if view.media.len() + usize::from(!view.media.contains_key(&new_key))
-                        - usize::from(released_key && view.media.contains_key(&old_key)) > 64 {
+                    if view.media.len() + usize::from(!view.media.contains_key(&new_key)) - usize::from(released_key && view.media.contains_key(&old_key)) > 64
+                    {
                         return Err("Session image cache is full (64 images). Cancel and remove an image first.".into());
                     }
-                    let freed = old_pic.filter(|old| !shared && !std::sync::Arc::ptr_eq(&old.rgba, &view.annotation.as_ref().unwrap().picture.rgba))
+                    let freed = old_pic
+                        .filter(|old| !shared && !std::sync::Arc::ptr_eq(&old.rgba, &view.annotation.as_ref().unwrap().picture.rgba))
                         .map_or(0, |p| p.rgba.len());
                     let additional = if std::sync::Arc::ptr_eq(&pic.rgba, &view.annotation.as_ref().unwrap().picture.rgba) { 0 } else { pic.rgba.len() };
                     if view.decoded_media_bytes().saturating_sub(freed) + additional > PIXEL_BUDGET {
@@ -229,12 +194,8 @@ impl App {
                 match result {
                     Ok((attachment, picture)) => {
                         let editor = view.annotation.take().unwrap();
-                        view.attachments[index].annotation = (!editor.strokes.is_empty())
-                            .then_some(Saved {
-                                original: editor.original,
-                                picture: editor.picture,
-                                strokes: editor.strokes,
-                            });
+                        view.attachments[index].annotation =
+                            (!editor.strokes.is_empty()).then_some(Saved { original: editor.original, picture: editor.picture, strokes: editor.strokes });
                         let key = media::key(&attachment);
                         view.attachments[index].attachment = attachment;
                         view.media.insert(key, Some(Ok(picture)));

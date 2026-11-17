@@ -60,14 +60,11 @@ impl View {
 /// The session's running jail has a test desktop (its launch says so).
 pub fn available(view: &SessionView, session: Option<&Session>) -> bool {
     session.is_some_and(|s| s.running && s.ended_at.is_none())
-        && view.permissions.views.as_ref().is_some_and(|v| {
-            v.launch.as_ref().is_some_and(|launch| {
-                launch
-                    .permissions
-                    .iter()
-                    .any(|p| p.capability == "test_desktop" && p.effective)
-            })
-        })
+        && view
+            .permissions
+            .views
+            .as_ref()
+            .is_some_and(|v| v.launch.as_ref().is_some_and(|launch| launch.permissions.iter().any(|p| p.capability == "test_desktop" && p.effective)))
 }
 
 impl App {
@@ -143,14 +140,9 @@ impl App {
                 actions
                     .reading(|client| {
                         if !client.has_capability(CAPABILITY) {
-                            anyhow::bail!(
-                                "the daemon is older than this window and cannot show the test desktop ({CAPABILITY}); update and restart it"
-                            );
+                            anyhow::bail!("the daemon is older than this window and cannot show the test desktop ({CAPABILITY}); update and restart it");
                         }
-                        let frame: DesktopFrame = client.call(
-                            "_sill/desktop.capture",
-                            DesktopCapture { session_id: session.clone(), since: shown.clone() },
-                        )?;
+                        let frame: DesktopFrame = client.call("_sill/desktop.capture", DesktopCapture { session_id: session.clone(), since: shown.clone() })?;
                         if !frame.changed || shown.as_ref() == Some(&frame.revision) {
                             return Ok(None);
                         }
@@ -162,12 +154,7 @@ impl App {
                         loop {
                             let chunk: FileBytes = client.call(
                                 "_sill/desktop.read",
-                                DesktopRead {
-                                    session_id: session.clone(),
-                                    revision: frame.revision.clone(),
-                                    offset: png.len().to_string(),
-                                    length: None,
-                                },
+                                DesktopRead { session_id: session.clone(), revision: frame.revision.clone(), offset: png.len().to_string(), length: None },
                             )?;
                             png.extend(sill_proto::admin::decode_bytes(&chunk.bytes_base64)?);
                             if png.len() > size {
@@ -178,11 +165,7 @@ impl App {
                             }
                         }
                         let picture = crate::media::decode(&png).map_err(anyhow::Error::msg)?;
-                        Ok(Some(Frame {
-                            picture,
-                            revision: frame.revision,
-                            scale: frame.scale.max(1),
-                        }))
+                        Ok(Some(Frame { picture, revision: frame.revision, scale: frame.scale.max(1) }))
                     })
                     .map_err(|e| said(&format!("{e:#}")))
             },
@@ -212,11 +195,7 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Option
     );
     Some(crate::ui::bar_tip(
         container(monitor).id("desktop-button"),
-        if view.desktop.shown {
-            "Hide the test desktop"
-        } else {
-            "Show the test desktop (view only)"
-        },
+        if view.desktop.shown { "Hide the test desktop" } else { "Show the test desktop (view only)" },
     ))
 }
 
@@ -228,43 +207,18 @@ pub fn pane<'a>(view: &'a SessionView, session: Option<&Session>) -> Element<'a,
     let status = match (&desktop.frame, &desktop.error, running) {
         (_, _, false) => "not running".to_string(),
         (_, Some(_), _) => "not updating".to_string(),
-        (Some(frame), None, true) => format!(
-            "{}×{} · view only",
-            frame.picture.width / frame.scale,
-            frame.picture.height / frame.scale
-        ),
+        (Some(frame), None, true) => format!("{}×{} · view only", frame.picture.width / frame.scale, frame.picture.height / frame.scale),
         (None, None, true) => "starting the view…".to_string(),
     };
-    let close = keys::press(
-        button(icons::glyph("x", 12.0, alpha(P.fg, 0.55)))
-            .padding([4, 6])
-            .style(style::quiet),
-        Message::Desktop(Event::Toggle(view.id.clone())),
-    );
-    let caption = row![
-        text("Test desktop").size(style::SMALL).color(P.fg),
-        text(status).size(style::TINY).color(P.fg_dim).width(Fill),
-        close,
-    ]
-    .spacing(10)
-    .align_y(Alignment::Center);
+    let close =
+        keys::press(button(icons::glyph("x", 12.0, alpha(P.fg, 0.55))).padding([4, 6]).style(style::quiet), Message::Desktop(Event::Toggle(view.id.clone())));
+    let caption = row![text("Test desktop").size(style::SMALL).color(P.fg), text(status).size(style::TINY).color(P.fg_dim).width(Fill), close,]
+        .spacing(10)
+        .align_y(Alignment::Center);
     let body: Element<'a, Message> = match (&desktop.frame, running) {
         (Some(frame), true) => {
-            let (w, h) = (
-                (frame.picture.width / frame.scale) as f32,
-                (frame.picture.height / frame.scale) as f32,
-            );
-            center(
-                container(
-                    image(frame.picture.handle.clone())
-                        .content_fit(ContentFit::Contain)
-                        .width(Fill)
-                        .height(Fill),
-                )
-                .max_width(w)
-                .max_height(h),
-            )
-            .into()
+            let (w, h) = ((frame.picture.width / frame.scale) as f32, (frame.picture.height / frame.scale) as f32);
+            center(container(image(frame.picture.handle.clone()).content_fit(ContentFit::Contain).width(Fill).height(Fill)).max_width(w).max_height(h)).into()
         }
         _ => center(
             text(match (&desktop.error, running) {
@@ -281,9 +235,7 @@ pub fn pane<'a>(view: &'a SessionView, session: Option<&Session>) -> Element<'a,
     if let (Some(error), Some(_)) = (&desktop.error, &desktop.frame) {
         pane = pane.push(container(text(error).size(style::TINY).color(P.error)).padding([0, 12]));
     }
-    pane.push(container(body).padding(8).width(Fill).height(Fill).style(style::fill(P.bg)))
-        .height(Fill)
-        .into()
+    pane.push(container(body).padding(8).width(Fill).height(Fill).style(style::fill(P.bg))).height(Fill).into()
 }
 
 #[cfg(test)]
@@ -295,9 +247,7 @@ mod tests {
     /// A 4×2 RGB PNG, as the daemon sends: a 2×1 desktop at scale 2.
     fn png() -> Vec<u8> {
         let mut bytes = std::io::Cursor::new(Vec::new());
-        ::image::RgbImage::from_pixel(4, 2, ::image::Rgb([200, 100, 50]))
-            .write_to(&mut bytes, ::image::ImageFormat::Png)
-            .unwrap();
+        ::image::RgbImage::from_pixel(4, 2, ::image::Rgb([200, 100, 50])).write_to(&mut bytes, ::image::ImageFormat::Png).unwrap();
         bytes.into_inner()
     }
 
@@ -307,7 +257,8 @@ mod tests {
             "available": true, "reason": ""});
         let view: sill_proto::admin::PolicyView = serde_json::from_value(json!({"view": "launch",
             "session_id": "demo", "name": "default", "text": null, "fingerprint": null,
-            "diagnostics": [], "permissions": [state], "session_hosts": []})).unwrap();
+            "diagnostics": [], "permissions": [state], "session_hosts": []}))
+        .unwrap();
         app.views.get_mut("demo").unwrap().permissions.views =
             Some(crate::permissions::Views { preview: view.clone(), launch: Some(view), agent_name: None, warnings: vec![] });
     }
@@ -380,8 +331,11 @@ mod tests {
             let read = daemon.expect("_sill/desktop.read");
             assert_eq!(read["params"]["revision"], "r1");
             assert_eq!(read["params"]["offset"], "0");
-            daemon.reply(&read, json!({"bytes_base64": sill_proto::admin::encode_bytes(&bytes),
-                "next_offset": size.to_string(), "eof": true, "revision": "r1"}));
+            daemon.reply(
+                &read,
+                json!({"bytes_base64": sill_proto::admin::encode_bytes(&bytes),
+                "next_offset": size.to_string(), "eof": true, "revision": "r1"}),
+            );
             // the same picture again: the window says which it has, no read follows
             let again = daemon.expect("_sill/desktop.capture");
             assert_eq!(again["params"]["since"], "r1");

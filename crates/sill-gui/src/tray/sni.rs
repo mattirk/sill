@@ -30,19 +30,11 @@ impl ksni::Tray for SillTray {
     }
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-        self.frames
-            .get(self.frame)
-            .or_else(|| self.frames.first())
-            .cloned()
-            .unwrap_or_default()
+        self.frames.get(self.frame).or_else(|| self.frames.first()).cloned().unwrap_or_default()
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
-        ksni::ToolTip {
-            title: "Sill".into(),
-            description: "Click to show or hide".into(),
-            ..ksni::ToolTip::default()
-        }
+        ksni::ToolTip { title: "Sill".into(), description: "Click to show or hide".into(), ..ksni::ToolTip::default() }
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
@@ -94,30 +86,25 @@ impl Tray {
         if !on || self.ticking.swap(true, Ordering::Relaxed) {
             return; // the ticker sees `busy` drop and puts the still icon back
         }
-        let (handle, busy, ticking) =
-            (self.handle.clone(), self.busy.clone(), self.ticking.clone());
-        let spawned = std::thread::Builder::new()
-            .name("sill-gui-tray".into())
-            .spawn(move || {
-                // the swell's frames, drawn the first time an agent works
-                if handle.update(|t| t.frames.len()) == Some(1) {
-                    let swell: Vec<Vec<ksni::Icon>> = (1..=FRAMES)
-                        .map(|i| frame_icons(&frame_svg(i as f64 / FRAMES as f64)))
-                        .collect();
-                    handle.update(|t| t.frames.extend(swell));
+        let (handle, busy, ticking) = (self.handle.clone(), self.busy.clone(), self.ticking.clone());
+        let spawned = std::thread::Builder::new().name("sill-gui-tray".into()).spawn(move || {
+            // the swell's frames, drawn the first time an agent works
+            if handle.update(|t| t.frames.len()) == Some(1) {
+                let swell: Vec<Vec<ksni::Icon>> = (1..=FRAMES).map(|i| frame_icons(&frame_svg(i as f64 / FRAMES as f64))).collect();
+                handle.update(|t| t.frames.extend(swell));
+            }
+            loop {
+                let moving = busy.load(Ordering::Relaxed);
+                let shown = handle.update(|t| {
+                    t.frame = if moving { t.frame % FRAMES + 1 } else { 0 };
+                });
+                if shown.is_none() || !moving {
+                    break;
                 }
-                loop {
-                    let moving = busy.load(Ordering::Relaxed);
-                    let shown = handle.update(|t| {
-                        t.frame = if moving { t.frame % FRAMES + 1 } else { 0 };
-                    });
-                    if shown.is_none() || !moving {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(FRAME_MS));
-                }
-                ticking.store(false, Ordering::Relaxed);
-            });
+                std::thread::sleep(std::time::Duration::from_millis(FRAME_MS));
+            }
+            ticking.store(false, Ordering::Relaxed);
+        });
         if spawned.is_err() {
             self.ticking.store(false, Ordering::Relaxed);
         }
@@ -131,17 +118,9 @@ fn frame_icons(svg: &str) -> Vec<ksni::Icon> {
 
 /// Put the icon in the panel; `None` (said on stderr) without a session bus.
 pub fn start(asked: async_channel::Sender<Asked>) -> Option<Tray> {
-    let tray = SillTray {
-        frames: vec![frame_icons(TRAY_ICON)],
-        frame: 0,
-        asked,
-    };
+    let tray = SillTray { frames: vec![frame_icons(TRAY_ICON)], frame: 0, asked };
     match tray.spawn() {
-        Ok(handle) => Some(Tray {
-            handle: Arc::new(handle),
-            busy: Arc::new(AtomicBool::new(false)),
-            ticking: Arc::new(AtomicBool::new(false)),
-        }),
+        Ok(handle) => Some(Tray { handle: Arc::new(handle), busy: Arc::new(AtomicBool::new(false)), ticking: Arc::new(AtomicBool::new(false)) }),
         Err(e) => {
             eprintln!("sill-gui: no tray icon: {e}");
             None
@@ -155,11 +134,7 @@ fn pixmap(svg: &str, size: u32) -> Option<ksni::Icon> {
     for p in data.as_chunks_mut::<4>().0 {
         p.rotate_right(1); // RGBA → ARGB
     }
-    Some(ksni::Icon {
-        width: size as i32,
-        height: size as i32,
-        data,
-    })
+    Some(ksni::Icon { width: size as i32, height: size as i32, data })
 }
 
 #[cfg(test)]

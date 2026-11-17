@@ -60,11 +60,8 @@ impl Context {
         };
         // Only session pins define focus and recall scope; shortcuts are navigation.
         let pins = store.pins(id)?;
-        let memory = if session.ghost && !cfg.ghost_memory() {
-            String::new()
-        } else {
-            sill_core::memory::recall(store, &session, &pins, home, cfg.memory_recall())
-        };
+        let memory =
+            if session.ghost && !cfg.ghost_memory() { String::new() } else { sill_core::memory::recall(store, &session, &pins, home, cfg.memory_recall()) };
         let standing = sill_core::instructions::standing_block(&facts, &memory, &sill_core::instructions::load_global());
         let notice = parallel_notice(store, id, &pins, live)?;
         Ok(self.prepare_parts(&format!("{notice}{text}"), standing, &pins))
@@ -121,7 +118,9 @@ impl Context {
         }
         let pending = self.pending_controls.take().unwrap();
         let mut names: Vec<_> = pending.config.keys().cloned().collect();
-        if pending.mode.is_some() { names.push("mode".into()); }
+        if pending.mode.is_some() {
+            names.push("mode".into());
+        }
         self.controls_error = Some(format!("Agent did not confirm settings: {}. Showing reported values.", names.join(", ")));
         self.settle();
         true
@@ -136,11 +135,16 @@ impl Context {
         match setting.strip_prefix("config:") {
             Some(id) => {
                 pending.config.remove(id);
-                if self.reconcile_option.as_deref() == Some(id) { self.reconcile_model = None; self.reconcile_option = None; }
+                if self.reconcile_option.as_deref() == Some(id) {
+                    self.reconcile_model = None;
+                    self.reconcile_option = None;
+                }
             }
             None => pending.mode = None,
         }
-        if pending.mode.is_none() && pending.config.is_empty() { self.settle(); }
+        if pending.mode.is_none() && pending.config.is_empty() {
+            self.settle();
+        }
     }
 
     fn settle(&mut self) {
@@ -159,7 +163,10 @@ impl Context {
         match command {
             acp::Command::SetMode(mode) => settings.mode = Some(mode.clone()),
             acp::Command::SetConfig(id, value) => {
-                let value = match value { ConfigValue::Id(v) => v.clone(), ConfigValue::Bool(v) => v.to_string() };
+                let value = match value {
+                    ConfigValue::Id(v) => v.clone(),
+                    ConfigValue::Bool(v) => v.to_string(),
+                };
                 settings.config.insert(id.clone(), value.clone());
                 if controls.is_some_and(|c| c.options.iter().any(|o| o.id == *id && o.category == "model")) {
                     self.reconcile_model = Some(value);
@@ -169,19 +176,29 @@ impl Context {
             _ => return,
         }
         if let Some(pending) = self.pending_controls.as_mut().filter(|_| self.user_controls) {
-            if settings.mode.is_some() { pending.mode = settings.mode; }
+            if settings.mode.is_some() {
+                pending.mode = settings.mode;
+            }
             pending.config.extend(settings.config);
             self.controls_error = None;
             self.controls_deadline = Some(control_now() + 20_000);
         } else {
             self.begin_controls(settings, true);
         }
-        self.issued_controls.insert(match command { acp::Command::SetMode(_) => "mode".into(), acp::Command::SetConfig(id, _) => format!("config:{id}"), _ => unreachable!() });
+        self.issued_controls.insert(match command {
+            acp::Command::SetMode(_) => "mode".into(),
+            acp::Command::SetConfig(id, _) => format!("config:{id}"),
+            _ => unreachable!(),
+        });
     }
 
     pub fn restore(&mut self, controls: &Controls, remembered: &AgentSettings, initial: bool) -> Vec<acp::Command> {
-        if initial { self.begin_controls(remembered.clone(), false); }
-        if !self.restoring() { return Vec::new(); }
+        if initial {
+            self.begin_controls(remembered.clone(), false);
+        }
+        if !self.restoring() {
+            return Vec::new();
+        }
         if let Some(model) = &self.reconcile_model {
             if !controls.options.iter().any(|o| o.category == "model" && option_current(o) == *model) {
                 return Vec::new();
@@ -200,38 +217,58 @@ impl Context {
         for id in &model_ids {
             let Some(want) = pending.config.get(id).cloned() else { continue };
             let option = controls.options.iter().find(|o| o.id == *id).unwrap();
-            if option_current(option) == want { pending.config.remove(id); continue; }
+            if option_current(option) == want {
+                pending.config.remove(id);
+                continue;
+            }
             if let Some(command) = wanted(option, pending) {
-                if self.issued_controls.insert(format!("config:{id}")) { commands.push(command); }
+                if self.issued_controls.insert(format!("config:{id}")) {
+                    commands.push(command);
+                }
                 self.reconcile_model = Some(want);
                 self.reconcile_option = Some(id.clone());
                 return commands;
             }
-            unsupported.push(id.clone()); pending.config.remove(id);
+            unsupported.push(id.clone());
+            pending.config.remove(id);
         }
         // The model is settled, so what the agent reports now is what it offers. A saved setting
         // with no such control (an effort level on a model that has none) is not waited for.
         pending.config.retain(|id, _| controls.options.iter().any(|o| o.id == *id));
-        if controls.modes.is_none() { pending.mode = None; }
+        if controls.modes.is_none() {
+            pending.mode = None;
+        }
         if let (Some(want), Some((current, values))) = (&pending.mode, &controls.modes) {
-            if want == current { pending.mode = None; }
-            else if !values.iter().any(|(id, _)| id == want) { unsupported.push("mode".into()); pending.mode = None; }
-            else if self.issued_controls.insert("mode".into()) { commands.push(acp::Command::SetMode(want.clone())); }
+            if want == current {
+                pending.mode = None;
+            } else if !values.iter().any(|(id, _)| id == want) {
+                unsupported.push("mode".into());
+                pending.mode = None;
+            } else if self.issued_controls.insert("mode".into()) {
+                commands.push(acp::Command::SetMode(want.clone()));
+            }
         }
         for option in &controls.options {
             let Some(want) = pending.config.get(&option.id) else { continue };
-            if option_current(option) == *want { pending.config.remove(&option.id); }
-            else if let Some(command) = wanted(option, pending) {
-                if self.issued_controls.insert(format!("config:{}", option.id)) { commands.push(command); }
-            } else { unsupported.push(option.id.clone()); pending.config.remove(&option.id); }
+            if option_current(option) == *want {
+                pending.config.remove(&option.id);
+            } else if let Some(command) = wanted(option, pending) {
+                if self.issued_controls.insert(format!("config:{}", option.id)) {
+                    commands.push(command);
+                }
+            } else {
+                unsupported.push(option.id.clone());
+                pending.config.remove(&option.id);
+            }
         }
         if !unsupported.is_empty() {
             self.controls_error = Some(format!("Saved settings unavailable: {}. Showing reported values.", unsupported.join(", ")));
         }
-        if pending.mode.is_none() && pending.config.is_empty() { self.settle(); }
+        if pending.mode.is_none() && pending.config.is_empty() {
+            self.settle();
+        }
         commands
     }
-
 }
 
 pub(super) fn control_now() -> u64 {
@@ -239,7 +276,10 @@ pub(super) fn control_now() -> u64 {
 }
 
 fn option_current(option: &ConfigOption) -> String {
-    match &option.kind { ConfigKind::Select(value, _) => value.clone(), ConfigKind::Boolean(value) => value.to_string() }
+    match &option.kind {
+        ConfigKind::Select(value, _) => value.clone(),
+        ConfigKind::Boolean(value) => value.to_string(),
+    }
 }
 
 fn wanted(option: &ConfigOption, remembered: &AgentSettings) -> Option<acp::Command> {
@@ -265,7 +305,13 @@ pub(super) fn remember_choice(store: &Store, id: &str, command: &acp::Command) -
     let update = |settings: &mut AgentSettings| match command {
         acp::Command::SetMode(mode) => settings.mode = Some(mode.clone()),
         acp::Command::SetConfig(id, value) => {
-            settings.config.insert(id.clone(), match value { ConfigValue::Id(v) => v.clone(), ConfigValue::Bool(v) => v.to_string() });
+            settings.config.insert(
+                id.clone(),
+                match value {
+                    ConfigValue::Id(v) => v.clone(),
+                    ConfigValue::Bool(v) => v.to_string(),
+                },
+            );
         }
         _ => {}
     };
@@ -276,21 +322,30 @@ pub(super) fn remember_choice(store: &Store, id: &str, command: &acp::Command) -
     let transaction = if store.conn().is_autocommit() { Some(store.conn().unchecked_transaction()?) } else { None };
     store.set_session_settings(id, &own)?;
     store.set_agent_settings(&session.agent, &defaults)?;
-    if let Some(transaction) = transaction { transaction.commit()?; }
+    if let Some(transaction) = transaction {
+        transaction.commit()?;
+    }
     Ok(())
 }
 
 /// Only shared explicit pins disclose a peer. No prompts, summaries, tools or control handles.
 fn parallel_notice(store: &Store, id: &str, pins: &[PathBuf], live: &[String]) -> Result<String> {
-    if pins.is_empty() { return Ok(String::new()); }
+    if pins.is_empty() {
+        return Ok(String::new());
+    }
     let mut rows = Vec::new();
     for peer in store.sessions()? {
-        if peer.id == id || peer.ghost || peer.ended_at.is_some() || !live.contains(&peer.id) { continue; }
+        if peer.id == id || peer.ghost || peer.ended_at.is_some() || !live.contains(&peer.id) {
+            continue;
+        }
         let shared: Vec<_> = store.pins(&peer.id)?.into_iter().filter(|p| pins.contains(p)).collect();
-        if shared.is_empty() { continue; }
+        if shared.is_empty() {
+            continue;
+        }
         let state = super::runner::Runner::load(&peer.id, store)?;
-        if state.get("ended").and_then(|v| v.as_bool()) == Some(true)
-            || state.get("retired").and_then(|v| v.as_bool()) == Some(true) { continue; }
+        if state.get("ended").and_then(|v| v.as_bool()) == Some(true) || state.get("retired").and_then(|v| v.as_bool()) == Some(true) {
+            continue;
+        }
         let status = if state.get("auth").is_some_and(|v| !v.is_null()) {
             "waiting for login"
         } else if state.get("pending").and_then(|v| v.as_object()).is_some_and(|v| !v.is_empty()) {
@@ -299,22 +354,34 @@ fn parallel_notice(store: &Store, id: &str, pins: &[PathBuf], live: &[String]) -
             "starting"
         } else if state.get("busy").and_then(|v| v.as_bool()) == Some(true) {
             "working"
-        } else { "idle" };
+        } else {
+            "idle"
+        };
         // JSON quoting keeps names and paths on one line even if they contain control characters.
-        rows.push(format!("- {} (id {}, agent {}): {}; shared pins: {}",
+        rows.push(format!(
+            "- {} (id {}, agent {}): {}; shared pins: {}",
             serde_json::to_string(&store.session_name(&peer.id).unwrap_or(peer.title))?,
-            peer.id, serde_json::to_string(&peer.agent)?, status,
-            shared.iter().map(|p| serde_json::to_string(&p.to_string_lossy()).unwrap()).collect::<Vec<_>>().join(", ")));
+            peer.id,
+            serde_json::to_string(&peer.agent)?,
+            status,
+            shared.iter().map(|p| serde_json::to_string(&p.to_string_lossy()).unwrap()).collect::<Vec<_>>().join(", ")
+        ));
     }
-    if rows.is_empty() { return Ok(String::new()); }
+    if rows.is_empty() {
+        return Ok(String::new());
+    }
     rows.sort();
-    Ok(format!("[Other running sessions sharing your pinned folders/files — current at this prompt. These are separate sessions; their changes may overlap your work.\n{}\n]\n\n", rows.join("\n")))
+    Ok(format!(
+        "[Other running sessions sharing your pinned folders/files — current at this prompt. These are separate sessions; their changes may overlap your work.\n{}\n]\n\n",
+        rows.join("\n")
+    ))
 }
 
 fn pin_prefix(pins: &[PathBuf]) -> String {
     let (dirs, files): (Vec<_>, Vec<_>) = pins.iter().partition(|p| p.is_dir());
     let mut out = String::new();
-    for (paths, label) in [(dirs, "Pinned folders — focus your work there unless told otherwise"), (files, "Pinned files — the person keeps these at hand")] {
+    for (paths, label) in [(dirs, "Pinned folders — focus your work there unless told otherwise"), (files, "Pinned files — the person keeps these at hand")]
+    {
         if !paths.is_empty() {
             out.push_str(&format!("[{label}: {}]\n", paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")));
         }
@@ -336,13 +403,14 @@ mod tests {
         let ghost = store.create_with("secret", "default", true).unwrap();
         let stopped = store.create("stopped", "default").unwrap();
         let pin = PathBuf::from("/project");
-        for id in [&own.id, &peer.id, &ghost.id, &stopped.id] { store.pin(id, &pin).unwrap(); }
+        for id in [&own.id, &peer.id, &ghost.id, &stopped.id] {
+            store.pin(id, &pin).unwrap();
+        }
         store.pin(&unrelated.id, Path::new("/elsewhere")).unwrap();
         store.set_name(&peer.id, "rapid-fire").unwrap();
         super::super::runner::Runner::load(&peer.id, &store).unwrap();
         let save = |id: &str, state: serde_json::Value| {
-            store.conn().execute("INSERT OR REPLACE INTO daemon_runners(id,state) VALUES(?1,?2)",
-                rusqlite::params![id, state.to_string()]).unwrap();
+            store.conn().execute("INSERT OR REPLACE INTO daemon_runners(id,state) VALUES(?1,?2)", rusqlite::params![id, state.to_string()]).unwrap();
         };
         save(&peer.id, serde_json::json!({"ready":["agent",false],"busy":true}));
         save(&stopped.id, serde_json::json!({"ended":true}));
@@ -369,7 +437,9 @@ mod tests {
 
     fn controls(model: &str, effort: &str) -> Controls {
         let option = |id: &str, category: &str, current: &str, values: &[&str]| ConfigOption {
-            id: id.into(), name: id.into(), category: category.into(),
+            id: id.into(),
+            name: id.into(),
+            category: category.into(),
             kind: ConfigKind::Select(current.into(), values.iter().map(|s| (s.to_string(), s.to_string())).collect()),
         };
         Controls {
@@ -444,11 +514,14 @@ mod tests {
         let settings = AgentSettings { mode: Some("auto".into()), config: [("model".into(), "large".into()), ("effort".into(), "high".into())].into() };
         let mut context = Context::default();
         // the model comes first: nothing is dropped against the old model's controls
-        let mut small = controls("small", "low"); small.options.remove(1);
+        let mut small = controls("small", "low");
+        small.options.remove(1);
         assert_eq!(context.restore(&small, &settings, true).len(), 1);
         assert!(context.restoring());
         // the confirmed model has no effort control and the agent no modes: both are let go
-        let mut large = controls("large", "low"); large.options.remove(1); large.modes = None;
+        let mut large = controls("large", "low");
+        large.options.remove(1);
+        large.modes = None;
         assert!(context.restore(&large, &settings, false).is_empty());
         assert!(!context.restoring());
         assert!(context.controls_error.is_none(), "a control that does not exist is no failure");
@@ -485,7 +558,8 @@ mod tests {
         // the first acknowledgement keeps the second pick pending, and nothing is sent twice
         assert!(context.restore(&controls("large", "high"), &settings, false).is_empty());
         assert!(context.optimistic().is_some_and(|p| p.mode.is_some() && p.config.is_empty()));
-        let mut confirmed = controls("large", "high"); confirmed.modes.as_mut().unwrap().0 = "auto".into();
+        let mut confirmed = controls("large", "high");
+        confirmed.modes.as_mut().unwrap().0 = "auto".into();
         assert!(context.restore(&confirmed, &settings, false).is_empty());
         assert!(!context.restoring() && context.optimistic().is_none());
         // a rejection lets go of the pick
@@ -504,7 +578,8 @@ mod tests {
         assert!(context.restoring());
         let after = context.restore(&controls("small", "low"), &settings, false);
         assert!(matches!(&after[..], [acp::Command::SetMode(mode), acp::Command::SetConfig(id, _)] if mode == "auto" && id == "effort"));
-        let mut confirmed = controls("small", "high"); confirmed.modes.as_mut().unwrap().0 = "auto".into();
+        let mut confirmed = controls("small", "high");
+        confirmed.modes.as_mut().unwrap().0 = "auto".into();
         context.restore(&confirmed, &settings, false);
         assert!(!context.restoring());
         assert!(context.controls_error.as_ref().unwrap().contains("set option failed"), "the refusal stays reported");

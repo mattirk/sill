@@ -1,13 +1,13 @@
 //! Host data access for frontends. The renderer never opens the daemon's database or paths.
-use std::path::Path;
+use super::Hub;
 use anyhow::Result;
 #[cfg(test)]
 use sill_core::frontend::Metadata;
-use super::Hub;
+use std::path::Path;
 
 pub(super) static CONFIG: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-pub(super) fn open_session_image(hub:&Hub,session:&str,src:&Path,home:&Path)->Result<Option<std::fs::File>> {
+pub(super) fn open_session_image(hub: &Hub, session: &str, src: &Path, home: &Path) -> Result<Option<std::fs::File>> {
     use std::path::Component;
     let p = if src.is_absolute() { src.to_path_buf() } else { home.join(src) };
     if p.components().any(|c| matches!(c, Component::ParentDir)) {
@@ -16,27 +16,32 @@ pub(super) fn open_session_image(hub:&Hub,session:&str,src:&Path,home:&Path)->Re
     if p.starts_with("/.sill") {
         return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "shim internals are not image sources").into());
     }
-    let image = p.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp"));
-    if !image { return Ok(None) }
+    let image = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp"));
+    if !image {
+        return Ok(None);
+    }
     let socket = sill_core::shim::runtime_dir(session)?.join("shim.sock");
     match sill_core::shim::Control::connect(&socket) {
         Ok(mut shim) => return shim.open_image(&p).map(Some),
         Err(e) => {
             // A stopped jail may still have persistent overlay images. A live supervisor's
             // read failure must never fall back to a different file on the host.
-            let stopped = e.downcast_ref::<std::io::Error>().is_some_and(|e| matches!(e.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused));
-            if !stopped { return Err(e); }
+            let stopped =
+                e.downcast_ref::<std::io::Error>().is_some_and(|e| matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused));
+            if !stopped {
+                return Err(e);
+            }
         }
     }
-    let Some(path) = stored_image_path(hub,session,&p)? else { return Ok(None) };
+    let Some(path) = stored_image_path(hub, session, &p)? else { return Ok(None) };
     use std::os::unix::fs::OpenOptionsExt;
-    Ok(Some(std::fs::OpenOptions::new().read(true)
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
-        .open(path)?))
+    Ok(Some(std::fs::OpenOptions::new().read(true).custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32).open(path)?))
 }
 
-fn stored_image_path(hub:&Hub,session:&str,p:&Path)->Result<Option<std::path::PathBuf>> {
+fn stored_image_path(hub: &Hub, session: &str, p: &Path) -> Result<Option<std::path::PathBuf>> {
     use std::os::unix::fs::FileTypeExt;
     // The pins its jail was launched with; a session that never launched has no jail and no
     // overlay, so a path under a pin it will mount is the host's file (its stored pins decide).
@@ -44,20 +49,28 @@ fn stored_image_path(hub:&Hub,session:&str,p:&Path)->Result<Option<std::path::Pa
         Some(launch) => launch.launch_pins,
         None => hub.with_store(|s| s.jail_pins(session))?,
     };
-    if pins.iter().any(|pin| pin.is_dir() && p.starts_with(pin)) { return Ok(Some(p.to_path_buf())) }
+    if pins.iter().any(|pin| pin.is_dir() && p.starts_with(pin)) {
+        return Ok(Some(p.to_path_buf()));
+    }
     // These mounts disappear with the jail; a same-named host file is unrelated.
     // Explicit pins take precedence, just as they do when constructing the jail.
     if ["/tmp", "/run", "/proc", "/dev", "/sys"].iter().any(|root| p.starts_with(root)) {
         return Ok(None);
     }
     let view = hub.jail_view(session)?;
-    if view.masked.iter().any(|mask| p.starts_with(mask)) { return Ok(None) }
+    if view.masked.iter().any(|mask| p.starts_with(mask)) {
+        return Ok(None);
+    }
     for (host, upper) in view.layers {
         if let Ok(rel) = p.strip_prefix(host) {
             let upper = upper.join(rel);
             if let Ok(m) = std::fs::symlink_metadata(&upper) {
-                if m.file_type().is_char_device() { return Ok(None) }
-                if m.is_file() { return Ok(Some(upper)) }
+                if m.file_type().is_char_device() {
+                    return Ok(None);
+                }
+                if m.is_file() {
+                    return Ok(Some(upper));
+                }
             }
         }
     }
@@ -67,7 +80,14 @@ fn stored_image_path(hub:&Hub,session:&str,p:&Path)->Result<Option<std::path::Pa
 #[cfg(test)]
 fn metadata(path: &Path) -> Result<Metadata> {
     let m = std::fs::symlink_metadata(path)?;
-    Ok(Metadata { file: m.is_file(), directory: m.is_dir(), symlink: m.is_symlink(), target: if m.is_symlink() { std::fs::read_link(path).ok() } else { None }, length: m.len(), readonly: m.permissions().readonly() })
+    Ok(Metadata {
+        file: m.is_file(),
+        directory: m.is_dir(),
+        symlink: m.is_symlink(),
+        target: if m.is_symlink() { std::fs::read_link(path).ok() } else { None },
+        length: m.len(),
+        readonly: m.permissions().readonly(),
+    })
 }
 
 pub(super) fn head_label(repo: &Path) -> Option<(String, bool)> {
@@ -102,27 +122,42 @@ pub(super) fn find_files(bases: &[std::path::PathBuf], q: &str, cap: usize, visi
         let Ok(metadata) = std::fs::symlink_metadata(base) else { continue };
         if metadata.is_file() {
             seen += 1;
-            if seen > visits || found.len() >= cap { cut = true; break }
-            let hay = if q.contains('/') {
-                base.to_string_lossy().to_lowercase()
-            } else {
-                base.file_name().unwrap_or_default().to_string_lossy().to_lowercase()
-            };
-            if hay.contains(q) && matched.insert(base.clone()) { found.push(base.clone()); }
+            if seen > visits || found.len() >= cap {
+                cut = true;
+                break;
+            }
+            let hay =
+                if q.contains('/') { base.to_string_lossy().to_lowercase() } else { base.file_name().unwrap_or_default().to_string_lossy().to_lowercase() };
+            if hay.contains(q) && matched.insert(base.clone()) {
+                found.push(base.clone());
+            }
             continue;
         }
-        if !metadata.is_dir() { continue }
+        if !metadata.is_dir() {
+            continue;
+        }
         let mut queue = std::collections::VecDeque::from([base.clone()]);
         while let Some(dir) = queue.pop_front() {
             let Ok(rd) = std::fs::read_dir(dir) else { continue };
             for e in rd.flatten() {
                 seen += 1;
-                if seen > visits || found.len() >= cap { cut = true; break 'bases }
+                if seen > visits || found.len() >= cap {
+                    cut = true;
+                    break 'bases;
+                }
                 let name = e.file_name().to_string_lossy().into_owned();
                 let path = e.path();
-                let hay = if q.contains('/') { path.strip_prefix(base).map(|p| p.to_string_lossy().to_lowercase()).unwrap_or_default() } else { name.to_lowercase() };
-                if hay.contains(q) && matched.insert(path.clone()) { found.push(path.clone()); }
-                if e.file_type().is_ok_and(|t| t.is_dir()) && !name.starts_with('.') && !matches!(name.as_str(), "target" | "node_modules" | "__pycache__" | "build" | "dist") { queue.push_back(path); }
+                let hay =
+                    if q.contains('/') { path.strip_prefix(base).map(|p| p.to_string_lossy().to_lowercase()).unwrap_or_default() } else { name.to_lowercase() };
+                if hay.contains(q) && matched.insert(path.clone()) {
+                    found.push(path.clone());
+                }
+                if e.file_type().is_ok_and(|t| t.is_dir())
+                    && !name.starts_with('.')
+                    && !matches!(name.as_str(), "target" | "node_modules" | "__pycache__" | "build" | "dist")
+                {
+                    queue.push_back(path);
+                }
             }
         }
     }
@@ -323,7 +358,6 @@ fn new_file_lines(path: &std::path::Path) -> Option<(u64, u64)> {
     if bytes.iter().take(8192).any(|b| *b == 0) {
         return None;
     }
-    let lines = bytes.iter().filter(|b| **b == b'\n').count() as u64
-        + u64::from(bytes.last().is_some_and(|b| *b != b'\n'));
+    let lines = bytes.iter().filter(|b| **b == b'\n').count() as u64 + u64::from(bytes.last().is_some_and(|b| *b != b'\n'));
     Some((lines, 0))
 }

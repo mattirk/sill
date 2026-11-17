@@ -7,8 +7,8 @@ use iced::widget::{column, container, text};
 use iced::{Element, Fill, Point, Rectangle, Renderer, Size, Theme, mouse};
 use sill_proto::admin::ActiveHour;
 
-use crate::style::{self, P, alpha};
 use crate::Message;
+use crate::style::{self, P, alpha};
 
 /// The days the chart shows, today last.
 pub const DAYS: u16 = 30;
@@ -27,19 +27,12 @@ fn local_offset(seconds: i64) -> i64 {
     // SAFETY: localtime_r writes only the tm it is given and reads the time it is given.
     unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&time, &mut tm).is_null() {
-            0
-        } else {
-            tm.tm_gmtoff as i64
-        }
+        if libc::localtime_r(&time, &mut tm).is_null() { 0 } else { tm.tm_gmtoff as i64 }
     }
 }
 
 fn now_seconds() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64
 }
 
 /// The last `count` local days up to the one holding `now`, each with the time of its hours.
@@ -66,10 +59,7 @@ pub fn demo() -> Vec<ActiveHour> {
             let day = now / 24 - back;
             let weekend = matches!(weekday(day as i64), "Sat" | "Sun");
             let hours = if weekend { day % 2 } else { 2 + (day * 7) % 6 };
-            (0..hours).map(move |hour| ActiveHour {
-                hour: day * 24 + 8 + hour,
-                ms: 1_500_000 + (day * 31 + hour * 17) % 40 * 60_000,
-            })
+            (0..hours).map(move |hour| ActiveHour { hour: day * 24 + 8 + hour, ms: 1_500_000 + (day * 31 + hour * 17) % 40 * 60_000 })
         })
         .filter(|hour| hour.hour <= now)
         .collect()
@@ -95,10 +85,7 @@ fn weekday(day: i64) -> &'static str {
 /// lines at round hours (or round minutes under an hour).
 fn axis(max_ms: u64) -> (f32, f32) {
     let hours = max_ms as f32 / 3_600_000.0;
-    let step = [0.25, 0.5, 1.0, 2.0, 4.0, 6.0, 12.0, 24.0, 48.0, 96.0]
-        .into_iter()
-        .find(|step| hours / step <= 4.0)
-        .unwrap_or(192.0);
+    let step = [0.25, 0.5, 1.0, 2.0, 4.0, 6.0, 12.0, 24.0, 48.0, 96.0].into_iter().find(|step| hours / step <= 4.0).unwrap_or(192.0);
     let top = ((hours / step).ceil()).max(1.0) * step;
     (top, step)
 }
@@ -116,29 +103,18 @@ fn tick(hours: f32) -> String {
 /// The section's body: a line of totals over the bars.
 pub fn view<'a>(hours: Option<&[ActiveHour]>) -> Element<'a, Message> {
     let Some(hours) = hours else {
-        return container(
-            text("The daemon does not report running time; restart it to update it.")
-                .size(style::SMALL)
-                .color(P.fg_dim),
-        )
-        .padding([12, 16])
-        .into();
+        return container(text("The daemon does not report running time; restart it to update it.").size(style::SMALL).color(P.fg_dim))
+            .padding([12, 16])
+            .into();
     };
     let days = days(hours, now_seconds(), DAYS, local_offset);
     let total: u64 = days.iter().map(|d| d.ms).sum();
     let today = days.last().map_or(0, |d| d.ms);
-    let totals = format!(
-        "Today {} · last {DAYS} days {}. Agents working at the same time are added together.",
-        span(today),
-        span(total)
-    );
-    column![
-        text(totals).size(style::SMALL).color(P.fg_dim),
-        iced::widget::canvas(Chart { days }).width(Fill).height(HEIGHT),
-    ]
-    .spacing(10)
-    .padding([12, 16])
-    .into()
+    let totals = format!("Today {} · last {DAYS} days {}. Agents working at the same time are added together.", span(today), span(total));
+    column![text(totals).size(style::SMALL).color(P.fg_dim), iced::widget::canvas(Chart { days }).width(Fill).height(HEIGHT),]
+        .spacing(10)
+        .padding([12, 16])
+        .into()
 }
 
 struct Chart {
@@ -156,12 +132,7 @@ struct Plot {
 impl Chart {
     fn plot(&self, size: Size) -> Plot {
         let (left, top, bottom) = (44.0, 22.0, 20.0);
-        Plot {
-            left,
-            top,
-            width: (size.width - left).max(1.0),
-            height: (size.height - top - bottom).max(1.0),
-        }
+        Plot { left, top, width: (size.width - left).max(1.0), height: (size.height - top - bottom).max(1.0) }
     }
 
     /// The day whose column holds the pointer.
@@ -179,29 +150,12 @@ impl Chart {
 impl canvas::Program<Message> for Chart {
     type State = ();
 
-    fn update(
-        &self,
-        _state: &mut (),
-        event: &iced::Event,
-        _bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Option<canvas::Action<Message>> {
+    fn update(&self, _state: &mut (), event: &iced::Event, _bounds: Rectangle, _cursor: mouse::Cursor) -> Option<canvas::Action<Message>> {
         // the hovered bar and its label follow the pointer
-        matches!(
-            event,
-            iced::Event::Mouse(mouse::Event::CursorMoved { .. } | mouse::Event::CursorLeft)
-        )
-        .then(canvas::Action::request_redraw)
+        matches!(event, iced::Event::Mouse(mouse::Event::CursorMoved { .. } | mouse::Event::CursorLeft)).then(canvas::Action::request_redraw)
     }
 
-    fn draw(
-        &self,
-        _state: &(),
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        cursor: mouse::Cursor,
-    ) -> Vec<Geometry> {
+    fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, cursor: mouse::Cursor) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
         let plot = self.plot(bounds.size());
         let max = self.days.iter().map(|d| d.ms).max().unwrap_or(0);
@@ -219,18 +173,9 @@ impl canvas::Program<Message> for Chart {
         let mut at = 0.0;
         while at <= top_hours + 0.001 {
             let y = plot.top + plot.height * (1.0 - at / top_hours);
-            frame.fill_rectangle(
-                Point::new(plot.left, y.round()),
-                Size::new(plot.width, 1.0),
-                alpha(P.fg, if at == 0.0 { 0.22 } else { 0.08 }),
-            );
+            frame.fill_rectangle(Point::new(plot.left, y.round()), Size::new(plot.width, 1.0), alpha(P.fg, if at == 0.0 { 0.22 } else { 0.08 }));
             if at > 0.0 {
-                frame.fill_text(label(
-                    tick(at),
-                    Point::new(plot.left - 8.0, y),
-                    iced::widget::text::Alignment::Right,
-                    P.fg_dim,
-                ));
+                frame.fill_text(label(tick(at), Point::new(plot.left - 8.0, y), iced::widget::text::Alignment::Right, P.fg_dim));
             }
             at += step;
         }
@@ -242,23 +187,14 @@ impl canvas::Program<Message> for Chart {
             let x = plot.left + slot * index as f32 + (slot - bar) / 2.0;
             if day.ms > 0 {
                 // a day with any work shows, however little
-                let height =
-                    (plot.height * day.ms as f32 / (top_hours * 3_600_000.0)).max(2.0);
+                let height = (plot.height * day.ms as f32 / (top_hours * 3_600_000.0)).max(2.0);
                 let radius = (bar / 2.0).min(4.0).min(height);
                 let shape = Path::rounded_rectangle(
                     Point::new(x, baseline - height),
                     Size::new(bar, height),
-                    iced::border::Radius {
-                        top_left: radius,
-                        top_right: radius,
-                        bottom_right: 0.0,
-                        bottom_left: 0.0,
-                    },
+                    iced::border::Radius { top_left: radius, top_right: radius, bottom_right: 0.0, bottom_left: 0.0 },
                 );
-                frame.fill(
-                    &shape,
-                    alpha(P.accent, if hovered == Some(index) { 1.0 } else { 0.7 }),
-                );
+                frame.fill(&shape, alpha(P.accent, if hovered == Some(index) { 1.0 } else { 0.7 }));
             }
             // Mondays are dated under the axis
             if weekday(day.day) == "Mon" && hovered.is_none() {
@@ -274,26 +210,12 @@ impl canvas::Program<Message> for Chart {
         if let Some(index) = hovered {
             let day = self.days[index];
             let center = plot.left + slot * (index as f32 + 0.5);
-            let text = format!(
-                "{} {} · {}",
-                weekday(day.day),
-                crate::menu::date(day.day * 86_400),
-                span(day.ms)
-            );
+            let text = format!("{} {} · {}", weekday(day.day), crate::menu::date(day.day * 86_400), span(day.ms));
             // kept inside the plot at either end
             let half = text.chars().count() as f32 * style::SMALL * 0.3;
             let x = center.clamp(plot.left + half, (plot.left + plot.width - half).max(plot.left + half));
-            frame.fill_text(label(
-                text,
-                Point::new(x, 9.0),
-                iced::widget::text::Alignment::Center,
-                P.fg,
-            ));
-            frame.fill_rectangle(
-                Point::new(center.round(), baseline),
-                Size::new(1.0, 4.0),
-                alpha(P.fg, 0.5),
-            );
+            frame.fill_text(label(text, Point::new(x, 9.0), iced::widget::text::Alignment::Center, P.fg));
+            frame.fill_rectangle(Point::new(center.round(), baseline), Size::new(1.0, 4.0), alpha(P.fg, 0.5));
         }
         vec![frame.into_geometry()]
     }
@@ -315,18 +237,8 @@ mod tests {
             hour(46, 8000),  // day 2 local
             hour(1, 16_000), // before the first day shown
         ];
-        assert_eq!(
-            days(&hours[..4], now, 3, |_| 7200),
-            [
-                Day { day: 0, ms: 1000 },
-                Day { day: 1, ms: 6000 },
-                Day { day: 2, ms: 8000 }
-            ]
-        );
-        assert_eq!(
-            days(&hours, now, 2, |_| 7200),
-            [Day { day: 1, ms: 6000 }, Day { day: 2, ms: 8000 }]
-        );
+        assert_eq!(days(&hours[..4], now, 3, |_| 7200), [Day { day: 0, ms: 1000 }, Day { day: 1, ms: 6000 }, Day { day: 2, ms: 8000 }]);
+        assert_eq!(days(&hours, now, 2, |_| 7200), [Day { day: 1, ms: 6000 }, Day { day: 2, ms: 8000 }]);
     }
 
     /// For looking at: `target/sill-gui-snapshots/running-time-*.png`.
@@ -334,11 +246,7 @@ mod tests {
     #[ignore = "writes a PNG for review; run explicitly"]
     fn the_chart_renders_with_the_demo_month() {
         let hours = demo();
-        let mut ui = iced_test::Simulator::with_size(
-            crate::snapshots::settings(),
-            (680.0, 240.0),
-            container(view(Some(&hours))).style(style::fill(P.surface)),
-        );
+        let mut ui = iced_test::Simulator::with_size(crate::snapshots::settings(), (680.0, 240.0), container(view(Some(&hours))).style(style::fill(P.surface)));
         ui.point_at(Point::new(400.0, 120.0));
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/sill-gui-snapshots");
         std::fs::create_dir_all(&dir).unwrap();

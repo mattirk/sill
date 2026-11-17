@@ -43,13 +43,20 @@ pub fn scan(layers: &[Layer], opts: &ScanOptions) -> Result<Vec<Change>> {
     }
     // Mount setup can create parents for absent masked targets. Hide an added
     // parent only when it contains no reportable change after applying skips.
-    let empty_mount_parents: Vec<PathBuf> = out.iter().filter(|c| {
-        c.kind == Kind::Added && c.file_type == FileType::Dir
-            && opts.skip.iter().any(|s| s.starts_with(&c.path))
-            && !out.iter().any(|child| child.path != c.path && child.path.starts_with(&c.path)
-                && !(child.kind == Kind::Added && child.file_type == FileType::Dir
-                    && opts.skip.iter().any(|s| s.starts_with(&child.path))))
-    }).map(|c| c.path.clone()).collect();
+    let empty_mount_parents: Vec<PathBuf> = out
+        .iter()
+        .filter(|c| {
+            c.kind == Kind::Added
+                && c.file_type == FileType::Dir
+                && opts.skip.iter().any(|s| s.starts_with(&c.path))
+                && !out.iter().any(|child| {
+                    child.path != c.path
+                        && child.path.starts_with(&c.path)
+                        && !(child.kind == Kind::Added && child.file_type == FileType::Dir && opts.skip.iter().any(|s| s.starts_with(&child.path)))
+                })
+        })
+        .map(|c| c.path.clone())
+        .collect();
     out.retain(|c| !empty_mount_parents.contains(&c.path));
     out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
@@ -99,15 +106,7 @@ fn walk(upper_root: &Path, host_root: &Path, dir: &Path, opts: &ScanOptions, out
             // whiteout: a deletion of something on the host; a file created and deleted in-session
             // leaves no whiteout (overlay removes the upper entry) — if it exists, the host had it
             if let Some(h) = host_md {
-                out.push(Change {
-                    path: host,
-                    upper,
-                    kind: Kind::Deleted,
-                    file_type: file_type_of(&h.file_type()),
-                    size: h.len(),
-                    conflict,
-                    ignored,
-                });
+                out.push(Change { path: host, upper, kind: Kind::Deleted, file_type: file_type_of(&h.file_type()), size: h.len(), conflict, ignored });
             }
             continue;
         }
@@ -116,15 +115,9 @@ fn walk(upper_root: &Path, host_root: &Path, dir: &Path, opts: &ScanOptions, out
             let opaque = is_opaque(&upper);
             match &host_md {
                 Some(h) if h.is_dir() && !opaque => {} // copy-up container, nothing to report itself
-                Some(h) if h.is_dir() => out.push(Change {
-                    path: host.clone(),
-                    upper: upper.clone(),
-                    kind: Kind::Replaced,
-                    file_type: FileType::Dir,
-                    size: 0,
-                    conflict,
-                    ignored,
-                }),
+                Some(h) if h.is_dir() => {
+                    out.push(Change { path: host.clone(), upper: upper.clone(), kind: Kind::Replaced, file_type: FileType::Dir, size: 0, conflict, ignored })
+                }
                 Some(h) => out.push(Change {
                     path: host.clone(),
                     upper: upper.clone(),
@@ -134,15 +127,7 @@ fn walk(upper_root: &Path, host_root: &Path, dir: &Path, opts: &ScanOptions, out
                     conflict,
                     ignored,
                 }),
-                None => out.push(Change {
-                    path: host.clone(),
-                    upper: upper.clone(),
-                    kind: Kind::Added,
-                    file_type: FileType::Dir,
-                    size: 0,
-                    conflict,
-                    ignored,
-                }),
+                None => out.push(Change { path: host.clone(), upper: upper.clone(), kind: Kind::Added, file_type: FileType::Dir, size: 0, conflict, ignored }),
             }
             // below an opaque or new dir the host counterpart doesn't apply: compare against nothing
             if opaque || !host_md.as_ref().map(|h| h.is_dir()).unwrap_or(false) {
@@ -257,7 +242,6 @@ fn same_content(a: &Path, am: &std::fs::Metadata, b: &Path, bm: &std::fs::Metada
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

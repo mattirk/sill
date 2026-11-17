@@ -37,22 +37,16 @@ pub fn attached() -> bool {
 /// A request to the Mac for `session` under Host control `generation`: the reply, and the
 /// picture's bytes when there is one.
 pub fn request(session: &str, generation: u64, op: &str, args: &Value) -> Result<(Value, Option<Vec<u8>>)> {
-    let token = std::fs::read_to_string(token_path()?)
-        .context("no Mac attached: this daemon does not run in Sill.app's VM")?;
+    let token = std::fs::read_to_string(token_path()?).context("no Mac attached: this daemon does not run in Sill.app's VM")?;
     let stream = connect().context("Sill.app on the Mac does not answer")?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut writer = stream.try_clone()?;
-    writeln!(
-        writer,
-        "{}",
-        json!({"token": token.trim(), "session": session, "generation": generation, "op": op, "args": args})
-    )?;
+    writeln!(writer, "{}", json!({"token": token.trim(), "session": session, "generation": generation, "op": op, "args": args}))?;
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line)?;
-    let reply: Value = serde_json::from_str(&line)
-        .context("the Mac's reply was cut off; the outcome is unknown, do not replay automatically")?;
+    let reply: Value = serde_json::from_str(&line).context("the Mac's reply was cut off; the outcome is unknown, do not replay automatically")?;
     if let Some(error) = reply.get("error").and_then(Value::as_str) {
         bail!("{error}");
     }
@@ -81,11 +75,7 @@ fn connect() -> Result<UnixStream> {
         address.svm_family = libc::AF_VSOCK as libc::sa_family_t;
         address.svm_cid = HOST_CID;
         address.svm_port = PORT;
-        let connected = libc::connect(
-            fd,
-            (&address as *const libc::sockaddr_vm).cast(),
-            std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
-        );
+        let connected = libc::connect(fd, (&address as *const libc::sockaddr_vm).cast(), std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t);
         if connected != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
@@ -267,14 +257,7 @@ mod tests {
         for ok in [json!({"list":"displays"}), json!({"list":"windows"}), json!({"display":1}), json!({"window":4242})] {
             assert!(super::check_view(&ok).is_ok(), "{ok}");
         }
-        for bad in [
-            json!({}),
-            json!({"list":"files"}),
-            json!({"display":"main"}),
-            json!({"display":1,"window":2}),
-            json!({"path":"/etc/passwd"}),
-            json!([1]),
-        ] {
+        for bad in [json!({}), json!({"list":"files"}), json!({"display":"main"}), json!({"display":1,"window":2}), json!({"path":"/etc/passwd"}), json!([1])] {
             assert!(super::check_view(&bad).is_err(), "{bad}");
         }
     }

@@ -7,11 +7,7 @@ use objc2::runtime::AnyObject;
 
 /// The frame's settings as the window is made: sill's content fills the whole window.
 pub fn platform_specific() -> iced::window::settings::PlatformSpecific {
-    iced::window::settings::PlatformSpecific {
-        title_hidden: true,
-        titlebar_transparent: true,
-        fullsize_content_view: true,
-    }
+    iced::window::settings::PlatformSpecific { title_hidden: true, titlebar_transparent: true, fullsize_content_view: true }
 }
 
 /// Once the window exists (on the main thread, where iced's window tasks run): hide the system's
@@ -34,8 +30,7 @@ pub fn dress(window: &dyn iced::window::Window) {
                 let () = msg_send![button, setHidden: true];
             }
         }
-        let name: *mut AnyObject =
-            msg_send![objc2::class!(NSString), stringWithUTF8String: c"sill".as_ptr()];
+        let name: *mut AnyObject = msg_send![objc2::class!(NSString), stringWithUTF8String: c"sill".as_ptr()];
         if !name.is_null() {
             let _: bool = msg_send![ns_window, setFrameAutosaveName: name];
         }

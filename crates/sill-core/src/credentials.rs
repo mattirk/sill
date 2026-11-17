@@ -21,19 +21,38 @@ pub struct Rules {
     selection: Option<Selection>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct Selection { credential: String, config: String, pointer: String, value: serde_json::Value }
+struct Selection {
+    credential: String,
+    config: String,
+    pointer: String,
+    value: serde_json::Value,
+}
 impl Rules {
     pub fn for_agent(agent: &Agent) -> Result<Self> {
         agent.validate()?;
         let files = files(agent, Path::new(""))?;
         let selection = match agent.id.as_str() {
-            "gemini" => Some(Selection { credential: ".gemini/oauth_creds.json".into(), config: ".gemini/settings.json".into(), pointer: "/security/auth/selectedType".into(), value: serde_json::json!("oauth-personal") }),
-            "claude" => Some(Selection { credential: ".claude/.credentials.json".into(), config: ".claude.json".into(), pointer: "/hasCompletedOnboarding".into(), value: serde_json::json!(true) }),
+            "gemini" => Some(Selection {
+                credential: ".gemini/oauth_creds.json".into(),
+                config: ".gemini/settings.json".into(),
+                pointer: "/security/auth/selectedType".into(),
+                value: serde_json::json!("oauth-personal"),
+            }),
+            "claude" => Some(Selection {
+                credential: ".claude/.credentials.json".into(),
+                config: ".claude.json".into(),
+                pointer: "/hasCompletedOnboarding".into(),
+                value: serde_json::json!(true),
+            }),
             _ => None,
-        }.filter(|s| files.contains(&PathBuf::from(&s.credential)) && agent.home_paths.iter().flatten().any(|p| {
-            let root = Path::new(p.path.trim_start_matches("~/"));
-            Path::new(&s.config) == root || (p.kind == crate::agents::HomePathKind::Directory && Path::new(&s.config).starts_with(root))
-        }));
+        }
+        .filter(|s| {
+            files.contains(&PathBuf::from(&s.credential))
+                && agent.home_paths.iter().flatten().any(|p| {
+                    let root = Path::new(p.path.trim_start_matches("~/"));
+                    Path::new(&s.config) == root || (p.kind == crate::agents::HomePathKind::Directory && Path::new(&s.config).starts_with(root))
+                })
+        });
         Ok(Self { files, selection })
     }
 }
@@ -68,10 +87,7 @@ fn auth_selection(rules: &Rules, root: &Path) -> Result<()> {
     }
     if pointer == "/security/auth/selectedType" {
         for pointer in ["/security", "/security/auth"] {
-            if config_value
-                .pointer(pointer)
-                .is_some_and(|v| !v.is_object() && !v.is_null())
-            {
+            if config_value.pointer(pointer).is_some_and(|v| !v.is_object() && !v.is_null()) {
                 bail!("login settings contain a non-object at {pointer}");
             }
         }
@@ -81,11 +97,7 @@ fn auth_selection(rules: &Rules, root: &Path) -> Result<()> {
     } else {
         config_value["hasCompletedOnboarding"] = value.clone();
     }
-    safe_fs::replace_private_beneath(
-        root,
-        Path::new(config),
-        &serde_json::to_vec_pretty(&config_value)?,
-    )
+    safe_fs::replace_private_beneath(root, Path::new(config), &serde_json::to_vec_pretty(&config_value)?)
 }
 
 fn fingerprint(bytes: &Option<Vec<u8>>) -> Option<[u8; 32]> {
@@ -103,14 +115,8 @@ impl Sync {
     /// the login. Simultaneous independent updates use mtime, then canonical-home order.
     pub fn reconcile(&mut self, rules: &Rules, base: &Path, ghosts: &[PathBuf]) -> Result<()> {
         use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(base)?;
-        let roots: Vec<&Path> = std::iter::once(base)
-            .chain(ghosts.iter().map(PathBuf::as_path))
-            .filter(|p| p.is_dir())
-            .collect();
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(base)?;
+        let roots: Vec<&Path> = std::iter::once(base).chain(ghosts.iter().map(PathBuf::as_path)).filter(|p| p.is_dir()).collect();
         let paths = rules.files.iter().cloned();
         for rel in paths {
             let mut values = Vec::new();
@@ -129,28 +135,17 @@ impl Sync {
                 }
                 let previous = self.seen.get(&key);
                 let changed = previous.is_some_and(|old| old != &fingerprint);
-                let time = std::fs::symlink_metadata(&key)
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::UNIX_EPOCH);
+                let time = std::fs::symlink_metadata(&key).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
                 values.push((key, value, changed, time));
             }
             let bootstrapping = !values.iter().any(|v| self.seen.contains_key(&v.0));
-            let winner = values
-                .iter()
-                .enumerate()
-                .filter(|(_, v)| v.2)
-                .max_by_key(|(i, v)| (v.3, std::cmp::Reverse(*i)))
-                .or_else(|| {
-                    if bootstrapping {
-                        values
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, v)| v.1.is_some())
-                            .max_by_key(|(i, v)| (v.3, std::cmp::Reverse(*i)))
-                    } else {
-                        values.iter().enumerate().find(|(_, v)| v.1.is_some())
-                    }
-                });
+            let winner = values.iter().enumerate().filter(|(_, v)| v.2).max_by_key(|(i, v)| (v.3, std::cmp::Reverse(*i))).or_else(|| {
+                if bootstrapping {
+                    values.iter().enumerate().filter(|(_, v)| v.1.is_some()).max_by_key(|(i, v)| (v.3, std::cmp::Reverse(*i)))
+                } else {
+                    values.iter().enumerate().find(|(_, v)| v.1.is_some())
+                }
+            });
             let Some((_, winner)) = winner else { continue };
             let wanted = winner.1.clone();
             for (root, (key, value, _, _)) in roots.iter().zip(values) {
@@ -184,50 +179,32 @@ mod tests {
     }
     impl Fixture {
         fn new(tag: &str) -> Self {
-            let dir =
-                std::env::temp_dir().join(format!("sill-credentials-{tag}-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("sill-credentials-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             let base = dir.join("base");
             let ghosts = vec![dir.join("ghost-one"), dir.join("ghost-two")];
             for root in std::iter::once(&base).chain(&ghosts) {
                 std::fs::create_dir_all(root).unwrap();
             }
-            let agent = crate::agents::builtin()
-                .into_iter()
-                .find(|a| a.id == "codex")
-                .unwrap();
-            Self {
-                dir,
-                agent,
-                base,
-                ghosts,
-            }
+            let agent = crate::agents::builtin().into_iter().find(|a| a.id == "codex").unwrap();
+            Self { dir, agent, base, ghosts }
         }
         fn put(&self, root: &Path, path: &str, bytes: &[u8]) {
             let bytes = if path.ends_with("auth.json") {
-                serde_json::to_vec(
-                    &serde_json::json!({"credential": String::from_utf8_lossy(bytes)}),
-                )
-                .unwrap()
+                serde_json::to_vec(&serde_json::json!({"credential": String::from_utf8_lossy(bytes)})).unwrap()
             } else {
                 bytes.to_vec()
             };
             safe_fs::replace_private_beneath(root, Path::new(path), &bytes).unwrap();
         }
         fn read(&self, root: &Path, path: &str) -> Option<Vec<u8>> {
-            safe_fs::read_file_beneath(root, Path::new(path), LIMIT)
-                .unwrap()
-                .map(|bytes| {
-                    if path.ends_with("auth.json") {
-                        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["credential"]
-                            .as_str()
-                            .unwrap()
-                            .as_bytes()
-                            .to_vec()
-                    } else {
-                        bytes
-                    }
-                })
+            safe_fs::read_file_beneath(root, Path::new(path), LIMIT).unwrap().map(|bytes| {
+                if path.ends_with("auth.json") {
+                    serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["credential"].as_str().unwrap().as_bytes().to_vec()
+                } else {
+                    bytes
+                }
+            })
         }
     }
     impl Drop for Fixture {
@@ -239,31 +216,13 @@ mod tests {
     #[test]
     fn ghost_seed_contains_credentials_only_and_no_links_or_settings() {
         let f = Fixture::new("seed");
-        for path in [
-            ".codex/auth.json",
-            ".codex/config.toml",
-            ".codex/sessions/old.json",
-            ".codex/skills/x",
-            ".claude.json",
-        ] {
+        for path in [".codex/auth.json", ".codex/config.toml", ".codex/sessions/old.json", ".codex/skills/x", ".claude.json"] {
             f.put(&f.base, path, b"private");
         }
         seed(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts[0]).unwrap();
-        assert_eq!(
-            f.read(&f.ghosts[0], ".codex/auth.json"),
-            Some(b"private".to_vec())
-        );
-        for path in [
-            ".codex/config.toml",
-            ".codex/sessions/old.json",
-            ".codex/skills/x",
-            ".claude.json",
-        ] {
-            assert_eq!(
-                f.read(&f.ghosts[0], path),
-                None,
-                "{path} escaped the boundary"
-            );
+        assert_eq!(f.read(&f.ghosts[0], ".codex/auth.json"), Some(b"private".to_vec()));
+        for path in [".codex/config.toml", ".codex/sessions/old.json", ".codex/skills/x", ".claude.json"] {
+            assert_eq!(f.read(&f.ghosts[0], path), None, "{path} escaped the boundary");
         }
         std::fs::remove_file(f.base.join(".codex/auth.json")).unwrap();
         std::os::unix::fs::symlink(f.dir.join("outside"), f.base.join(".codex/auth.json")).unwrap();
@@ -279,28 +238,18 @@ mod tests {
         f.put(&f.ghosts[0], ".codex/config.toml", b"ghost-only");
         sync.reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).unwrap();
         for root in [&f.base, &f.ghosts[1]] {
-            assert_eq!(
-                f.read(root, ".codex/auth.json"),
-                Some(b"first login".to_vec())
-            );
+            assert_eq!(f.read(root, ".codex/auth.json"), Some(b"first login".to_vec()));
             assert_eq!(f.read(root, ".codex/config.toml"), None);
         }
         // Replacing the inode is how token refresh libraries commonly save their credentials.
         f.put(&f.ghosts[1], ".codex/auth.json", b"refreshed");
         sync.reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).unwrap();
         for root in [&f.base, &f.ghosts[0]] {
-            assert_eq!(
-                f.read(root, ".codex/auth.json"),
-                Some(b"refreshed".to_vec())
-            );
+            assert_eq!(f.read(root, ".codex/auth.json"), Some(b"refreshed".to_vec()));
         }
         std::fs::remove_file(f.ghosts[0].join(".codex/auth.json")).unwrap();
         sync.reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).unwrap();
-        assert_eq!(
-            f.read(&f.base, ".codex/auth.json"),
-            None,
-            "logout must propagate too"
-        );
+        assert_eq!(f.read(&f.base, ".codex/auth.json"), None, "logout must propagate too");
         assert_eq!(f.read(&f.ghosts[1], ".codex/auth.json"), None);
     }
 
@@ -314,14 +263,8 @@ mod tests {
         f.put(&f.base, ".local/share/custom/settings.json", b"hooks");
         let mut sync = Sync::default();
         sync.reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).unwrap();
-        assert_eq!(
-            f.read(&f.ghosts[0], ".local/share/custom/auth.json"),
-            Some(b"login".to_vec())
-        );
-        assert_eq!(
-            f.read(&f.ghosts[0], ".local/share/custom/settings.json"),
-            None
-        );
+        assert_eq!(f.read(&f.ghosts[0], ".local/share/custom/auth.json"), Some(b"login".to_vec()));
+        assert_eq!(f.read(&f.ghosts[0], ".local/share/custom/settings.json"), None);
         let outside = f.dir.join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::remove_dir_all(f.ghosts[1].join(".local")).unwrap();
@@ -344,71 +287,37 @@ mod tests {
         let mut sync = Sync::default();
         f.put(&f.base, ".codex/auth.json", b"good");
         sync.reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).unwrap();
-        safe_fs::write_file_beneath(&f.ghosts[0], Path::new(".codex/auth.json"), b"{", 0o600)
-            .unwrap();
+        safe_fs::write_file_beneath(&f.ghosts[0], Path::new(".codex/auth.json"), b"{", 0o600).unwrap();
         assert!(sync.reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).is_err());
         assert_eq!(f.read(&f.base, ".codex/auth.json"), Some(b"good".to_vec()));
         f.put(&f.ghosts[0], ".codex/auth.json", b"completed");
         sync.reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).unwrap();
-        assert_eq!(
-            f.read(&f.base, ".codex/auth.json"),
-            Some(b"completed".to_vec())
-        );
+        assert_eq!(f.read(&f.base, ".codex/auth.json"), Some(b"completed".to_vec()));
     }
 
     #[test]
     fn daemon_restart_recovers_a_refresh_from_the_newest_private_file() {
         let f = Fixture::new("restart");
         f.put(&f.base, ".codex/auth.json", b"old");
-        Sync::default()
-            .reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts)
-            .unwrap();
+        Sync::default().reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).unwrap();
         f.put(&f.ghosts[0], ".codex/auth.json", b"refreshed");
         let file = std::fs::File::open(f.ghosts[0].join(".codex/auth.json")).unwrap();
-        file.set_times(
-            std::fs::FileTimes::new()
-                .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2)),
-        )
-        .unwrap();
-        Sync::default()
-            .reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts)
-            .unwrap();
-        assert_eq!(
-            f.read(&f.base, ".codex/auth.json"),
-            Some(b"refreshed".to_vec())
-        );
+        file.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2))).unwrap();
+        Sync::default().reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).unwrap();
+        assert_eq!(f.read(&f.base, ".codex/auth.json"), Some(b"refreshed".to_vec()));
     }
 
     #[test]
     fn gemini_auth_selection_does_not_import_mcp_settings() {
         let mut f = Fixture::new("selection");
-        f.agent = crate::agents::builtin()
-            .into_iter()
-            .find(|a| a.id == "gemini")
-            .unwrap();
-        f.put(
-            &f.base,
-            ".gemini/oauth_creds.json",
-            br#"{"refresh_token":"test"}"#,
-        );
-        f.put(
-            &f.base,
-            ".gemini/settings.json",
-            br#"{"mcpServers":{"host-only":{"command":"bad"}}}"#,
-        );
+        f.agent = crate::agents::builtin().into_iter().find(|a| a.id == "gemini").unwrap();
+        f.put(&f.base, ".gemini/oauth_creds.json", br#"{"refresh_token":"test"}"#);
+        f.put(&f.base, ".gemini/settings.json", br#"{"mcpServers":{"host-only":{"command":"bad"}}}"#);
         seed(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts[0]).unwrap();
-        let settings: serde_json::Value =
-            serde_json::from_slice(&f.read(&f.ghosts[0], ".gemini/settings.json").unwrap())
-                .unwrap();
-        assert_eq!(
-            settings,
-            serde_json::json!({"security":{"auth":{"selectedType":"oauth-personal"}}})
-        );
-        Sync::default()
-            .reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts)
-            .unwrap();
-        let settings: serde_json::Value =
-            serde_json::from_slice(&f.read(&f.base, ".gemini/settings.json").unwrap()).unwrap();
+        let settings: serde_json::Value = serde_json::from_slice(&f.read(&f.ghosts[0], ".gemini/settings.json").unwrap()).unwrap();
+        assert_eq!(settings, serde_json::json!({"security":{"auth":{"selectedType":"oauth-personal"}}}));
+        Sync::default().reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).unwrap();
+        let settings: serde_json::Value = serde_json::from_slice(&f.read(&f.base, ".gemini/settings.json").unwrap()).unwrap();
         assert_eq!(settings["mcpServers"]["host-only"]["command"], "bad");
     }
 }

@@ -34,19 +34,9 @@ fn item(line: &str) -> Option<Item<'_>> {
         (digits + 2, format!("{}{}", number + 1, &rest[..2]))
     };
     let rest = &body[marker..];
-    let checkbox = ["[ ] ", "[x] ", "[X] "].iter().any(|b| rest.starts_with(b))
-        || matches!(rest, "[ ]" | "[x]" | "[X]");
-    let (text, next) = if checkbox {
-        ((marker + 4).min(body.len()), next + "[ ] ")
-    } else {
-        (marker, next)
-    };
-    Some(Item {
-        indent,
-        marker: indent.len() + marker,
-        text: indent.len() + text,
-        next,
-    })
+    let checkbox = ["[ ] ", "[x] ", "[X] "].iter().any(|b| rest.starts_with(b)) || matches!(rest, "[ ]" | "[x]" | "[X]");
+    let (text, next) = if checkbox { ((marker + 4).min(body.len()), next + "[ ] ") } else { (marker, next) };
+    Some(Item { indent, marker: indent.len() + marker, text: indent.len() + text, next })
 }
 
 fn line(content: &Content, index: usize) -> String {
@@ -54,10 +44,7 @@ fn line(content: &Content, index: usize) -> String {
 }
 
 fn replace_lines(content: &mut Content, first: usize, last: usize, text: String) {
-    content.move_to(Cursor {
-        position: Position { line: first, column: 0 },
-        selection: Some(Position { line: last, column: line(content, last).len() }),
-    });
+    content.move_to(Cursor { position: Position { line: first, column: 0 }, selection: Some(Position { line: last, column: line(content, last).len() }) });
     if text.is_empty() {
         content.perform(Action::Edit(Edit::Backspace));
     } else {
@@ -70,9 +57,7 @@ fn replace_lines(content: &mut Content, first: usize, last: usize, text: String)
 pub fn newline(content: &mut Content) {
     let cursor = content.cursor();
     let text = line(content, cursor.position.line);
-    let Some(item) = item(&text).filter(|item| {
-        cursor.selection.is_none() && cursor.position.column >= item.text
-    }) else {
+    let Some(item) = item(&text).filter(|item| cursor.selection.is_none() && cursor.position.column >= item.text) else {
         content.perform(Action::Edit(Edit::Enter));
         return;
     };
@@ -90,10 +75,7 @@ pub fn newline(content: &mut Content) {
 pub fn indent(content: &mut Content, outdent: bool) -> bool {
     let cursor = content.cursor();
     let anchor = cursor.selection.unwrap_or(cursor.position);
-    let (first, last) = (
-        cursor.position.line.min(anchor.line),
-        cursor.position.line.max(anchor.line),
-    );
+    let (first, last) = (cursor.position.line.min(anchor.line), cursor.position.line.max(anchor.line));
     if first == last && item(&line(content, first)).is_none() {
         return false;
     }
@@ -118,16 +100,10 @@ pub fn indent(content: &mut Content, outdent: bool) -> bool {
         return true;
     }
     replace_lines(content, first, last, lines.join("\n"));
-    let moved = |position: Position| Position {
-        line: position.line,
-        column: position.column.saturating_add_signed(shifts[position.line - first]),
-    };
+    let moved = |position: Position| Position { line: position.line, column: position.column.saturating_add_signed(shifts[position.line - first]) };
     // a selection is put back from its anchor, as `move_to` leaves the cursor at its end
     match cursor.selection {
-        Some(selection) => content.move_to(Cursor {
-            position: moved(selection),
-            selection: Some(moved(cursor.position)),
-        }),
+        Some(selection) => content.move_to(Cursor { position: moved(selection), selection: Some(moved(cursor.position)) }),
         None => content.move_to(Cursor { position: moved(cursor.position), selection: None }),
     }
     true
@@ -232,8 +208,7 @@ impl Highlighter for Marks {
             if item.text > item.marker {
                 spans.push((item.marker..item.marker + 3, dim));
                 // a ticked item is done with: all of it steps back
-                if line[item.marker..].starts_with(['[']) && !line[item.marker..].starts_with("[ ]")
-                {
+                if line[item.marker..].starts_with(['[']) && !line[item.marker..].starts_with("[ ]") {
                     if item.text < line.len() {
                         spans.push((item.text..line.len(), dim));
                     }
@@ -286,12 +261,7 @@ mod tests {
 
     #[test]
     fn a_new_line_on_an_empty_item_ends_the_list() {
-        for (before, after) in [
-            ("- one\n- ", "- one\n"),
-            ("1. one\n2. ", "1. one\n"),
-            ("- [ ] one\n- [ ] ", "- [ ] one\n"),
-            ("- ", ""),
-        ] {
+        for (before, after) in [("- one\n- ", "- one\n"), ("1. one\n2. ", "1. one\n"), ("- [ ] one\n- [ ] ", "- [ ] one\n"), ("- ", "")] {
             let mut content = at_end(before);
             newline(&mut content);
             assert_eq!(content.text(), after, "{before:?}");
@@ -336,10 +306,7 @@ mod tests {
         assert_eq!(content.cursor().position, Position { line: 0, column: 6 });
 
         let mut content = Content::with_text("a\n\n b\n\tc\nlast");
-        content.move_to(Cursor {
-            position: Position { line: 0, column: 1 },
-            selection: Some(Position { line: 3, column: 2 }),
-        });
+        content.move_to(Cursor { position: Position { line: 0, column: 1 }, selection: Some(Position { line: 3, column: 2 }) });
         assert!(indent(&mut content, false));
         assert_eq!(content.text(), "  a\n\n   b\n  \tc\nlast");
         assert_eq!(content.selection().as_deref(), Some("\n\n   b\n  \tc"));
@@ -359,12 +326,7 @@ mod tests {
         let Colours { marker, dim, code } = colours();
         assert_eq!(
             marks("- one `code` two\n  12. [x] done `x`\n* [ ] open\nplain ``a ` b`` and `open"),
-            vec![
-                vec![(0..1, marker), (6..12, code)],
-                vec![(2..5, marker), (6..9, dim), (10..18, dim)],
-                vec![(0..1, marker), (2..5, dim)],
-                vec![(6..15, code)],
-            ]
+            vec![vec![(0..1, marker), (6..12, code)], vec![(2..5, marker), (6..9, dim), (10..18, dim)], vec![(0..1, marker), (2..5, dim)], vec![(6..15, code)],]
         );
     }
 

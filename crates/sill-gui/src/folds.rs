@@ -28,11 +28,7 @@ impl Row {
 
 /// The feed's rows over `items`. `purpose` is an item's (`Conversation::purpose`);
 /// `stands_alone` names items that keep their own row.
-pub fn rows<'a>(
-    items: &[&'a Item],
-    purpose: impl Fn(&'a Item) -> Option<&'a str>,
-    stands_alone: impl Fn(&Item) -> bool,
-) -> Vec<Row> {
+pub fn rows<'a>(items: &[&'a Item], purpose: impl Fn(&'a Item) -> Option<&'a str>, stands_alone: impl Fn(&Item) -> bool) -> Vec<Row> {
     // of a Crosscheck fix request only the prompt folds: the turn it starts is the agent's work
     let folded = |item: &'a Item| {
         purpose(item).filter(|why| !stands_alone(item) && !(*why == "commit" && item.kind == "agent") && !(*why == FIX && item.kind != "user"))
@@ -50,11 +46,7 @@ pub fn rows<'a>(
         // the turn's items after it; after a prompt, the turn that prompt started
         while index < items.len() {
             let (last, item) = (items[index - 1], items[index]);
-            let same = if last.kind == "user" {
-                item.kind != "user" && item.turn_id.is_some()
-            } else {
-                item.turn_id.is_some() && item.turn_id == last.turn_id
-            };
+            let same = if last.kind == "user" { item.kind != "user" && item.turn_id.is_some() } else { item.turn_id.is_some() && item.turn_id == last.turn_id };
             if !same || folded(item) != Some(why) {
                 break;
             }
@@ -70,11 +62,7 @@ pub fn rows<'a>(
 
 fn push_plain(rows: &mut Vec<Row>, items: &[&Item], range: Range<usize>, stands_alone: &impl Fn(&Item) -> bool) {
     let offset = range.start;
-    rows.extend(
-        crate::tool_runs::entries(&items[range], stands_alone)
-            .into_iter()
-            .map(|r| Row::Items(r.start + offset..r.end + offset)),
-    );
+    rows.extend(crate::tool_runs::entries(&items[range], stands_alone).into_iter().map(|r| Row::Items(r.start + offset..r.end + offset)));
 }
 
 /// What a fold's line says when it is the folded prompt's own first line: a Crosscheck fix
@@ -165,27 +153,19 @@ mod tests {
 
     #[test]
     fn an_item_with_a_question_breaks_the_fold() {
-        let items = [
-            item("c1", "tool", Some("t"), true),
-            item("c2", "tool", Some("t"), true),
-            item("c3", "agent", Some("t"), false),
-        ];
+        let items = [item("c1", "tool", Some("t"), true), item("c2", "tool", Some("t"), true), item("c3", "agent", Some("t"), false)];
         let refs: Vec<&Item> = items.iter().collect();
         let rows = rows(&refs, |_| Some("commit"), |i| i.item_id == "c2");
-        assert_eq!(
-            rows,
-            vec![
-                Row::Fold(0..1, "commit".into()),
-                Row::Items(1..2),
-                Row::Items(2..3),
-            ]
-        );
+        assert_eq!(rows, vec![Row::Fold(0..1, "commit".into()), Row::Items(1..2), Row::Items(2..3),]);
     }
 
     #[test]
     fn of_a_crosscheck_fix_request_only_the_prompt_folds() {
         let mut prompt = item("p", "user", None, false);
-        prompt.content = vec![serde_json::from_value(serde_json::json!({"block_id": "b", "type": "text", "text": "\nFix the 2 problems codex found\n\nA second opinion…"})).unwrap()];
+        prompt.content = vec![
+            serde_json::from_value(serde_json::json!({"block_id": "b", "type": "text", "text": "\nFix the 2 problems codex found\n\nA second opinion…"}))
+                .unwrap(),
+        ];
         let items = [item("before", "agent", Some("t0"), false), prompt, item("work", "tool", Some("t1"), true), item("answer", "agent", Some("t1"), false)];
         let refs: Vec<&Item> = items.iter().collect();
         let purpose = |i: &Item| match i.item_id.as_str() {

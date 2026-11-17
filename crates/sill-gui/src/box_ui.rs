@@ -85,19 +85,13 @@ impl App {
                 self.box_link.asks.clear();
                 self.box_link.input.clear();
                 if result.is_ok() {
-                    return Task::batch([
-                        self.daemon_event(crate::daemon_ui::Event::Check),
-                        Task::done(Message::Refresh),
-                    ]);
+                    return Task::batch([self.daemon_event(crate::daemon_ui::Event::Check), Task::done(Message::Refresh)]);
                 }
                 Task::none()
             }
             Event::RetryNow(host) => {
                 boxlink::retry_now(&host);
-                Task::batch([
-                    self.daemon_event(crate::daemon_ui::Event::Check),
-                    Task::done(Message::Refresh),
-                ])
+                Task::batch([self.daemon_event(crate::daemon_ui::Event::Check), Task::done(Message::Refresh)])
             }
             Event::Asked(ask) => {
                 let first = self.box_link.asks.is_empty();
@@ -129,12 +123,7 @@ impl App {
 }
 
 fn act<'a>(label: &'a str, message: Option<Message>) -> Element<'a, Message> {
-    keys::press_maybe(
-        iced::widget::button(text(label).size(style::SMALL))
-            .padding([2, 8])
-            .style(style::tinted(P.accent)),
-        message,
-    )
+    keys::press_maybe(iced::widget::button(text(label).size(style::SMALL)).padding([2, 8]).style(style::tinted(P.accent)), message)
 }
 
 /// The window-level band: SSH's question when a sign-in is asking one, else the box's trouble.
@@ -143,20 +132,13 @@ pub fn band(app: &App) -> Option<Element<'_, Message>> {
     let body: Element<'_, Message> = if let Some(ask) = state.asks.front() {
         let prompt = &ask.prompt;
         let question = column![
-            text(format!("SSH asks, to sign in to {}:", prompt.host))
-                .size(style::TINY)
-                .color(P.fg_dim),
+            text(format!("SSH asks, to sign in to {}:", prompt.host)).size(style::TINY).color(P.fg_dim),
             text(prompt.text.trim().to_owned()).size(style::SMALL).color(P.fg),
         ]
         .spacing(2);
         let answer: Element<'_, Message> = match prompt.kind {
             PromptKind::Notice => space().height(0).into(),
-            PromptKind::Confirm => row![
-                act("Yes", Some(Message::Box(Event::Yes))),
-                act("No", Some(Message::Box(Event::Cancel))),
-            ]
-            .spacing(8)
-            .into(),
+            PromptKind::Confirm => row![act("Yes", Some(Message::Box(Event::Yes))), act("No", Some(Message::Box(Event::Cancel))),].spacing(8).into(),
             PromptKind::Secret | PromptKind::Text => row![
                 text_input("", &state.input)
                     .id("box-answer")
@@ -185,43 +167,21 @@ pub fn band(app: &App) -> Option<Element<'_, Message>> {
             format!("Sign in to reconnect to {}", status.host)
         } else {
             match status.retry_in {
-                Some(wait) if !wait.is_zero() => format!(
-                    "Box {} offline — reconnecting in {} s",
-                    status.host,
-                    wait.as_secs().max(1)
-                ),
+                Some(wait) if !wait.is_zero() => format!("Box {} offline — reconnecting in {} s", status.host, wait.as_secs().max(1)),
                 _ => format!("Box {} offline — reconnecting…", status.host),
             }
         };
         let action = if waits_for_person {
-            act(
-                "Sign in",
-                (!state.signing_in && !status.signing_in && !app.demo)
-                    .then(|| Message::Box(Event::SignIn(status.host.clone()))),
-            )
+            act("Sign in", (!state.signing_in && !status.signing_in && !app.demo).then(|| Message::Box(Event::SignIn(status.host.clone()))))
         } else {
             act("Retry now", Some(Message::Box(Event::RetryNow(status.host.clone()))))
         };
-        row![
-            column![
-                text(headline).size(style::SMALL).color(P.error),
-                text(status.detail).size(style::TINY).color(P.fg_dim),
-            ]
-            .spacing(2)
-            .width(Fill),
-            action,
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center)
-        .into()
+        row![column![text(headline).size(style::SMALL).color(P.error), text(status.detail).size(style::TINY).color(P.fg_dim),].spacing(2).width(Fill), action,]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into()
     };
-    Some(
-        container(body)
-            .width(Fill)
-            .padding([6, 10])
-            .style(style::fill(alpha(P.error, 0.12)))
-            .into(),
-    )
+    Some(container(body).width(Fill).padding([6, 10]).style(style::fill(alpha(P.error, 0.12))).into())
 }
 
 #[cfg(test)]

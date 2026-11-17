@@ -25,21 +25,10 @@ fn word(c: char) -> bool {
 
 // The text removed by a deletion, with unchanged prefix and suffix stripped.
 fn removed_word(before: &str, after: &str) -> bool {
-    let prefix: usize = before
-        .chars()
-        .zip(after.chars())
-        .take_while(|(a, b)| a == b)
-        .map(|(c, _)| c.len_utf8())
-        .sum();
+    let prefix: usize = before.chars().zip(after.chars()).take_while(|(a, b)| a == b).map(|(c, _)| c.len_utf8()).sum();
     let before = &before[prefix..];
     let after = &after[prefix..];
-    let suffix: usize = before
-        .chars()
-        .rev()
-        .zip(after.chars().rev())
-        .take_while(|(a, b)| a == b)
-        .map(|(c, _)| c.len_utf8())
-        .sum();
+    let suffix: usize = before.chars().rev().zip(after.chars().rev()).take_while(|(a, b)| a == b).map(|(c, _)| c.len_utf8()).sum();
     let removed = &before[..before.len() - suffix];
     !removed.is_empty() && removed.chars().all(word)
 }
@@ -69,16 +58,10 @@ impl Editor {
         Self::default()
     }
     pub fn with_text(text: &str) -> Self {
-        Self {
-            content: Content::with_text(text),
-            ..Self::default()
-        }
+        Self { content: Content::with_text(text), ..Self::default() }
     }
     fn snapshot(&self) -> Snapshot {
-        Snapshot {
-            text: self.content.text(),
-            cursor: self.content.cursor(),
-        }
+        Snapshot { text: self.content.text(), cursor: self.content.cursor() }
     }
     fn push(history: &mut VecDeque<Snapshot>, snapshot: Snapshot) {
         history.push_back(snapshot);
@@ -111,24 +94,17 @@ impl Editor {
         if let Some(before) = before {
             let after = self.content.text();
             if before.text != after {
-                let kind =
-                    kind.filter(|kind| *kind == Kind::Typing || removed_word(&before.text, &after));
+                let kind = kind.filter(|kind| *kind == Kind::Typing || removed_word(&before.text, &after));
                 let merge = kind.is_some_and(|kind| {
-                    self.group.as_ref().is_some_and(|group| {
-                        group.kind == kind
-                            && group.cursor == before.cursor
-                            && now.saturating_duration_since(group.at) < GROUP_PAUSE
-                    })
+                    self.group
+                        .as_ref()
+                        .is_some_and(|group| group.kind == kind && group.cursor == before.cursor && now.saturating_duration_since(group.at) < GROUP_PAUSE)
                 });
                 if !merge {
                     Self::push(&mut self.undo, before);
                 }
                 self.redo.clear();
-                self.group = kind.map(|kind| Group {
-                    kind,
-                    cursor: self.content.cursor(),
-                    at: now,
-                });
+                self.group = kind.map(|kind| Group { kind, cursor: self.content.cursor(), at: now });
                 return;
             }
         }
@@ -153,11 +129,7 @@ impl Editor {
     }
     pub fn history(&mut self, redo: bool) {
         self.break_group();
-        let snapshot = if redo {
-            self.redo.pop_back()
-        } else {
-            self.undo.pop_back()
-        };
+        let snapshot = if redo { self.redo.pop_back() } else { self.undo.pop_back() };
         if let Some(snapshot) = snapshot {
             let current = self.snapshot();
             Self::push(if redo { &mut self.undo } else { &mut self.redo }, current);
@@ -297,11 +269,7 @@ mod grouping_tests {
                 editor.perform(Action::Move(Motion::DocumentEnd));
             }
             let now = Instant::now();
-            let edit = if backwards {
-                Edit::Backspace
-            } else {
-                Edit::Delete
-            };
+            let edit = if backwards { Edit::Backspace } else { Edit::Delete };
             for _ in 0..3 {
                 editor.perform_at(Action::Edit(edit.clone()), now);
             }

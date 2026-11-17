@@ -23,13 +23,7 @@ fn bullet_items(bullet: &Bullet) -> &[Item] {
 }
 
 impl<'a> Viewer<'a, Message> for SillViewer<'a> {
-    fn image(
-        &self,
-        _settings: Settings,
-        url: &'a Uri,
-        _title: &'a str,
-        _alt: &Text,
-    ) -> Element<'a, Message> {
+    fn image(&self, _settings: Settings, url: &'a Uri, _title: &'a str, _alt: &Text) -> Element<'a, Message> {
         match self.media {
             Some((session, cache)) => crate::media::picture(cache, session, &url.to_string()),
             None => text(url.to_string()).into(),
@@ -40,13 +34,7 @@ impl<'a> Viewer<'a, Message> for SillViewer<'a> {
     }
 
     /// As iced_selection's heading: the level's size, half a line above all but the first.
-    fn heading(
-        &self,
-        settings: Settings,
-        level: &'a HeadingLevel,
-        text: &'a Text,
-        index: usize,
-    ) -> Element<'a, Message> {
+    fn heading(&self, settings: Settings, level: &'a HeadingLevel, text: &'a Text, index: usize) -> Element<'a, Message> {
         let size = match level {
             HeadingLevel::H1 => settings.h1_size,
             HeadingLevel::H2 => settings.h2_size,
@@ -62,19 +50,8 @@ impl<'a> Viewer<'a, Message> for SillViewer<'a> {
                 .size(size)
                 .style(style::selectable_inherited),
         )
-        .id(format!(
-            "{}-heading-{index}",
-            if self.media.is_none() {
-                "markdown"
-            } else {
-                "conversation"
-            }
-        ))
-        .padding(padding::top(if index > 0 {
-            settings.text_size / 2.0
-        } else {
-            Pixels::ZERO
-        }))
+        .id(format!("{}-heading-{index}", if self.media.is_none() { "markdown" } else { "conversation" }))
+        .padding(padding::top(if index > 0 { settings.text_size / 2.0 } else { Pixels::ZERO }))
         .into()
     }
 
@@ -82,43 +59,21 @@ impl<'a> Viewer<'a, Message> for SillViewer<'a> {
     /// so code is set one step down (92 %).
     fn paragraph(&self, settings: Settings, text: &Text) -> Element<'a, Message> {
         let code = Font::with_name(crate::fonts::MONO_FAMILY);
-        let spans: Vec<_> = text
-            .spans(settings.style)
-            .iter()
-            .cloned()
-            .map(|span| {
-                if span.font == Some(code) {
-                    span.size(settings.code_size)
-                } else {
-                    span
-                }
-            })
-            .collect();
-        selection::rich_text(spans)
-            .size(settings.text_size)
-            .on_link_click(Message::Link)
-            .on_link_copy(Message::Copy)
-            .style(style::selectable_inherited)
-            .into()
+        let spans: Vec<_> =
+            text.spans(settings.style).iter().cloned().map(|span| if span.font == Some(code) { span.size(settings.code_size) } else { span }).collect();
+        selection::rich_text(spans).size(settings.text_size).on_link_click(Message::Link).on_link_copy(Message::Copy).style(style::selectable_inherited).into()
     }
 
     /// As iced_selection's list: a bullet (or a task's box) beside each item's blocks.
     fn unordered_list(&self, settings: Settings, bullets: &'a [Bullet]) -> Element<'a, Message> {
         column(bullets.iter().map(|bullet| {
             let marker: Element<'a, Message> = match bullet {
-                Bullet::Point { .. } => selection::text("•")
-                    .size(settings.text_size)
-                    .style(style::selectable_inherited)
-                    .into(),
+                Bullet::Point { .. } => selection::text("•").size(settings.text_size).style(style::selectable_inherited).into(),
                 Bullet::Task { done, .. } => container(checkbox(*done).size(settings.text_size))
-                    .center_y(
-                        iced::widget::text::LineHeight::default().to_absolute(settings.text_size),
-                    )
+                    .center_y(iced::widget::text::LineHeight::default().to_absolute(settings.text_size))
                     .into(),
             };
-            row![marker, self.items(settings, bullet)]
-                .spacing(settings.spacing)
-                .into()
+            row![marker, self.items(settings, bullet)].spacing(settings.spacing).into()
         }))
         .spacing(settings.spacing * 0.75)
         .padding([0.0, settings.spacing.0])
@@ -126,15 +81,8 @@ impl<'a> Viewer<'a, Message> for SillViewer<'a> {
     }
 
     /// As iced_selection's list: right-aligned numbers wide enough for the longest.
-    fn ordered_list(
-        &self,
-        settings: Settings,
-        start: u64,
-        bullets: &'a [Bullet],
-    ) -> Element<'a, Message> {
-        let digits = ((start + bullets.len() as u64).max(1) as f32)
-            .log10()
-            .ceil();
+    fn ordered_list(&self, settings: Settings, start: u64, bullets: &'a [Bullet]) -> Element<'a, Message> {
+        let digits = ((start + bullets.len() as u64).max(1) as f32).log10().ceil();
         column(bullets.iter().enumerate().map(|(i, bullet)| {
             row![
                 selection::text(format!("{}.", i as u64 + start))
@@ -151,13 +99,7 @@ impl<'a> Viewer<'a, Message> for SillViewer<'a> {
         .into()
     }
 
-    fn code_block(
-        &self,
-        settings: Settings,
-        _language: Option<&'a str>,
-        code: &'a str,
-        lines: &'a [Text],
-    ) -> Element<'a, Message> {
+    fn code_block(&self, settings: Settings, _language: Option<&'a str>, code: &'a str, lines: &'a [Text]) -> Element<'a, Message> {
         let body = container(
             scrollable(
                 container(column(lines.iter().map(|line| {
@@ -176,36 +118,21 @@ impl<'a> Viewer<'a, Message> for SillViewer<'a> {
         )
         .width(Fill)
         .style(style::card(P.code_bg));
-        let copy = right(
-            button(text("Copy").size(style::TINY))
-                .padding([2, 8])
-                .style(style::quiet)
-                .on_press_with(move || Message::Copy(code.to_string())),
-        )
-        .padding([4, 6]);
-        container(hover(body, copy))
-            .padding(Padding::from([2.0, 8.0]))
-            .into()
+        let copy = right(button(text("Copy").size(style::TINY)).padding([2, 8]).style(style::quiet).on_press_with(move || Message::Copy(code.to_string())))
+            .padding([4, 6]);
+        container(hover(body, copy)).padding(Padding::from([2.0, 8.0])).into()
     }
 
     /// iced's table, scrolling sideways on the thin bar that hides at rest (iced's own is 10 px
     /// with a visible track). Needs the patched `Row::cells` (vendor/README.md).
-    fn table(
-        &self,
-        settings: Settings,
-        columns: &'a [markdown::Column],
-        rows: &'a [markdown::Row],
-    ) -> Element<'a, Message> {
+    fn table(&self, settings: Settings, columns: &'a [markdown::Column], rows: &'a [markdown::Row]) -> Element<'a, Message> {
         use iced::widget::table;
         let table = table(
             columns.iter().enumerate().map(move |(i, column)| {
-                table::column(
-                    markdown::items(self, settings, &column.header),
-                    move |row: &markdown::Row| match row.cells().get(i) {
-                        Some(cells) => markdown::items(self, settings, cells),
-                        None => text("").into(),
-                    },
-                )
+                table::column(markdown::items(self, settings, &column.header), move |row: &markdown::Row| match row.cells().get(i) {
+                    Some(cells) => markdown::items(self, settings, cells),
+                    None => text("").into(),
+                })
                 // the parser's alignment, by name: iced does not re-export its type
                 .align_x(match format!("{:?}", column.alignment).as_str() {
                     "Center" => alignment::Horizontal::Center,
@@ -218,33 +145,19 @@ impl<'a> Viewer<'a, Message> for SillViewer<'a> {
         .padding_x(settings.spacing.0)
         .padding_y(settings.spacing.0 / 2.0)
         .separator_x(0);
-        scrollable(table)
-            .direction(scrollable::Direction::Horizontal(crate::style::bar()))
-            .spacing(settings.spacing.0 / 2.0)
-            .style(style::feed_scroll)
-            .into()
+        scrollable(table).direction(scrollable::Direction::Horizontal(crate::style::bar())).spacing(settings.spacing.0 / 2.0).style(style::feed_scroll).into()
     }
 }
 
 impl<'a> SillViewer<'a> {
     /// A list item's own blocks, a little closer together than the list's.
     fn items(&self, settings: Settings, bullet: &'a Bullet) -> Element<'a, Message> {
-        markdown::view_with(
-            bullet_items(bullet),
-            Settings {
-                spacing: settings.spacing * 0.6,
-                ..settings
-            },
-            self,
-        )
+        markdown::view_with(bullet_items(bullet), Settings { spacing: settings.spacing * 0.6, ..settings }, self)
     }
 }
 
 fn text_leaf(text: &Text, style: markdown::Style) -> String {
-    text.spans(style)
-        .iter()
-        .map(|span| span.text.as_ref())
-        .collect()
+    text.spans(style).iter().map(|span| span.text.as_ref()).collect()
 }
 
 /// Extracts the flattened text of every [`selection::Selectable`] leaf that [`SillViewer`] builds
@@ -261,10 +174,7 @@ pub fn markdown_leaves(items: &[Item], out: &mut Vec<String>) {
                     out.push(text_leaf(line, style));
                 }
             }
-            Item::List {
-                start: None,
-                bullets,
-            } => {
+            Item::List { start: None, bullets } => {
                 for bullet in bullets {
                     match bullet {
                         Bullet::Point { items } => {
@@ -277,10 +187,7 @@ pub fn markdown_leaves(items: &[Item], out: &mut Vec<String>) {
                     }
                 }
             }
-            Item::List {
-                start: Some(start),
-                bullets,
-            } => {
+            Item::List { start: Some(start), bullets } => {
                 for (i, bullet) in bullets.iter().enumerate() {
                     out.push(format!("{}.", i as u64 + *start));
                     markdown_leaves(bullet_items(bullet), out);

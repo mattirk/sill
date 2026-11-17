@@ -109,7 +109,9 @@ fn hex(digest: &[u8]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub fn sha256_file(path: &Path) -> Result<String> { sha256_reader(std::fs::File::open(path)?) }
+pub fn sha256_file(path: &Path) -> Result<String> {
+    sha256_reader(std::fs::File::open(path)?)
+}
 
 /// Hash a stream with bounded working memory (also supports anonymous snapshot files).
 pub fn sha256_reader(mut f: impl std::io::Read) -> Result<String> {
@@ -495,8 +497,7 @@ mod tests {
     #[test]
     fn legacy_backups_cannot_be_kept_even_before_creation() {
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-        let state = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".local/state"));
+        let state = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/state"));
         assert_eq!(protected(&state.join("sill.bak-20990101/sill.db")), Some("sill's own state"));
         assert_eq!(protected(&state.join("sill/backups/20990101/sill.db")), Some("sill's own state"));
     }

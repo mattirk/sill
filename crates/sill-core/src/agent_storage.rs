@@ -130,11 +130,7 @@ pub fn resolve(
     ghost: bool,
 ) -> Result<Plan> {
     let roots = agent.ready(home)?;
-    let profile = if ghost {
-        crate::session::ghost_agent_home(state_dir, &agent.id)
-    } else {
-        crate::session::agent_home(home, &agent.id)
-    };
+    let profile = if ghost { crate::session::ghost_agent_home(state_dir, &agent.id) } else { crate::session::agent_home(home, &agent.id) };
     let mut plan = Plan {
         profile: HostPath::from_path(&profile),
         ghost,
@@ -143,29 +139,15 @@ pub fn resolve(
         bindings: vec![],
         agent_masks: vec![],
         policy_paths: PolicyPaths::default(),
-        view: FilesystemView {
-            rules: vec![],
-            unused: vec![],
-        },
+        view: FilesystemView { rules: vec![], unused: vec![] },
         workspaces: vec![],
     };
-    plan.rule(
-        home,
-        Some(home),
-        Behavior::Overlay,
-        "policy",
-        "Host files are readable; writes stay in this session except for explicit bindings.",
-    );
+    plan.rule(home, Some(home), Behavior::Overlay, "policy", "Host files are readable; writes stay in this session except for explicit bindings.");
     for entry in roots {
-        let relative =
-            crate::agents::relative_path(entry.path.strip_prefix("~/").context("home path")?)?;
+        let relative = crate::agents::relative_path(entry.path.strip_prefix("~/").context("home path")?)?;
         let target = home.join(&relative);
         let source = profile.join(relative);
-        plan.bindings.push(Binding {
-            source: HostPath::from_path(&source),
-            target: HostPath::from_path(&target),
-            kind: BindingKind::Agent(entry.clone()),
-        });
+        plan.bindings.push(Binding { source: HostPath::from_path(&source), target: HostPath::from_path(&target), kind: BindingKind::Agent(entry.clone()) });
         plan.rule(
             &target,
             Some(&source),
@@ -179,70 +161,47 @@ pub fn resolve(
         );
     }
     for credential in &plan.credentials.files.clone() {
-        plan.rule(&home.join(credential), Some(&profile.join(credential)), Behavior::Credential, "agent: login_files", "Only this declared file may be imported or synchronized between the normal profile and ghosts.");
+        plan.rule(
+            &home.join(credential),
+            Some(&profile.join(credential)),
+            Behavior::Credential,
+            "agent: login_files",
+            "Only this declared file may be imported or synchronized between the normal profile and ghosts.",
+        );
     }
     for other in registry.values() {
         other.validate()?;
         for entry in other.home_paths.as_deref().unwrap_or_default() {
             let path = expand_home(&entry.path, home);
-            if let Some(mask) = plan
-                .agent_masks
-                .iter()
-                .find(|p| p.path == HostPath::from_path(&path))
-            {
-                ensure!(
-                    mask.kind == entry.kind,
-                    "agent definitions disagree about the type of {}",
-                    path.display()
-                );
+            if let Some(mask) = plan.agent_masks.iter().find(|p| p.path == HostPath::from_path(&path)) {
+                ensure!(mask.kind == entry.kind, "agent definitions disagree about the type of {}", path.display());
             } else {
-                plan.agent_masks.push(AgentMask {
-                    path: HostPath::from_path(&path),
-                    kind: entry.kind,
-                });
-                plan.rule(&path, None, Behavior::AgentMask, &format!("agent {}: home_paths", other.id), "Original host agent data is hidden in both views; selected private profile bindings are separate.");
+                plan.agent_masks.push(AgentMask { path: HostPath::from_path(&path), kind: entry.kind });
+                plan.rule(
+                    &path,
+                    None,
+                    Behavior::AgentMask,
+                    &format!("agent {}: home_paths", other.id),
+                    "Original host agent data is hidden in both views; selected private profile bindings are separate.",
+                );
             }
         }
     }
     for pin in pins.iter().filter(|_| !ghost) {
         if pin.is_dir() {
-            plan.bindings.push(Binding {
-                source: HostPath::from_path(pin),
-                target: HostPath::from_path(pin),
-                kind: BindingKind::Pin,
-            });
-            plan.rule(
-                pin,
-                Some(pin),
-                Behavior::Pin,
-                "session pins",
-                "Writes reach the pinned host folder directly.",
-            );
+            plan.bindings.push(Binding { source: HostPath::from_path(pin), target: HostPath::from_path(pin), kind: BindingKind::Pin });
+            plan.rule(pin, Some(pin), Behavior::Pin, "session pins", "Writes reach the pinned host folder directly.");
         }
     }
     for pattern in &policy.paths.private {
         for target in expanded(pattern, home) {
             let source = state_dir.join("private").join(layer_name(&target));
-            plan.bindings.push(Binding {
-                source: HostPath::from_path(&source),
-                target: HostPath::from_path(&target),
-                kind: BindingKind::Private,
-            });
-            plan.rule(
-                &target,
-                Some(&source),
-                Behavior::Private,
-                "policy: paths.private",
-                "Session-private scratch; no host cache import.",
-            );
+            plan.bindings.push(Binding { source: HostPath::from_path(&source), target: HostPath::from_path(&target), kind: BindingKind::Private });
+            plan.rule(&target, Some(&source), Behavior::Private, "policy: paths.private", "Session-private scratch; no host cache import.");
         }
     }
     for pattern in &policy.paths.mask {
-        plan.mask(
-            &crate::paths::mask_root(pattern, home),
-            "policy: paths.mask",
-            "Hidden by the policy in both views.",
-        );
+        plan.mask(&crate::paths::mask_root(pattern, home), "policy: paths.mask", "Hidden by the policy in both views.");
     }
     for pattern in &policy.paths.ro {
         for target in expand_pattern(pattern, home) {
@@ -257,11 +216,7 @@ pub fn resolve(
         }
     }
     for target in crate::paths::sill_own(home)? {
-        plan.mask(
-            &target,
-            "Sill internal storage",
-            "Sill configuration, profiles and daemon records stay hidden.",
-        );
+        plan.mask(&target, "Sill internal storage", "Sill configuration, profiles and daemon records stay hidden.");
     }
     // A private root must never compete with a pin, private scratch, or another declared root.
     for (i, binding) in plan.bindings.iter().enumerate() {
@@ -269,21 +224,14 @@ pub fn resolve(
         for other in &plan.bindings[..i] {
             let parent = other.target.to_path()?;
             ensure!(
-                !(binding.declaration().is_some() || other.declaration().is_some())
-                    || !(target.starts_with(&parent) || parent.starts_with(&target)),
+                !(binding.declaration().is_some() || other.declaration().is_some()) || !(target.starts_with(&parent) || parent.starts_with(&target)),
                 "agent storage conflicts with another binding: {} and {}",
                 target.display(),
                 parent.display()
             );
         }
         if binding.declaration().is_some() {
-            for pattern in policy
-                .paths
-                .mask
-                .iter()
-                .chain(&policy.paths.ro)
-                .chain(&policy.paths.direct)
-            {
+            for pattern in policy.paths.mask.iter().chain(&policy.paths.ro).chain(&policy.paths.direct) {
                 for restricted in expanded(pattern, home) {
                     ensure!(
                         !(target.starts_with(&restricted) || restricted.starts_with(&target)),
@@ -293,7 +241,11 @@ pub fn resolve(
                     );
                 }
             }
-            let restricted_paths = plan.policy_paths.masks.iter().map(|m| (&m.path, Behavior::Mask))
+            let restricted_paths = plan
+                .policy_paths
+                .masks
+                .iter()
+                .map(|m| (&m.path, Behavior::Mask))
                 .chain(plan.policy_paths.read_only.iter().map(|p| (p, Behavior::ReadOnly)))
                 .chain(plan.policy_paths.direct.iter().map(|p| (p, Behavior::Direct)));
             for (path, behavior) in restricted_paths {
@@ -314,37 +266,16 @@ pub fn resolve(
 }
 
 /// A development terminal has no persistent agent state; its explicit binds are still recorded.
-pub fn resolve_development(
-    registry: &BTreeMap<String, Agent>,
-    policy: &Policy,
-    state_dir: &Path,
-    home: &Path,
-    binds: &[(PathBuf, PathBuf)],
-) -> Result<Plan> {
-    let stateless: Agent = toml::from_str(
-        "id = 'sill-development'\nname = 'Development terminal'\ncommand = []\nhome_paths = []",
-    )?;
+pub fn resolve_development(registry: &BTreeMap<String, Agent>, policy: &Policy, state_dir: &Path, home: &Path, binds: &[(PathBuf, PathBuf)]) -> Result<Plan> {
+    let stateless: Agent = toml::from_str("id = 'sill-development'\nname = 'Development terminal'\ncommand = []\nhome_paths = []")?;
     let mut plan = resolve(&stateless, registry, policy, state_dir, home, &[], false)?;
     for (source, target) in binds {
         ensure!(
-            !plan.bindings.iter().any(|b| b
-                .target
-                .to_path()
-                .is_ok_and(|p| p.starts_with(target) || target.starts_with(p))),
+            !plan.bindings.iter().any(|b| b.target.to_path().is_ok_and(|p| p.starts_with(target) || target.starts_with(p))),
             "development binding conflicts with private scratch"
         );
-        plan.bindings.push(Binding {
-            source: HostPath::from_path(source),
-            target: HostPath::from_path(target),
-            kind: BindingKind::Development,
-        });
-        plan.rule(
-            target,
-            Some(source),
-            Behavior::Direct,
-            "development --bind",
-            "Explicit development-jail binding.",
-        );
+        plan.bindings.push(Binding { source: HostPath::from_path(source), target: HostPath::from_path(target), kind: BindingKind::Development });
+        plan.rule(target, Some(source), Behavior::Direct, "development --bind", "Explicit development-jail binding.");
     }
     Ok(plan)
 }
@@ -352,32 +283,19 @@ pub fn resolve_development(
 /// A declared private profile can sit below a wildcard's conservative parent mask.
 /// It contains no host directory contents; literal secret masks still take precedence.
 pub(crate) fn private_under_wildcard_mask(policy: &Policy, home: &Path, target: &Path, mask: &Path) -> bool {
-    target != mask && target.starts_with(mask)
+    target != mask
+        && target.starts_with(mask)
         && policy.paths.mask.iter().any(|p| p.contains(['*', '?', '[']) && crate::paths::mask_root(p, home) == mask)
-        && !policy.paths.mask.iter().flat_map(|p| expanded(p, home))
-            .any(|p| target.starts_with(&p) || p.starts_with(target))
+        && !policy.paths.mask.iter().flat_map(|p| expanded(p, home)).any(|p| target.starts_with(&p) || p.starts_with(target))
 }
 
 fn expanded(pattern: &str, home: &Path) -> Vec<PathBuf> {
-    if pattern.contains(['*', '?', '[']) {
-        expand_pattern(pattern, home)
-    } else {
-        vec![expand_home(pattern, home)]
-    }
+    if pattern.contains(['*', '?', '[']) { expand_pattern(pattern, home) } else { vec![expand_home(pattern, home)] }
 }
 
 fn unused(base: &Path, roots: &[HomePath]) -> Result<Vec<HostPath>> {
-    let declared: Vec<PathBuf> = roots
-        .iter()
-        .map(|r| PathBuf::from(r.path.trim_start_matches("~/")))
-        .collect();
-    fn walk(
-        base: &Path,
-        relative: &Path,
-        declared: &[PathBuf],
-        budget: &mut usize,
-        out: &mut Vec<HostPath>,
-    ) -> Result<()> {
+    let declared: Vec<PathBuf> = roots.iter().map(|r| PathBuf::from(r.path.trim_start_matches("~/"))).collect();
+    fn walk(base: &Path, relative: &Path, declared: &[PathBuf], budget: &mut usize, out: &mut Vec<HostPath>) -> Result<()> {
         let dir = match crate::safe_fs::open_dir_beneath(base, relative, false) {
             Ok(d) => d,
             Err(_) => return Ok(()),
@@ -408,14 +326,7 @@ fn unused(base: &Path, roots: &[HomePath]) -> Result<Vec<HostPath>> {
 }
 
 impl Plan {
-    fn rule(
-        &mut self,
-        target: &Path,
-        backing: Option<&Path>,
-        behavior: Behavior,
-        source: &str,
-        reason: &str,
-    ) {
+    fn rule(&mut self, target: &Path, backing: Option<&Path>, behavior: Behavior, source: &str, reason: &str) {
         self.view.rules.push(PathRule {
             target: HostPath::from_path(target),
             backing: backing.map(HostPath::from_path),
@@ -426,10 +337,9 @@ impl Plan {
     }
     /// A path hidden in both views: enforced through `policy_paths`, shown through the view.
     fn mask(&mut self, target: &Path, source: &str, reason: &str) {
-        self.policy_paths.masks.push(AgentMask {
-            path: HostPath::from_path(target),
-            kind: if target.is_file() { HomePathKind::File } else { HomePathKind::Directory },
-        });
+        self.policy_paths
+            .masks
+            .push(AgentMask { path: HostPath::from_path(target), kind: if target.is_file() { HomePathKind::File } else { HomePathKind::Directory } });
         self.rule(target, None, Behavior::Mask, source, reason);
     }
     /// A workspace session's repositories (§12): a pin at or inside one is not bound — its clone
@@ -452,17 +362,10 @@ impl Plan {
         Ok(())
     }
     pub fn binds(&self) -> Result<Vec<(PathBuf, PathBuf)>> {
-        self.bindings
-            .iter()
-            .map(|b| Ok((b.source.to_path()?, b.target.to_path()?)))
-            .collect()
+        self.bindings.iter().map(|b| Ok((b.source.to_path()?, b.target.to_path()?))).collect()
     }
     pub fn state_paths(&self) -> Result<Vec<PathBuf>> {
-        self.bindings
-            .iter()
-            .filter(|b| b.declaration().is_some())
-            .map(|b| b.target.to_path())
-            .collect()
+        self.bindings.iter().filter(|b| b.declaration().is_some()).map(|b| b.target.to_path()).collect()
     }
     /// Compare enforcement, ignoring the informational inventory of unused files.
     pub fn same_mounts(&self, other: &Self) -> bool {
@@ -479,36 +382,24 @@ impl Plan {
         let profile = self.profile.to_path()?;
         let parent = profile.parent().context("profile parent")?;
         if self.ghost || self.bindings.iter().any(|b| b.declaration().is_some()) {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(parent)?;
+            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(parent)?;
             crate::safe_fs::owned_dir(parent, rustix::process::getuid().as_raw(), false)?;
             crate::safe_fs::owned_dir(&profile, rustix::process::getuid().as_raw(), true)?;
         }
         for binding in &self.bindings {
             let source = binding.source.to_path()?;
             if let BindingKind::Agent(entry) = &binding.kind {
-                let rel = source
-                    .strip_prefix(&profile)
-                    .context("agent source outside its profile")?;
+                let rel = source.strip_prefix(&profile).context("agent source outside its profile")?;
                 match entry.kind {
                     HomePathKind::Directory => {
                         crate::safe_fs::open_dir_beneath(&profile, rel, true)?;
                     }
                     HomePathKind::File => {
-                        crate::safe_fs::initialize_private_beneath(
-                            &profile,
-                            rel,
-                            entry.initial_content.as_deref().unwrap_or("").as_bytes(),
-                        )?;
+                        crate::safe_fs::initialize_private_beneath(&profile, rel, entry.initial_content.as_deref().unwrap_or("").as_bytes())?;
                     }
                 }
             } else if binding.kind == BindingKind::Private {
-                std::fs::DirBuilder::new()
-                    .recursive(true)
-                    .mode(0o700)
-                    .create(&source)?;
+                std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&source)?;
                 crate::safe_fs::owned_dir(&source, rustix::process::getuid().as_raw(), false)?;
             }
         }
@@ -519,13 +410,10 @@ impl Plan {
     }
     pub fn apply(&self, spec: &mut crate::jail::JailSpec) -> Result<()> {
         spec.binds = self.binds()?;
-        spec.workspace_mask = self.workspaces.iter().map(|w| Ok::<_, anyhow::Error>((w.source.to_path()?, w.clone.to_path()?, w.objects.to_path()?))).collect::<Result<_>>()?;
+        spec.workspace_mask =
+            self.workspaces.iter().map(|w| Ok::<_, anyhow::Error>((w.source.to_path()?, w.clone.to_path()?, w.objects.to_path()?))).collect::<Result<_>>()?;
         spec.policy_paths = Some(self.policy_paths.clone());
-        spec.agent_masks = self
-            .agent_masks
-            .iter()
-            .map(|m| Ok((m.path.to_path()?, m.kind)))
-            .collect::<Result<_>>()?;
+        spec.agent_masks = self.agent_masks.iter().map(|m| Ok((m.path.to_path()?, m.kind))).collect::<Result<_>>()?;
         spec.agent_binds = self
             .bindings
             .iter()
@@ -556,38 +444,17 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            assert!(
-                std::env::var_os("XDG_STATE_HOME").is_none(),
-                "run storage tests with XDG_STATE_HOME unset"
-            );
-            let root =
-                std::env::temp_dir().join(format!("sill-storage-{:032x}", rand::random::<u128>()));
+            assert!(std::env::var_os("XDG_STATE_HOME").is_none(), "run storage tests with XDG_STATE_HOME unset");
+            let root = std::env::temp_dir().join(format!("sill-storage-{:032x}", rand::random::<u128>()));
             let home = root.join("home");
             std::fs::create_dir_all(&home).unwrap();
-            Self {
-                state: root.join("state"),
-                root,
-                home,
-                registry: crate::agents::builtin()
-                    .into_iter()
-                    .map(|a| (a.id.clone(), a))
-                    .collect(),
-            }
+            Self { state: root.join("state"), root, home, registry: crate::agents::builtin().into_iter().map(|a| (a.id.clone(), a)).collect() }
         }
         fn plan(&self, id: &str, ghost: bool) -> Plan {
             // These fixtures exercise arbitrary declared roots, including ~/.config.
             let mut policy = Policy::builtin_default();
             policy.paths.mask.retain(|p| !p.contains('*'));
-            resolve(
-                &self.registry[id],
-                &self.registry,
-                &policy,
-                &self.state,
-                &self.home,
-                &[],
-                ghost,
-            )
-            .unwrap()
+            resolve(&self.registry[id], &self.registry, &policy, &self.state, &self.home, &[], ghost).unwrap()
         }
         fn put(&self, path: &Path, bytes: &str) {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -632,34 +499,14 @@ mod tests {
         f.put(&f.home.join(".cargo/new-file"), "a new tool file");
         for (id, before) in [("codex", before_codex), ("claude", before_claude)] {
             let after = f.plan(id, false);
-            assert!(
-                before.same_mounts(&after),
-                "ordinary writes changed {id}'s rules"
-            );
-            assert!(
-                !after
-                    .agent_masks
-                    .iter()
-                    .any(|m| m.path == HostPath::from_path(&f.home.join(".cargo")))
-            );
-            assert!(
-                !after
-                    .binds()
-                    .unwrap()
-                    .iter()
-                    .any(|(_, target)| target == &f.home.join(".cargo"))
-            );
+            assert!(before.same_mounts(&after), "ordinary writes changed {id}'s rules");
+            assert!(!after.agent_masks.iter().any(|m| m.path == HostPath::from_path(&f.home.join(".cargo"))));
+            assert!(!after.binds().unwrap().iter().any(|(_, target)| target == &f.home.join(".cargo")));
             after.prepare().unwrap();
         }
         assert_eq!(std::fs::read_to_string(cargo).unwrap(), "host dependency");
-        assert_eq!(
-            std::fs::read_to_string(&stray).unwrap(),
-            "incidental tool state"
-        );
-        assert_eq!(
-            f.plan("codex", false).view.unused,
-            vec![HostPath::from_path(stray.parent().unwrap())]
-        );
+        assert_eq!(std::fs::read_to_string(&stray).unwrap(), "incidental tool state");
+        assert_eq!(f.plan("codex", false).view.unused, vec![HostPath::from_path(stray.parent().unwrap())]);
     }
 
     #[test]
@@ -669,13 +516,7 @@ mod tests {
         assert!(!f.home.join(".local").exists());
         assert!(!f.state.exists());
         let bytes = serde_json::to_vec(&before).unwrap();
-        f.registry
-            .get_mut("claude")
-            .unwrap()
-            .home_paths
-            .as_mut()
-            .unwrap()
-            .push(HomePath::directory("~/.config/new-agent-path"));
+        f.registry.get_mut("claude").unwrap().home_paths.as_mut().unwrap().push(HomePath::directory("~/.config/new-agent-path"));
         let after = f.plan("claude", false);
         let recorded: Plan = serde_json::from_slice(&bytes).unwrap();
         assert!(recorded.same_mounts(&before));
@@ -687,11 +528,8 @@ mod tests {
     fn nested_roots_keep_full_names_and_existing_files_are_not_initialized_again() {
         let mut f = Fixture::new();
         let a = f.registry.get_mut("codex").unwrap();
-        a.home_paths = Some(vec![
-            HomePath::directory("~/.config/example"),
-            HomePath::directory("~/.local/share/example"),
-            HomePath::file("~/.example.json", "{}"),
-        ]);
+        a.home_paths =
+            Some(vec![HomePath::directory("~/.config/example"), HomePath::directory("~/.local/share/example"), HomePath::file("~/.example.json", "{}")]);
         a.home_env = None;
         a.login_files.clear();
         let plan = f.plan("codex", false);
@@ -703,14 +541,8 @@ mod tests {
         assert!(!profile.join("example").exists());
         f.put(&profile.join(".example.json"), "saved settings");
         plan.prepare().unwrap();
-        assert_eq!(
-            std::fs::read_to_string(profile.join(".example.json")).unwrap(),
-            "saved settings"
-        );
-        assert_eq!(
-            std::fs::read_to_string(f.home.join(".config/sibling/config")).unwrap(),
-            "host sibling"
-        );
+        assert_eq!(std::fs::read_to_string(profile.join(".example.json")).unwrap(), "saved settings");
+        assert_eq!(std::fs::read_to_string(f.home.join(".config/sibling/config")).unwrap(), "host sibling");
     }
 
     #[test]
@@ -720,34 +552,11 @@ mod tests {
         a.home_paths = None;
         a.login_files.clear();
         a.home_env = None;
-        let error = resolve(
-            a,
-            &BTreeMap::new(),
-            &Policy::builtin_default(),
-            &f.state,
-            &f.home,
-            &[],
-            false,
-        )
-        .unwrap_err();
+        let error = resolve(a, &BTreeMap::new(), &Policy::builtin_default(), &f.state, &f.home, &[], false).unwrap_err();
         assert!(error.to_string().contains("needs directory setup"));
         assert!(!f.home.join(".local").exists());
         a.home_paths = Some(vec![]);
-        assert!(
-            resolve(
-                a,
-                &BTreeMap::new(),
-                &Policy::builtin_default(),
-                &f.state,
-                &f.home,
-                &[],
-                false
-            )
-            .unwrap()
-            .state_paths()
-            .unwrap()
-            .is_empty()
-        );
+        assert!(resolve(a, &BTreeMap::new(), &Policy::builtin_default(), &f.state, &f.home, &[], false).unwrap().state_paths().unwrap().is_empty());
     }
 
     #[test]
@@ -763,16 +572,7 @@ mod tests {
         assert!(private.join(".codex/auth.json").is_file());
         assert!(!private.join(".codex/config.toml").exists());
         assert!(!private.join(".codex/sessions").exists());
-        let next = resolve(
-            &f.registry["codex"],
-            &f.registry,
-            &Policy::builtin_default(),
-            &f.root.join("other-session"),
-            &f.home,
-            &[],
-            false,
-        )
-        .unwrap();
+        let next = resolve(&f.registry["codex"], &f.registry, &Policy::builtin_default(), &f.root.join("other-session"), &f.home, &[], false).unwrap();
         assert_eq!(f.plan("codex", false).profile, next.profile);
     }
 
@@ -789,18 +589,7 @@ mod tests {
         std::fs::remove_file(profile.join(".codex")).unwrap();
         std::fs::write(profile.join(".codex"), "wrong type").unwrap();
         assert!(f.plan("codex", false).prepare().is_err());
-        assert!(
-            resolve(
-                &f.registry["codex"],
-                &f.registry,
-                &Policy::builtin_default(),
-                &f.state,
-                &f.home,
-                std::slice::from_ref(&f.home),
-                false
-            )
-            .is_err()
-        );
+        assert!(resolve(&f.registry["codex"], &f.registry, &Policy::builtin_default(), &f.state, &f.home, std::slice::from_ref(&f.home), false).is_err());
     }
 
     #[test]
@@ -817,10 +606,7 @@ mod tests {
         assert!(!first.same_mounts(&f.plan("codex", true)));
         let normal = first.normal_profile.to_path().unwrap();
         f.put(&normal.join(".codex/auth.json"), "{\"old-declared\":true}");
-        f.put(
-            &normal.join(".codex/new-token.json"),
-            "{\"new-declared\":true}",
-        );
+        f.put(&normal.join(".codex/new-token.json"), "{\"new-declared\":true}");
         first.prepare().unwrap();
         let ghost = first.profile.to_path().unwrap();
         assert!(ghost.join(".codex/auth.json").is_file());
@@ -835,19 +621,9 @@ mod tests {
         policy.paths.mask.retain(|p| !p.contains('*'));
         policy.permissions.private_bus = crate::permissions::Rule::On;
         policy.permissions.test_desktop = crate::permissions::Rule::On;
-        let after = resolve(
-            &f.registry["codex"],
-            &f.registry,
-            &policy,
-            &f.state,
-            &f.home,
-            &[],
-            false,
-        )
-        .unwrap();
+        let after = resolve(&f.registry["codex"], &f.registry, &policy, &f.state, &f.home, &[], false).unwrap();
         assert!(before.same_mounts(&after));
-        let development =
-            resolve_development(&f.registry, &policy, &f.state, &f.home, &[]).unwrap();
+        let development = resolve_development(&f.registry, &policy, &f.state, &f.home, &[]).unwrap();
         assert!(development.state_paths().unwrap().is_empty());
         development.prepare().unwrap();
         assert!(!development.profile.to_path().unwrap().exists());
@@ -866,8 +642,7 @@ mod tests {
             clone: HostPath::from_path(&f.root.join("clone")),
             objects: HostPath::from_path(&repo.join(".git/objects")),
         });
-        let plan = crate::changes::session_view(&Policy::builtin_default(), &f.state, &f.home, &storage)
-        .unwrap();
+        let plan = crate::changes::session_view(&Policy::builtin_default(), &f.state, &f.home, &storage).unwrap();
         assert!(plan.direct.contains(&repo));
     }
 
@@ -878,33 +653,14 @@ mod tests {
         let second = f.home.join("hidden/second");
         f.put(&first, "fixture secret");
         let mut policy = Policy::builtin_default();
-        policy
-            .paths
-            .mask
-            .push(f.home.join("hidden/*").display().to_string());
-        let storage = resolve(
-            &f.registry["codex"],
-            &f.registry,
-            &policy,
-            &f.state,
-            &f.home,
-            &[],
-            false,
-        )
-        .unwrap();
+        policy.paths.mask.push(f.home.join("hidden/*").display().to_string());
+        let storage = resolve(&f.registry["codex"], &f.registry, &policy, &f.state, &f.home, &[], false).unwrap();
         std::fs::remove_file(&first).unwrap();
         f.put(&second, "a later host file");
-        let plan = crate::changes::session_view(&policy, &f.state, &f.home, &storage)
-        .unwrap();
+        let plan = crate::changes::session_view(&policy, &f.state, &f.home, &storage).unwrap();
         assert!(plan.masked.contains(&f.home.join("hidden")));
-        assert!(
-            !plan.masked.contains(&second),
-            "current glob matches must not rewrite launch evidence"
-        );
+        assert!(!plan.masked.contains(&second), "current glob matches must not rewrite launch evidence");
         assert!(!storage.profile.to_path().unwrap().exists());
-        assert!(
-            !f.state.exists(),
-            "Changes inspection created session storage"
-        );
+        assert!(!f.state.exists(), "Changes inspection created session storage");
     }
 }

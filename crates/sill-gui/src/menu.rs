@@ -2,10 +2,7 @@
 //! ghost button at its right; then *Reopen* — a filter, and the sessions not open as tabs, newest
 //! first, the first few and "N more…". A row reopens its session; *New here* starts a new one
 //! that follows an ended session; the bin deletes, on a second press.
-use iced::widget::{
-    Column, button, column, container, mouse_area, row, rule, scrollable, space, svg, text,
-    text_input, tooltip,
-};
+use iced::widget::{Column, button, column, container, mouse_area, row, rule, scrollable, space, svg, text, text_input, tooltip};
 use iced::{Alignment, Element, Fill, Padding};
 use sill_client::sessions;
 use sill_proto::agent_admin::Definition;
@@ -42,7 +39,11 @@ pub enum Event {
     More,
     /// `workspaces`: the button beside the ghost chose live or workspace (docs/parallel-coding.md
     /// §12); None follows Settings → Automatic workspaces.
-    New { agent: String, ghost: bool, workspaces: Option<bool> },
+    New {
+        agent: String,
+        ghost: bool,
+        workspaces: Option<bool>,
+    },
     /// An agent without directory setup: open the Agents page to finish it.
     Setup(String),
     Reopen(String),
@@ -61,10 +62,7 @@ impl App {
         let mut panel = Column::new().spacing(2).padding(6).width(330);
         match &menu.agents {
             None => panel = panel.push(caption("Reading the agents…")),
-            Some(Err(error)) => {
-                panel = panel
-                    .push(container(text(error).size(style::TINY).color(P.error)).padding([4, 8]))
-            }
+            Some(Err(error)) => panel = panel.push(container(text(error).size(style::TINY).color(P.error)).padding([4, 8])),
             Some(Ok(agents)) => {
                 for agent in agents {
                     if agent.home_paths.is_none() {
@@ -72,10 +70,7 @@ impl App {
                             keys::press(
                                 button(
                                     row![
-                                        svg(self.agent_icon(&agent.id))
-                                            .width(15)
-                                            .height(15)
-                                            .style(style::icon(alpha(P.fg, 0.5))),
+                                        svg(self.agent_icon(&agent.id)).width(15).height(15).style(style::icon(alpha(P.fg, 0.5))),
                                         text(&agent.name).size(style::TEXT).color(alpha(P.fg, 0.5)),
                                         text("needs setup").size(style::TINY).color(P.warning),
                                     ]
@@ -94,24 +89,14 @@ impl App {
                     }
                     let start = keys::press(
                         button(
-                            row![
-                                svg(self.agent_icon(&agent.id))
-                                    .width(15)
-                                    .height(15)
-                                    .style(style::icon(P.fg)),
-                                text(&agent.name).size(style::TEXT),
-                            ]
-                            .spacing(10)
-                            .align_y(Alignment::Center),
+                            row![svg(self.agent_icon(&agent.id)).width(15).height(15).style(style::icon(P.fg)), text(&agent.name).size(style::TEXT),]
+                                .spacing(10)
+                                .align_y(Alignment::Center),
                         )
                         .padding([6, 8])
                         .width(Fill)
                         .style(style::row_button),
-                        event(Event::New {
-                            agent: agent.id.clone(),
-                            ghost: false,
-                            workspaces: None,
-                        }),
+                        event(Event::New { agent: agent.id.clone(), ghost: false, workspaces: None }),
                     );
                     // the other kind of session than Settings → Automatic workspaces makes
                     let automatic = self.daemon_settings.as_ref().and_then(|s| s.automatic_workspaces).unwrap_or(false);
@@ -122,38 +107,18 @@ impl App {
                     };
                     let other = tooltip(
                         keys::press(
-                            button(crate::icons::glyph(glyph, 15.0, alpha(P.fg, 0.6)))
-                                .padding([6, 8])
-                                .style(style::quiet),
-                            event(Event::New {
-                                agent: agent.id.clone(),
-                                ghost: false,
-                                workspaces: Some(!automatic),
-                            }),
+                            button(crate::icons::glyph(glyph, 15.0, alpha(P.fg, 0.6))).padding([6, 8]).style(style::quiet),
+                            event(Event::New { agent: agent.id.clone(), ghost: false, workspaces: Some(!automatic) }),
                         ),
                         tip(said),
                         tooltip::Position::Left,
                     );
                     let ghost = tooltip(
                         keys::press(
-                            button(
-                                svg(icons::ghost())
-                                    .width(15)
-                                    .height(15)
-                                    .style(style::icon(alpha(P.fg, 0.6))),
-                            )
-                            .padding([6, 8])
-                            .style(style::quiet),
-                            event(Event::New {
-                                agent: agent.id.clone(),
-                                ghost: true,
-                                workspaces: None,
-                            }),
+                            button(svg(icons::ghost()).width(15).height(15).style(style::icon(alpha(P.fg, 0.6)))).padding([6, 8]).style(style::quiet),
+                            event(Event::New { agent: agent.id.clone(), ghost: true, workspaces: None }),
                         ),
-                        tip(format!(
-                            "{} as a ghost — leaves no session behind: no pins, no memory, its writes revert after an hour",
-                            agent.name
-                        )),
+                        tip(format!("{} as a ghost — leaves no session behind: no pins, no memory, its writes revert after an hour", agent.name)),
                         tooltip::Position::Left,
                     );
                     panel = panel.push(row![start, other, ghost].align_y(Alignment::Center));
@@ -166,55 +131,26 @@ impl App {
             panel = panel
                 .push(rule::horizontal(1).style(style::rule_style(P.border)))
                 // the filter of the sessions to reopen: no caption or hint, the list below says it
-                .push(
-                    container(
-                        text_input("", &menu.filter)
-                            .size(style::SMALL)
-                            .padding(6)
-                            .on_input(|value| event(Event::Filter(value))),
-                    )
-                    .padding([6, 4]),
-                );
+                .push(container(text_input("", &menu.filter).size(style::SMALL).padding(6).on_input(|value| event(Event::Filter(value)))).padding([6, 4]));
             let filtering = !menu.filter.trim().is_empty();
-            let found: Vec<_> = reopenable
-                .into_iter()
-                .filter(|s| !filtering || sessions::matches(s, &menu.filter))
-                .collect();
-            let shown = if filtering || menu.expanded {
-                found.len()
-            } else {
-                found.len().min(SHOWN)
-            };
+            let found: Vec<_> = reopenable.into_iter().filter(|s| !filtering || sessions::matches(s, &menu.filter)).collect();
+            let shown = if filtering || menu.expanded { found.len() } else { found.len().min(SHOWN) };
             let mut rows = Column::new().spacing(1);
             for session in &found[..shown] {
                 rows = rows.push(self.reopen_row(menu, session));
             }
-            panel = panel.push(
-                scrollable(rows)
-                    .direction(scrollable::Direction::Vertical(style::bar()))
-                    .height(iced::Shrink)
-                    .style(style::feed_scroll),
-            );
+            panel = panel.push(scrollable(rows).direction(scrollable::Direction::Vertical(style::bar())).height(iced::Shrink).style(style::feed_scroll));
             if found.is_empty() {
                 panel = panel.push(caption("Nothing found"));
             } else if shown < found.len() {
                 panel = panel.push(keys::press(
-                    button(
-                        text(format!("{} more…", found.len() - shown))
-                            .size(style::SMALL)
-                            .color(P.fg_dim),
-                    )
-                    .padding([4, 8])
-                    .style(style::quiet),
+                    button(text(format!("{} more…", found.len() - shown)).size(style::SMALL).color(P.fg_dim)).padding([4, 8]).style(style::quiet),
                     event(Event::More),
                 ));
             }
         }
         let panel = container(column![
-            scrollable(panel)
-                .direction(scrollable::Direction::Vertical(style::bar()))
-                .height(iced::Shrink)
-                .style(style::feed_scroll),
+            scrollable(panel).direction(scrollable::Direction::Vertical(style::bar())).height(iced::Shrink).style(style::feed_scroll),
             rule::horizontal(1).style(style::rule_style(P.border)),
             self.view_choice(),
         ])
@@ -222,31 +158,15 @@ impl App {
         .max_height(640)
         .style(|_| iced::widget::container::Style {
             background: Some(P.surface.into()),
-            border: iced::Border {
-                color: P.border,
-                width: 1.0,
-                radius: style::CARD.into(),
-            },
+            border: iced::Border { color: P.border, width: 1.0, radius: style::CARD.into() },
             ..iced::widget::container::Style::default()
         });
-        let placed = container(panel)
-            .padding(Padding {
-                top: 38.0,
-                right: 12.0,
-                bottom: 0.0,
-                left: 0.0,
-            })
-            .align_right(Fill);
+        let placed = container(panel).padding(Padding { top: 38.0, right: 12.0, bottom: 0.0, left: 0.0 }).align_right(Fill);
         // a press anywhere else closes the menu, and so does the pointer leaving it (it opened as
         // the pointer came over the +, which the menu's top padding covers)
         iced::widget::stack![
             // Leave the top bar uncovered so presses on + reach its open-only handler.
-            column![
-                space().height(37),
-                mouse_area(container(space()).width(Fill).height(Fill))
-                    .on_press(event(Event::Leave)),
-            ]
-            .height(Fill),
+            column![space().height(37), mouse_area(container(space()).width(Fill).height(Fill)).on_press(event(Event::Leave)),].height(Fill),
             mouse_area(placed).on_exit(event(Event::Leave)),
         ]
         .into()
@@ -263,20 +183,10 @@ impl App {
             let on = view == current;
             let color = if on { P.accent } else { alpha(P.fg, 0.7) };
             let body = icons::glyph(glyph, 17.0, color);
-            let underline = rule::horizontal(2).style(style::rule_style(if on {
-                P.accent
-            } else {
-                iced::Color::TRANSPARENT
-            }));
+            let underline = rule::horizontal(2).style(style::rule_style(if on { P.accent } else { iced::Color::TRANSPARENT }));
             tooltip(
                 container(keys::press(
-                    button(
-                        column![container(body).padding([8, 0]).center_x(Fill), underline]
-                            .width(Fill),
-                    )
-                    .padding(0)
-                    .width(Fill)
-                    .style(style::quiet),
+                    button(column![container(body).padding([8, 0]).center_x(Fill), underline].width(Fill)).padding(0).width(Fill).style(style::quiet),
                     event(Event::View(view)),
                 ))
                 .id(match view {
@@ -290,34 +200,16 @@ impl App {
         };
         container(
             row![
-                choice(
-                    View::Shelf,
-                    "panel",
-                    "Shelf",
-                    "the conversation alone, narrow: at most a share of the screen (Ctrl+Shift+D)"
-                ),
-                choice(
-                    View::Drawer,
-                    "panel-right",
-                    "Drawer",
-                    "the conversation with the drawer beside it (Ctrl+Shift+D)"
-                ),
-                choice(
-                    View::Full,
-                    "window-full",
-                    "Full",
-                    "the conversation across the whole window; Ctrl+Shift+F goes back (Ctrl+Shift+F)"
-                ),
+                choice(View::Shelf, "panel", "Shelf", "the conversation alone, narrow: at most a share of the screen (Ctrl+Shift+D)"),
+                choice(View::Drawer, "panel-right", "Drawer", "the conversation with the drawer beside it (Ctrl+Shift+D)"),
+                choice(View::Full, "window-full", "Full", "the conversation across the whole window; Ctrl+Shift+F goes back (Ctrl+Shift+F)"),
                 // not a mode: the window goes, the daemon and its sessions go on
                 tooltip(
                     container(keys::press(
                         button(
                             column![
-                                container(icons::glyph("x", 17.0, alpha(P.fg, 0.7)))
-                                    .padding([8, 0])
-                                    .center_x(Fill),
-                                rule::horizontal(2)
-                                    .style(style::rule_style(iced::Color::TRANSPARENT)),
+                                container(icons::glyph("x", 17.0, alpha(P.fg, 0.7))).padding([8, 0]).center_x(Fill),
+                                rule::horizontal(2).style(style::rule_style(iced::Color::TRANSPARENT)),
                             ]
                             .width(Fill),
                         )
@@ -348,15 +240,10 @@ impl App {
         let dot = |color: iced::Color, id: &'static str, message: Message, what: &'static str| {
             tooltip(
                 container(keys::press(
-                    button(container(space().width(DOT).height(DOT)).style(move |_| {
-                        iced::widget::container::Style {
-                            background: Some(color.into()),
-                            border: iced::Border {
-                                radius: (DOT / 2.0).into(),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }
+                    button(container(space().width(DOT).height(DOT)).style(move |_| iced::widget::container::Style {
+                        background: Some(color.into()),
+                        border: iced::Border { radius: (DOT / 2.0).into(), ..Default::default() },
+                        ..Default::default()
                     }))
                     .padding(6)
                     .style(style::quiet),
@@ -384,19 +271,11 @@ impl App {
         .into()
     }
 
-    fn reopen_row<'a>(
-        &'a self,
-        menu: &'a Menu,
-        session: &'a sill_proto::sessions::Session,
-    ) -> Element<'a, Message> {
+    fn reopen_row<'a>(&'a self, menu: &'a Menu, session: &'a sill_proto::sessions::Session) -> Element<'a, Message> {
         let sub = if session.ghost {
             "ghost · still running".to_string()
         } else if session.ended_at.is_some() {
-            session
-                .ended_at
-                .as_deref()
-                .and_then(|t| t.parse::<i64>().ok())
-                .map_or_else(|| "ended".into(), date)
+            session.ended_at.as_deref().and_then(|t| t.parse::<i64>().ok()).map_or_else(|| "ended".into(), date)
         } else if session.running {
             "running".into()
         } else {
@@ -409,18 +288,11 @@ impl App {
         let main = keys::press(
             button(
                 row![
-                    svg(self.agent_icon(&session.agent))
-                        .width(15)
-                        .height(15)
-                        .style(style::icon(P.fg)),
+                    svg(self.agent_icon(&session.agent)).width(15).height(15).style(style::icon(P.fg)),
                     column![
-                        container(
-                            text(crate::ui::one_line(sessions::display_title(session), 34))
-                                .size(style::TEXT)
-                                .wrapping(text::Wrapping::None),
-                        )
-                        .width(Fill)
-                        .clip(true),
+                        container(text(crate::ui::one_line(sessions::display_title(session), 34)).size(style::TEXT).wrapping(text::Wrapping::None),)
+                            .width(Fill)
+                            .clip(true),
                         text(sub).size(style::TINY).color(P.fg_dim),
                     ]
                     .spacing(1)
@@ -434,28 +306,13 @@ impl App {
             .style(style::row_button),
             event(Event::Reopen(session.session_id.clone())),
         );
-        let main: Element<'a, Message> = if session.summary.is_empty() {
-            main
-        } else {
-            tooltip(
-                main,
-                tip(crate::ui::one_line(&session.summary, 400)),
-                tooltip::Position::Left,
-            )
-            .into()
-        };
+        let main: Element<'a, Message> =
+            if session.summary.is_empty() { main } else { tooltip(main, tip(crate::ui::one_line(&session.summary, 400)), tooltip::Position::Left).into() };
         let mut line = row![main].align_y(Alignment::Center);
         if session.ended_at.is_some() && !session.summary.is_empty() {
             line = line.push(tooltip(
                 keys::press(
-                    button(
-                        svg(icons::plus())
-                            .width(13)
-                            .height(13)
-                            .style(style::icon(alpha(P.fg, 0.6))),
-                    )
-                    .padding([6, 6])
-                    .style(style::quiet),
+                    button(svg(icons::plus()).width(13).height(13).style(style::icon(alpha(P.fg, 0.6)))).padding([6, 6]).style(style::quiet),
                     event(Event::NewHere(session.session_id.clone())),
                 ),
                 tip("New here: a new session with the same agent and policy, told this one's summary first".into()),
@@ -486,17 +343,11 @@ impl App {
 }
 
 fn caption<'a>(value: &'a str) -> Element<'a, Message> {
-    container(text(value).size(style::TINY).color(P.fg_dim))
-        .padding([4, 8])
-        .into()
+    container(text(value).size(style::TINY).color(P.fg_dim)).padding([4, 8]).into()
 }
 
 fn tip<'a>(value: String) -> Element<'a, Message> {
-    container(text(value).size(style::TINY))
-        .padding([4, 8])
-        .max_width(320)
-        .style(style::fill(P.code_bg))
-        .into()
+    container(text(value).size(style::TINY)).padding([4, 8]).max_width(320).style(style::fill(P.code_bg)).into()
 }
 
 /// A Unix time as sessions are dated: year-month-day, in UTC.

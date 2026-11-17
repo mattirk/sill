@@ -63,32 +63,17 @@ impl Attention {
             .filter(|_| !running)
             .and_then(|turn| conversation.turns.get(turn))
             .filter(|turn| turn.outcome == "failed")
-            .map(|turn| {
-                turn.reason
-                    .as_ref()
-                    .map_or_else(|| "the turn failed".into(), |r| r.message.clone())
-            });
+            .map(|turn| turn.reason.as_ref().map_or_else(|| "the turn failed".into(), |r| r.message.clone()));
         let working_ms = session.and_then(|s| {
             let since = s.active_since_ms?;
             Some(s.active_ms + now_ms.saturating_sub(since))
         });
-        let worked_ms = session.map(|s| {
-            s.active_ms
-                + s.active_since_ms
-                    .map_or(0, |since| now_ms.saturating_sub(since))
-        });
+        let worked_ms = session.map(|s| s.active_ms + s.active_since_ms.map_or(0, |since| now_ms.saturating_sub(since)));
         Self {
             activity,
-            questions: conversation
-                .open_questions()
-                .map(|q| (q.question_id.clone(), q.title.clone()))
-                .collect(),
+            questions: conversation.open_questions().map(|q| (q.question_id.clone(), q.title.clone())).collect(),
             failed,
-            undelivered: outbox
-                .pending()
-                .iter()
-                .filter(|p| matches!(p.state, State::Failed(_) | State::Uncertain(_)))
-                .count(),
+            undelivered: outbox.pending().iter().filter(|p| matches!(p.state, State::Failed(_) | State::Uncertain(_))).count(),
             link: status.problem().map(str::to_owned),
             working_ms,
             worked_ms,
@@ -138,16 +123,7 @@ impl Attention {
 /// m:ss below an hour, then h:mm:ss. Hours are never wrapped or truncated.
 pub fn clock(ms: u64) -> String {
     let seconds = ms / 1000;
-    if seconds >= 3600 {
-        format!(
-            "{}:{:02}:{:02}",
-            seconds / 3600,
-            (seconds / 60) % 60,
-            seconds % 60
-        )
-    } else {
-        format!("{}:{:02}", seconds / 60, seconds % 60)
-    }
+    if seconds >= 3600 { format!("{}:{:02}:{:02}", seconds / 3600, (seconds / 60) % 60, seconds % 60) } else { format!("{}:{:02}", seconds / 60, seconds % 60) }
 }
 
 #[cfg(test)]
@@ -215,11 +191,7 @@ mod tests {
             .unwrap(),
         );
         // while the next turn runs, the earlier failure is not news
-        assert!(
-            Attention::of(&view, &Outbox::default(), &Status::Live, 0)
-                .failed
-                .is_none()
-        );
+        assert!(Attention::of(&view, &Outbox::default(), &Status::Live, 0).failed.is_none());
         let idle = view.session.as_mut().unwrap();
         idle.activity = "idle".into();
         idle.turn_id = None;
@@ -232,11 +204,7 @@ mod tests {
         failed.created_seq = "2".into();
         failed.turn_id = Some("t2".into());
         view.insert_item(failed);
-        assert!(
-            Attention::of(&view, &Outbox::default(), &Status::Live, 0)
-                .failed
-                .is_none()
-        );
+        assert!(Attention::of(&view, &Outbox::default(), &Status::Live, 0).failed.is_none());
 
         view.questions.insert(
             "q".into(),

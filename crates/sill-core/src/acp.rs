@@ -9,18 +9,15 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::schema::v1 as acp_v1;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ClientCapabilities, ContentBlock, CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction,
-    ElicitationAction, ElicitationCapabilities, ElicitationContentValue, ElicitationFormCapabilities, ElicitationMode,
-    ElicitationPropertySchema, ElicitationSchema, InitializeRequest, MultiSelectItems, PromptRequest, PromptResponse, RequestPermissionOutcome,
-    RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOptions, SessionModeState,
-    ImageContent, ResourceLink, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
-    ToolCallContent,
+    CancelNotification, ClientCapabilities, ContentBlock, CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction,
+    ElicitationCapabilities, ElicitationContentValue, ElicitationFormCapabilities, ElicitationMode, ElicitationPropertySchema, ElicitationSchema, ImageContent,
+    InitializeRequest, MultiSelectItems, PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResourceLink, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
+    SessionConfigSelectOptions, SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, ToolCallContent,
 };
 use agent_client_protocol::util::MatchDispatch;
-use agent_client_protocol::schema::v1 as acp_v1;
 use serde::{Deserialize, Serialize};
 
 // The agent's side as sill keeps it: ACP reduced to what sill shows. These are sill-core's own,
@@ -69,7 +66,9 @@ fn option_kind(k: acp_v1::PermissionOptionKind) -> PermissionOptionKind {
         acp_v1::PermissionOptionKind::AllowAlways => PermissionOptionKind::AllowAlways,
         acp_v1::PermissionOptionKind::RejectOnce => PermissionOptionKind::RejectOnce,
         acp_v1::PermissionOptionKind::RejectAlways => PermissionOptionKind::RejectAlways,
-        other => PermissionOptionKind::Other(serde_json::to_value(other).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_else(|| format!("{other:?}"))),
+        other => {
+            PermissionOptionKind::Other(serde_json::to_value(other).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_else(|| format!("{other:?}")))
+        }
     }
 }
 
@@ -121,12 +120,7 @@ pub enum ConfigValue {
 }
 
 fn controls_from(modes: Option<&SessionModeState>, options: Option<&[SessionConfigOption]>) -> Controls {
-    let modes = modes.map(|m| {
-        (
-            m.current_mode_id.to_string(),
-            m.available_modes.iter().map(|x| (x.id.to_string(), x.name.clone())).collect(),
-        )
-    });
+    let modes = modes.map(|m| (m.current_mode_id.to_string(), m.available_modes.iter().map(|x| (x.id.to_string(), x.name.clone())).collect()));
     let options = options
         .unwrap_or(&[])
         .iter()
@@ -145,10 +139,9 @@ fn controls_from(modes: Option<&SessionModeState>, options: Option<&[SessionConf
                 SessionConfigKind::Select(s) => {
                     let list: Vec<(String, String)> = match &s.options {
                         SessionConfigSelectOptions::Ungrouped(v) => v.iter().map(|x| (x.value.to_string(), x.name.clone())).collect(),
-                        SessionConfigSelectOptions::Grouped(g) => g
-                            .iter()
-                            .flat_map(|grp| grp.options.iter().map(move |x| (x.value.to_string(), format!("{} · {}", grp.name, x.name))))
-                            .collect(),
+                        SessionConfigSelectOptions::Grouped(g) => {
+                            g.iter().flat_map(|grp| grp.options.iter().map(move |x| (x.value.to_string(), format!("{} · {}", grp.name, x.name)))).collect()
+                        }
                         _ => Vec::new(),
                     };
                     ConfigKind::Select(s.current_value.to_string(), list)
@@ -225,20 +218,46 @@ pub fn form_fields(schema: &ElicitationSchema) -> Vec<FormField> {
 #[derive(Debug)]
 pub enum Event {
     /// Native ACP v2 evidence. Message identities and patch semantics are retained to SFP.
-    V2Ready { session_id: String, resumed: bool, controls: Controls },
-    V2Update { update: serde_json::Value },
+    V2Ready {
+        session_id: String,
+        resumed: bool,
+        controls: Controls,
+    },
+    V2Update {
+        update: serde_json::Value,
+    },
     V2PermissionsCancelled,
-    PromptAccepted { message_id: String },
-    V2PromptFailed { code: String, message: String },
-    V2PermissionRequest { tool_call_id: Option<String>, title: String, subject: Option<serde_json::Value>, options: Vec<PermissionOption>, reply: oneshot::Sender<Option<String>> },
+    PromptAccepted {
+        message_id: String,
+    },
+    V2PromptFailed {
+        code: String,
+        message: String,
+    },
+    V2PermissionRequest {
+        tool_call_id: Option<String>,
+        title: String,
+        subject: Option<serde_json::Value>,
+        options: Vec<PermissionOption>,
+        reply: oneshot::Sender<Option<String>>,
+    },
     /// The ACP session is up: (agent session id, resumed with history replay?).
-    Ready { session_id: String, resumed: bool, controls: Controls },
+    Ready {
+        session_id: String,
+        resumed: bool,
+        controls: Controls,
+    },
     /// What the agent accepts in a prompt (from `initialize`), before Ready.
-    Capabilities { images: bool },
+    Capabilities {
+        images: bool,
+    },
     /// Modes / config options changed (by us or by the agent).
     Controls(Controls),
     /// A settings request was rejected by the agent. `setting` is `mode` or `config:<option id>`.
-    ControlFailed { setting: String, reason: String },
+    ControlFailed {
+        setting: String,
+        reason: String,
+    },
     /// A prompt turn started.
     TurnStarted,
     /// Replayed user message (only after a `session/load`).
@@ -249,31 +268,73 @@ pub enum Event {
     /// `diff`: a file edit as a unified diff (the call's `Diff` content blocks), shown live.
     /// `parent`: the delegation (Task/Agent call) this call runs under, for a sub-agent's own calls.
     /// `command` is what the agent declared as the call's command ([`input_command`]), when it did.
-    ToolCall { id: String, title: String, kind: String, status: String, detail: Option<String>, diff: Option<String>, parent: Option<String>, command: Option<String> },
-    ToolCallUpdate { id: String, status: Option<String>, title: Option<String>, detail: Option<String>, diff: Option<String>, command: Option<String> },
+    ToolCall {
+        id: String,
+        title: String,
+        kind: String,
+        status: String,
+        detail: Option<String>,
+        diff: Option<String>,
+        parent: Option<String>,
+        command: Option<String>,
+    },
+    ToolCallUpdate {
+        id: String,
+        status: Option<String>,
+        title: Option<String>,
+        detail: Option<String>,
+        diff: Option<String>,
+        command: Option<String>,
+    },
     /// Text a sub-agent produced (shown under its delegation, not as the agent's own words).
-    SubagentText { parent: String, text: String },
+    SubagentText {
+        parent: String,
+        text: String,
+    },
     /// An image block in the agent's own message (`parent` names a sub-agent's tool call).
     /// The daemon keeps the bytes as a session upload; they never enter a conversation record.
-    Image { mime: String, data_base64: String, parent: Option<String> },
+    Image {
+        mime: String,
+        data_base64: String,
+        parent: Option<String>,
+    },
     /// Frontend only: kept agent images by session upload, as `sfp_client` renders them.
     AgentImages(Vec<UserAttachment>),
     /// The agent asks for permission; answer with the chosen option id (None = cancel).
-    PermissionRequest { tool_call_id: String, title: String, options: Vec<PermissionOption>, reply: oneshot::Sender<Option<String>> },
+    PermissionRequest {
+        tool_call_id: String,
+        title: String,
+        options: Vec<PermissionOption>,
+        reply: oneshot::Sender<Option<String>>,
+    },
     /// The daemon answered a permission request itself (the session's auto-allow, docs/daemon.md
     /// §3.3): `allowed` false when no allow option was offered and it was refused. Never sent by
     /// [`run_session`]; a frontend marks the call's line with it.
-    AutoAnswered { tool_call_id: String, title: String, allowed: bool },
+    AutoAnswered {
+        tool_call_id: String,
+        title: String,
+        allowed: bool,
+    },
     /// The agent asks the person to fill a form (a multiple-choice question, say); answer with the
     /// values by field key — strings, arrays of strings, booleans, numbers — or None to cancel.
-    Elicitation { message: String, fields: Vec<FormField>, reply: oneshot::Sender<Option<std::collections::BTreeMap<String, serde_json::Value>>> },
+    Elicitation {
+        message: String,
+        fields: Vec<FormField>,
+        reply: oneshot::Sender<Option<std::collections::BTreeMap<String, serde_json::Value>>>,
+    },
     Other(String),
     /// Context used so far, of the model's window, in tokens (`usage_update`, after each turn
     /// from agents that report it: Claude, Codex, Antigravity…).
-    Usage { used: u64, size: u64 },
+    Usage {
+        used: u64,
+        size: u64,
+    },
     /// The agent wants a login before it opens a session; answer with [`Command::Authenticate`]
     /// (agent-side method) or run the terminal method and send [`Command::RetrySession`].
-    AuthRequired { message: String, methods: Vec<AuthMethodInfo> },
+    AuthRequired {
+        message: String,
+        methods: Vec<AuthMethodInfo>,
+    },
     /// A prompt turn ended.
     Stopped(StopReason),
     /// The session ended (connection closed or error).
@@ -285,10 +346,17 @@ pub enum Event {
     /// The agent named or renamed the session (ACP `session_info_update` with a title).
     AgentTitle(String),
     /// Something the agent wants shown (ACP `notice`): severity as ACP's string.
-    Notice { severity: String, title: String, description: Option<String> },
+    Notice {
+        severity: String,
+        title: String,
+        description: Option<String>,
+    },
     /// A prompt as a frontend shows it, with its attachments. Never sent by [`run_session`]: the
     /// daemon's view of a submission (`sfp_client`) produces it.
-    UserMessage { text: String, attachments: Vec<UserAttachment> },
+    UserMessage {
+        text: String,
+        attachments: Vec<UserAttachment>,
+    },
 }
 
 /// An attachment as a view shows it: inline data, or an upload fetched from the daemon on display.
@@ -402,7 +470,10 @@ pub enum Command {
     Authenticate(String),
     /// `authenticate` a method marked `api_key` with the key saved in `key_file` (see
     /// [`AuthMethodInfo::api_key`]); the file is read when the request goes, never carried.
-    AuthenticateKey { method: String, key_file: std::path::PathBuf },
+    AuthenticateKey {
+        method: String,
+        key_file: std::path::PathBuf,
+    },
     /// Open the session again (after a terminal login ran outside the protocol).
     RetrySession,
     SetMode(String),
@@ -436,12 +507,7 @@ pub struct SessionOptions {
 
 /// Run an ACP session over `stream` until `Command::Quit` or the connection ends. Blocking; run it
 /// on its own thread.
-pub fn run_session(
-    stream: UnixStream,
-    opts: SessionOptions,
-    commands: async_channel::Receiver<Command>,
-    events: async_channel::Sender<Event>,
-) -> Result<()> {
+pub fn run_session(stream: UnixStream, opts: SessionOptions, commands: async_channel::Receiver<Command>, events: async_channel::Sender<Event>) -> Result<()> {
     stream.set_nonblocking(true)?;
     let stream = async_io::Async::new(stream).context("async socket")?;
     let (reader, writer) = stream.split();
@@ -457,27 +523,22 @@ pub fn run_session(
             .name("sill")
             .on_receive_request(
                 async move |req: RequestPermissionRequest, responder, _cx| {
-                    let options: Vec<PermissionOption> = req
-                        .options
-                        .iter()
-                        .map(|o| PermissionOption { id: o.option_id.to_string(), name: o.name.clone(), kind: option_kind(o.kind) })
-                        .collect();
-                    let title = req
-                        .tool_call
-                        .fields
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| req.tool_call.tool_call_id.to_string());
-                    let pick = |kinds: &[PermissionOptionKind]| {
-                        kinds.iter().find_map(|k| options.iter().find(|o| &o.kind == k)).map(|o| o.id.clone())
-                    };
+                    let options: Vec<PermissionOption> =
+                        req.options.iter().map(|o| PermissionOption { id: o.option_id.to_string(), name: o.name.clone(), kind: option_kind(o.kind) }).collect();
+                    let title = req.tool_call.fields.title.clone().unwrap_or_else(|| req.tool_call.tool_call_id.to_string());
+                    let pick = |kinds: &[PermissionOptionKind]| kinds.iter().find_map(|k| options.iter().find(|o| &o.kind == k)).map(|o| o.id.clone());
                     let chosen: Option<String> = match auto {
                         AutoPermission::AllowOnce => pick(&[PermissionOptionKind::AllowOnce, PermissionOptionKind::AllowAlways]),
                         AutoPermission::Reject => pick(&[PermissionOptionKind::RejectOnce, PermissionOptionKind::RejectAlways]),
                         AutoPermission::Ask => {
                             let (tx, rx) = oneshot::channel();
                             let _ = events_perm
-                                .send(Event::PermissionRequest { tool_call_id: req.tool_call.tool_call_id.to_string(), title: title.clone(), options: options.clone(), reply: tx })
+                                .send(Event::PermissionRequest {
+                                    tool_call_id: req.tool_call.tool_call_id.to_string(),
+                                    title: title.clone(),
+                                    options: options.clone(),
+                                    reply: tx,
+                                })
                                 .await;
                             rx.await.unwrap_or(None)
                         }
@@ -512,7 +573,9 @@ pub fn run_session(
                                         serde_json::Value::String(s) => ElicitationContentValue::String(s),
                                         serde_json::Value::Bool(b) => ElicitationContentValue::Boolean(b),
                                         serde_json::Value::Number(n) => ElicitationContentValue::Number(n.as_f64()?),
-                                        serde_json::Value::Array(a) => ElicitationContentValue::StringArray(a.into_iter().filter_map(|x| x.as_str().map(str::to_string)).collect()),
+                                        serde_json::Value::Array(a) => {
+                                            ElicitationContentValue::StringArray(a.into_iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                                        }
                                         _ => return None,
                                     };
                                     Some((k, v))
@@ -532,10 +595,7 @@ pub fn run_session(
                 auth_caps.terminal = true;
                 // forms: the agent's multiple-choice questions come as elicitations (SPEC §3.3)
                 let caps = ClientCapabilities::new().auth(auth_caps).elicitation(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()));
-                let init = cx
-                    .send_request(InitializeRequest::new(ProtocolVersion::V1).client_capabilities(caps))
-                    .block_task()
-                    .await?;
+                let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1).client_capabilities(caps)).block_task().await?;
                 let can_load = init.agent_capabilities.load_session;
                 let roots = if init.agent_capabilities.session_capabilities.additional_directories.is_some() { opts.roots.clone() } else { vec![] };
                 let _ = events_loop.send(Event::Capabilities { images: init.agent_capabilities.prompt_capabilities.image }).await;
@@ -548,7 +608,14 @@ pub fn run_session(
                 loop {
                     let resume = opts.resume.clone().filter(|_| can_load);
                     let attempt: Result<(), agent_client_protocol::Error> = match resume {
-                        Some(id) => match cx.load_session_from(agent_client_protocol::schema::v1::LoadSessionRequest::new(id, opts.cwd.as_path()).additional_directories(roots.clone())).block_task().start_session().await {
+                        Some(id) => match cx
+                            .load_session_from(
+                                agent_client_protocol::schema::v1::LoadSessionRequest::new(id, opts.cwd.as_path()).additional_directories(roots.clone()),
+                            )
+                            .block_task()
+                            .start_session()
+                            .await
+                        {
                             Ok(restored) => {
                                 let mut session = restored.into_session();
                                 drive(&mut session, true, &auth_methods, &commands, &events_loop).await
@@ -566,9 +633,7 @@ pub fn run_session(
                         Err(e) if e.code == ErrorCode::AuthRequired => {
                             // asked once; other commands (a prompt sent meanwhile) are dropped
                             // without asking again, a failed login asks again with its reason
-                            let _ = events_loop
-                                .send(Event::AuthRequired { message: e.message.clone(), methods: auth_methods.clone() })
-                                .await;
+                            let _ = events_loop.send(Event::AuthRequired { message: e.message.clone(), methods: auth_methods.clone() }).await;
                             loop {
                                 match commands.recv().await {
                                     Ok(Command::Authenticate(id)) => {
@@ -634,10 +699,12 @@ async fn open_fresh(
     let opened = std::rc::Rc::new(std::cell::Cell::new(false));
     let session = {
         let opened = opened.clone();
-        cx.build_session_from(agent_client_protocol::schema::v1::NewSessionRequest::new(cwd).additional_directories(roots.to_vec())).block_task().run_until(async move |mut s| {
-            opened.set(true);
-            drive(&mut s, false, auth_methods, commands, events_loop).await
-        })
+        cx.build_session_from(agent_client_protocol::schema::v1::NewSessionRequest::new(cwd).additional_directories(roots.to_vec())).block_task().run_until(
+            async move |mut s| {
+                opened.set(true);
+                drive(&mut s, false, auth_methods, commands, events_loop).await
+            },
+        )
     };
     let stall = async {
         let timeout = session_open_timeout();
@@ -661,12 +728,29 @@ async fn open_fresh(
 fn is_prompt_auth_error(msg: &str) -> bool {
     let lower = msg.to_ascii_lowercase();
     let normalized = lower.replace(['_', '-'], " ").replace("apikey", "api key");
-    ["unauthorized", "authentication error", "authentication failed", "unauthenticated",
-        "invalid api key", "incorrect api key", "missing api key", "expired api key", "revoked api key",
-        "api key not valid", "api key is not valid", "api key invalid", "api key is invalid",
-        "api key expired", "api key has expired", "api key revoked", "api key was revoked",
-        "api key not provided", "api key was not provided"]
-        .iter().any(|s| normalized.contains(s))
+    [
+        "unauthorized",
+        "authentication error",
+        "authentication failed",
+        "unauthenticated",
+        "invalid api key",
+        "incorrect api key",
+        "missing api key",
+        "expired api key",
+        "revoked api key",
+        "api key not valid",
+        "api key is not valid",
+        "api key invalid",
+        "api key is invalid",
+        "api key expired",
+        "api key has expired",
+        "api key revoked",
+        "api key was revoked",
+        "api key not provided",
+        "api key was not provided",
+    ]
+    .iter()
+    .any(|s| normalized.contains(s))
 }
 
 /// Run an open session until `Command::Quit`, the commands channel closes, or the connection
@@ -679,11 +763,7 @@ async fn drive(
     events_loop: &async_channel::Sender<Event>,
 ) -> Result<(), agent_client_protocol::Error> {
     let _ = events_loop
-        .send(Event::Ready {
-            session_id: session.session_id().to_string(),
-            resumed,
-            controls: controls_from(session.modes(), session.config_options()),
-        })
+        .send(Event::Ready { session_id: session.session_id().to_string(), resumed, controls: controls_from(session.modes(), session.config_options()) })
         .await;
     let mut last_modes: Option<SessionModeState> = session.modes().cloned();
     let mut last_options: Vec<SessionConfigOption> = session.config_options().map(|o| o.to_vec()).unwrap_or_default();
@@ -736,12 +816,9 @@ async fn drive(
                     Err(e) if e.code == ErrorCode::AuthRequired || (!auth_methods.is_empty() && is_prompt_auth_error(&e.message)) => {
                         // A failed RPC does not establish cancellation or successful insertion.
                         let _ = events_loop.send(Event::Stopped(StopReason::Other("_sill_prompt_error".into()))).await;
-                        let _ = events_loop
-                            .send(Event::AuthRequired { message: e.message.clone(), methods: auth_methods.to_vec() })
-                            .await;
+                        let _ = events_loop.send(Event::AuthRequired { message: e.message.clone(), methods: auth_methods.to_vec() }).await;
                     }
-                    Err(e) if agent_client_protocol::is_incoming_transport_closed(&e)
-                        || agent_client_protocol::is_connection_terminated(&e) => {
+                    Err(e) if agent_client_protocol::is_incoming_transport_closed(&e) || agent_client_protocol::is_connection_terminated(&e) => {
                         // A dead connection cannot accept another prompt. End this
                         // worker so the daemon can create a new connection on retry.
                         // Do not replay a request whose execution is uncertain.
@@ -763,9 +840,7 @@ async fn drive(
                         let _ = events_loop.send(Event::Other("logged in; send the message again".into())).await;
                     }
                     Err(e) => {
-                        let _ = events_loop
-                            .send(Event::AuthRequired { message: format!("login failed: {}", e.message), methods: auth_methods.to_vec() })
-                            .await;
+                        let _ = events_loop.send(Event::AuthRequired { message: format!("login failed: {}", e.message), methods: auth_methods.to_vec() }).await;
                     }
                 }
             }
@@ -777,9 +852,7 @@ async fn drive(
                         let _ = events_loop.send(Event::Other("logged in; send the message again".into())).await;
                     }
                     Err(reason) => {
-                        let _ = events_loop
-                            .send(Event::AuthRequired { message: format!("login failed: {reason}"), methods: auth_methods.to_vec() })
-                            .await;
+                        let _ = events_loop.send(Event::AuthRequired { message: format!("login failed: {reason}"), methods: auth_methods.to_vec() }).await;
                     }
                 }
             }
@@ -807,9 +880,7 @@ async fn drive(
                         AttachmentKind::File { jail_path } => ContentBlock::ResourceLink(ResourceLink::new(a.name, format!("file://{}", jail_path.display()))),
                     });
                 }
-                pending = Some(Box::pin(async move {
-                    conn.send_request(PromptRequest::new(sid, blocks)).block_task().await
-                }));
+                pending = Some(Box::pin(async move { conn.send_request(PromptRequest::new(sid, blocks)).block_task().await }));
                 in_turn = true;
                 let _ = events_loop.send(Event::TurnStarted).await;
             }
@@ -910,13 +981,7 @@ async fn drive(
 }
 
 /// One prompt in a fresh session (M0 CLI).
-pub fn run_prompt(
-    stream: UnixStream,
-    cwd: &Path,
-    prompt: &str,
-    auto: AutoPermission,
-    mut on_event: impl FnMut(Event) + Send + 'static,
-) -> Result<()> {
+pub fn run_prompt(stream: UnixStream, cwd: &Path, prompt: &str, auto: AutoPermission, mut on_event: impl FnMut(Event) + Send + 'static) -> Result<()> {
     let (cmd_tx, cmd_rx) = async_channel::bounded(2);
     let (ev_tx, ev_rx) = async_channel::unbounded();
     cmd_tx.send_blocking(Command::Prompt(prompt.to_string(), vec![]))?;
@@ -940,7 +1005,9 @@ pub fn run_prompt(
 /// An `Event::Other` that is not for people: a `_sill…` marker, or `to_event`'s `Debug` dump of
 /// an update kind it does not render (`SessionInfoUpdate(SessionInfoUpdate { … })`).
 pub fn is_diagnostic(text: &str) -> bool {
-    if text.starts_with("_sill") { return true; }
+    if text.starts_with("_sill") {
+        return true;
+    }
     let name: String = text.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
     name.starts_with(|c: char| c.is_ascii_uppercase()) && text[name.len()..].starts_with('(')
 }
@@ -977,12 +1044,22 @@ fn to_event(update: SessionUpdate) -> Event {
             diff: tool_diff(u.fields.content.as_deref()),
             command: input_command(u.fields.raw_input.as_ref()),
         },
-        SessionUpdate::Plan(p) => Event::Plan(p.entries.iter().map(|e| PlanEntry { content: e.content.clone(), status: acp_string(&e.status), priority: acp_string(&e.priority) }).collect()),
-        SessionUpdate::AvailableCommandsUpdate(u) => Event::Commands(u.available_commands.iter().map(|c| AgentCommand {
-            name: c.name.clone(),
-            description: c.description.clone(),
-            hint: match &c.input { Some(acp_v1::AvailableCommandInput::Unstructured(i)) => Some(i.hint.clone()), _ => None },
-        }).collect()),
+        SessionUpdate::Plan(p) => Event::Plan(
+            p.entries.iter().map(|e| PlanEntry { content: e.content.clone(), status: acp_string(&e.status), priority: acp_string(&e.priority) }).collect(),
+        ),
+        SessionUpdate::AvailableCommandsUpdate(u) => Event::Commands(
+            u.available_commands
+                .iter()
+                .map(|c| AgentCommand {
+                    name: c.name.clone(),
+                    description: c.description.clone(),
+                    hint: match &c.input {
+                        Some(acp_v1::AvailableCommandInput::Unstructured(i)) => Some(i.hint.clone()),
+                        _ => None,
+                    },
+                })
+                .collect(),
+        ),
         SessionUpdate::SessionInfoUpdate(u) => match u.title {
             agent_client_protocol::schema::MaybeUndefined::Value(title) if !title.trim().is_empty() => Event::AgentTitle(title),
             // Codex sends one after every turn with only `_meta` (thread status): nothing to show.
@@ -1033,7 +1110,15 @@ fn is_delegation(name: Option<&str>, title: &str, input: Option<&serde_json::Val
         }
     }
     let t = title.to_lowercase();
-    matches!(t.as_str(), "spawnagent" | "spawn_agent") || t.starts_with("start subagent ") || t.starts_with("complete subagent ") || t.starts_with("interact with subagent ") || t.starts_with("interrupt subagent ") || t.starts_with("task:") || t.starts_with("task(") || t.starts_with("subagent") || t.starts_with("agent(")
+    matches!(t.as_str(), "spawnagent" | "spawn_agent")
+        || t.starts_with("start subagent ")
+        || t.starts_with("complete subagent ")
+        || t.starts_with("interact with subagent ")
+        || t.starts_with("interrupt subagent ")
+        || t.starts_with("task:")
+        || t.starts_with("task(")
+        || t.starts_with("subagent")
+        || t.starts_with("agent(")
 }
 
 /// A file edit as a unified diff: every `Diff` content block (path, old text → new text; a new file
@@ -1140,7 +1225,9 @@ mod tests {
 
     use super::*;
 
-    fn update(json: serde_json::Value) -> Event { to_event(serde_json::from_value(json).unwrap()) }
+    fn update(json: serde_json::Value) -> Event {
+        to_event(serde_json::from_value(json).unwrap())
+    }
 
     /// A shell call's command travels apart from its title: it is the `command` the agent
     /// declared in the call's input. Claude's adapter reports a Bash call first while its input
@@ -1150,9 +1237,13 @@ mod tests {
         use serde_json::json;
         let started = update(json!({"sessionUpdate":"tool_call","toolCallId":"t1","title":"Terminal","kind":"execute","status":"pending","rawInput":{}}));
         assert!(matches!(&started, Event::ToolCall { command: None, title, kind, .. } if title == "Terminal" && kind == "Execute"), "{started:?}");
-        let refined = update(json!({"sessionUpdate":"tool_call_update","toolCallId":"t1","title":"List the files","kind":"execute","rawInput":{"command":"ls; pwd","description":"List the files"}}));
+        let refined = update(
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"t1","title":"List the files","kind":"execute","rawInput":{"command":"ls; pwd","description":"List the files"}}),
+        );
         assert!(matches!(&refined, Event::ToolCallUpdate { command: Some(c), title: Some(t), .. } if c == "ls; pwd" && t == "List the files"), "{refined:?}");
-        let codex = update(json!({"sessionUpdate":"tool_call","toolCallId":"t2","title":"git status","kind":"execute","status":"in_progress","rawInput":{"command":"git status","cwd":"/tmp"}}));
+        let codex = update(
+            json!({"sessionUpdate":"tool_call","toolCallId":"t2","title":"git status","kind":"execute","status":"in_progress","rawInput":{"command":"git status","cwd":"/tmp"}}),
+        );
         assert!(matches!(&codex, Event::ToolCall { command: Some(c), .. } if c == "git status"), "{codex:?}");
         let finished = update(json!({"sessionUpdate":"tool_call_update","toolCallId":"t2","status":"completed"}));
         assert!(matches!(&finished, Event::ToolCallUpdate { command: None, .. }), "{finished:?}");
@@ -1171,12 +1262,17 @@ mod tests {
         let commands = update(serde_json::json!({"sessionUpdate":"available_commands_update","availableCommands":[
             {"name":"review","description":"Review changes","input":{"hint":"what to review"}},{"name":"init","description":"Write AGENTS.md"}]}));
         assert!(matches!(&commands, Event::Commands(c) if c[0].hint.as_deref()==Some("what to review") && c[1].hint.is_none()), "{commands:?}");
-        assert!(matches!(update(serde_json::json!({"sessionUpdate":"session_info_update","title":"Fix the hotkey"})), Event::AgentTitle(t) if t=="Fix the hotkey"));
+        assert!(
+            matches!(update(serde_json::json!({"sessionUpdate":"session_info_update","title":"Fix the hotkey"})), Event::AgentTitle(t) if t=="Fix the hotkey")
+        );
         // Codex: after every turn, only `_meta`; the old dump of this became a visible note
         let codex = update(serde_json::json!({"sessionUpdate":"session_info_update","_meta":{"codex":{"threadStatus":"idle"}}}));
         assert!(matches!(&codex, Event::Other(t) if is_diagnostic(t)), "{codex:?}");
         let notice = update(serde_json::json!({"sessionUpdate":"notice","severity":"warning","title":"Rate limited","description":"retrying"}));
-        assert!(matches!(&notice, Event::Notice { severity, title, description: Some(d) } if severity=="warning" && title=="Rate limited" && d=="retrying"), "{notice:?}");
+        assert!(
+            matches!(&notice, Event::Notice { severity, title, description: Some(d) } if severity=="warning" && title=="Rate limited" && d=="retrying"),
+            "{notice:?}"
+        );
     }
 
     #[test]

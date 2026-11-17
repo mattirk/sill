@@ -335,7 +335,10 @@ fn settle(conn: &Connection, op: &str, state: Ended, detail: &str) -> Result<()>
 /// Successful Apply or Discard resolves earlier Apply interruptions and carry notices.
 /// Other unfinished operations keep their own recovery paths.
 fn settle_notices(conn: &Connection, workspace: &str) -> Result<()> {
-    conn.execute("UPDATE workspace_journal SET state='done' WHERE workspace_id=?1 AND (state='notice' OR (kind='apply' AND state='interrupted'))", [workspace])?;
+    conn.execute(
+        "UPDATE workspace_journal SET state='done' WHERE workspace_id=?1 AND (state='notice' OR (kind='apply' AND state='interrupted'))",
+        [workspace],
+    )?;
     Ok(())
 }
 
@@ -477,7 +480,8 @@ fn commit_leftovers<H: Host>(h: &H, r: &Row) -> Result<()> {
     let Some((name, email)) = flow::identity(&r.source)? else {
         return Err(refuse("no_identity", "Set user.name and user.email in Git first: the session's uncommitted work is committed as yours.", vec![]));
     };
-    let message = h.title(&r.session_id).map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).unwrap_or_else(|| format!("Work from a sill session in {}", r.name));
+    let message =
+        h.title(&r.session_id).map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).unwrap_or_else(|| format!("Work from a sill session in {}", r.name));
     flow::commit_all(&r.path, &r.branch, &message, &name, &email)?;
     Ok(())
 }
@@ -744,7 +748,13 @@ fn carry_into<H: Host>(h: &H, r: &Row, overlay: Option<&Overlay>) {
     let (state, detail) = match outcome {
         Ok(None) => return,
         Ok(Some((state, detail))) => (state, detail),
-        Err(e) => (Ended::Waiting, format!("Work the agent did in {} before it was pinned could not be brought into the workspace: {e:#}. It stays in the session's overlay and is tried again at the session's next start.", r.source.display())),
+        Err(e) => (
+            Ended::Waiting,
+            format!(
+                "Work the agent did in {} before it was pinned could not be brought into the workspace: {e:#}. It stays in the session's overlay and is tried again at the session's next start.",
+                r.source.display()
+            ),
+        ),
     };
     let _ = h.db(|c| {
         intent(c, &op, &r.id, Step::Carry, &json!({"upper": bytes(&upper)}), h.now())?;
@@ -760,7 +770,11 @@ fn carry_steps<H: Host>(h: &H, r: &Row, upper: &Path, started: i64) -> Result<Op
         carry::forget(&p)?;
         return Ok(None);
     }
-    let how = if p.from_reflog { "" } else { " Its starting point was not in your checkout's history, so the agent's files were taken as they are: look before you apply." };
+    let how = if p.from_reflog {
+        ""
+    } else {
+        " Its starting point was not in your checkout's history, so the agent's files were taken as they are: look before you apply."
+    };
     let done = if p.from_reflog { Ended::Done } else { Ended::Notice };
     match carry::merge(&r.path, &p)? {
         carry::Merge::Clean { ours, tree } => {
@@ -841,11 +855,7 @@ pub fn session_view<H: Host>(h: &H, session: &str) -> Result<api::SessionView> {
     })?;
     let live = live
         .into_iter()
-        .map(|(source, reason)| api::LiveRepository {
-            message: refusal_message(&reason),
-            source: HostPath::from_path(&source),
-            reason,
-        })
+        .map(|(source, reason)| api::LiveRepository { message: refusal_message(&reason), source: HostPath::from_path(&source), reason })
         .collect();
     Ok(api::SessionView { workspaces_mode, workspaces, details, live })
 }
@@ -880,7 +890,16 @@ fn summary(r: &Row, m: &flow::Mirror) -> Result<(api::Summary, Vec<api::FileChan
             removed: f.removed.to_string(),
         })
         .collect();
-    Ok((api::Summary { commits: s.commits, files: s.files, added: s.added.to_string(), removed: s.removed.to_string(), uncommitted: if m.committed { vec![] } else { s.uncommitted } }, files))
+    Ok((
+        api::Summary {
+            commits: s.commits,
+            files: s.files,
+            added: s.added.to_string(),
+            removed: s.removed.to_string(),
+            uncommitted: if m.committed { vec![] } else { s.uncommitted },
+        },
+        files,
+    ))
 }
 
 /// A workspace after one look (`detail`).
@@ -917,7 +936,15 @@ fn detail<H: Host>(h: &H, r: Row) -> Result<Settled> {
         let full = revision_now(&r).and_then(|(revision, needs_rebase)| Ok((revision, needs_rebase, summary(&r, &m)?)));
         match full {
             Ok((revision, needs_rebase, (summary, files))) => {
-                return Ok(Settled::Full(api::Detail { workspace, revision, summary, needs_rebase, checkout_only: m.checkout_only.len() as u32, state_tree: m.now.clone(), files }));
+                return Ok(Settled::Full(api::Detail {
+                    workspace,
+                    revision,
+                    summary,
+                    needs_rebase,
+                    checkout_only: m.checkout_only.len() as u32,
+                    state_tree: m.now.clone(),
+                    files,
+                }));
             }
             Err(e) => unread = Some(e),
         }
@@ -938,13 +965,7 @@ fn detail<H: Host>(h: &H, r: Row) -> Result<Settled> {
 }
 
 fn changed<H: Host>(h: &H, r: Option<&Row>, operation: Option<&str>, discarded: Option<api::Discarded>) -> Result<api::Changed> {
-    h.db(|c| {
-        Ok(api::Changed {
-            workspace: r.map(|r| record(c, r)).transpose()?,
-            operation: operation.map(|o| receipts(c)?.get(o)).transpose()?,
-            discarded,
-        })
-    })
+    h.db(|c| Ok(api::Changed { workspace: r.map(|r| record(c, r)).transpose()?, operation: operation.map(|o| receipts(c)?.get(o)).transpose()?, discarded }))
 }
 
 /// Newest first; `after` is the previous page's `next`. Reading settles ended sessions and expiries.
@@ -989,7 +1010,8 @@ pub fn list<H: Host>(h: &H, a: &api::List) -> Result<api::Listed> {
     }
     let discarded = if a.after.is_none() {
         h.db(|c| {
-            let mut stmt = c.prepare(&format!("SELECT {DISCARD_COLUMNS} FROM workspace_discards WHERE ?1 IS NULL OR session_id=?1 ORDER BY created_at DESC"))?;
+            let mut stmt =
+                c.prepare(&format!("SELECT {DISCARD_COLUMNS} FROM workspace_discards WHERE ?1 IS NULL OR session_id=?1 ORDER BY created_at DESC"))?;
             let rows = stmt.query_map([&a.session_id], discard_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows.iter().map(discard_record).collect())
         })?
@@ -1102,7 +1124,7 @@ pub fn abort<H: Host>(h: &H, a: &api::Operate) -> Result<api::Changed> {
     let _g = lock();
     let r = get_row(h, &a.workspace_id)?;
     if !rebasing(&r.path) {
-            clear_conflict(h, &r)?;
+        clear_conflict(h, &r)?;
         return changed(h, Some(&r), None, None);
     }
     if h.busy(&r.session_id) {
@@ -1249,7 +1271,9 @@ pub fn branch<H: Host>(h: &H, a: &api::Apply) -> Result<api::Branched> {
         Ok(Err(stop)) => {
             let (reason, message) = match &stop {
                 Some(stop) => (stop.reason(), stop_message(stop)),
-                None => ("branch_exists", format!("Your checkout already has a branch {name} at other commits: rename or remove it, then apply as branch again.")),
+                None => {
+                    ("branch_exists", format!("Your checkout already has a branch {name} at other commits: rename or remove it, then apply as branch again."))
+                }
             };
             h.db(|c| {
                 settle(c, &k, Ended::Failed, &message)?;
@@ -1342,76 +1366,54 @@ pub fn discard<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
     const METHOD: &str = "_sill/workspaces.discard";
     let fingerprint = input(a)?;
     let _g = lock();
-    if h.db(|c| receipts(c)?.existing(&a.operation_id, METHOD, &fingerprint))?
-        .is_some()
-    {
+    if h.db(|c| receipts(c)?.existing(&a.operation_id, METHOD, &fingerprint))?.is_some() {
         let r = h.db(|c| load(c, &a.workspace_id))?;
         return changed(h, r.as_ref(), Some(&a.operation_id), None);
     }
-    let mut r =
-        settle_session(h, get_row(h, &a.workspace_id)?)?.ok_or_else(|| not_found("workspace"))?;
+    let mut r = settle_session(h, get_row(h, &a.workspace_id)?)?.ok_or_else(|| not_found("workspace"))?;
     if h.busy(&r.session_id) {
-        return Err(refuse(
-            "writer_active",
-            "The agent is working; discard after its turn.",
-            vec![],
-        ));
+        return Err(refuse("writer_active", "The agent is working; discard after its turn.", vec![]));
     }
     if rebasing(&r.path) {
-        return Err(refuse(
-            "rebase_in_progress",
-            "A rebase is stopped in the workspace: finish it there or abort it first.",
-            conflicted(&r.path),
-        ));
+        return Err(refuse("rebase_in_progress", "A rebase is stopped in the workspace: finish it there or abort it first.", conflicted(&r.path)));
     }
     let now_rev = super::revision(&r.path, &r.branch)?;
     if now_rev.tip != a.revision.tip || now_rev.worktree != a.revision.worktree {
-        return Err(refuse(
-            "stale_revision",
-            "The workspace changed since you looked; look again at what would be discarded.",
-            vec![],
-        ));
+        return Err(refuse("stale_revision", "The workspace changed since you looked; look again at what would be discarded.", vec![]));
     }
     h.db(|c| receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint))?;
     // Unique anchors cannot overwrite a snapshot retained by a failed earlier attempt.
     let n = crate::store::new_id();
     let mut discarded = None;
-    flow::discard_retained(
-        &r.source.clone(),
-        &r.path.clone(),
-        &r.id.clone(),
-        &n,
-        &r.branch.clone(),
-        |kept| {
-            let d = Discard {
-                id: format!("wsd-{}", crate::store::new_id()),
-                workspace_id: r.id.clone(),
-                session_id: r.session_id.clone(),
-                name: r.name.clone(),
-                source: r.source.clone(),
-                branch: r.branch.clone(),
-                snapshot: kept.to_string(),
-                anchor: super::anchor_ref(&r.id, &format!("discarded/{n}")),
-                until: h.now() + RETENTION,
-                created_at: h.now(),
-            };
-            r.discards += 1;
-            r.updated_at = h.now();
-            h.db(|c| {
-        let tx = c.unchecked_transaction()?;
-        save(c, &r)?;
-        c.execute(
-            &format!("INSERT INTO workspace_discards({DISCARD_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"),
-            params![d.id, d.workspace_id, d.session_id, d.name, bytes(&d.source), d.branch, d.snapshot, d.anchor, d.until, d.created_at],
-        )?;
-        intent(c, &key(&a.operation_id), &r.id, Step::Discard, &json!({"snapshot": kept, "anchor": d.anchor}), h.now())?;
-        tx.commit()?;
+    flow::discard_retained(&r.source.clone(), &r.path.clone(), &r.id.clone(), &n, &r.branch.clone(), |kept| {
+        let d = Discard {
+            id: format!("wsd-{}", crate::store::new_id()),
+            workspace_id: r.id.clone(),
+            session_id: r.session_id.clone(),
+            name: r.name.clone(),
+            source: r.source.clone(),
+            branch: r.branch.clone(),
+            snapshot: kept.to_string(),
+            anchor: super::anchor_ref(&r.id, &format!("discarded/{n}")),
+            until: h.now() + RETENTION,
+            created_at: h.now(),
+        };
+        r.discards += 1;
+        r.updated_at = h.now();
+        h.db(|c| {
+            let tx = c.unchecked_transaction()?;
+            save(c, &r)?;
+            c.execute(
+                &format!("INSERT INTO workspace_discards({DISCARD_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"),
+                params![d.id, d.workspace_id, d.session_id, d.name, bytes(&d.source), d.branch, d.snapshot, d.anchor, d.until, d.created_at],
+            )?;
+            intent(c, &key(&a.operation_id), &r.id, Step::Discard, &json!({"snapshot": kept, "anchor": d.anchor}), h.now())?;
+            tx.commit()?;
+            Ok(())
+        })?;
+        discarded = Some(d);
         Ok(())
     })?;
-            discarded = Some(d);
-            Ok(())
-        },
-    )?;
     h.db(|c| {
         settle(c, &key(&a.operation_id), Ended::Done, "")?;
         settle_notices(c, &r.id)?;
@@ -1419,12 +1421,7 @@ pub fn discard<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
     })?;
     let d = discarded.context("discard snapshot was not retained")?;
     let r = settle_result(h, r)?;
-    changed(
-        h,
-        r.as_ref(),
-        Some(&a.operation_id),
-        Some(discard_record(&d)),
-    )
+    changed(h, r.as_ref(), Some(&a.operation_id), Some(discard_record(&d)))
 }
 
 /// Remove a workspace nothing can be read of: its folder and its record go, with whatever work the
@@ -1452,39 +1449,20 @@ pub fn undo<H: Host>(h: &H, a: &api::Undo) -> Result<api::Changed> {
     let fingerprint = input(a)?;
     let _g = lock();
     let d = h
-        .db(|c| {
-            Ok(c.query_row(
-                &format!("SELECT {DISCARD_COLUMNS} FROM workspace_discards WHERE id=?1"),
-                [&a.discard_id],
-                discard_row,
-            )
-            .optional()?)
-        })?
+        .db(|c| Ok(c.query_row(&format!("SELECT {DISCARD_COLUMNS} FROM workspace_discards WHERE id=?1"), [&a.discard_id], discard_row).optional()?))?
         .ok_or_else(|| not_found("discarded work"))?;
-    if h.db(|c| receipts(c)?.existing(&a.operation_id, METHOD, &fingerprint))?
-        .is_some()
-    {
+    if h.db(|c| receipts(c)?.existing(&a.operation_id, METHOD, &fingerprint))?.is_some() {
         let r = h.db(|c| load(c, &d.workspace_id))?;
         return changed(h, r.as_ref(), Some(&a.operation_id), None);
     }
     if h.now() > d.until {
-        return Err(refuse(
-            "retention_expired",
-            "The discarded work is no longer kept.",
-            vec![],
-        ));
+        return Err(refuse("retention_expired", "The discarded work is no longer kept.", vec![]));
     }
-    let existing = h
-        .db(|c| load(c, &d.workspace_id))?
-        .filter(|r| r.path.exists());
+    let existing = h.db(|c| load(c, &d.workspace_id))?.filter(|r| r.path.exists());
     let r = match existing {
         Some(r) => {
             if h.busy(&r.session_id) {
-                return Err(refuse(
-                    "writer_active",
-                    "The agent is working; undo after its turn.",
-                    vec![],
-                ));
+                return Err(refuse("writer_active", "The agent is working; undo after its turn.", vec![]));
             }
             h.db(|c| receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint))?;
             // the workspace's branch is about to name the discarded commits again: kept in the
@@ -1492,26 +1470,15 @@ pub fn undo<H: Host>(h: &H, a: &api::Undo) -> Result<api::Changed> {
             super::anchor(&r.source, &r.id, "restored", &d.snapshot)?;
             if !flow::undo(&r.source, &r.path, &r.branch, &d.snapshot)? {
                 let _ = h.db(|c| receipts(c)?.finish(&a.operation_id, None, Some("invalid_state")));
-                return Err(refuse(
-                    "changed_since",
-                    "The workspace has new work since the Discard; apply or discard it first.",
-                    vec![],
-                ));
+                return Err(refuse("changed_since", "The workspace has new work since the Discard; apply or discard it first.", vec![]));
             }
             r
         }
         None => {
             if h.busy(&d.session_id) {
-                return Err(refuse(
-                    "writer_active",
-                    "The agent is working; undo after its turn.",
-                    vec![],
-                ));
+                return Err(refuse("writer_active", "The agent is working; undo after its turn.", vec![]));
             }
-            if h.db(|c| of_session(c, &d.session_id))?
-                .iter()
-                .any(|r| r.source == d.source)
-            {
+            if h.db(|c| of_session(c, &d.session_id))?.iter().any(|r| r.source == d.source) {
                 return Err(refuse(
                     "changed_since",
                     "This session already has a workspace for this repository; its newer work must be settled before Undo.",
@@ -1636,7 +1603,8 @@ pub fn reconcile<H: Host>(h: &H) -> Result<()> {
     })?;
     for (op, id, kind, intent_text) in running {
         let i: Value = serde_json::from_str(&intent_text).unwrap_or(Value::Null);
-        let p = |name: &str| -> PathBuf { path(i[name].as_array().map(|a| a.iter().filter_map(|b| b.as_u64().map(|b| b as u8)).collect()).unwrap_or_default()) };
+        let p =
+            |name: &str| -> PathBuf { path(i[name].as_array().map(|a| a.iter().filter_map(|b| b.as_u64().map(|b| b as u8)).collect()).unwrap_or_default()) };
         match kind.as_str() {
             kind if kind == Step::Create.name() => {
                 if h.db(|c| load(c, &id))?.is_some() {

@@ -16,9 +16,9 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::ops::Range;
 
+use iced::advanced::widget::Id;
 use iced::advanced::widget::operation::scrollable::{self as scroll, AbsoluteOffset, Scrollable};
 use iced::advanced::widget::operation::{Operation, Outcome};
-use iced::advanced::widget::Id;
 use iced::widget::{container, mouse_area, right, row, text, text_editor, text_input};
 use iced::{Alignment, Element, Padding, Rectangle, Task, Vector};
 use sill_proto::sfp::{Answer, Item, Question, Tool};
@@ -90,12 +90,7 @@ impl Surface {
     /// Which surface it is, whatever is in it now: a selection made in another is not this one's.
     fn identity(&self) -> Surface {
         match self {
-            Surface::Reader { key, mode, .. } => Surface::Reader {
-                key: key.clone(),
-                mode: *mode,
-                revision: 0,
-                edits: 0,
-            },
+            Surface::Reader { key, mode, .. } => Surface::Reader { key: key.clone(), mode: *mode, revision: 0, edits: 0 },
             other => other.clone(),
         }
     }
@@ -162,32 +157,16 @@ impl State {
         if !self.shown || self.query.is_empty() {
             return None;
         }
-        Some(FindQuery {
-            needle: self.query.clone(),
-            case_sensitive: self.case_sensitive,
-            current: self.current.map(|i| (0, i)),
-        })
+        Some(FindQuery { needle: self.query.clone(), case_sensitive: self.case_sensitive, current: self.current.map(|i| (0, i)) })
     }
 
     /// The matches in the reader's source as `(line, byte range, current)`, for the editor's
     /// marks.
     pub fn source_marks(&self) -> Vec<(usize, Range<usize>, bool)> {
-        if !self.shown
-            || !matches!(
-                self.surface,
-                Some(Surface::Reader {
-                    mode: ReaderMode::Source,
-                    ..
-                })
-            )
-        {
+        if !self.shown || !matches!(self.surface, Some(Surface::Reader { mode: ReaderMode::Source, .. })) {
             return Vec::new();
         }
-        self.matches
-            .iter()
-            .enumerate()
-            .map(|(i, m)| (m.leaf_in_row, m.range.0..m.range.1, self.current == Some(i)))
-            .collect()
+        self.matches.iter().enumerate().map(|(i, m)| (m.leaf_in_row, m.range.0..m.range.1, self.current == Some(i))).collect()
     }
 
     /// The query and current visible match to hand to [`crate::selection::Area::find`].
@@ -197,19 +176,10 @@ impl State {
         }
         let current = self.current.and_then(|idx| {
             let m = self.matches.get(idx)?;
-            let visible_occ = self.matches[..idx]
-                .iter()
-                .filter(|prev| {
-                    prev.row == m.row && prev.open_keys.iter().all(|k| k.is_open(view))
-                })
-                .count();
+            let visible_occ = self.matches[..idx].iter().filter(|prev| prev.row == m.row && prev.open_keys.iter().all(|k| k.is_open(view))).count();
             Some((m.row, visible_occ))
         });
-        Some(FindQuery {
-            needle: self.query.clone(),
-            case_sensitive: self.case_sensitive,
-            current,
-        })
+        Some(FindQuery { needle: self.query.clone(), case_sensitive: self.case_sensitive, current })
     }
 
     /// `(label, has_matches)` for the Find bar's count display, or `None` when the query is empty.
@@ -237,25 +207,13 @@ impl State {
         );
         let mut bar_row = row![input].spacing(4).align_y(Alignment::Center);
         if let Some((label, _)) = self.count_label() {
-            bar_row = bar_row.push(
-                container(text(label).size(style::TINY).color(P.fg_dim)).padding([0, 4]),
-            );
+            bar_row = bar_row.push(container(text(label).size(style::TINY).color(P.fg_dim)).padding([0, 4]));
         }
         let case_sensitive = self.case_sensitive;
         let case_button = crate::ui::bar_tip(
             keys::press(
-                crate::ui::bar_button(
-                    text("Aa")
-                        .size(style::TINY)
-                        .color(if case_sensitive { P.accent } else { P.fg_dim }),
-                )
-                .style(move |theme, status| {
-                    if case_sensitive {
-                        style::tinted(P.accent)(theme, status)
-                    } else {
-                        style::quiet(theme, status)
-                    }
-                }),
+                crate::ui::bar_button(text("Aa").size(style::TINY).color(if case_sensitive { P.accent } else { P.fg_dim }))
+                    .style(move |theme, status| if case_sensitive { style::tinted(P.accent)(theme, status) } else { style::quiet(theme, status) }),
                 Message::Find(Event::ToggleCase),
             ),
             "Match case (Alt+C)",
@@ -263,63 +221,27 @@ impl State {
         let has_matches = !self.matches.is_empty();
         let prev_button = crate::ui::bar_tip(
             keys::press_maybe(
-                crate::ui::bar_button(icons::glyph(
-                    "chevron-up",
-                    crate::ui::BAR_ICON,
-                    if has_matches {
-                        P.fg_dim
-                    } else {
-                        alpha(P.fg_dim, 0.35)
-                    },
-                ))
-                .style(style::quiet),
+                crate::ui::bar_button(icons::glyph("chevron-up", crate::ui::BAR_ICON, if has_matches { P.fg_dim } else { alpha(P.fg_dim, 0.35) }))
+                    .style(style::quiet),
                 has_matches.then_some(Message::Find(Event::Prev)),
             ),
             "Previous match (Shift+Enter)",
         );
         let next_button = crate::ui::bar_tip(
             keys::press_maybe(
-                crate::ui::bar_button(icons::glyph(
-                    "chevron-down",
-                    crate::ui::BAR_ICON,
-                    if has_matches {
-                        P.fg_dim
-                    } else {
-                        alpha(P.fg_dim, 0.35)
-                    },
-                ))
-                .style(style::quiet),
+                crate::ui::bar_button(icons::glyph("chevron-down", crate::ui::BAR_ICON, if has_matches { P.fg_dim } else { alpha(P.fg_dim, 0.35) }))
+                    .style(style::quiet),
                 has_matches.then_some(Message::Find(Event::Next)),
             ),
             "Next match (Enter)",
         );
         let close_button = crate::ui::bar_tip(
-            keys::press(
-                crate::ui::bar_button(icons::glyph("x", 12.0, P.fg_dim)).style(style::quiet),
-                Message::Find(Event::Close),
-            ),
+            keys::press(crate::ui::bar_button(icons::glyph("x", 12.0, P.fg_dim)).style(style::quiet), Message::Find(Event::Close)),
             "Close (Escape)",
         );
-        bar_row = bar_row
-            .push(case_button)
-            .push(prev_button)
-            .push(next_button)
-            .push(close_button);
-        let card = mouse_area(
-            container(bar_row)
-                .id("find-bar")
-                .padding([4, 6])
-                .style(style::find_bar),
-        )
-        .on_press(Message::Noop);
-        right(card)
-            .padding(Padding {
-                top: 8.0,
-                right: 18.0,
-                bottom: 0.0,
-                left: 0.0,
-            })
-            .into()
+        bar_row = bar_row.push(case_button).push(prev_button).push(next_button).push(close_button);
+        let card = mouse_area(container(bar_row).id("find-bar").padding([4, 6]).style(style::find_bar)).on_press(Message::Noop);
+        right(card).padding(Padding { top: 8.0, right: 18.0, bottom: 0.0, left: 0.0 }).into()
     }
 }
 
@@ -332,10 +254,7 @@ pub fn match_ranges(haystack: &str, needle: &str, case_sensitive: bool) -> Vec<(
         return Vec::new();
     }
     if case_sensitive {
-        return haystack
-            .match_indices(needle)
-            .map(|(i, s)| (i, i + s.len()))
-            .collect();
+        return haystack.match_indices(needle).map(|(i, s)| (i, i + s.len())).collect();
     }
     if haystack.is_ascii() && needle.is_ascii() {
         let h = haystack.as_bytes();
@@ -404,12 +323,7 @@ fn index_rows(view: &SessionView) -> Vec<Vec<IndexedLeaf>> {
     let conversation = &view.conversation;
     let items = conversation.visible_items();
     let places = conversation.question_places();
-    let below = |item: &Item| -> Vec<&Question> {
-        places
-            .get(item.item_id.as_str())
-            .cloned()
-            .unwrap_or_default()
-    };
+    let below = |item: &Item| -> Vec<&Question> { places.get(item.item_id.as_str()).cloned().unwrap_or_default() };
     let turn_end = |index: usize, item: &Item| -> Option<String> {
         let turn_id = item.turn_id.as_ref()?;
         if items.get(index + 1).and_then(|next| next.turn_id.as_ref()) == Some(turn_id) {
@@ -417,11 +331,7 @@ fn index_rows(view: &SessionView) -> Vec<Vec<IndexedLeaf>> {
         }
         conversation.turn_end(turn_id).map(|end| end.to_string())
     };
-    let folds = crate::folds::rows(
-        &items,
-        |item| conversation.purpose(item),
-        |item| places.contains_key(item.item_id.as_str()),
-    );
+    let folds = crate::folds::rows(&items, |item| conversation.purpose(item), |item| places.contains_key(item.item_id.as_str()));
     let entries: Vec<Range<usize>> = folds.iter().map(|r| r.range().clone()).collect();
 
     let mut rows = Vec::with_capacity(entries.len() + 4);
@@ -437,10 +347,7 @@ fn index_rows(view: &SessionView) -> Vec<Vec<IndexedLeaf>> {
             let inside = items[entry].to_vec();
             let base_keys = vec![OpenKey::Group(crate::ui::fold_key(inside[0]))];
             for sub_entry in crate::tool_runs::entries(&inside, |_| false) {
-                if inside[sub_entry.clone()]
-                    .iter()
-                    .all(|i| crate::host_runs::host_text(i).is_some())
-                {
+                if inside[sub_entry.clone()].iter().all(|i| crate::host_runs::host_text(i).is_some()) {
                     index_host_run(&inside[sub_entry], &base_keys, &mut leaves);
                 } else if sub_entry.len() > 1 {
                     index_tool_run(&inside[sub_entry], &base_keys, &mut leaves);
@@ -448,10 +355,7 @@ fn index_rows(view: &SessionView) -> Vec<Vec<IndexedLeaf>> {
                     index_item(view, inside[sub_entry.start], &base_keys, &mut leaves);
                 }
             }
-        } else if items[entry.clone()]
-            .iter()
-            .all(|i| crate::host_runs::host_text(i).is_some())
-        {
+        } else if items[entry.clone()].iter().all(|i| crate::host_runs::host_text(i).is_some()) {
             index_host_run(&items[entry], &[], &mut leaves);
         } else if entry.len() > 1 {
             index_tool_run(&items[entry], &[], &mut leaves);
@@ -462,57 +366,32 @@ fn index_rows(view: &SessionView) -> Vec<Vec<IndexedLeaf>> {
             }
         }
         if let Some(end) = turn_end(last, items[last]) {
-            leaves.push(IndexedLeaf {
-                text: format!("· {end}"),
-                open_keys: Vec::new(),
-            });
+            leaves.push(IndexedLeaf { text: format!("· {end}"), open_keys: Vec::new() });
         }
         rows.push(leaves);
     }
 
-    for question in conversation
-        .questions
-        .values()
-        .filter(|q| !placed.contains(q.question_id.as_str()))
-    {
+    for question in conversation.questions.values().filter(|q| !placed.contains(q.question_id.as_str())) {
         let mut leaves = Vec::new();
         index_question(question, &[], &mut leaves);
         rows.push(leaves);
     }
     if let Some(error) = view.status.problem() {
-        rows.push(vec![IndexedLeaf {
-            text: error.to_string(),
-            open_keys: Vec::new(),
-        }]);
+        rows.push(vec![IndexedLeaf { text: error.to_string(), open_keys: Vec::new() }]);
     }
     if let Some(failed) = &view.failed {
-        rows.push(vec![IndexedLeaf {
-            text: failed.clone(),
-            open_keys: Vec::new(),
-        }]);
+        rows.push(vec![IndexedLeaf { text: failed.clone(), open_keys: Vec::new() }]);
     }
 
     rows
 }
 
 fn push_leaf(out: &mut Vec<IndexedLeaf>, text: impl Into<String>, keys: &[OpenKey]) {
-    out.push(IndexedLeaf {
-        text: text.into(),
-        open_keys: keys.to_vec(),
-    });
+    out.push(IndexedLeaf { text: text.into(), open_keys: keys.to_vec() });
 }
 
-fn index_item(
-    view: &SessionView,
-    item: &Item,
-    keys: &[OpenKey],
-    out: &mut Vec<IndexedLeaf>,
-) {
-    let empty_user = item.kind == "user"
-        && view
-            .rendered
-            .get(&item.item_id)
-            .is_none_or(|r| r.source.trim().is_empty());
+fn index_item(view: &SessionView, item: &Item, keys: &[OpenKey], out: &mut Vec<IndexedLeaf>) {
+    let empty_user = item.kind == "user" && view.rendered.get(&item.item_id).is_none_or(|r| r.source.trim().is_empty());
     if empty_user {
         return;
     }
@@ -520,10 +399,7 @@ fn index_item(
         index_tool_call(item, tool, keys, out);
         return;
     }
-    let source = view
-        .rendered
-        .get(&item.item_id)
-        .map_or("", |r| r.source.as_str());
+    let source = view.rendered.get(&item.item_id).map_or("", |r| r.source.as_str());
     match item.kind.as_str() {
         "user" => push_leaf(out, source, keys),
         "thought" => {
@@ -540,10 +416,7 @@ fn index_item(
         "note" => push_leaf(out, format!("· {source}"), keys),
         "notice" => {
             let mut notice_keys = keys.to_vec();
-            if source.starts_with("HOST action ")
-                || source.starts_with("HOST process ")
-                || crate::ui::is_long_notice(source)
-            {
+            if source.starts_with("HOST action ") || source.starts_with("HOST process ") || crate::ui::is_long_notice(source) {
                 notice_keys.push(OpenKey::Tool(item.item_id.clone()));
             }
             push_leaf(out, source, &notice_keys);
@@ -563,12 +436,7 @@ fn index_item(
     }
 }
 
-fn index_step_line(
-    step: &crate::shell::Step<'_>,
-    arguments_quiet: bool,
-    keys: &[OpenKey],
-    out: &mut Vec<IndexedLeaf>,
-) {
+fn index_step_line(step: &crate::shell::Step<'_>, arguments_quiet: bool, keys: &[OpenKey], out: &mut Vec<IndexedLeaf>) {
     let shown = crate::ui::one_line(step.text, 140);
     match shown.split_once(' ') {
         Some((word, arguments)) if arguments_quiet => {
@@ -583,12 +451,7 @@ fn index_step_line(
     }
 }
 
-fn index_tool_output(
-    item_id: &str,
-    tool: &Tool,
-    keys: &[OpenKey],
-    out: &mut Vec<IndexedLeaf>,
-) {
+fn index_tool_output(item_id: &str, tool: &Tool, keys: &[OpenKey], out: &mut Vec<IndexedLeaf>) {
     let mut out_keys = keys.to_vec();
     out_keys.push(OpenKey::Tool(item_id.to_string()));
     if !tool.detail.trim().is_empty() {
@@ -601,23 +464,14 @@ fn index_tool_output(
     }
 }
 
-fn index_tool_call(
-    item: &Item,
-    tool: &Tool,
-    keys: &[OpenKey],
-    out: &mut Vec<IndexedLeaf>,
-) {
+fn index_tool_call(item: &Item, tool: &Tool, keys: &[OpenKey], out: &mut Vec<IndexedLeaf>) {
     for step in crate::tool_runs::lines(tool) {
         index_step_line(&step, false, keys, out);
     }
     index_tool_output(&item.item_id, tool, keys, out);
 }
 
-fn index_tool_run(
-    run: &[&Item],
-    keys: &[OpenKey],
-    out: &mut Vec<IndexedLeaf>,
-) {
+fn index_tool_run(run: &[&Item], keys: &[OpenKey], out: &mut Vec<IndexedLeaf>) {
     let groups = crate::tool_runs::groups(run);
     for group in &groups {
         let name = crate::ui::one_line(&group.name, 24);
@@ -648,11 +502,7 @@ fn index_tool_run(
     }
 }
 
-fn index_host_details(
-    action: &crate::host_runs::Action<'_>,
-    keys: &[OpenKey],
-    out: &mut Vec<IndexedLeaf>,
-) {
+fn index_host_details(action: &crate::host_runs::Action<'_>, keys: &[OpenKey], out: &mut Vec<IndexedLeaf>) {
     let mut detail_keys = keys.to_vec();
     detail_keys.push(OpenKey::Tool(action.key.clone()));
     if let Some(request) = action.request {
@@ -665,15 +515,8 @@ fn index_host_details(
     }
 }
 
-fn index_host_run(
-    notices: &[&Item],
-    keys: &[OpenKey],
-    out: &mut Vec<IndexedLeaf>,
-) {
-    let texts: Vec<(&str, &str)> = notices
-        .iter()
-        .filter_map(|item| Some((item.item_id.as_str(), crate::host_runs::host_text(item)?)))
-        .collect();
+fn index_host_run(notices: &[&Item], keys: &[OpenKey], out: &mut Vec<IndexedLeaf>) {
+    let texts: Vec<(&str, &str)> = notices.iter().filter_map(|item| Some((item.item_id.as_str(), crate::host_runs::host_text(item)?))).collect();
     let groups = crate::host_runs::groups(crate::host_runs::actions(&texts));
     for group in &groups {
         let single = group.actions.len() == 1;
@@ -712,12 +555,9 @@ fn index_question(question: &Question, keys: &[OpenKey], out: &mut Vec<IndexedLe
         }
     } else {
         let outcome = match &question.answer {
-            Some(Answer::Permission { option_id }) => question
-                .options
-                .iter()
-                .find(|o| &o.option_id == option_id)
-                .map_or(option_id.as_str(), |o| o.title.as_str())
-                .to_string(),
+            Some(Answer::Permission { option_id }) => {
+                question.options.iter().find(|o| &o.option_id == option_id).map_or(option_id.as_str(), |o| o.title.as_str()).to_string()
+            }
             Some(Answer::Cancel) => "cancelled".into(),
             Some(Answer::Form { .. }) => "answered".into(),
             None => question.state.clone(),
@@ -735,12 +575,7 @@ fn collect_matches(rows: &[Vec<IndexedLeaf>], query: &str, case_sensitive: bool)
     for (row_idx, leaves) in rows.iter().enumerate() {
         for (leaf_idx, leaf) in leaves.iter().enumerate() {
             for range in match_ranges(&leaf.text, query, case_sensitive) {
-                matches.push(Match {
-                    row: row_idx,
-                    leaf_in_row: leaf_idx,
-                    range,
-                    open_keys: leaf.open_keys.clone(),
-                });
+                matches.push(Match { row: row_idx, leaf_in_row: leaf_idx, range, open_keys: leaf.open_keys.clone() });
             }
         }
     }
@@ -753,18 +588,12 @@ fn row_positions(view: &SessionView, viewport: f32) -> (f32, Vec<(f32, f32)>) {
     let conversation = &view.conversation;
     let items = conversation.visible_items();
     let places = conversation.question_places();
-    let folds = crate::folds::rows(
-        &items,
-        |item| conversation.purpose(item),
-        |item| places.contains_key(item.item_id.as_str()),
-    );
+    let folds = crate::folds::rows(&items, |item| conversation.purpose(item), |item| places.contains_key(item.item_id.as_str()));
     let heights = view.heights.borrow();
     let mut positions = Vec::with_capacity(folds.len());
     let mut y = 0.0_f32;
     for row in &folds {
-        let h = heights
-            .get(&items[row.range().start].item_id)
-            .map_or(0.0, |(_, h)| *h);
+        let h = heights.get(&items[row.range().start].item_id).map_or(0.0, |(_, h)| *h);
         positions.push((y, h));
         y += h + crate::rows::SPACING;
     }
@@ -780,22 +609,10 @@ fn row_positions(view: &SessionView, viewport: f32) -> (f32, Vec<(f32, f32)>) {
 /// Picks the first match at or below the top of the viewport. Within the top row, uses the
 /// laid-out `visible_leaves` when there are any, so matches scrolled above the top of a long
 /// message are skipped in favour of the first visible one.
-fn first_match_at_or_below_top(
-    view: &SessionView,
-    viewport: f32,
-    rows: &[Vec<IndexedLeaf>],
-    matches: &[Match],
-    visible_leaves: &[VisibleLeaf],
-) -> usize {
+fn first_match_at_or_below_top(view: &SessionView, viewport: f32, rows: &[Vec<IndexedLeaf>], matches: &[Match], visible_leaves: &[VisibleLeaf]) -> usize {
     let (top_y, positions) = row_positions(view, viewport);
-    let top_row = positions
-        .iter()
-        .position(|&(ry, rh)| ry + rh > top_y + 1.0)
-        .unwrap_or(0);
-    let top_row_leaves: Vec<&VisibleLeaf> = visible_leaves
-        .iter()
-        .filter(|l| l.row == Some(top_row))
-        .collect();
+    let top_row = positions.iter().position(|&(ry, rh)| ry + rh > top_y + 1.0).unwrap_or(0);
+    let top_row_leaves: Vec<&VisibleLeaf> = visible_leaves.iter().filter(|l| l.row == Some(top_row)).collect();
     let is_open = |keys: &[OpenKey]| keys.iter().all(|k| k.is_open(view));
     for (idx, m) in matches.iter().enumerate() {
         if m.row < top_row {
@@ -804,10 +621,7 @@ fn first_match_at_or_below_top(
         if m.row > top_row || !is_open(&m.open_keys) {
             return idx;
         }
-        let shown_before = rows[top_row][..m.leaf_in_row]
-            .iter()
-            .filter(|leaf| is_open(&leaf.open_keys))
-            .count();
+        let shown_before = rows[top_row][..m.leaf_in_row].iter().filter(|leaf| is_open(&leaf.open_keys)).count();
         let Some(rect) = top_row_leaves
             .get(shown_before)
             .and_then(|leaf| Some((leaf, leaf.layout.highlight_rects(m.range).into_iter().next()?)))
@@ -825,11 +639,7 @@ fn first_match_at_or_below_top(
 /// The conversation's height: until it has scrolled, the window's stands in (as in
 /// [`crate::ui`]).
 fn viewport(view: &SessionView, window_height: f32) -> f32 {
-    if view.viewport > 0.0 {
-        view.viewport
-    } else {
-        window_height
-    }
+    if view.viewport > 0.0 { view.viewport } else { window_height }
 }
 
 /// The reader's text in the order its leaves are built: the preview's Markdown leaves, the diff's
@@ -846,18 +656,10 @@ fn reader_leaves(view: &SessionView, mode: ReaderMode) -> Vec<String> {
             }
             out
         }
-        ReaderMode::Diff => crate::diff_ui::numbered_diff(&file.text)
-            .into_iter()
-            .map(|(_, _, line)| line.to_string())
-            .collect(),
-        ReaderMode::Source => (0..reader.content.line_count())
-            .map(|i| {
-                reader
-                    .content
-                    .line(i)
-                    .map_or_else(String::new, |line| line.text.into_owned())
-            })
-            .collect(),
+        ReaderMode::Diff => crate::diff_ui::numbered_diff(&file.text).into_iter().map(|(_, _, line)| line.to_string()).collect(),
+        ReaderMode::Source => {
+            (0..reader.content.line_count()).map(|i| reader.content.line(i).map_or_else(String::new, |line| line.text.into_owned())).collect()
+        }
         ReaderMode::Waiting => Vec::new(),
     }
 }
@@ -865,27 +667,15 @@ fn reader_leaves(view: &SessionView, mode: ReaderMode) -> Vec<String> {
 /// The reader's first match at or below where it is: in the source, at or after the cursor (the
 /// start of its selection); in the preview or diff, the first at or below the top of the view,
 /// from the leaves laid out last.
-fn reader_first_match(
-    view: &SessionView,
-    mode: ReaderMode,
-    leaves: usize,
-    matches: &[Match],
-    visible_leaves: &[VisibleLeaf],
-) -> usize {
+fn reader_first_match(view: &SessionView, mode: ReaderMode, leaves: usize, matches: &[Match], visible_leaves: &[VisibleLeaf]) -> usize {
     let found = match mode {
         ReaderMode::Source => view.reader.as_ref().and_then(|reader| {
             let cursor = reader.content.cursor();
             let key = |p: text_editor::Position| (p.line, p.column);
-            let at = cursor
-                .selection
-                .map_or(key(cursor.position), |s| key(s).min(key(cursor.position)));
-            matches
-                .iter()
-                .position(|m| (m.leaf_in_row, m.range.0) >= at)
+            let at = cursor.selection.map_or(key(cursor.position), |s| key(s).min(key(cursor.position)));
+            matches.iter().position(|m| (m.leaf_in_row, m.range.0) >= at)
         }),
-        ReaderMode::Preview | ReaderMode::Diff => {
-            first_laid_out_match(leaves, matches, visible_leaves)
-        }
+        ReaderMode::Preview | ReaderMode::Diff => first_laid_out_match(leaves, matches, visible_leaves),
         ReaderMode::Waiting => None,
     };
     found.unwrap_or(0)
@@ -893,41 +683,24 @@ fn reader_first_match(
 
 /// The first match at or below the top of the view, from the leaves laid out last, when they are
 /// the `leaves` the index was made of (all of a surface that builds all of its text).
-fn first_laid_out_match(
-    leaves: usize,
-    matches: &[Match],
-    visible_leaves: &[VisibleLeaf],
-) -> Option<usize> {
+fn first_laid_out_match(leaves: usize, matches: &[Match], visible_leaves: &[VisibleLeaf]) -> Option<usize> {
     if visible_leaves.len() != leaves {
         return None;
     }
     matches.iter().position(|m| {
         let leaf = &visible_leaves[m.leaf_in_row];
-        leaf.layout
-            .highlight_rects(m.range)
-            .into_iter()
-            .next()
-            .is_none_or(|rect| leaf.origin_y + rect.y + rect.height > leaf.view_top + 1.0)
+        leaf.layout.highlight_rects(m.range).into_iter().next().is_none_or(|rect| leaf.origin_y + rect.y + rect.height > leaf.view_top + 1.0)
     })
 }
 
 /// Texts as the leaves of one row, none of them folded away.
 fn one_row(texts: Vec<String>) -> Vec<IndexedLeaf> {
-    texts
-        .into_iter()
-        .map(|text| IndexedLeaf {
-            text,
-            open_keys: Vec::new(),
-        })
-        .collect()
+    texts.into_iter().map(|text| IndexedLeaf { text, open_keys: Vec::new() }).collect()
 }
 
 /// The rectangles of `marks` (`(line, byte range, current)`, in line order) in the lines the
 /// source editor has laid out, in its text's own coordinates.
-pub fn mark_rects(
-    buffer: &iced::advanced::graphics::text::cosmic_text::Buffer,
-    marks: &[(usize, Range<usize>, bool)],
-) -> Vec<(Rectangle, iced::Color)> {
+pub fn mark_rects(buffer: &iced::advanced::graphics::text::cosmic_text::Buffer, marks: &[(usize, Range<usize>, bool)]) -> Vec<(Rectangle, iced::Color)> {
     use iced::advanced::graphics::text::cosmic_text::Cursor;
     let mut out = Vec::new();
     if marks.is_empty() {
@@ -936,19 +709,10 @@ pub fn mark_rects(
     for run in buffer.layout_runs() {
         let first = marks.partition_point(|m| m.0 < run.line_i);
         for (line, range, current) in marks[first..].iter().take_while(|m| m.0 == run.line_i) {
-            if let Some((x, width)) =
-                run.highlight(Cursor::new(*line, range.start), Cursor::new(*line, range.end))
+            if let Some((x, width)) = run.highlight(Cursor::new(*line, range.start), Cursor::new(*line, range.end))
                 && width > 0.0
             {
-                out.push((
-                    Rectangle {
-                        x,
-                        y: run.line_top,
-                        width,
-                        height: run.line_height,
-                    },
-                    style::find_match(*current),
-                ));
+                out.push((Rectangle { x, y: run.line_top, width, height: run.line_height }, style::find_match(*current)));
             }
         }
     }
@@ -960,12 +724,9 @@ impl App {
     pub fn terminal_focused(&self) -> bool {
         self.find_available()
             && self.menu.is_none()
-            && self.current().is_some_and(|v| {
-                v.terminal_shown
-                    && v.terminal
-                        .as_ref()
-                        .is_some_and(|t| t.focused && t.status == crate::terminal::Status::Running)
-            })
+            && self
+                .current()
+                .is_some_and(|v| v.terminal_shown && v.terminal.as_ref().is_some_and(|t| t.focused && t.status == crate::terminal::Status::Running))
     }
 
     /// Whether the window shows something Find searches.
@@ -1032,31 +793,16 @@ impl App {
             return Task::none();
         }
         match (&self.find.surface, &now) {
-            (
-                Some(Surface::Reader {
-                    key: was,
-                    mode: was_mode,
-                    revision: was_revision,
-                    ..
-                }),
-                Some(Surface::Reader {
-                    key,
-                    mode,
-                    revision,
-                    ..
-                }),
-            ) if was == key => {
+            (Some(Surface::Reader { key: was, mode: was_mode, revision: was_revision, .. }), Some(Surface::Reader { key, mode, revision, .. }))
+                if was == key =>
+            {
                 let keep = was_mode == mode;
                 // the file read again is a new editor, its cursor at the start: the kept match is
                 // its selection again (an edit keeps the editor, and the cursor where it is typed)
                 let replaced = keep && *mode == ReaderMode::Source && was_revision != revision;
                 self.find.surface = now;
                 let task = self.recompute_find(keep);
-                if replaced {
-                    Task::batch([task, self.activate_current_match()])
-                } else {
-                    task
-                }
+                if replaced { Task::batch([task, self.activate_current_match()]) } else { task }
             }
             _ => {
                 self.find.close();
@@ -1067,11 +813,7 @@ impl App {
 
     /// Text streamed into the conversation: its matches again, the current one kept.
     pub fn find_streamed(&mut self) -> Task<Message> {
-        if self.find.surface == Some(Surface::Conversation) {
-            self.recompute_find(true)
-        } else {
-            Task::none()
-        }
+        if self.find.surface == Some(Surface::Conversation) { self.recompute_find(true) } else { Task::none() }
     }
 
     pub fn find_event(&mut self, event: Event) -> Task<Message> {
@@ -1098,13 +840,7 @@ impl App {
                     return focus;
                 }
                 let selected = match &surface {
-                    Surface::Reader {
-                        mode: ReaderMode::Source,
-                        ..
-                    } => self
-                        .current()
-                        .and_then(|v| v.reader.as_ref())
-                        .and_then(|r| r.content.selection()),
+                    Surface::Reader { mode: ReaderMode::Source, .. } => self.current().and_then(|v| v.reader.as_ref()).and_then(|r| r.content.selection()),
                     _ => self.find.selected_text.borrow().clone(),
                 };
                 if let Some(selected) = selected
@@ -1124,10 +860,7 @@ impl App {
                 match surface {
                     Some(Surface::Conversation) => iced::widget::operation::focus("prompt"),
                     // the cursor stays on the last match (docs/find.md, the reader)
-                    Some(Surface::Reader {
-                        mode: ReaderMode::Source,
-                        ..
-                    }) => iced::widget::operation::focus("file-reader"),
+                    Some(Surface::Reader { mode: ReaderMode::Source, .. }) => iced::widget::operation::focus("file-reader"),
                     _ => Task::none(),
                 }
             }
@@ -1176,14 +909,7 @@ impl App {
             }
             (Surface::Conversation | Surface::Reader { .. }, false, None) => Vec::new(),
             // the page builds all of its text: what it laid out last is the index
-            (Surface::Settings, false, _) => vec![one_row(
-                self.find
-                    .visible_leaves
-                    .borrow()
-                    .iter()
-                    .map(|leaf| leaf.layout.text().to_owned())
-                    .collect(),
-            )],
+            (Surface::Settings, false, _) => vec![one_row(self.find.visible_leaves.borrow().iter().map(|leaf| leaf.layout.text().to_owned()).collect())],
         };
         let matches = collect_matches(&rows, &self.find.query, self.find.case_sensitive);
         if matches.is_empty() {
@@ -1191,41 +917,23 @@ impl App {
             self.find.current = None;
             return Task::none();
         }
-        let kept = keep_current
-            .then(|| self.find.current.and_then(|i| self.find.matches.get(i)))
-            .flatten()
-            .map(|prev| {
-                matches
-                    .iter()
-                    .position(|m| {
-                        (m.row, m.leaf_in_row, m.range) == (prev.row, prev.leaf_in_row, prev.range)
-                    })
-                    .unwrap_or(self.find.current.unwrap_or(0).min(matches.len() - 1))
-            });
+        let kept = keep_current.then(|| self.find.current.and_then(|i| self.find.matches.get(i))).flatten().map(|prev| {
+            matches
+                .iter()
+                .position(|m| (m.row, m.leaf_in_row, m.range) == (prev.row, prev.leaf_in_row, prev.range))
+                .unwrap_or(self.find.current.unwrap_or(0).min(matches.len() - 1))
+        });
         if let Some(current) = kept {
             self.find.matches = matches;
             self.find.current = Some(current);
             return Task::none();
         }
         let initial = match (&surface, view) {
-            (Surface::Conversation, Some(view)) => first_match_at_or_below_top(
-                view,
-                viewport(view, self.height),
-                &rows,
-                &matches,
-                &self.find.visible_leaves.borrow(),
-            ),
-            (Surface::Reader { mode, .. }, Some(view)) => reader_first_match(
-                view,
-                *mode,
-                rows[0].len(),
-                &matches,
-                &self.find.visible_leaves.borrow(),
-            ),
-            (Surface::Settings, _) => {
-                first_laid_out_match(rows[0].len(), &matches, &self.find.visible_leaves.borrow())
-                    .unwrap_or(0)
+            (Surface::Conversation, Some(view)) => {
+                first_match_at_or_below_top(view, viewport(view, self.height), &rows, &matches, &self.find.visible_leaves.borrow())
             }
+            (Surface::Reader { mode, .. }, Some(view)) => reader_first_match(view, *mode, rows[0].len(), &matches, &self.find.visible_leaves.borrow()),
+            (Surface::Settings, _) => first_laid_out_match(rows[0].len(), &matches, &self.find.visible_leaves.borrow()).unwrap_or(0),
             // no session: no conversation or reader rows, so no matches got this far
             (_, None) => 0,
         };
@@ -1248,18 +956,11 @@ impl App {
                     ReaderMode::Preview => reveal_match("markdown-reader"),
                     ReaderMode::Diff => reveal_match("diff-reader"),
                     ReaderMode::Source => {
-                        let Some(reader) = self.current_mut().and_then(|v| v.reader.as_mut())
-                        else {
+                        let Some(reader) = self.current_mut().and_then(|v| v.reader.as_mut()) else {
                             return Task::none();
                         };
-                        let at = |column| text_editor::Position {
-                            line: m.leaf_in_row,
-                            column,
-                        };
-                        reader.content.select(text_editor::Cursor {
-                            position: at(m.range.1),
-                            selection: Some(at(m.range.0)),
-                        });
+                        let at = |column| text_editor::Position { line: m.leaf_in_row, column };
+                        reader.content.select(text_editor::Cursor { position: at(m.range.1), selection: Some(at(m.range.0)) });
                         crate::files::reveal_caret(reader)
                     }
                     ReaderMode::Waiting => Task::none(),
@@ -1302,11 +1003,7 @@ struct ScrollFrame {
 fn reveal_axis(start: f32, end: f32, scroll: f32, view: f32, content: f32) -> f32 {
     let margin = (view * 0.1).min(48.0);
     let max_scroll = (content - view).max(0.0);
-    if start < scroll + margin || end > scroll + view - margin {
-        (start - view / 3.0).clamp(0.0, max_scroll)
-    } else {
-        scroll.clamp(0.0, max_scroll)
-    }
+    if start < scroll + margin || end > scroll + view - margin { (start - view / 3.0).clamp(0.0, max_scroll) } else { scroll.clamp(0.0, max_scroll) }
 }
 
 struct RevealMatch {
@@ -1329,20 +1026,8 @@ impl Operation for RevealMatch {
         }
     }
 
-    fn scrollable(
-        &mut self,
-        id: Option<&Id>,
-        bounds: Rectangle,
-        content_bounds: Rectangle,
-        translation: Vector,
-        _state: &mut dyn Scrollable,
-    ) {
-        self.entered = Some(ScrollFrame {
-            id: id.cloned(),
-            bounds,
-            content: content_bounds.size(),
-            translation,
-        });
+    fn scrollable(&mut self, id: Option<&Id>, bounds: Rectangle, content_bounds: Rectangle, translation: Vector, _state: &mut dyn Scrollable) {
+        self.entered = Some(ScrollFrame { id: id.cloned(), bounds, content: content_bounds.size(), translation });
     }
 
     fn custom(&mut self, _id: Option<&Id>, bounds: Rectangle, state: &mut dyn Any) {
@@ -1355,57 +1040,29 @@ impl Operation for RevealMatch {
         let Some(rect) = selectable.current_match_rect() else {
             return;
         };
-        let Some(frame) = self
-            .frames
-            .iter()
-            .rev()
-            .find(|f| f.id.as_ref() == Some(&self.id))
-        else {
+        let Some(frame) = self.frames.iter().rev().find(|f| f.id.as_ref() == Some(&self.id)) else {
             return;
         };
         let origin = selectable.origin(bounds);
         let top = origin.y + rect.y - frame.bounds.y;
-        let y = reveal_axis(
-            top,
-            top + rect.height,
-            frame.translation.y,
-            frame.bounds.height,
-            frame.content.height,
-        );
+        let y = reveal_axis(top, top + rect.height, frame.translation.y, frame.bounds.height, frame.content.height);
         let x = (frame.content.width > frame.bounds.width + 0.5).then(|| {
             let left = origin.x + rect.x - frame.bounds.x;
-            reveal_axis(
-                left,
-                left + rect.width,
-                frame.translation.x,
-                frame.bounds.width,
-                frame.content.width,
-            )
+            reveal_axis(left, left + rect.width, frame.translation.x, frame.bounds.width, frame.content.width)
         });
         self.target = Some((self.id.clone(), x, y));
     }
 
     fn finish(&self) -> Outcome<()> {
         match &self.target {
-            Some((id, x, y)) => Outcome::Chain(Box::new(scroll::scroll_to(
-                id.clone(),
-                AbsoluteOffset {
-                    x: *x,
-                    y: Some(*y),
-                },
-            ))),
+            Some((id, x, y)) => Outcome::Chain(Box::new(scroll::scroll_to(id.clone(), AbsoluteOffset { x: *x, y: Some(*y) }))),
             None => Outcome::None,
         }
     }
 }
 
 fn reveal_match(id: &'static str) -> Task<Message> {
-    keys::effect(RevealMatch {
-        id: Id::new(id),
-        entered: None,
-        frames: Vec::new(),
-        target: None,
-    })
+    keys::effect(RevealMatch { id: Id::new(id), entered: None, frames: Vec::new(), target: None })
 }
 
 #[cfg(test)]
@@ -1416,23 +1073,14 @@ mod tests {
     fn match_ranges_handles_case_unicode_and_non_overlapping_occurrences() {
         assert_eq!(match_ranges("hello", "", false), Vec::<(usize, usize)>::new());
         assert_eq!(match_ranges("ababa", "aba", false), vec![(0, 3)]);
-        assert_eq!(
-            match_ranges("Send send SEND", "send", false),
-            vec![(0, 4), (5, 9), (10, 14)]
-        );
-        assert_eq!(
-            match_ranges("Send send SEND", "send", true),
-            vec![(5, 9)]
-        );
+        assert_eq!(match_ranges("Send send SEND", "send", false), vec![(0, 4), (5, 9), (10, 14)]);
+        assert_eq!(match_ranges("Send send SEND", "send", true), vec![(5, 9)]);
         // Multi-byte UTF-8: cafés and Café
         let hay = "Deux cafés au Café Central";
         let ranges = match_ranges(hay, "café", false);
         assert_eq!(ranges.len(), 2);
         assert_eq!(&hay[ranges[0].0..ranges[0].1], "café");
         assert_eq!(&hay[ranges[1].0..ranges[1].1], "Café");
-        assert_eq!(
-            match_ranges(hay, "Café", true),
-            vec![ranges[1]]
-        );
+        assert_eq!(match_ranges(hay, "Café", true), vec![ranges[1]]);
     }
 }

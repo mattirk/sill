@@ -105,14 +105,8 @@ impl Permissions {
     }
 
     pub fn validate(&self, network: &Network) -> Result<()> {
-        ensure!(
-            self.host_control != Rule::On,
-            "Host control cannot be enabled by a policy default; explicit activation is required"
-        );
-        ensure!(
-            self.public_web != Rule::Forbidden || network.mode != NetMode::All,
-            "public_web is forbidden but network.mode is all"
-        );
+        ensure!(self.host_control != Rule::On, "Host control cannot be enabled by a policy default; explicit activation is required");
+        ensure!(self.public_web != Rule::Forbidden || network.mode != NetMode::All, "public_web is forbidden but network.mode is all");
         Ok(())
     }
 
@@ -212,8 +206,7 @@ impl Permissions {
                         _ => rule == Rule::On,
                     };
                 let refusal = self.enable_refusal(capability, network);
-                let allowed = rule != Rule::Forbidden
-                    && (!available || effective || refusal.is_none());
+                let allowed = rule != Rule::Forbidden && (!available || effective || refusal.is_none());
                 let blocked = choice.and_then(|choice| choice.blocked.as_deref());
                 let reason = if let Some(blocked) = blocked {
                     format!("session choice blocked: {blocked}")
@@ -263,10 +256,7 @@ mod tests {
 
     #[test]
     fn defaults_and_hard_limits_are_distinct() {
-        let p = Policy::parse(
-            "name='test'\n[permissions]\nprivate_bus='off'\ngpu='forbidden'\npublic_web='on'",
-        )
-        .unwrap();
+        let p = Policy::parse("name='test'\n[permissions]\nprivate_bus='off'\ngpu='forbidden'\npublic_web='on'").unwrap();
         let states = p.permissions.states(&p.network, &[]);
         // (the private bus's backend depends on the machine; off is allowed and not effective)
         assert!(states[1].allowed && !states[1].effective);
@@ -279,12 +269,7 @@ mod tests {
     fn host_authority_cannot_be_a_saved_default() {
         assert!(Policy::parse("name='bad'\n[permissions]\nhost_control='on'").is_err());
         assert!(Policy::parse("name='bad'\n[permissions]\nunknown='off'").is_err());
-        assert!(
-            Policy::parse(
-                "name='bad'\n[permissions]\npublic_web='forbidden'\n[network]\nmode='all'"
-            )
-            .is_err()
-        );
+        assert!(Policy::parse("name='bad'\n[permissions]\npublic_web='forbidden'\n[network]\nmode='all'").is_err());
     }
 
     #[test]
@@ -306,12 +291,7 @@ mod tests {
         // Offline overrides the requested default without changing its provenance.
         assert!(p.permissions.validate_launch(&p.network).is_ok());
         p.ghostly(std::path::Path::new("/nonexistent"));
-        assert!(
-            p.permissions
-                .states(&p.network, &[])
-                .iter()
-                .all(|state| !state.allowed && !state.effective)
-        );
+        assert!(p.permissions.states(&p.network, &[]).iter().all(|state| !state.allowed && !state.effective));
     }
 
     /// The test desktop is not a network grant: offline policies and the additional-hosts ceiling

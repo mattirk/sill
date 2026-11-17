@@ -111,8 +111,7 @@ impl Control {
             }
             Err(e) => return Err(e.into()),
         }
-        let reply: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(reply.trim()).context("shim reply")?;
+        let reply: serde_json::Map<String, serde_json::Value> = serde_json::from_str(reply.trim()).context("shim reply")?;
         if reply.get("ok").and_then(|v| v.as_bool()) != Some(true) {
             let msg = reply.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
             bail!("shim: {msg}");
@@ -150,9 +149,9 @@ impl Control {
     /// Open an image inside the live jail. Binary bytes stay on the descriptor; no text
     /// conversion, host-path lookup or agent process is involved.
     pub fn open_image(&mut self, path: &Path) -> Result<std::fs::File> {
+        use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, recvmsg};
         use std::io::Read;
         use std::os::unix::ffi::OsStrExt;
-        use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, recvmsg};
         writeln!(self.writer, "{}", json!({"op":"open_image", "path_bytes":path.as_os_str().as_bytes()}))?;
         // Ancillary data rides on the first byte. Then read the rest as a bounded line,
         // since a Unix stream may split even this small reply across multiple writes.
@@ -162,7 +161,9 @@ impl Control {
         let received = recvmsg(&self.writer, &mut [std::io::IoSliceMut::new(&mut first)], &mut control, RecvFlags::CMSG_CLOEXEC)?;
         let mut fds = Vec::new();
         for message in control.drain() {
-            if let RecvAncillaryMessage::ScmRights(rights) = message { fds.extend(rights); }
+            if let RecvAncillaryMessage::ScmRights(rights) = message {
+                fds.extend(rights);
+            }
         }
         anyhow::ensure!(received.bytes == 1 && !received.flags.contains(rustix::net::ReturnFlags::CTRUNC), "incomplete shim image reply");
         let mut reply = first.to_vec();
@@ -173,8 +174,7 @@ impl Control {
             if let Some(errno) = reply["errno"].as_i64().and_then(|n| i32::try_from(n).ok()) {
                 return Err(std::io::Error::from_raw_os_error(errno).into());
             }
-            bail!("shim image read failed: {}; start a new session if its supervisor predates image reads",
-                reply["error"].as_str().unwrap_or("unknown error"));
+            bail!("shim image read failed: {}; start a new session if its supervisor predates image reads", reply["error"].as_str().unwrap_or("unknown error"));
         }
         anyhow::ensure!(fds.len() == 1, "expected one image fd in the shim reply");
         Ok(std::fs::File::from(fds.pop().unwrap()))
@@ -201,8 +201,7 @@ impl Control {
         let mut control = RecvAncillaryBuffer::new(&mut space);
         let r = recvmsg(&self.writer, &mut [std::io::IoSliceMut::new(&mut buf)], &mut control, RecvFlags::empty())?;
         let text = String::from_utf8_lossy(&buf[..r.bytes]).to_string();
-        let reply: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(text.lines().next().unwrap_or("").trim()).context("shim reply")?;
+        let reply: serde_json::Map<String, serde_json::Value> = serde_json::from_str(text.lines().next().unwrap_or("").trim()).context("shim reply")?;
         if reply.get("ok").and_then(|v| v.as_bool()) != Some(true) {
             bail!("shim: {}", reply.get("error").and_then(|v| v.as_str()).unwrap_or("open_pty failed"));
         }
@@ -284,8 +283,7 @@ pub fn runtime_dir(session: &str) -> Result<PathBuf> {
     if !crate::session::valid_id(session) {
         anyhow::bail!("bad session id {session:?}");
     }
-    let base = std::env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(format!("/run/user/{}", rustix::process::getuid().as_raw())));
+    let base =
+        std::env::var("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(format!("/run/user/{}", rustix::process::getuid().as_raw())));
     Ok(base.join("sill").join(session))
 }

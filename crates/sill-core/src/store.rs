@@ -17,8 +17,8 @@ pub(crate) fn sql_path(path: &Path) -> rusqlite::types::Value {
     }
 }
 pub(crate) fn read_sql_path(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<PathBuf> {
-    use std::os::unix::ffi::OsStringExt;
     use rusqlite::types::ValueRef;
+    use std::os::unix::ffi::OsStringExt;
     match row.get_ref(column)? {
         ValueRef::Text(bytes) | ValueRef::Blob(bytes) => Ok(std::ffi::OsString::from_vec(bytes.to_vec()).into()),
         value => Err(rusqlite::Error::InvalidColumnType(column, "path".into(), value.data_type())),
@@ -90,9 +90,8 @@ pub struct Store {
 }
 
 pub fn default_path() -> Result<PathBuf> {
-    let base = std::env::var("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state"));
+    let base =
+        std::env::var("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state"));
     Ok(base.join("sill").join("sill.db"))
 }
 
@@ -129,10 +128,10 @@ pub fn new_id() -> String {
 impl Store {
     /// A read-only snapshot reader, without schema setup or writer-side maintenance.
     pub fn open_read_only(path: &Path) -> Result<Self> {
-        let conn=Connection::open_with_flags(path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY|rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA query_only=ON; BEGIN")?;
-        Ok(Self {conn})
+        Ok(Self { conn })
     }
     pub fn open(path: &Path) -> Result<Self> {
         // the person's state is 0700/0600 whatever the umask says (security.md S21): the dir here,
@@ -242,14 +241,13 @@ impl Store {
 
     /// Stable keyset pagination. Rows are live at each request; creation keys never change.
     pub fn sessions_page(&self, after: Option<(i64, &str)>, limit: usize) -> Result<Vec<Session>> {
-        let (time,id)=after.unwrap_or((i64::MAX,""));
-        self.session_query("WHERE created_at < ?1 OR (created_at = ?1 AND id < ?2) ORDER BY created_at DESC, id DESC LIMIT ?3",
-            params![time,id,limit as i64])
+        let (time, id) = after.unwrap_or((i64::MAX, ""));
+        self.session_query("WHERE created_at < ?1 OR (created_at = ?1 AND id < ?2) ORDER BY created_at DESC, id DESC LIMIT ?3", params![time, id, limit as i64])
     }
-    pub fn session_exact(&self, id:&str) -> Result<Option<Session>> {
+    pub fn session_exact(&self, id: &str) -> Result<Option<Session>> {
         Ok(self.session_query("WHERE id = ?1", params![id])?.pop())
     }
-    fn session_query(&self, suffix:&str, params: impl rusqlite::Params) -> Result<Vec<Session>> {
+    fn session_query(&self, suffix: &str, params: impl rusqlite::Params) -> Result<Vec<Session>> {
         let mut st = self.conn.prepare(&format!(
             "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings, ended_at, summary, summary_kind, memory_scope, follows, compacted, title_kind, ghost FROM sessions {suffix}"
         ))?;
@@ -289,7 +287,9 @@ impl Store {
         } else {
             None // The caller's transaction already covers allocation and both inserts.
         };
-        let used = self.conn.prepare("SELECT name FROM session_names")?
+        let used = self
+            .conn
+            .prepare("SELECT name FROM session_names")?
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
         let s = Session {
@@ -316,7 +316,9 @@ impl Store {
             params![s.id, s.agent, s.title, s.created_at, s.last_used, s.policy, serde_json::to_string(&s.agent_settings)?, ghost as i32],
         )?;
         self.conn.execute("INSERT INTO session_names (session_id, name) VALUES (?1, ?2)", params![s.id, s.title])?;
-        if let Some(tx) = tx { tx.commit()?; }
+        if let Some(tx) = tx {
+            tx.commit()?;
+        }
         Ok(s)
     }
 
@@ -329,8 +331,14 @@ impl Store {
     /// on its own, so summaries do not repeat it.
     pub fn set_name(&self, id: &str, name: &str) -> Result<()> {
         let name = name.trim();
-        anyhow::ensure!(!name.is_empty() && name.chars().count() <= 80 && !name.chars().any(char::is_control), "name must contain 1–80 characters without control characters");
-        self.conn.execute("INSERT INTO session_names (session_id, name) VALUES (?1, ?2) ON CONFLICT(session_id) DO UPDATE SET name = excluded.name", params![id, name])?;
+        anyhow::ensure!(
+            !name.is_empty() && name.chars().count() <= 80 && !name.chars().any(char::is_control),
+            "name must contain 1–80 characters without control characters"
+        );
+        self.conn.execute(
+            "INSERT INTO session_names (session_id, name) VALUES (?1, ?2) ON CONFLICT(session_id) DO UPDATE SET name = excluded.name",
+            params![id, name],
+        )?;
         Ok(())
     }
 
@@ -478,8 +486,16 @@ impl Store {
         self.conn.execute(
             "INSERT INTO host_processes (id, session_id, generation, pid, start_ticks, argv, cwd, started, state)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'running')",
-            params![p.id, p.session_id, p.generation as i64, p.pid as i64, p.start_ticks as i64,
-                    serde_json::to_string(&p.argv)?, p.cwd.to_string_lossy(), p.started],
+            params![
+                p.id,
+                p.session_id,
+                p.generation as i64,
+                p.pid as i64,
+                p.start_ticks as i64,
+                serde_json::to_string(&p.argv)?,
+                p.cwd.to_string_lossy(),
+                p.started
+            ],
         )?;
         Ok(())
     }
@@ -496,10 +512,10 @@ impl Store {
     /// Forget an ended host process's record (the person dismissed it). Not a running one, nor
     /// one whose end is unknown: it may still be alive, and its record is how it is found.
     pub fn dismiss_host_process(&self, session_id: &str, id: &str) -> Result<bool> {
-        Ok(self.conn.execute(
-            "DELETE FROM host_processes WHERE id = ?1 AND session_id = ?2 AND ended IS NOT NULL AND state <> 'unknown'",
-            params![id, session_id],
-        )? == 1)
+        Ok(self
+            .conn
+            .execute("DELETE FROM host_processes WHERE id = ?1 AND session_id = ?2 AND ended IS NOT NULL AND state <> 'unknown'", params![id, session_id])?
+            == 1)
     }
 
     pub fn keep_host_process(&self, id: &str, kept: bool) -> Result<bool> {
@@ -509,15 +525,24 @@ impl Store {
     pub fn host_processes(&self, session_id: &str) -> Result<Vec<HostProcess>> {
         let mut st = self.conn.prepare(
             "SELECT id, session_id, generation, pid, start_ticks, argv, cwd, started, ended, exit_code, kept, state
-             FROM host_processes WHERE session_id = ?1 ORDER BY started, id")?;
+             FROM host_processes WHERE session_id = ?1 ORDER BY started, id",
+        )?;
         let rows = st.query_map(params![session_id], |r| {
             let argv: String = r.get(5)?;
             let cwd: String = r.get(6)?;
             Ok(HostProcess {
-                id: r.get(0)?, session_id: r.get(1)?, generation: r.get::<_, i64>(2)? as u64,
-                pid: r.get::<_, i64>(3)? as u32, start_ticks: r.get::<_, i64>(4)? as u64,
-                argv: serde_json::from_str(&argv).unwrap_or_default(), cwd: PathBuf::from(cwd),
-                started: r.get(7)?, ended: r.get(8)?, exit_code: r.get(9)?, kept: r.get(10)?, state: r.get(11)?,
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                generation: r.get::<_, i64>(2)? as u64,
+                pid: r.get::<_, i64>(3)? as u32,
+                start_ticks: r.get::<_, i64>(4)? as u64,
+                argv: serde_json::from_str(&argv).unwrap_or_default(),
+                cwd: PathBuf::from(cwd),
+                started: r.get(7)?,
+                ended: r.get(8)?,
+                exit_code: r.get(9)?,
+                kept: r.get(10)?,
+                state: r.get(11)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -557,7 +582,8 @@ impl Store {
             Some(enabled) => self.conn.execute(
                 "INSERT INTO session_permissions (session_id, capability, enabled) VALUES (?1, ?2, ?3)
                  ON CONFLICT (session_id, capability) DO UPDATE SET enabled = excluded.enabled",
-                params![session_id, capability, enabled])?,
+                params![session_id, capability, enabled],
+            )?,
             None => self.conn.execute("DELETE FROM session_permissions WHERE session_id = ?1 AND capability = ?2", params![session_id, capability])?,
         };
         transaction.commit()?;
@@ -581,10 +607,7 @@ impl Store {
     }
 
     pub fn pin(&self, session_id: &str, path: &Path) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO session_pins (session_id, path) VALUES (?1, ?2)",
-            params![session_id, sql_path(path)],
-        )?;
+        self.conn.execute("INSERT OR IGNORE INTO session_pins (session_id, path) VALUES (?1, ?2)", params![session_id, sql_path(path)])?;
         Ok(())
     }
 
@@ -662,8 +685,10 @@ impl Store {
 
     /// Keep adapter identities so a reopened conversation can rebuild delegation trees.
     pub fn set_tool_identity(&self, session_id: &str, seq: i64, call_id: &str, parent: Option<&str>) -> Result<()> {
-        self.conn.execute("UPDATE entries SET call_id = ?3, parent = ?4 WHERE session_id = ?1 AND seq = ?2",
-            params![session_id, seq, call_id, parent.unwrap_or("")])?;
+        self.conn.execute(
+            "UPDATE entries SET call_id = ?3, parent = ?4 WHERE session_id = ?1 AND seq = ?2",
+            params![session_id, seq, call_id, parent.unwrap_or("")],
+        )?;
         Ok(())
     }
 
@@ -694,15 +719,12 @@ impl Store {
     }
 
     pub fn count_kind(&self, session_id: &str, kind: &str) -> Result<i64> {
-        Ok(self.conn.query_row(
-            "SELECT COUNT(*) FROM entries WHERE session_id = ?1 AND kind = ?2",
-            params![session_id, kind],
-            |r| r.get(0),
-        )?)
+        Ok(self.conn.query_row("SELECT COUNT(*) FROM entries WHERE session_id = ?1 AND kind = ?2", params![session_id, kind], |r| r.get(0))?)
     }
 
     pub fn entries(&self, session_id: &str) -> Result<Vec<Entry>> {
-        let mut st = self.conn.prepare("SELECT seq, ts, kind, text, extra, tool_kind, detail, diff, call_id, parent FROM entries WHERE session_id = ?1 ORDER BY seq")?;
+        let mut st =
+            self.conn.prepare("SELECT seq, ts, kind, text, extra, tool_kind, detail, diff, call_id, parent FROM entries WHERE session_id = ?1 ORDER BY seq")?;
         let rows = st.query_map(params![session_id], Self::entry_row)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
@@ -723,13 +745,17 @@ impl Store {
             let mut start = first;
             for e in &v {
                 if !e.parent.is_empty() {
-                    let parent_seq: Option<i64> = self.conn.query_row(
-                        "SELECT MIN(seq) FROM entries WHERE session_id = ?1 AND call_id = ?2",
-                        params![session_id, e.parent], |r| r.get(0))?;
-                    if let Some(seq) = parent_seq { start = start.min(seq); }
+                    let parent_seq: Option<i64> =
+                        self.conn
+                            .query_row("SELECT MIN(seq) FROM entries WHERE session_id = ?1 AND call_id = ?2", params![session_id, e.parent], |r| r.get(0))?;
+                    if let Some(seq) = parent_seq {
+                        start = start.min(seq);
+                    }
                 }
             }
-            if start == first { break; }
+            if start == first {
+                break;
+            }
             let mut st = self.conn.prepare("SELECT seq, ts, kind, text, extra, tool_kind, detail, diff, call_id, parent FROM entries WHERE session_id = ?1 AND seq >= ?2 AND seq < ?3 ORDER BY seq")?;
             let mut prefix = st.query_map(params![session_id, start, first], Self::entry_row)?.collect::<std::result::Result<Vec<_>, _>>()?;
             prefix.append(&mut v);
@@ -786,7 +812,10 @@ mod tests {
         assert_eq!(pins.len(), 2);
         assert!(pins.contains(&exact));
         assert!(pins.contains(&display_collision));
-        assert_eq!(store.conn().query_row("SELECT typeof(path) FROM session_pins WHERE path = ?1", ["/pin/\u{fffd}"], |r| r.get::<_, String>(0)).unwrap(), "text");
+        assert_eq!(
+            store.conn().query_row("SELECT typeof(path) FROM session_pins WHERE path = ?1", ["/pin/\u{fffd}"], |r| r.get::<_, String>(0)).unwrap(),
+            "text"
+        );
         store.unpin("s1", &exact).unwrap();
         store.global_unpin(&exact).unwrap();
         assert_eq!(store.pins("s1").unwrap(), vec![display_collision.clone()]);
@@ -802,8 +831,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir.join("s.db")).unwrap();
         let process = |id: &str| HostProcess {
-            id: id.into(), session_id: "s1".into(), generation: 1, pid: 10, start_ticks: 5, argv: vec!["true".into()],
-            cwd: PathBuf::from("/"), started: 1, ended: None, exit_code: None, kept: false, state: "running".into(),
+            id: id.into(),
+            session_id: "s1".into(),
+            generation: 1,
+            pid: 10,
+            start_ticks: 5,
+            argv: vec!["true".into()],
+            cwd: PathBuf::from("/"),
+            started: 1,
+            ended: None,
+            exit_code: None,
+            kept: false,
+            state: "running".into(),
         };
         for id in ["run", "done", "unknown"] {
             store.add_host_process(&process(id)).unwrap();
@@ -959,10 +998,19 @@ mod tests {
         assert_eq!(renamed.title, "A new title");
         assert_eq!(renamed.summary, "Work completed");
         // the name stays findable through memory search instead
-        let found: String = store.conn().query_row("SELECT t.session_id FROM memory_fts JOIN memory_text t ON t.id = memory_fts.rowid WHERE memory_fts MATCH 'choice' AND t.kind = 'name'", [], |r| r.get(0)).unwrap();
+        let found: String = store
+            .conn()
+            .query_row(
+                "SELECT t.session_id FROM memory_fts JOIN memory_text t ON t.id = memory_fts.rowid WHERE memory_fts MATCH 'choice' AND t.kind = 'name'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(found, session.id);
         assert_eq!(store.session_name(&session.id).as_deref(), Some("human choice"));
-        for invalid in ["", "  ", "two\nlines", "bad\tname"] { assert!(store.set_name(&session.id, invalid).is_err()); }
+        for invalid in ["", "  ", "two\nlines", "bad\tname"] {
+            assert!(store.set_name(&session.id, invalid).is_err());
+        }
         assert!(store.set_name(&session.id, &"a".repeat(81)).is_err());
         store.delete(&session.id).unwrap();
         assert_eq!(store.session_name(&session.id), None);
@@ -1012,7 +1060,9 @@ mod tests {
         let store = Store::open(&path).unwrap();
         let first = store.create("codex", "default").unwrap();
         let second = store.create("codex", "default").unwrap();
-        for n in 0..128 { store.allow_network_host(&first.id, &format!("h{n}.example.com")).unwrap(); }
+        for n in 0..128 {
+            store.allow_network_host(&first.id, &format!("h{n}.example.com")).unwrap();
+        }
         store.allow_network_host(&first.id, "h0.example.com").unwrap();
         assert!(store.allow_network_host(&first.id, "overflow.example.com").is_err());
         assert!(store.allow_network_host("missing", "example.com").is_err());
@@ -1061,5 +1111,4 @@ mod tests {
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
-
 }

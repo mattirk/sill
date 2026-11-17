@@ -117,7 +117,8 @@ pub fn write_snapshot(src: &Path, dir: &Path, kept: &[(String, PathBuf, String)]
         )?;
         snap.execute_batch(TEXT_SCHEMA)?;
         snap.execute_batch(history::SCHEMA)?;
-        snap.execute("ATTACH DATABASE ?1 AS src", params![format!("file:{}?mode=ro", src.display())]).or_else(|_| snap.execute("ATTACH DATABASE ?1 AS src", params![src.to_string_lossy()]))?;
+        snap.execute("ATTACH DATABASE ?1 AS src", params![format!("file:{}?mode=ro", src.display())])
+            .or_else(|_| snap.execute("ATTACH DATABASE ?1 AS src", params![src.to_string_lossy()]))?;
         let tx = snap.unchecked_transaction()?;
         tx.execute_batch("CREATE TEMP TABLE excluded (id TEXT PRIMARY KEY);")?;
         // ghost sessions (docs/memory.md §3) are nobody's memory, not even while they run
@@ -126,7 +127,8 @@ pub fn write_snapshot(src: &Path, dir: &Path, kept: &[(String, PathBuf, String)]
             tx.execute_batch("INSERT OR IGNORE INTO excluded SELECT id FROM src.sessions WHERE ghost <> 0;")?;
         }
         // Crosscheck's reviewer sessions are a run's evidence, kept with its report: not memory
-        let has_workers: bool = tx.query_row("SELECT count(*) FROM src.sqlite_master WHERE type = 'table' AND name = 'crosscheck_workers'", [], |r| r.get::<_, i64>(0))? > 0;
+        let has_workers: bool =
+            tx.query_row("SELECT count(*) FROM src.sqlite_master WHERE type = 'table' AND name = 'crosscheck_workers'", [], |r| r.get::<_, i64>(0))? > 0;
         if has_workers {
             tx.execute_batch("INSERT OR IGNORE INTO excluded SELECT session_id FROM src.crosscheck_workers;")?;
         }
@@ -228,8 +230,8 @@ fn session_row(r: &rusqlite::Row) -> rusqlite::Result<SessionInfo> {
 fn pins_of(conn: &Connection, id: &str) -> Result<Vec<PathBuf>> {
     let mut st = conn.prepare_cached("SELECT path FROM session_pins WHERE session_id = ?1 ORDER BY path")?;
     let rows = st.query_map(params![id], |r| {
-        use std::os::unix::ffi::OsStringExt;
         use rusqlite::types::ValueRef;
+        use std::os::unix::ffi::OsStringExt;
         match r.get_ref(0)? {
             ValueRef::Text(bytes) | ValueRef::Blob(bytes) => Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec()))),
             value => Err(rusqlite::Error::InvalidColumnType(0, "path".into(), value.data_type())),
@@ -284,9 +286,7 @@ pub fn find_session(conn: &Connection, key: &str) -> Result<Option<SessionInfo>>
 /// What a snapshot says a session kept (the host reads the journals instead).
 pub fn snapshot_kept(conn: &Connection, id: &str) -> Vec<(PathBuf, String)> {
     let Ok(mut st) = conn.prepare("SELECT path, what FROM kept WHERE session_id = ?1") else { return Vec::new() };
-    st.query_map(params![id], |r| Ok((history::read_path(r, 0)?, r.get::<_, String>(1)?)))
-        .map(|rows| rows.filter_map(Result::ok).collect())
-        .unwrap_or_default()
+    st.query_map(params![id], |r| Ok((history::read_path(r, 0)?, r.get::<_, String>(1)?))).map(|rows| rows.filter_map(Result::ok).collect()).unwrap_or_default()
 }
 
 /// (ts, kind, text) of a session's notes, oldest first.
@@ -345,14 +345,16 @@ pub fn parse_age(s: &str) -> Option<i64> {
     let s = s.trim();
     let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
     let n: i64 = num.parse().ok()?;
-    Some(n * match unit {
-        "" | "d" => 86_400,
-        "h" => 3600,
-        "m" | "min" => 60,
-        "w" => 7 * 86_400,
-        "y" => 365 * 86_400,
-        _ => return None,
-    })
+    Some(
+        n * match unit {
+            "" | "d" => 86_400,
+            "h" => 3600,
+            "m" | "min" => 60,
+            "w" => 7 * 86_400,
+            "y" => 365 * 86_400,
+            _ => return None,
+        },
+    )
 }
 
 /// `~` for the home directory.
@@ -460,18 +462,25 @@ pub fn recall_pick<'a>(all: &'a [SessionInfo], me: &str, pins: &[PathBuf], scope
 }
 
 /// Choose recall candidates using bounded memory rather than loading all session summaries.
-pub fn recall_candidates(conn:&Connection,me:&str,pins:&[PathBuf],scope:Scope,n:usize,first:Option<&str>)->Result<Vec<SessionInfo>> {
-    let n=n.min(20);if n==0||scope==Scope::Off{return Ok(Vec::new());}
-    let mut chosen=Vec::new();
-    let mut st=conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions WHERE ended_at IS NOT NULL AND id<>?1 AND {} ORDER BY last_used DESC",remembered(conn)?))?;
-    let rows=st.query_map([me],session_row)?;
-    for row in rows {let mut candidate=row?;candidate.pins=pins_of(conn,&candidate.id)?;
+pub fn recall_candidates(conn: &Connection, me: &str, pins: &[PathBuf], scope: Scope, n: usize, first: Option<&str>) -> Result<Vec<SessionInfo>> {
+    let n = n.min(20);
+    if n == 0 || scope == Scope::Off {
+        return Ok(Vec::new());
+    }
+    let mut chosen = Vec::new();
+    let mut st =
+        conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions WHERE ended_at IS NOT NULL AND id<>?1 AND {} ORDER BY last_used DESC", remembered(conn)?))?;
+    let rows = st.query_map([me], session_row)?;
+    for row in rows {
+        let mut candidate = row?;
+        candidate.pins = pins_of(conn, &candidate.id)?;
         // Keep the one line recall_block quotes, plus one character so that its ellipsis
         // survives, without retaining every selected full summary in memory.
-        candidate.summary=first_line(&candidate.summary).chars().take(HOOK_CHARS+1).collect();
+        candidate.summary = first_line(&candidate.summary).chars().take(HOOK_CHARS + 1).collect();
         chosen.push(candidate);
-        chosen=recall_pick(&chosen,me,pins,scope,n,first).into_iter().cloned().collect();
-    }Ok(chosen)
+        chosen = recall_pick(&chosen, me, pins, scope, n, first).into_iter().cloned().collect();
+    }
+    Ok(chosen)
 }
 
 /// The most of a summary's first line a recall block quotes.
@@ -493,7 +502,8 @@ pub fn hook(summary: &str) -> String {
 /// not pushed. `kept_count` says how many files a session kept. Empty when there is nothing to
 /// say and the snapshot is not there to search either.
 pub fn recall_block(picked: &[&SessionInfo], scope: Scope, searchable: bool, home: &Path, kept_count: impl Fn(&str) -> usize) -> String {
-    let tools = "`sill-memory search WORDS` searches all sessions, `sill-memory show ID` a whole summary, `sill-memory transcript ID [--grep WORDS]` the conversation";
+    let tools =
+        "`sill-memory search WORDS` searches all sessions, `sill-memory show ID` a whole summary, `sill-memory transcript ID [--grep WORDS]` the conversation";
     if picked.is_empty() {
         return if searchable { format!("[Earlier sessions on this machine are remembered by sill (not your own memory): {tools}.]") } else { String::new() };
     }
@@ -600,37 +610,61 @@ pub struct Hit {
 /// Sessions matching `q`, best match first (FTS5 rank); with no words, the filters alone over every
 /// session, most recently used first. At most `limit`.
 pub fn search(conn: &Connection, q: &Query, now: i64, limit: usize) -> Result<Vec<Hit>> {
-    let mut out=Vec::new();search_visit(conn,q,now,limit,|hit|{out.push(hit);Ok(true)})?;Ok(out)
+    let mut out = Vec::new();
+    search_visit(conn, q, now, limit, |hit| {
+        out.push(hit);
+        Ok(true)
+    })?;
+    Ok(out)
 }
 
 /// Visit ranked matching sessions one at a time; false stops before another row is materialized.
-pub fn search_visit(conn:&Connection,q:&Query,now:i64,limit:usize,mut visit:impl FnMut(Hit)->Result<bool>)->Result<()> {
-    let mut seen=std::collections::HashSet::new();
+pub fn search_visit(conn: &Connection, q: &Query, now: i64, limit: usize, mut visit: impl FnMut(Hit) -> Result<bool>) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
     match q.fts() {
-        None=>{
-            let mut st=conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions WHERE {} ORDER BY last_used DESC",remembered(conn)?))?;
-            let rows=st.query_map([],session_row)?;
+        None => {
+            let mut st = conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions WHERE {} ORDER BY last_used DESC", remembered(conn)?))?;
+            let rows = st.query_map([], session_row)?;
             for row in rows {
-                if seen.len()>=limit{break;}
-                let mut session=row?;session.pins=pins_of(conn,&session.id)?;
-                if q.admits(&session,now){seen.insert(session.id.clone());if !visit(Hit {session,kind:String::new(),snippet:String::new()})?{break;}}
-            }
-        },
-        Some(expr)=>{
-            let mut st=conn.prepare("SELECT t.session_id,t.kind,snippet(memory_fts,0,'[',']','…',12) FROM memory_fts JOIN memory_text t ON t.id=memory_fts.rowid WHERE memory_fts MATCH ?1 ORDER BY rank LIMIT 2000")?;
-            let mut by_id=conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions WHERE id=?1 AND {}",remembered(conn)?))?;
-            let rows=st.query_map(params![expr],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?;
-            for row in rows {
-                if seen.len()>=limit{break;}
-                let (id,kind,snippet)=row?;if seen.contains(&id){continue;}
-                use rusqlite::OptionalExtension;
-                if let Some(mut session)=by_id.query_row([&id],session_row).optional()? {
-                    session.pins=pins_of(conn,&id)?;
-                    if q.admits(&session,now){seen.insert(id);if !visit(Hit {session,kind,snippet:snippet.replace('\n'," ")})?{break;}}
+                if seen.len() >= limit {
+                    break;
+                }
+                let mut session = row?;
+                session.pins = pins_of(conn, &session.id)?;
+                if q.admits(&session, now) {
+                    seen.insert(session.id.clone());
+                    if !visit(Hit { session, kind: String::new(), snippet: String::new() })? {
+                        break;
+                    }
                 }
             }
         }
-    }Ok(())
+        Some(expr) => {
+            let mut st=conn.prepare("SELECT t.session_id,t.kind,snippet(memory_fts,0,'[',']','…',12) FROM memory_fts JOIN memory_text t ON t.id=memory_fts.rowid WHERE memory_fts MATCH ?1 ORDER BY rank LIMIT 2000")?;
+            let mut by_id = conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions WHERE id=?1 AND {}", remembered(conn)?))?;
+            let rows = st.query_map(params![expr], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+            for row in rows {
+                if seen.len() >= limit {
+                    break;
+                }
+                let (id, kind, snippet) = row?;
+                if seen.contains(&id) {
+                    continue;
+                }
+                use rusqlite::OptionalExtension;
+                if let Some(mut session) = by_id.query_row([&id], session_row).optional()? {
+                    session.pins = pins_of(conn, &id)?;
+                    if q.admits(&session, now) {
+                        seen.insert(id);
+                        if !visit(Hit { session, kind, snippet: snippet.replace('\n', " ") })? {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Who wrote a summary, from `summary_kind`: the agent, sill, or the person who edited it.
@@ -677,14 +711,15 @@ pub fn brief(summary: &str, max: usize) -> String {
 
 /// A session's record as text: the facts, the summary, the notes.
 pub fn show(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, String)], home: &Path) -> Result<String> {
-    let mut out=String::new();
+    let mut out = String::new();
     show_to(conn, s, kept, home, &mut out)?;
     Ok(out)
 }
 
 /// Stream formatted memory without accumulating the complete output.
 pub fn show_to(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, String)], home: &Path, out: &mut impl std::fmt::Write) -> Result<()> {
-    write!(out,
+    write!(
+        out,
         "{}  “{}”  {}  started {}{}\n",
         s.id,
         s.title,
@@ -707,10 +742,10 @@ pub fn show_to(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, String)], h
     } else {
         write!(out, "\nsummary ({}):\n{}\n", summary_by(&s.summary_kind), s.summary.trim_end())?;
     }
-    let mut note_query=conn.prepare("SELECT ts,kind,text FROM memories WHERE session_id=?1 ORDER BY ts,rowid")?;
-    let note_rows=note_query.query_map(params![s.id], |r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?;
+    let mut note_query = conn.prepare("SELECT ts,kind,text FROM memories WHERE session_id=?1 ORDER BY ts,rowid")?;
+    let note_rows = note_query.query_map(params![s.id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
     for row in note_rows {
-        let (ts,kind,text)=row?;
+        let (ts, kind, text) = row?;
         write!(out, "\n{kind} {}:\n{}\n", date(ts), text.trim_end())?;
     }
     Ok(())
@@ -719,7 +754,7 @@ pub fn show_to(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, String)], h
 /// A session's conversation, oldest first: the person's and the agent's text with times (UTC), a
 /// tool call as one line. With `grep`, only the messages holding every one of its words (any case).
 pub fn transcript(conn: &Connection, s: &SessionInfo, grep: Option<&str>) -> Result<String> {
-    let mut out=String::new();
+    let mut out = String::new();
     transcript_to(conn, s, grep, &mut out)?;
     Ok(out)
 }
@@ -764,7 +799,7 @@ pub fn transcript_to(conn: &Connection, s: &SessionInfo, grep: Option<&str>, out
 /// then the conversation as it stands (compacted or not) — the person's data in a form that
 /// outlives sill.
 pub fn export_markdown(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, String)], home: &Path) -> Result<String> {
-    let mut out=String::new();
+    let mut out = String::new();
     export_markdown_to(conn, s, kept, home, &mut out)?;
     Ok(out)
 }
@@ -787,13 +822,14 @@ pub fn export_markdown_to(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, 
     if !s.summary.trim().is_empty() {
         write!(out, "\n## Summary ({})\n\n{}\n", summary_by(&s.summary_kind), s.summary.trim_end())?;
     }
-    let mut note_query=conn.prepare("SELECT ts,kind,text FROM memories WHERE session_id=?1 ORDER BY ts,rowid")?;
-    let mut notes=note_query.query(params![s.id])?;
-    let mut heading=false;
-    while let Some(row)=notes.next()? {
-        let (ts,kind,text)=(row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?);
-        if !heading { heading=true;
-        out.write_str("\n## Notes\n")?;
+    let mut note_query = conn.prepare("SELECT ts,kind,text FROM memories WHERE session_id=?1 ORDER BY ts,rowid")?;
+    let mut notes = note_query.query(params![s.id])?;
+    let mut heading = false;
+    while let Some(row) = notes.next()? {
+        let (ts, kind, text) = (row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?);
+        if !heading {
+            heading = true;
+            out.write_str("\n## Notes\n")?;
         }
         {
             write!(out, "\n**{kind}, {}**\n\n{}\n", date(ts), text.trim_end())?;
@@ -813,7 +849,6 @@ pub fn export_markdown_to(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, 
     }
     Ok(())
 }
-
 
 /// A file name for a session's export: date, id, the title's words.
 pub fn export_name(s: &SessionInfo) -> String {
@@ -1024,10 +1059,7 @@ mod tests {
             "worker history title",
             "worker-kept-secret",
         ] {
-            assert!(
-                !raw.windows(forbidden.len()).any(|w| w == forbidden.as_bytes()),
-                "excluded text {forbidden:?} leaked into snapshot bytes"
-            );
+            assert!(!raw.windows(forbidden.len()).any(|w| w == forbidden.as_bytes()), "excluded text {forbidden:?} leaked into snapshot bytes");
         }
         let snap = open_snapshot(&snapdir).unwrap().unwrap();
         let ids: Vec<String> = snap.prepare("SELECT id FROM sessions").unwrap().query_map([], |r| r.get(0)).unwrap().flatten().collect();
@@ -1085,22 +1117,27 @@ mod tests {
             c.execute("INSERT INTO session_pins VALUES (?1, ?2)", params![id, p]).unwrap();
         }
         if let Some((t, summary)) = ended {
-            c.execute("UPDATE sessions SET ended_at = ?2, summary = ?3, summary_kind = 'agent', last_used = ?2 WHERE id = ?1", params![id, t, summary]).unwrap();
+            c.execute("UPDATE sessions SET ended_at = ?2, summary = ?3, summary_kind = 'agent', last_used = ?2 WHERE id = ?1", params![id, t, summary])
+                .unwrap();
         }
     }
 
     #[test]
     fn streaming_recall_selection_preserves_rendered_output() {
-        let c=store_like();let home=Path::new("/home/me");
-        for i in 0..40 {let summary=format!("  Indented line {i}\n\n{}\nlast", "word ".repeat(400));session(&c,&format!("pick{i:04}"),"candidate",&["/home/me/project"],Some((2000+i,&summary)));}
-        let all=sessions(&c).unwrap();
-        for first in [None,Some("pick0001")] {
-            let old=recall_pick(&all,"current",&[],Scope::Everywhere,3,first);
-            let selected=recall_candidates(&c,"current",&[],Scope::Everywhere,3,first).unwrap();
-            assert_eq!(old.iter().map(|s|&s.id).collect::<Vec<_>>(),selected.iter().map(|s|&s.id).collect::<Vec<_>>());
-            let new=selected.iter().collect::<Vec<_>>();
-            assert_eq!(recall_block(&old,Scope::Everywhere,true,home,|_|0),recall_block(&new,Scope::Everywhere,true,home,|_|0));
-            assert!(selected.iter().all(|s|s.summary.chars().count()<=HOOK_CHARS+1));
+        let c = store_like();
+        let home = Path::new("/home/me");
+        for i in 0..40 {
+            let summary = format!("  Indented line {i}\n\n{}\nlast", "word ".repeat(400));
+            session(&c, &format!("pick{i:04}"), "candidate", &["/home/me/project"], Some((2000 + i, &summary)));
+        }
+        let all = sessions(&c).unwrap();
+        for first in [None, Some("pick0001")] {
+            let old = recall_pick(&all, "current", &[], Scope::Everywhere, 3, first);
+            let selected = recall_candidates(&c, "current", &[], Scope::Everywhere, 3, first).unwrap();
+            assert_eq!(old.iter().map(|s| &s.id).collect::<Vec<_>>(), selected.iter().map(|s| &s.id).collect::<Vec<_>>());
+            let new = selected.iter().collect::<Vec<_>>();
+            assert_eq!(recall_block(&old, Scope::Everywhere, true, home, |_| 0), recall_block(&new, Scope::Everywhere, true, home, |_| 0));
+            assert!(selected.iter().all(|s| s.summary.chars().count() <= HOOK_CHARS + 1));
         }
     }
 
@@ -1184,7 +1221,10 @@ mod tests {
         let picked = recall_pick(&all, "me", &me_pins, Scope::Here, 1, None);
         let b = recall_block(&picked, Scope::Here, true, home, |id| if id == "same" { 7 } else { 0 });
         assert!(b.starts_with("[Memory — earlier sessions in these folders"), "{b}");
-        assert!(b.contains("\n- 1970-01-01, 1 min, claude in ~/sill, kept 7 files — “same” (same):\n  summary of same\nEach is the first line of a longer summary"), "{b}");
+        assert!(
+            b.contains("\n- 1970-01-01, 1 min, claude in ~/sill, kept 7 files — “same” (same):\n  summary of same\nEach is the first line of a longer summary"),
+            "{b}"
+        );
         assert!(b.contains("read the rest with `sill-memory show ID`"), "{b}");
         assert!(b.ends_with("the conversation.]"), "{b}");
         let mut long = s("long", &["/w/sill"], Some(60));
@@ -1225,8 +1265,13 @@ mod tests {
         .unwrap();
         install(&src).unwrap();
         session(&src, "bbbb2222", "tray icon", &["/home/me/GIT/sill"], Some((1_793_560_000, "Added the tray icon in tray.rs.\nNo appindicator.")));
-        src.execute("INSERT INTO entries (session_id, seq, ts, kind, text, detail) VALUES ('bbbb2222', 1, 1793545200, 'user', 'add a tray icon', '')", []).unwrap();
-        src.execute("INSERT INTO entries (session_id, seq, ts, kind, text, detail) VALUES ('bbbb2222', 2, 1793545260, 'tool', 'Edit tray.rs', 'SECRET DETAIL')", []).unwrap();
+        src.execute("INSERT INTO entries (session_id, seq, ts, kind, text, detail) VALUES ('bbbb2222', 1, 1793545200, 'user', 'add a tray icon', '')", [])
+            .unwrap();
+        src.execute(
+            "INSERT INTO entries (session_id, seq, ts, kind, text, detail) VALUES ('bbbb2222', 2, 1793545260, 'tool', 'Edit tray.rs', 'SECRET DETAIL')",
+            [],
+        )
+        .unwrap();
         src.execute("INSERT INTO entries (session_id, seq, ts, kind, text, detail) VALUES ('bbbb2222', 3, 1793545320, 'agent', 'Done: StatusNotifierItem\nover D-Bus', '')", []).unwrap();
         // written while the daemon holds the db open in WAL mode
         let snapdir = dir.join("memory");

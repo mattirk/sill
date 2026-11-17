@@ -38,27 +38,17 @@ pub enum Edit {
 const KINDS: [&str; 5] = ["choice", "choices", "text", "boolean", "number"];
 
 pub fn answerable(question: &Question) -> bool {
-    question
-        .fields
-        .iter()
-        .all(|f| KINDS.contains(&f.kind.as_str()))
+    question.fields.iter().all(|f| KINDS.contains(&f.kind.as_str()))
 }
 
 pub fn title(field: &FormField) -> &str {
-    if field.title.is_empty() {
-        &field.key
-    } else {
-        &field.title
-    }
+    if field.title.is_empty() { &field.key } else { &field.title }
 }
 
 pub fn apply(form: &mut Form, question: &Question, edit: Edit) {
     match edit {
         Edit::Pick { key, value } => {
-            let single = question
-                .fields
-                .iter()
-                .any(|f| f.key == key && f.kind == "choice");
+            let single = question.fields.iter().any(|f| f.key == key && f.kind == "choice");
             let entry = form.entry(key).or_default();
             if single {
                 entry.picked = BTreeSet::from([value]);
@@ -82,14 +72,7 @@ pub fn values(form: &Form, question: &Question) -> Result<BTreeMap<String, Value
         let text = entry.text.trim();
         let value = match field.kind.as_str() {
             "choice" => entry.picked.iter().next().cloned().map(Value::String),
-            "choices" => Some(Value::Array(
-                field
-                    .choices
-                    .iter()
-                    .filter(|c| entry.picked.contains(&c.value))
-                    .map(|c| Value::String(c.value.clone()))
-                    .collect(),
-            )),
+            "choices" => Some(Value::Array(field.choices.iter().filter(|c| entry.picked.contains(&c.value)).map(|c| Value::String(c.value.clone())).collect())),
             "boolean" => Some(Value::Bool(entry.on)),
             "text" => (!text.is_empty()).then(|| Value::String(text.to_string())),
             "number" if text.is_empty() => None,
@@ -101,10 +84,7 @@ pub fn values(form: &Form, question: &Question) -> Result<BTreeMap<String, Value
                     .ok_or_else(|| format!("{} is not a number", title(field)))?,
             ),
             other => {
-                return Err(format!(
-                    "{}: a {other} field cannot be answered here",
-                    title(field)
-                ));
+                return Err(format!("{}: a {other} field cannot be answered here", title(field)));
             }
         };
         if let Some(value) = value {
@@ -143,55 +123,20 @@ mod tests {
         let q = question();
         let mut form = Form::new();
         for edit in [
-            Edit::Pick {
-                key: "env".into(),
-                value: "stage".into(),
-            },
-            Edit::Pick {
-                key: "env".into(),
-                value: "prod".into(),
-            },
-            Edit::Pick {
-                key: "steps".into(),
-                value: "b".into(),
-            },
-            Edit::Pick {
-                key: "steps".into(),
-                value: "a".into(),
-            },
-            Edit::Pick {
-                key: "steps".into(),
-                value: "b".into(),
-            },
-            Edit::Text {
-                key: "why".into(),
-                text: "  ship it ".into(),
-            },
+            Edit::Pick { key: "env".into(), value: "stage".into() },
+            Edit::Pick { key: "env".into(), value: "prod".into() },
+            Edit::Pick { key: "steps".into(), value: "b".into() },
+            Edit::Pick { key: "steps".into(), value: "a".into() },
+            Edit::Pick { key: "steps".into(), value: "b".into() },
+            Edit::Text { key: "why".into(), text: "  ship it ".into() },
             Edit::Toggle { key: "ok".into() },
         ] {
             apply(&mut form, &q, edit);
         }
-        assert_eq!(
-            json!(values(&form, &q).unwrap()),
-            json!({"env":"prod", "steps":["a"], "why":"ship it", "ok":true})
-        );
-        apply(
-            &mut form,
-            &q,
-            Edit::Text {
-                key: "n".into(),
-                text: "three".into(),
-            },
-        );
+        assert_eq!(json!(values(&form, &q).unwrap()), json!({"env":"prod", "steps":["a"], "why":"ship it", "ok":true}));
+        apply(&mut form, &q, Edit::Text { key: "n".into(), text: "three".into() });
         assert_eq!(values(&form, &q).unwrap_err(), "Count is not a number");
-        apply(
-            &mut form,
-            &q,
-            Edit::Text {
-                key: "n".into(),
-                text: "3.5".into(),
-            },
-        );
+        apply(&mut form, &q, Edit::Text { key: "n".into(), text: "3.5".into() });
         assert_eq!(values(&form, &q).unwrap()["n"], json!(3.5));
         assert!(answerable(&q));
     }

@@ -7,11 +7,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
@@ -61,49 +61,129 @@ impl std::error::Error for Refused {}
 /// reply channel, and `Resolved` once the relay delivered the answer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum Event {
-    V2Ready { session_id: String, resumed: bool, controls: acp::Controls },
-    V2Update { update: serde_json::Value },
+    V2Ready {
+        session_id: String,
+        resumed: bool,
+        controls: acp::Controls,
+    },
+    V2Update {
+        update: serde_json::Value,
+    },
     V2PermissionsCancelled,
-    PromptAccepted { message_id: String },
-    V2PromptFailed { code: String, message: String },
-    V2PermissionRequest { request: u64, tool_call_id: Option<String>, title: String, subject: Option<serde_json::Value>, options: Vec<acp::PermissionOption> },
-    Ready { session_id: String, resumed: bool, controls: acp::Controls },
-    Capabilities { images: bool },
+    PromptAccepted {
+        message_id: String,
+    },
+    V2PromptFailed {
+        code: String,
+        message: String,
+    },
+    V2PermissionRequest {
+        request: u64,
+        tool_call_id: Option<String>,
+        title: String,
+        subject: Option<serde_json::Value>,
+        options: Vec<acp::PermissionOption>,
+    },
+    Ready {
+        session_id: String,
+        resumed: bool,
+        controls: acp::Controls,
+    },
+    Capabilities {
+        images: bool,
+    },
     Controls(acp::Controls),
     /// A settings request was rejected by the agent. `setting` is `mode` or `config:<option id>`.
-    ControlFailed { setting: String, reason: String },
+    ControlFailed {
+        setting: String,
+        reason: String,
+    },
     TurnStarted,
     UserText(String),
     Text(String),
     Thought(String),
-    ToolCall { id: String, title: String, kind: String, status: String, detail: Option<String>, diff: Option<String>, parent: Option<String>, command: Option<String> },
-    ToolCallUpdate { id: String, status: Option<String>, title: Option<String>, detail: Option<String>, diff: Option<String>, command: Option<String> },
-    SubagentText { parent: String, text: String },
-    Image { mime: String, data_base64: String, parent: Option<String> },
-    PermissionRequest { request: u64, tool_call_id: String, title: String, options: Vec<acp::PermissionOption> },
-    AutoAnswered { tool_call_id: String, title: String, allowed: bool },
-    Elicitation { request: u64, message: String, fields: Vec<acp::FormField> },
-    Resolved { request: u64 },
+    ToolCall {
+        id: String,
+        title: String,
+        kind: String,
+        status: String,
+        detail: Option<String>,
+        diff: Option<String>,
+        parent: Option<String>,
+        command: Option<String>,
+    },
+    ToolCallUpdate {
+        id: String,
+        status: Option<String>,
+        title: Option<String>,
+        detail: Option<String>,
+        diff: Option<String>,
+        command: Option<String>,
+    },
+    SubagentText {
+        parent: String,
+        text: String,
+    },
+    Image {
+        mime: String,
+        data_base64: String,
+        parent: Option<String>,
+    },
+    PermissionRequest {
+        request: u64,
+        tool_call_id: String,
+        title: String,
+        options: Vec<acp::PermissionOption>,
+    },
+    AutoAnswered {
+        tool_call_id: String,
+        title: String,
+        allowed: bool,
+    },
+    Elicitation {
+        request: u64,
+        message: String,
+        fields: Vec<acp::FormField>,
+    },
+    Resolved {
+        request: u64,
+    },
     Other(String),
-    Usage { used: u64, size: u64 },
-    AuthRequired { message: String, methods: Vec<acp::AuthMethodInfo> },
+    Usage {
+        used: u64,
+        size: u64,
+    },
+    AuthRequired {
+        message: String,
+        methods: Vec<acp::AuthMethodInfo>,
+    },
     Stopped(acp::StopReason),
     Ended(Option<String>),
     Plan(Vec<acp::PlanEntry>),
     Commands(Vec<acp::AgentCommand>),
     AgentTitle(String),
-    Notice { severity: String, title: String, description: Option<String> },
+    Notice {
+        severity: String,
+        title: String,
+        description: Option<String>,
+    },
 }
 
 /// What the daemon asks of the ACP conversation. `text` is what the agent gets: the daemon has
 /// composed it already (context prefix included).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum Command {
-    Prompt { text: String, attachments: Vec<acp::Attachment> },
+    Prompt {
+        text: String,
+        attachments: Vec<acp::Attachment>,
+    },
     Authenticate(String),
     /// A login with an API key the daemon saved: the relay reads `key_file` right before sending,
     /// so neither this command nor the daemon's saved outbox holds the key.
-    AuthenticateKey { method: String, key_file: std::path::PathBuf },
+    AuthenticateKey {
+        method: String,
+        key_file: std::path::PathBuf,
+    },
     RetrySession,
     SetMode(String),
     SetConfig(String, acp::ConfigValue),
@@ -165,12 +245,14 @@ impl Reply {
 fn event_from_acp(event: acp::Event, request: u64) -> (Event, Option<Reply>) {
     use acp::Event as A;
     let event = match event {
-        A::V2Ready {session_id,resumed,controls} => Event::V2Ready {session_id,resumed,controls},
-        A::V2Update {update} => Event::V2Update {update},
+        A::V2Ready { session_id, resumed, controls } => Event::V2Ready { session_id, resumed, controls },
+        A::V2Update { update } => Event::V2Update { update },
         A::V2PermissionsCancelled => Event::V2PermissionsCancelled,
-        A::PromptAccepted {message_id} => Event::PromptAccepted {message_id},
-        A::V2PromptFailed {code,message} => Event::V2PromptFailed {code,message},
-        A::V2PermissionRequest {tool_call_id,title,subject,options,reply} => return (Event::V2PermissionRequest {request,tool_call_id,title,subject,options},Some(Reply::Permission(reply))),
+        A::PromptAccepted { message_id } => Event::PromptAccepted { message_id },
+        A::V2PromptFailed { code, message } => Event::V2PromptFailed { code, message },
+        A::V2PermissionRequest { tool_call_id, title, subject, options, reply } => {
+            return (Event::V2PermissionRequest { request, tool_call_id, title, subject, options }, Some(Reply::Permission(reply)));
+        }
         A::Ready { session_id, resumed, controls } => Event::Ready { session_id, resumed, controls },
         A::Capabilities { images } => Event::Capabilities { images },
         A::Controls(c) => Event::Controls(c),
@@ -220,9 +302,7 @@ enum Input {
 
 #[derive(Serialize, Deserialize)]
 enum Output {
-    Hello {
-        acknowledged: u64, last: u64, version: u32,
-    },
+    Hello { acknowledged: u64, last: u64, version: u32 },
     Event(Delivered),
     Accepted { id: u64, error: Option<String> },
     Answered { request: u64, error: Option<String> },
@@ -283,8 +363,8 @@ impl Shared {
         if state.stopping {
             return;
         }
-        if matches!(&event,acp::Event::V2PermissionsCancelled) {
-            state.pending.retain(|_,p|!matches!(&p.event,Event::V2PermissionRequest{..}));
+        if matches!(&event, acp::Event::V2PermissionsCancelled) {
+            state.pending.retain(|_, p| !matches!(&p.event, Event::V2PermissionRequest { .. }));
         }
         state.next_request += 1;
         let request = state.next_request;
@@ -306,7 +386,10 @@ impl Shared {
             return Ok(());
         }
         let Some(pending) = state.pending.get(&request) else { bail!("no open question {request}") };
-        if !matches!((&pending.event, &answer), (Event::PermissionRequest { .. } | Event::V2PermissionRequest { .. }, Answer::Permission(_)) | (Event::Elicitation { .. }, Answer::Form(_))) {
+        if !matches!(
+            (&pending.event, &answer),
+            (Event::PermissionRequest { .. } | Event::V2PermissionRequest { .. }, Answer::Permission(_)) | (Event::Elicitation { .. }, Answer::Form(_))
+        ) {
             bail!("the answer is not of the question's kind");
         }
         let pending = state.pending.remove(&request).unwrap();
@@ -356,7 +439,15 @@ impl Shared {
 
 /// Run the worker against the session's shim. Its lifetime is the ACP conversation plus delivery
 /// of its final Ended event; dropping the daemon connection never closes the agent connection.
-pub(crate) fn run(session: &str, socket: &Path, agent_socket: &Path, cwd: &Path, roots: Vec<PathBuf>, resume: Option<String>, experimental_acp_v2: bool) -> Result<()> {
+pub(crate) fn run(
+    session: &str,
+    socket: &Path,
+    agent_socket: &Path,
+    cwd: &Path,
+    roots: Vec<PathBuf>,
+    resume: Option<String>,
+    experimental_acp_v2: bool,
+) -> Result<()> {
     super::exit_on_panic();
     run_with(session, socket, cwd, roots, resume, experimental_acp_v2, ORPHAN_GRACE, || sill_core::shim::agent_stream(agent_socket))
 }
@@ -373,7 +464,16 @@ fn socket_identity(socket: &Path) -> Option<(u64, u64)> {
     std::fs::symlink_metadata(socket).ok().map(|m| (m.dev(), m.ino()))
 }
 
-fn run_with(session: &str, socket: &Path, cwd: &Path, roots: Vec<PathBuf>, resume: Option<String>, experimental_acp_v2: bool, orphan_grace: Duration, open: impl FnOnce() -> Result<UnixStream>) -> Result<()> {
+fn run_with(
+    session: &str,
+    socket: &Path,
+    cwd: &Path,
+    roots: Vec<PathBuf>,
+    resume: Option<String>,
+    experimental_acp_v2: bool,
+    orphan_grace: Duration,
+    open: impl FnOnce() -> Result<UnixStream>,
+) -> Result<()> {
     if let Some(dir) = socket.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -401,7 +501,11 @@ fn run_with(session: &str, socket: &Path, cwd: &Path, roots: Vec<PathBuf>, resum
     let shared = Arc::new(Shared { state: Mutex::new(State::default()), changed: Condvar::new(), commands });
     let opts = acp::SessionOptions { cwd: cwd.to_path_buf(), roots, auto: acp::AutoPermission::Ask, resume };
     let worker = std::thread::Builder::new().name(format!("sill-relay-acp-{session}")).spawn(move || {
-        let _ = if experimental_acp_v2 { sill_core::acp_v2::run_session(stream, opts, command_rx, events) } else { acp::run_session(stream, opts, command_rx, events) };
+        let _ = if experimental_acp_v2 {
+            sill_core::acp_v2::run_session(stream, opts, command_rx, events)
+        } else {
+            acp::run_session(stream, opts, command_rx, events)
+        };
     })?;
     let state = shared.clone();
     let collector = std::thread::Builder::new().name(format!("sill-relay-events-{session}")).spawn(move || {
@@ -564,7 +668,9 @@ fn serve(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
             cursor = next.seq;
             if let Err(error) = write_line(&mut output.lock().unwrap(), &Output::Event(next)) {
                 let state = state.state.lock().unwrap();
-                if state.generation == generation && let Some(stream) = &state.subscriber {
+                if state.generation == generation
+                    && let Some(stream) = &state.subscriber
+                {
                     let _ = stream.shutdown(std::net::Shutdown::Both);
                 }
                 return Err(error);
@@ -635,7 +741,6 @@ pub(crate) struct Client {
 }
 
 impl Client {
-
     fn write(&self, value: &Input) -> Result<()> {
         if self.closed.load(Ordering::Acquire) {
             bail!("the ACP relay connection closed");
@@ -646,9 +751,8 @@ impl Client {
     fn request(&self, key: (bool, u64), value: Input) -> Result<()> {
         let (tx, rx) = mpsc::sync_channel(1);
         self.waiters.lock().unwrap().insert(key, tx);
-        let result = self.write(&value).and_then(|()| {
-            rx.recv_timeout(IO_TIMEOUT).context("the ACP relay did not acknowledge the request")?.map_err(anyhow::Error::msg)
-        });
+        let result =
+            self.write(&value).and_then(|()| rx.recv_timeout(IO_TIMEOUT).context("the ACP relay did not acknowledge the request")?.map_err(anyhow::Error::msg));
         self.waiters.lock().unwrap().remove(&key);
         result
     }
@@ -672,7 +776,9 @@ impl Client {
 }
 
 impl Drop for Client {
-    fn drop(&mut self) { self.close(); }
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 /// Reconnect at the last sequence committed to the store. The receiver closes on a transport
@@ -711,7 +817,11 @@ pub(super) fn connect(socket: &Path, since: u64) -> Result<(Arc<Client>, mpsc::R
             let Ok(line) = line else { break };
             let Ok(output) = serde_json::from_str::<Output>(&line) else { break };
             match output {
-                Output::Event(event) => { if tx.send(event).is_err() { break } }
+                Output::Event(event) => {
+                    if tx.send(event).is_err() {
+                        break;
+                    }
+                }
                 Output::Accepted { id, error } => {
                     if let Some(client) = receive.upgrade()
                         && let Some(tx) = client.waiters.lock().unwrap().remove(&(false, id))
@@ -753,7 +863,13 @@ pub(super) fn stop_unowned(socket: &Path, session: &str, cursor: u64) -> Result<
     let dir = socket.parent().unwrap_or(Path::new("."));
     let (client, events) = match connect(socket, cursor) {
         Ok(connection) => connection,
-        Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|error| matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused)) => return Ok(()),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused)) =>
+        {
+            return Ok(());
+        }
         Err(error) => {
             // its journal was for a session being deleted anyway
             eprintln!("sill daemon: session {session}: the orphaned ACP relay did not take a connection ({error:#}); evicting it");
@@ -837,8 +953,12 @@ fn is_relay_of(pid: u32, session: &str) -> bool {
 pub(super) fn wait_stopped(socket: &Path) -> Result<()> {
     let deadline = std::time::Instant::now() + IO_TIMEOUT;
     while socket.exists() {
-        if UnixStream::connect(socket).is_err() { return Ok(()); }
-        if std::time::Instant::now() >= deadline { bail!("ACP worker has not stopped; refusing to remove its runtime directory"); }
+        if UnixStream::connect(socket).is_err() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!("ACP worker has not stopped; refusing to remove its runtime directory");
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
     Ok(())
@@ -887,7 +1007,10 @@ mod tests {
             message(&mut writer, json!({"jsonrpc":"2.0","id":new["id"],"result":{"sessionId":"fake"}}));
             let prompt = read(&mut reader);
             assert_eq!(prompt["method"], "session/prompt");
-            message(&mut writer, json!({"jsonrpc":"2.0","id":prompt["id"],"error":{"code":-32603,"message":"Incoming transport closed","data":{"reason":"incoming_transport_closed","method":"session/prompt"}}}));
+            message(
+                &mut writer,
+                json!({"jsonrpc":"2.0","id":prompt["id"],"error":{"code":-32603,"message":"Incoming transport closed","data":{"reason":"incoming_transport_closed","method":"session/prompt"}}}),
+            );
             let mut extra = String::new();
             assert_eq!(reader.read_line(&mut extra).unwrap(), 0, "failed prompt was replayed");
         });
@@ -914,7 +1037,9 @@ mod tests {
     /// workspace roots (Antigravity confines its tools to them); any other agent gets only `cwd`.
     #[test]
     fn pinned_folders_are_additional_directories_for_an_agent_that_takes_them() {
-        for (n, (capabilities, expected)) in [(json!({"sessionCapabilities":{"additionalDirectories":{}}}), json!(["/pins/a", "/pins/b"])), (json!({}), json!(null))].into_iter().enumerate() {
+        for (n, (capabilities, expected)) in
+            [(json!({"sessionCapabilities":{"additionalDirectories":{}}}), json!(["/pins/a", "/pins/b"])), (json!({}), json!(null))].into_iter().enumerate()
+        {
             let dir = std::env::temp_dir().join(format!("sill-relay-roots-{}-{n}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let socket = dir.join("relay.sock");
@@ -931,7 +1056,10 @@ mod tests {
                 assert_eq!(new["params"]["additionalDirectories"], expected);
                 message(&mut writer, json!({"jsonrpc":"2.0","id":new["id"],"result":{"sessionId":"fake"}}));
                 let prompt = read(&mut reader);
-                message(&mut writer, json!({"jsonrpc":"2.0","id":prompt["id"],"error":{"code":-32603,"message":"Incoming transport closed","data":{"reason":"incoming_transport_closed","method":"session/prompt"}}}));
+                message(
+                    &mut writer,
+                    json!({"jsonrpc":"2.0","id":prompt["id"],"error":{"code":-32603,"message":"Incoming transport closed","data":{"reason":"incoming_transport_closed","method":"session/prompt"}}}),
+                );
             });
             let path = socket.clone();
             let roots = vec![PathBuf::from("/pins/a"), PathBuf::from("/pins/b")];
@@ -967,21 +1095,33 @@ mod tests {
             let mut writer = agent;
             let initialize = read(&mut reader);
             assert_eq!(initialize["method"], "initialize");
-            message(&mut writer, json!({"jsonrpc":"2.0", "id":initialize["id"], "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[]}}));
+            message(
+                &mut writer,
+                json!({"jsonrpc":"2.0", "id":initialize["id"], "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[]}}),
+            );
             let new_session = read(&mut reader);
             assert_eq!(new_session["method"], "session/new");
             message(&mut writer, json!({"jsonrpc":"2.0", "id":new_session["id"], "result":{"sessionId":"fake-session"}}));
             let prompt = read(&mut reader);
             assert_eq!(prompt["method"], "session/prompt");
-            message(&mut writer, json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"fake-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"before disconnect"}}}}));
+            message(
+                &mut writer,
+                json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"fake-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"before disconnect"}}}}),
+            );
             // The main daemon has disappeared; the SDK and its prompt future keep running.
             released.recv_timeout(Duration::from_secs(5)).unwrap();
-            message(&mut writer, json!({"jsonrpc":"2.0", "id":99, "method":"session/request_permission", "params":{"sessionId":"fake-session","toolCall":{"toolCallId":"tool","title":"work","status":"pending"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}}));
+            message(
+                &mut writer,
+                json!({"jsonrpc":"2.0", "id":99, "method":"session/request_permission", "params":{"sessionId":"fake-session","toolCall":{"toolCallId":"tool","title":"work","status":"pending"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}}),
+            );
             let answer = read(&mut reader);
             assert_eq!(answer["id"], 99);
             assert_eq!(answer["result"]["outcome"]["outcome"], "selected");
             assert_eq!(answer["result"]["outcome"]["optionId"], "allow");
-            message(&mut writer, json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"fake-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"after reconnect"}}}}));
+            message(
+                &mut writer,
+                json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"fake-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"after reconnect"}}}}),
+            );
             message(&mut writer, json!({"jsonrpc":"2.0", "id":prompt["id"], "result":{"stopReason":"end_turn"}}));
             // Quit closes ACP. A replayed prompt would appear here and fail this assertion.
             let mut extra = String::new();
@@ -1064,7 +1204,14 @@ mod tests {
             shared.cancel_questions_locked(&mut state);
             assert!(state.pending.is_empty());
             assert!(state.answered.contains(&1) && state.answered.contains(&2));
-            let resolved: Vec<u64> = state.journal.iter().filter_map(|e| match e.delivered.event { Event::Resolved { request } => Some(request), _ => None }).collect();
+            let resolved: Vec<u64> = state
+                .journal
+                .iter()
+                .filter_map(|e| match e.delivered.event {
+                    Event::Resolved { request } => Some(request),
+                    _ => None,
+                })
+                .collect();
             assert_eq!(resolved, [1, 2]);
         }
         assert_eq!(futures::executor::block_on(permission_rx).unwrap(), None, "cancelled, as ACP asks");
@@ -1113,18 +1260,21 @@ mod tests {
     }
     #[test]
     fn incompatible_daemon_is_refused_before_replacing_subscriber() {
-        let (commands,_)=async_channel::unbounded();
-        let shared=Arc::new(Shared{state:Mutex::new(State::default()),changed:Condvar::new(),commands});
-        let (existing,_peer)=UnixStream::pair().unwrap();
-        shared.state.lock().unwrap().subscriber=Some(existing);
-        let (mut client,server)=UnixStream::pair().unwrap();
+        let (commands, _) = async_channel::unbounded();
+        let shared = Arc::new(Shared { state: Mutex::new(State::default()), changed: Condvar::new(), commands });
+        let (existing, _peer) = UnixStream::pair().unwrap();
+        shared.state.lock().unwrap().subscriber = Some(existing);
+        let (mut client, server) = UnixStream::pair().unwrap();
         client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        let state=shared.clone();let worker=std::thread::spawn(move||serve(server,state));
-        message(&mut client,json!({"Hello":{"since":0,"version":1}}));
-        let response=read(&mut BufReader::new(client));assert_eq!(response["Hello"]["version"],RELAY_PROTOCOL);
+        let state = shared.clone();
+        let worker = std::thread::spawn(move || serve(server, state));
+        message(&mut client, json!({"Hello":{"since":0,"version":1}}));
+        let response = read(&mut BufReader::new(client));
+        assert_eq!(response["Hello"]["version"], RELAY_PROTOCOL);
         assert!(worker.join().unwrap().is_err());
-        let state=shared.state.lock().unwrap();
-        assert!(state.subscriber.is_some());assert_eq!(state.generation,0);
+        let state = shared.state.lock().unwrap();
+        assert!(state.subscriber.is_some());
+        assert_eq!(state.generation, 0);
     }
     /// A fake agent that completes `initialize` and `session/new`, then reports what happened to
     /// its connection: "closed" when the relay closed it.
@@ -1196,7 +1346,8 @@ mod tests {
         let socket = dir.join("relay.sock");
         let (agent, worker_stream) = UnixStream::pair().unwrap();
         let path = socket.clone();
-        let worker = std::thread::spawn(move || run_with("test", &path, Path::new("/tmp"), vec![], None, false, Duration::from_millis(300), || Ok(worker_stream)));
+        let worker =
+            std::thread::spawn(move || run_with("test", &path, Path::new("/tmp"), vec![], None, false, Duration::from_millis(300), || Ok(worker_stream)));
         // the agent goes at once, as with a jail that died: the worker journals Ended
         drop(agent);
         assert!(finishes(&worker, Duration::from_secs(5)), "a relay with an ended, unclaimed conversation stayed");
@@ -1213,7 +1364,8 @@ mod tests {
         let (agent, worker_stream) = UnixStream::pair().unwrap();
         let fake = idle_agent(agent);
         let path = socket.clone();
-        let worker = std::thread::spawn(move || run_with("test", &path, Path::new("/tmp"), vec![], None, false, Duration::from_millis(100), || Ok(worker_stream)));
+        let worker =
+            std::thread::spawn(move || run_with("test", &path, Path::new("/tmp"), vec![], None, false, Duration::from_millis(100), || Ok(worker_stream)));
         std::thread::sleep(Duration::from_millis(800));
         assert!(!worker.is_finished(), "a relay with a live conversation left for want of a daemon");
         let (client, events) = connect(&socket, 0).unwrap();
@@ -1252,12 +1404,14 @@ mod tests {
 
     #[test]
     fn native_cancellation_removes_pending_handlers_without_false_answer_confirmation() {
-        let (commands,_)=async_channel::unbounded();let shared=Shared{state:Mutex::new(State::default()),changed:Condvar::new(),commands};
-        let (reply,_)=futures::channel::oneshot::channel();
-        shared.take_event(acp::Event::V2PermissionRequest{tool_call_id:None,title:"Run?".into(),subject:None,options:vec![],reply});
+        let (commands, _) = async_channel::unbounded();
+        let shared = Shared { state: Mutex::new(State::default()), changed: Condvar::new(), commands };
+        let (reply, _) = futures::channel::oneshot::channel();
+        shared.take_event(acp::Event::V2PermissionRequest { tool_call_id: None, title: "Run?".into(), subject: None, options: vec![], reply });
         shared.take_event(acp::Event::V2PermissionsCancelled);
-        let state=shared.state.lock().unwrap();assert!(state.pending.is_empty());assert!(state.answered.is_empty());
-        assert!(matches!(state.journal.back().unwrap().delivered.event,Event::V2PermissionsCancelled));
+        let state = shared.state.lock().unwrap();
+        assert!(state.pending.is_empty());
+        assert!(state.answered.is_empty());
+        assert!(matches!(state.journal.back().unwrap().delivered.event, Event::V2PermissionsCancelled));
     }
-
 }

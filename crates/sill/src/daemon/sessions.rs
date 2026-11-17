@@ -6,34 +6,45 @@ use sill_proto::sessions as api;
 
 fn record(store: &Store, s: sill_core::store::Session) -> Result<api::Session> {
     // a session never attached has no journal state yet: no time worked
-    let (active_ms, active_since_ms) = store.conn()
-        .query_row("SELECT json_extract(state,'$.active_ms'),json_extract(state,'$.active_since_ms') FROM sfp_sessions WHERE session_id=?1", [&s.id],
-            |r| Ok((r.get::<_, Option<i64>>(0)?.unwrap_or(0) as u64, r.get::<_, Option<i64>>(1)?.map(|v| v as u64))))
+    let (active_ms, active_since_ms) = store
+        .conn()
+        .query_row("SELECT json_extract(state,'$.active_ms'),json_extract(state,'$.active_since_ms') FROM sfp_sessions WHERE session_id=?1", [&s.id], |r| {
+            Ok((r.get::<_, Option<i64>>(0)?.unwrap_or(0) as u64, r.get::<_, Option<i64>>(1)?.map(|v| v as u64)))
+        })
         .unwrap_or((0, None));
     Ok(api::Session {
         active_ms,
         active_since_ms,
         running: s.ended_at.is_none() && sill_core::session::is_running(&s.id),
-        policy_changed: s.ended_at.is_none() && sill_core::changes::home().is_ok_and(|home| {
-            let pins = if s.ghost { vec![] } else { store.jail_pins(&s.id).unwrap_or_default() };
-            let Ok(mut registry) = sill_core::agents::load(&home) else { return true };
-            let domains = registry.remove(&s.agent).map(|a| a.domains).unwrap_or_default();
-            let current = sill_core::session::recorded_filesystem(&s.id);
-            let next = (|| -> Result<sill_core::session::Resolution> {
-                let resolution = sill_core::session::next_build_base(&s, &home, &pins)?;
-                let resolution = sill_core::session::apply_grants(resolution, &store.permission_choices(&s.id)?, store.network_hosts(&s.id)?);
-                let workspace = store.workspace_mask(&s.id)?;
-                sill_core::session::freeze_filesystem(resolution, &s.agent, &home, &sill_core::session::state_dir_path(rustix::process::getuid().as_raw(), &s.id)?, &pins, s.ghost, &workspace)
-            })();
-            match (current, next) {
-                (Ok(current), Ok(next)) if next.filesystem.as_ref().is_some_and(|next| current.same_mounts(next)) => {},
-                _ => return true,
-            }
-            match sill_core::session::session_base_policy(&s.policy, &home, s.ghost, Some(&s.agent)) {
-                Ok(base) => sill_core::session::jail_outdated_with_grants(&s.id, &base, &pins, store, &domains),
-                Err(_) => true,
-            }
-        }),
+        policy_changed: s.ended_at.is_none()
+            && sill_core::changes::home().is_ok_and(|home| {
+                let pins = if s.ghost { vec![] } else { store.jail_pins(&s.id).unwrap_or_default() };
+                let Ok(mut registry) = sill_core::agents::load(&home) else { return true };
+                let domains = registry.remove(&s.agent).map(|a| a.domains).unwrap_or_default();
+                let current = sill_core::session::recorded_filesystem(&s.id);
+                let next = (|| -> Result<sill_core::session::Resolution> {
+                    let resolution = sill_core::session::next_build_base(&s, &home, &pins)?;
+                    let resolution = sill_core::session::apply_grants(resolution, &store.permission_choices(&s.id)?, store.network_hosts(&s.id)?);
+                    let workspace = store.workspace_mask(&s.id)?;
+                    sill_core::session::freeze_filesystem(
+                        resolution,
+                        &s.agent,
+                        &home,
+                        &sill_core::session::state_dir_path(rustix::process::getuid().as_raw(), &s.id)?,
+                        &pins,
+                        s.ghost,
+                        &workspace,
+                    )
+                })();
+                match (current, next) {
+                    (Ok(current), Ok(next)) if next.filesystem.as_ref().is_some_and(|next| current.same_mounts(next)) => {}
+                    _ => return true,
+                }
+                match sill_core::session::session_base_policy(&s.policy, &home, s.ghost, Some(&s.agent)) {
+                    Ok(base) => sill_core::session::jail_outdated_with_grants(&s.id, &base, &pins, store, &domains),
+                    Err(_) => true,
+                }
+            }),
         name: store.session_name(&s.id),
         host_control: crate::daemon::host_control::brief(&s.id),
         pins: store.pins(&s.id)?.iter().map(|p| api::HostPath::from_path(p)).collect(),
@@ -68,11 +79,7 @@ pub(super) fn create(store: &Store, mut a: api::Create) -> Result<api::SessionKe
     if a.ghost && !a.pins.is_empty() {
         return Err(Error::invalid_params(GHOST_NO_PINS).into());
     }
-    let pins = a
-        .pins
-        .iter()
-        .map(|p| p.to_path().map_err(Error::invalid_params))
-        .collect::<Result<Vec<_>, _>>()?;
+    let pins = a.pins.iter().map(|p| p.to_path().map_err(Error::invalid_params)).collect::<Result<Vec<_>, _>>()?;
     for p in &mut a.pins {
         p.display.clear();
     }
@@ -85,19 +92,13 @@ pub(super) fn create(store: &Store, mut a: api::Create) -> Result<api::SessionKe
     )?;
     let tx = store.conn().unchecked_transaction()?;
     let key = sill_core::sfp::create_fingerprint(&a.create_id);
-    let previous: Option<(String, Option<String>)> = store
-        .conn()
-        .query_row("SELECT fingerprint,session_id FROM sfp_creates WHERE create_id=?1", [&key], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
-        .optional()?;
+    let previous: Option<(String, Option<String>)> =
+        store.conn().query_row("SELECT fingerprint,session_id FROM sfp_creates WHERE create_id=?1", [&key], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
     if let Some((old, session_id)) = previous {
         if input != old {
             return Err(Error::domain("id_conflict", "create_id was already used with different input").into());
         }
-        return Ok(api::SessionKey {
-            session_id: session_id.ok_or_else(|| Error::domain("gone", "the created session has been deleted"))?,
-        });
+        return Ok(api::SessionKey { session_id: session_id.ok_or_else(|| Error::domain("gone", "the created session has been deleted"))? });
     }
     let count: i64 = store.conn().query_row("SELECT count(*) FROM sfp_creates", [], |r| r.get(0))?;
     if count >= 65536 {
@@ -109,22 +110,11 @@ pub(super) fn create(store: &Store, mut a: api::Create) -> Result<api::SessionKe
     let workspaces = !a.ghost && a.workspaces.unwrap_or_else(|| sill_core::config::load().automatic_workspaces());
     let session_id = Hub::create_session_row(
         store,
-        NewSession {
-            agent: a.agent,
-            policy: a.policy,
-            pins,
-            memory_scope: a.memory_scope,
-            follows: a.follows,
-            remember_pins: a.remember_pins,
-            ghost: a.ghost,
-        },
+        NewSession { agent: a.agent, policy: a.policy, pins, memory_scope: a.memory_scope, follows: a.follows, remember_pins: a.remember_pins, ghost: a.ghost },
     )?;
     // a session's mode is fixed when it is made (docs/parallel-coding.md §12)
     sill_core::workspace::records::set_mode(store.conn(), &session_id, workspaces)?;
-    store.conn().execute(
-        "INSERT INTO sfp_creates(create_id,fingerprint,session_id) VALUES (?1,?2,?3)",
-        rusqlite::params![key, input, session_id],
-    )?;
+    store.conn().execute("INSERT INTO sfp_creates(create_id,fingerprint,session_id) VALUES (?1,?2,?3)", rusqlite::params![key, input, session_id])?;
     tx.commit()?;
     Ok(api::SessionKey { session_id })
 }
@@ -140,16 +130,22 @@ fn public_page(store: &Store, after: Option<(i64, &str)>, limit: usize) -> Resul
     while visible.len() < limit {
         let rows = store.sessions_page(cursor.as_ref().map(|(time, id)| (*time, id.as_str())), 128)?;
         let exhausted = rows.len() < 128;
-        if let Some(last) = rows.last() { cursor = Some((last.created_at, last.id.clone())); }
+        if let Some(last) = rows.last() {
+            cursor = Some((last.created_at, last.id.clone()));
+        }
         visible.extend(rows.into_iter().filter(|s| !hidden.contains(&s.id)).take(limit - visible.len()));
-        if exhausted { break; }
+        if exhausted {
+            break;
+        }
     }
     Ok(visible)
 }
 
 impl Hub {
     pub(in crate::daemon) fn public_sessions(self: &Arc<Self>, method: &str, params: Value) -> Option<Result<Value, Error>> {
-        if let Some(result) = self.public_pins(method, params.clone()) { return Some(result); }
+        if let Some(result) = self.public_pins(method, params.clone()) {
+            return Some(result);
+        }
         let result = || -> Result<Value> {
             match method {
                 "_sill/sessions.list" => {
@@ -181,7 +177,12 @@ impl Hub {
                         let sessions = rows.into_iter().map(|s| record(store, s)).collect::<Result<Vec<_>>>()?;
                         let value = json!(api::Page { sessions, next });
                         if serde_json::to_vec(&value)?.len() > 4 * 1024 * 1024 {
-                            return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Result, Some(4194304), "session page exceeds 4 MiB; request fewer records").into());
+                            return Err(sill_proto::rpc::Error::limit(
+                                sill_proto::rpc::LimitScope::Result,
+                                Some(4194304),
+                                "session page exceeds 4 MiB; request fewer records",
+                            )
+                            .into());
                         }
                         Ok(value)
                     })
@@ -252,18 +253,8 @@ impl Hub {
                         return Err(Error::invalid_params("reason must be close, idle or quit").into());
                     }
                     let row = self.with_store(|s| exact(s, &a.session_id))?;
-                    let e = if row.ended_at.is_some() {
-                        Ending {
-                            pending: false,
-                            deleted: false,
-                        }
-                    } else {
-                        self.end_session(&a.session_id, &a.reason)?
-                    };
-                    Ok(json!(api::Ending {
-                        pending: e.pending,
-                        deleted: e.deleted
-                    }))
+                    let e = if row.ended_at.is_some() { Ending { pending: false, deleted: false } } else { self.end_session(&a.session_id, &a.reason)? };
+                    Ok(json!(api::Ending { pending: e.pending, deleted: e.deleted }))
                 }
                 "_sill/sessions.delete" => {
                     let a: api::SessionKey = args(params)?;
@@ -274,7 +265,9 @@ impl Hub {
                 "_sill/sessions.reset" => {
                     let a: api::SessionKey = args(params)?;
                     let row = self.with_store(|s| exact(s, &a.session_id))?;
-                    if row.ended_at.is_some() { return Err(Error::domain("invalid_state", "reopen the session before resetting its agent").into()); }
+                    if row.ended_at.is_some() {
+                        return Err(Error::domain("invalid_state", "reopen the session before resetting its agent").into());
+                    }
                     self.ensure_runner(&a.session_id, true)?;
                     Ok(json!({}))
                 }
@@ -282,9 +275,18 @@ impl Hub {
                     let a: api::Log = args(params)?;
                     self.with_store(|s| exact(s, &a.session_id))?;
                     let n = a.lines.unwrap_or(100);
-                    if n == 0 || n > 20000 { return Err(Error::invalid_params("lines must be 1–20000").into()); }
+                    if n == 0 || n > 20000 {
+                        return Err(Error::invalid_params("lines must be 1–20000").into());
+                    }
                     let text = sill_core::session::read_log(&sill_core::session::log_source(&a.session_id), n as usize);
-                    if serde_json::to_vec(&text)?.len()>4*1024*1024 { return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Result, Some(4194304), "log exceeds 4 MiB; request fewer lines").into()); }
+                    if serde_json::to_vec(&text)?.len() > 4 * 1024 * 1024 {
+                        return Err(sill_proto::rpc::Error::limit(
+                            sill_proto::rpc::LimitScope::Result,
+                            Some(4194304),
+                            "log exceeds 4 MiB; request fewer lines",
+                        )
+                        .into());
+                    }
                     Ok(json!(sill_proto::Text { text }))
                 }
                 "_sill/sessions.start" | "_sill/sessions.stop" | "_sill/sessions.checkpoint" => {
@@ -297,10 +299,7 @@ impl Hub {
                         "_sill/sessions.start" => {
                             let s = self.start_session(&a.session_id)?;
                             self.ensure_runner(&a.session_id, false)?;
-                            Ok(json!(api::Started {
-                                session_id: a.session_id,
-                                fresh: s.fresh
-                            }))
+                            Ok(json!(api::Started { session_id: a.session_id, fresh: s.fresh }))
                         }
                         "_sill/sessions.stop" => {
                             crate::daemon::host_control::session_ended(self, &a.session_id, "the session stopped");
@@ -340,7 +339,9 @@ mod tests {
             store.conn().execute("UPDATE sessions SET created_at=?1 WHERE id=?2", rusqlite::params![i, session.id]).unwrap();
             if i >= 7 {
                 store.conn().execute("INSERT INTO crosscheck_workers VALUES (?1,'run')", [&session.id]).unwrap();
-            } else { ordinary.push(session.id); }
+            } else {
+                ordinary.push(session.id);
+            }
         }
         ordinary.reverse();
         let first = public_page(&store, None, 4).unwrap();
@@ -358,10 +359,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sill-remember-pins-{}", crate::daemon::sfp::id()));
         let store = Store::open(&dir.join("store.db")).unwrap();
         store.global_pin(std::path::Path::new("/shortcut")).unwrap();
-        let input = |id: &str| api::Create {
-            create_id: id.into(), agent: "test".into(), policy: "default".into(),
-            workspaces: Some(false), ..Default::default()
-        };
+        let input =
+            |id: &str| api::Create { create_id: id.into(), agent: "test".into(), policy: "default".into(), workspaces: Some(false), ..Default::default() };
         let source = create(&store, input("source")).unwrap();
         store.pin(&source.session_id, std::path::Path::new("/remembered")).unwrap();
         let empty = create(&store, input("off")).unwrap();
@@ -399,7 +398,9 @@ mod tests {
         later["worktree"] = serde_json::json!(true);
         assert_ne!(sill_core::sfp::canonical_fingerprint(&later), today, "a set field is input");
         let mut reordered = serde_json::Map::new();
-        for (k, v) in serde_json::to_value(&input).unwrap().as_object().unwrap().iter().rev() { reordered.insert(k.clone(), v.clone()); }
+        for (k, v) in serde_json::to_value(&input).unwrap().as_object().unwrap().iter().rev() {
+            reordered.insert(k.clone(), v.clone());
+        }
         assert_eq!(sill_core::sfp::canonical_fingerprint(&serde_json::Value::Object(reordered)), today);
     }
 
@@ -408,15 +409,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sill-create-capacity-{}", crate::daemon::sfp::id()));
         let path = dir.join("store.db");
         let store = Store::open(&path).unwrap();
-        let input = api::Create {
-            create_id: "durable".into(), agent: "test".into(), policy: "default".into(),
-            ..Default::default()
-        };
+        let input = api::Create { create_id: "durable".into(), agent: "test".into(), policy: "default".into(), ..Default::default() };
         let first = create(&store, input.clone()).unwrap();
         // Fill the remaining slots with tombstones, without creating 65k sessions.
-        store.conn().execute_batch("WITH RECURSIVE n(x) AS (
+        store
+            .conn()
+            .execute_batch(
+                "WITH RECURSIVE n(x) AS (
             VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<65535
-        ) INSERT INTO sfp_creates SELECT 'fixture-' || x, 'fixture', NULL FROM n;").unwrap();
+        ) INSERT INTO sfp_creates SELECT 'fixture-' || x, 'fixture', NULL FROM n;",
+            )
+            .unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
         let code = |result: Result<api::SessionKey>| {
@@ -462,18 +465,12 @@ mod tests {
         assert_eq!(create(&store, retry).unwrap().session_id, first.session_id);
         assert_eq!(store.pins(&first.session_id).unwrap(), vec![PathBuf::from("/exact")]);
         // Force failure after the row was inserted, before the retry receipt is committed.
-        store
-            .conn()
-            .execute_batch("CREATE TRIGGER reject_pin BEFORE INSERT ON session_pins BEGIN SELECT RAISE(ABORT,'test failure'); END;")
-            .unwrap();
+        store.conn().execute_batch("CREATE TRIGGER reject_pin BEFORE INSERT ON session_pins BEGIN SELECT RAISE(ABORT,'test failure'); END;").unwrap();
         let mut failed = input.clone();
         failed.create_id = "rolled-back".into();
         assert!(create(&store, failed).is_err());
         assert_eq!(store.sessions().unwrap().len(), 1);
-        assert_eq!(
-            store.conn().query_row("SELECT count(*) FROM sfp_creates", [], |r| r.get::<_, i64>(0)).unwrap(),
-            1
-        );
+        assert_eq!(store.conn().query_row("SELECT count(*) FROM sfp_creates", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
         store.conn().execute_batch("DROP TRIGGER reject_pin").unwrap();
         let mut non_utf8 = input;
         non_utf8.create_id = "exact-bytes".into();

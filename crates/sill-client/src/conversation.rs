@@ -41,74 +41,35 @@ pub struct Conversation {
 }
 
 fn position(item: &Item) -> (u64, String) {
-    (
-        item.created_seq.parse().unwrap_or_default(),
-        item.item_id.clone(),
-    )
+    (item.created_seq.parse().unwrap_or_default(), item.item_id.clone())
 }
 
 impl Conversation {
     /// An empty view of `session_id` at `seq` (a snapshot's cursor), to install records into.
     pub fn new(session_id: &str, subscription_id: &str, seq: u64) -> Self {
-        Self {
-            session_id: session_id.into(),
-            subscription_id: subscription_id.into(),
-            seq,
-            ..Self::default()
-        }
+        Self { session_id: session_id.into(), subscription_id: subscription_id.into(), seq, ..Self::default() }
     }
 
     /// Attach afresh and read the whole snapshot. Notifications arriving meanwhile stay queued on
     /// `client`; apply them afterwards (events through the snapshot's cursor are ignored).
     pub fn attach(client: &Client, session_id: &str) -> Result<Self> {
-        let attached: Attached = client.call(
-            "_sill/sessions.attach",
-            Attach {
-                session_id: session_id.into(),
-                since: None,
-            },
-        )?;
-        let Attached::Snapshot {
-            subscription_id,
-            snapshot,
-        } = attached
-        else {
+        let attached: Attached = client.call("_sill/sessions.attach", Attach { session_id: session_id.into(), since: None })?;
+        let Attached::Snapshot { subscription_id, snapshot } = attached else {
             bail!("expected a snapshot for a fresh attachment");
         };
         Self::read_snapshot(client, session_id, &subscription_id, &snapshot)
     }
 
     /// Read every page of a snapshot lease into a new view.
-    pub fn read_snapshot(
-        client: &Client,
-        session_id: &str,
-        subscription_id: &str,
-        snapshot: &SnapshotLease,
-    ) -> Result<Self> {
-        ensure!(
-            snapshot.at.session_id == session_id,
-            "snapshot belongs to another session"
-        );
-        let seq = snapshot
-            .at
-            .seq
-            .parse()
-            .context("invalid snapshot sequence")?;
+    pub fn read_snapshot(client: &Client, session_id: &str, subscription_id: &str, snapshot: &SnapshotLease) -> Result<Self> {
+        ensure!(snapshot.at.session_id == session_id, "snapshot belongs to another session");
+        let seq = snapshot.at.seq.parse().context("invalid snapshot sequence")?;
         let mut view = Self::new(session_id, subscription_id, seq);
         let mut decoder = SnapshotDecoder::default();
         let mut page = None;
         loop {
-            let part: SnapshotPage = client.call(
-                "_sill/sessions.snapshot",
-                SnapshotRequest {
-                    token: snapshot.token.clone(),
-                    page,
-                },
-            )?;
-            ensure!(
-                part.at == snapshot.at,
-                "snapshot cursor changed during pagination"
-            );
+            let part: SnapshotPage = client.call("_sill/sessions.snapshot", SnapshotRequest { token: snapshot.token.clone(), page })?;
+            ensure!(part.at == snapshot.at, "snapshot cursor changed during pagination");
             for record in decoder.records(&part).map_err(anyhow::Error::msg)? {
                 view.install(record)?;
             }
@@ -125,24 +86,18 @@ impl Conversation {
     pub fn install(&mut self, record: Record) -> Result<()> {
         match record {
             Record::Session { session } => {
-                ensure!(
-                    session.session_id == self.session_id,
-                    "wrong session record"
-                );
+                ensure!(session.session_id == self.session_id, "wrong session record");
                 self.session = Some(session);
             }
             Record::Item { item } => self.insert_item(item),
             Record::Question { question } => {
                 if let Some(last) = self.order.last() {
-                    self.asked_at
-                        .insert(question.question_id.clone(), last.clone());
+                    self.asked_at.insert(question.question_id.clone(), last.clone());
                 }
-                self.questions
-                    .insert(question.question_id.clone(), question);
+                self.questions.insert(question.question_id.clone(), question);
             }
             Record::Submission { submission } => {
-                self.submissions
-                    .insert(submission.submission_id.clone(), submission);
+                self.submissions.insert(submission.submission_id.clone(), submission);
             }
             Record::Turn { turn } => {
                 self.turns.insert(turn.turn_id.clone(), turn);
@@ -176,38 +131,23 @@ impl Conversation {
     /// `None` is a foreign subscription's event or an already applied one. A gap is an error: the
     /// caller takes a fresh snapshot. On error nothing changed and the cursor stays.
     pub fn accept(&mut self, notification: SessionEvent) -> Result<Option<Change>> {
-        if notification.session_id != self.session_id
-            || notification.subscription_id != self.subscription_id
-        {
+        if notification.session_id != self.session_id || notification.subscription_id != self.subscription_id {
             return Ok(None);
         }
-        let seq = notification
-            .seq
-            .parse::<u64>()
-            .context("invalid event sequence")?;
+        let seq = notification.seq.parse::<u64>().context("invalid event sequence")?;
         if seq <= self.seq {
             return Ok(None);
         }
-        ensure!(
-            self.seq.checked_add(1) == Some(seq),
-            "conversation event gap after {}",
-            self.seq
-        );
+        ensure!(self.seq.checked_add(1) == Some(seq), "conversation event gap after {}", self.seq);
         let change = match notification.event {
             Event::ItemCreated { item } => {
-                ensure!(
-                    !self.items.contains_key(&item.item_id),
-                    "duplicate item identity"
-                );
+                ensure!(!self.items.contains_key(&item.item_id), "duplicate item identity");
                 let id = item.item_id.clone();
                 self.insert_item(item);
                 Change::Item(id)
             }
             Event::ItemPatched { item_id, set } => {
-                let item = self
-                    .items
-                    .get_mut(&item_id)
-                    .context("missing patch target")?;
+                let item = self.items.get_mut(&item_id).context("missing patch target")?;
                 if let Some(content) = set.content {
                     item.content = content;
                 }
@@ -216,11 +156,7 @@ impl Conversation {
                 }
                 Change::Item(item_id)
             }
-            Event::ItemTextAppended {
-                item_id,
-                block_id,
-                text,
-            } => {
+            Event::ItemTextAppended { item_id, block_id, text } => {
                 self.items
                     .get_mut(&item_id)
                     .context("missing append target")?
@@ -235,26 +171,18 @@ impl Conversation {
                 Change::Item(item_id)
             }
             Event::ItemRemoved { item_id, .. } => {
-                let item = self
-                    .items
-                    .remove(&item_id)
-                    .context("missing removal target")?;
+                let item = self.items.remove(&item_id).context("missing removal target")?;
                 self.order.remove(&position(&item));
                 Change::ItemRemoved(item_id)
             }
             Event::SessionUpdated { session } => {
-                ensure!(
-                    session.session_id == self.session_id,
-                    "wrong session update"
-                );
+                ensure!(session.session_id == self.session_id, "wrong session update");
                 self.session = Some(session);
                 Change::Session
             }
             Event::QuestionUpdated { question } => {
                 let id = question.question_id.clone();
-                self.asked_at
-                    .entry(id.clone())
-                    .or_insert((seq, String::new()));
+                self.asked_at.entry(id.clone()).or_insert((seq, String::new()));
                 self.questions.insert(id.clone(), question);
                 Change::Question(id)
             }
@@ -275,21 +203,12 @@ impl Conversation {
 
     /// A prompt still queued is not yet part of the agent's conversation.
     fn queued(&self, item: &Item) -> bool {
-        item.kind == "user"
-            && item
-                .submission_id
-                .as_ref()
-                .and_then(|id| self.submissions.get(id))
-                .is_some_and(|s| s.delivery == "queued")
+        item.kind == "user" && item.submission_id.as_ref().and_then(|id| self.submissions.get(id)).is_some_and(|s| s.delivery == "queued")
     }
 
     /// The items to show, in conversation order. Linear in the history, never a sort.
     pub fn visible_items(&self) -> Vec<&Item> {
-        self.order
-            .iter()
-            .filter_map(|(_, id)| self.items.get(id))
-            .filter(|item| !self.queued(item))
-            .collect()
+        self.order.iter().filter_map(|(_, id)| self.items.get(id)).filter(|item| !self.queued(item)).collect()
     }
 
     /// Which shown item each question goes under, in the order they were asked: its tool's item
@@ -299,11 +218,7 @@ impl Conversation {
         let shown = self.visible_items();
         let ids: HashSet<&str> = shown.iter().map(|i| i.item_id.as_str()).collect();
         let positions: Vec<(u64, String)> = shown.iter().map(|i| position(i)).collect();
-        let mut asked: Vec<(&Question, Option<&(u64, String)>)> = self
-            .questions
-            .values()
-            .map(|q| (q, self.asked_at.get(&q.question_id)))
-            .collect();
+        let mut asked: Vec<(&Question, Option<&(u64, String)>)> = self.questions.values().map(|q| (q, self.asked_at.get(&q.question_id))).collect();
         asked.sort_by_key(|(_, at)| *at);
         let mut places: HashMap<&str, Vec<&Question>> = HashMap::new();
         for (question, at) in asked {
@@ -352,11 +267,7 @@ impl Conversation {
 
     /// The most recent turn that has items, by conversation order.
     pub fn last_turn_id(&self) -> Option<&str> {
-        self.order
-            .iter()
-            .rev()
-            .filter_map(|(_, id)| self.items.get(id))
-            .find_map(|item| item.turn_id.as_deref())
+        self.order.iter().rev().filter_map(|(_, id)| self.items.get(id)).find_map(|item| item.turn_id.as_deref())
     }
 
     /// Questions waiting for the person.
@@ -368,26 +279,18 @@ impl Conversation {
     pub fn queued_submission_ids(&self) -> Vec<String> {
         self.submissions
             .values()
-            .filter(|s| {
-                s.delivery == "queued" && s.insertion == "pending" && s.outcome == "pending"
-            })
+            .filter(|s| s.delivery == "queued" && s.insertion == "pending" && s.outcome == "pending")
             .map(|s| s.submission_id.clone())
             .collect()
     }
 
     /// The agent is working or waiting on a question.
     pub fn busy(&self) -> bool {
-        self.session
-            .as_ref()
-            .is_some_and(|s| s.activity == "working" || s.activity == "waiting")
+        self.session.as_ref().is_some_and(|s| s.activity == "working" || s.activity == "waiting")
     }
 
     pub fn transcript(&self) -> String {
-        self.visible_items()
-            .into_iter()
-            .map(|item| format!("{}\n{}", item.kind, item_text(item)))
-            .collect::<Vec<_>>()
-            .join("\n\n")
+        self.visible_items().into_iter().map(|item| format!("{}\n{}", item.kind, item_text(item))).collect::<Vec<_>>().join("\n\n")
     }
 }
 
@@ -433,12 +336,7 @@ mod tests {
     }
 
     fn event(view: &Conversation, payload: Event) -> SessionEvent {
-        SessionEvent {
-            session_id: view.session_id.clone(),
-            subscription_id: view.subscription_id.clone(),
-            seq: (view.seq + 1).to_string(),
-            event: payload,
-        }
+        SessionEvent { session_id: view.session_id.clone(), subscription_id: view.subscription_id.clone(), seq: (view.seq + 1).to_string(), event: payload }
     }
 
     fn view() -> Conversation {
@@ -451,50 +349,15 @@ mod tests {
     #[test]
     fn events_report_what_they_changed_and_order_is_kept_without_sorting() {
         let mut view = view();
-        let ids = |v: &Conversation| -> Vec<String> {
-            v.visible_items()
-                .iter()
-                .map(|i| i.item_id.clone())
-                .collect()
-        };
+        let ids = |v: &Conversation| -> Vec<String> { v.visible_items().iter().map(|i| i.item_id.clone()).collect() };
         assert_eq!(ids(&view), ["a", "b"]);
-        let created = event(
-            &view,
-            Event::ItemCreated {
-                item: item("c", 3, "agent", "third"),
-            },
-        );
-        assert_eq!(
-            view.accept(created).unwrap(),
-            Some(Change::Item("c".into()))
-        );
-        let appended = event(
-            &view,
-            Event::ItemTextAppended {
-                item_id: "b".into(),
-                block_id: "text".into(),
-                text: " more".into(),
-            },
-        );
-        assert_eq!(
-            view.accept(appended).unwrap(),
-            Some(Change::Item("b".into()))
-        );
+        let created = event(&view, Event::ItemCreated { item: item("c", 3, "agent", "third") });
+        assert_eq!(view.accept(created).unwrap(), Some(Change::Item("c".into())));
+        let appended = event(&view, Event::ItemTextAppended { item_id: "b".into(), block_id: "text".into(), text: " more".into() });
+        assert_eq!(view.accept(appended).unwrap(), Some(Change::Item("b".into())));
         assert_eq!(item_text(view.item("b").unwrap()), "second more");
-        let removed = event(
-            &view,
-            Event::ItemRemoved {
-                item_id: "a".into(),
-                reason: Reason {
-                    code: "x".into(),
-                    message: "x".into(),
-                },
-            },
-        );
-        assert_eq!(
-            view.accept(removed).unwrap(),
-            Some(Change::ItemRemoved("a".into()))
-        );
+        let removed = event(&view, Event::ItemRemoved { item_id: "a".into(), reason: Reason { code: "x".into(), message: "x".into() } });
+        assert_eq!(view.accept(removed).unwrap(), Some(Change::ItemRemoved("a".into())));
         assert_eq!(ids(&view), ["b", "c"]);
         assert_eq!(view.last_turn_id(), Some("t"));
     }
@@ -502,34 +365,13 @@ mod tests {
     #[test]
     fn duplicates_foreign_events_and_gaps_leave_the_view_unchanged() {
         let mut view = view();
-        let next = event(
-            &view,
-            Event::ItemTextAppended {
-                item_id: "b".into(),
-                block_id: "text".into(),
-                text: "!".into(),
-            },
-        );
+        let next = event(&view, Event::ItemTextAppended { item_id: "b".into(), block_id: "text".into(), text: "!".into() });
         assert!(view.accept(next.clone()).unwrap().is_some());
         assert!(view.accept(next).unwrap().is_none(), "already applied");
-        let mut foreign = event(
-            &view,
-            Event::ItemTextAppended {
-                item_id: "b".into(),
-                block_id: "text".into(),
-                text: "wrong".into(),
-            },
-        );
+        let mut foreign = event(&view, Event::ItemTextAppended { item_id: "b".into(), block_id: "text".into(), text: "wrong".into() });
         foreign.subscription_id = "old".into();
         assert!(view.accept(foreign).unwrap().is_none());
-        let mut gap = event(
-            &view,
-            Event::ItemTextAppended {
-                item_id: "b".into(),
-                block_id: "text".into(),
-                text: "gap".into(),
-            },
-        );
+        let mut gap = event(&view, Event::ItemTextAppended { item_id: "b".into(), block_id: "text".into(), text: "gap".into() });
         gap.seq = (view.seq + 2).to_string();
         assert!(view.accept(gap).is_err());
         assert_eq!(view.seq, 3);
@@ -550,39 +392,13 @@ mod tests {
     #[test]
     fn a_question_stays_where_it_was_asked() {
         let mut view = Conversation::new("s", "sub", 2);
-        view.install(Record::Item {
-            item: item("a", 1, "user", "first"),
-        })
-        .unwrap();
-        view.install(Record::Question {
-            question: question("from-snapshot"),
-        })
-        .unwrap();
-        view.install(Record::Item {
-            item: item("b", 2, "agent", "second"),
-        })
-        .unwrap();
-        view.accept(event(
-            &view,
-            Event::QuestionUpdated {
-                question: question("live"),
-            },
-        ))
-        .unwrap();
-        view.accept(event(
-            &view,
-            Event::ItemCreated {
-                item: item("c", 4, "agent", "third"),
-            },
-        ))
-        .unwrap();
+        view.install(Record::Item { item: item("a", 1, "user", "first") }).unwrap();
+        view.install(Record::Question { question: question("from-snapshot") }).unwrap();
+        view.install(Record::Item { item: item("b", 2, "agent", "second") }).unwrap();
+        view.accept(event(&view, Event::QuestionUpdated { question: question("live") })).unwrap();
+        view.accept(event(&view, Event::ItemCreated { item: item("c", 4, "agent", "third") })).unwrap();
         let places = view.question_places();
-        let ids = |item: &str| -> Vec<&str> {
-            places
-                .get(item)
-                .map(|q| q.iter().map(|q| q.question_id.as_str()).collect())
-                .unwrap_or_default()
-        };
+        let ids = |item: &str| -> Vec<&str> { places.get(item).map(|q| q.iter().map(|q| q.question_id.as_str()).collect()).unwrap_or_default() };
         assert_eq!(ids("a"), ["from-snapshot"]);
         assert_eq!(ids("b"), ["live"]);
         assert!(ids("c").is_empty(), "not pulled to the end");
@@ -599,18 +415,11 @@ mod tests {
             "insertion":"pending", "outcome":"pending"
         }))
         .unwrap();
-        view.accept(event(
-            &view,
-            Event::SubmissionUpdated {
-                submission: submission.clone(),
-            },
-        ))
-        .unwrap();
+        view.accept(event(&view, Event::SubmissionUpdated { submission: submission.clone() })).unwrap();
         assert!(!view.visible_items().iter().any(|i| i.item_id == "a"));
         assert_eq!(view.queued_submission_ids(), ["q"]);
         submission.delivery = "sent".into();
-        view.accept(event(&view, Event::SubmissionUpdated { submission }))
-            .unwrap();
+        view.accept(event(&view, Event::SubmissionUpdated { submission })).unwrap();
         assert!(view.visible_items().iter().any(|i| i.item_id == "a"));
         assert!(view.queued_submission_ids().is_empty());
     }

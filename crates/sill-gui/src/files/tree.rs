@@ -25,31 +25,13 @@ impl App {
         let token = view.media_token.clone();
         self.drawer.folder_picker = Some((session.clone(), token.clone()));
         Task::perform(
-            async {
-                rfd::AsyncFileDialog::new()
-                    .set_title("Pin a folder")
-                    .pick_folder()
-                    .await
-                    .map(|folder| folder.path().to_path_buf())
-            },
-            move |path| {
-                Message::Files(Action::FolderPicked {
-                    session,
-                    token,
-                    path,
-                })
-            },
+            async { rfd::AsyncFileDialog::new().set_title("Pin a folder").pick_folder().await.map(|folder| folder.path().to_path_buf()) },
+            move |path| Message::Files(Action::FolderPicked { session, token, path }),
         )
     }
 
-    pub(super) fn folder_picked(
-        &mut self,
-        session: String,
-        token: String,
-        path: Option<std::path::PathBuf>,
-    ) -> Task<Message> {
-        if self.drawer.folder_picker.as_ref() != Some(&(session.clone(), token.clone()))
-        {
+    pub(super) fn folder_picked(&mut self, session: String, token: String, path: Option<std::path::PathBuf>) -> Task<Message> {
+        if self.drawer.folder_picker.as_ref() != Some(&(session.clone(), token.clone())) {
             return Task::none();
         }
         // the Mac's own VM: the folder is the Mac's, put in the VM at its path before it is pinned
@@ -57,49 +39,24 @@ impl App {
         if let Some(picked) = path.clone()
             && crate::local_vm::phase().is_some()
         {
-            return crate::blocking(
-                move || crate::local_vm::expose(&picked),
-                move |result| {
-                    Message::Files(Action::MacFolderShared {
-                        session,
-                        token,
-                        result,
-                    })
-                },
-            );
+            return crate::blocking(move || crate::local_vm::expose(&picked), move |result| Message::Files(Action::MacFolderShared { session, token, result }));
         }
         self.drawer.folder_picker = None;
-        let Some(view) = self
-            .views
-            .get_mut(&session)
-            .filter(|v| v.media_token == token)
-        else {
+        let Some(view) = self.views.get_mut(&session).filter(|v| v.media_token == token) else {
             return Task::none();
         };
-        let requests = path
-            .and_then(|path| view.files.pin(HostPath::from_path(&path), true))
-            .into_iter()
-            .collect();
+        let requests = path.and_then(|path| view.files.pin(HostPath::from_path(&path), true)).into_iter().collect();
         self.files_send(&session, requests);
         Task::none()
     }
 
     /// A picked Mac folder is in the VM at its path (or could not be put there): pin it as any.
-    pub(super) fn mac_folder_shared(
-        &mut self,
-        session: String,
-        token: String,
-        result: Result<std::path::PathBuf, String>,
-    ) -> Task<Message> {
+    pub(super) fn mac_folder_shared(&mut self, session: String, token: String, result: Result<std::path::PathBuf, String>) -> Task<Message> {
         if self.drawer.folder_picker.as_ref() != Some(&(session.clone(), token.clone())) {
             return Task::none();
         }
         self.drawer.folder_picker = None;
-        let Some(view) = self
-            .views
-            .get_mut(&session)
-            .filter(|v| v.media_token == token)
-        else {
+        let Some(view) = self.views.get_mut(&session).filter(|v| v.media_token == token) else {
             return Task::none();
         };
         let requests = match result {
@@ -138,11 +95,7 @@ impl App {
                     self.drawer.chosen();
                 }
                 self.drawer.shown = true;
-                if revealing && view.files.expanded.contains(files::key(&path)) {
-                    vec![]
-                } else {
-                    view.files.toggle(path).into_iter().collect()
-                }
+                if revealing && view.files.expanded.contains(files::key(&path)) { vec![] } else { view.files.toggle(path).into_iter().collect() }
             }
             Action::More(path) => view.files.more(path).into_iter().collect(),
             Action::Open { path, repo } => vec![view.files.open(path, repo)],

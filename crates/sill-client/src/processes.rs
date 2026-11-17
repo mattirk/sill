@@ -25,14 +25,7 @@ pub fn list(client: &Client, session: &str) -> Result<Vec<Process>> {
     let mut all = vec![];
     let mut after = None;
     loop {
-        let page: ProcessesPage = client.call(
-            "_sill/procs.list",
-            ProcessesList {
-                session_id: session.into(),
-                after,
-                limit: Some(128),
-            },
-        )?;
+        let page: ProcessesPage = client.call("_sill/procs.list", ProcessesList { session_id: session.into(), after, limit: Some(128) })?;
         all.extend(page.processes);
         after = page.next;
         if after.is_none() {
@@ -92,12 +85,7 @@ pub fn exposable(policy: &str) -> Vec<String> {
         .get("processes")
         .and_then(|p| p.get("expose"))
         .and_then(|e| e.as_array())
-        .map(|specs| {
-            specs
-                .iter()
-                .filter_map(|s| s.as_str().map(str::to_string))
-                .collect()
-        })
+        .map(|specs| specs.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
         .unwrap_or_default()
 }
 
@@ -116,21 +104,11 @@ pub fn allows(specs: &[String], port: u16) -> bool {
 /// snapshot, or its named policy when an older session has none. Automatic exposure must use what
 /// is enforced, so a failed read is an error, which grants nothing.
 pub fn session_exposable(client: &Client, session: &str, policy: &str) -> Result<Vec<String>> {
-    let snapshot: PolicySnapshot = client.call(
-        "_sill/policy.snapshot",
-        SessionKey {
-            session_id: session.into(),
-        },
-    )?;
+    let snapshot: PolicySnapshot = client.call("_sill/policy.snapshot", SessionKey { session_id: session.into() })?;
     let text = match snapshot.snapshot.and_then(|view| view.text) {
         Some(text) => text,
         None => {
-            let entry: PolicyEntry = client.call(
-                "_sill/policy.get",
-                PolicyKey {
-                    name: policy.into(),
-                },
-            )?;
+            let entry: PolicyEntry = client.call("_sill/policy.get", PolicyKey { name: policy.into() })?;
             entry.text
         }
     };
@@ -147,9 +125,7 @@ pub struct Bridge {
 
 impl std::fmt::Debug for Bridge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Bridge")
-            .field("host_port", &self.host_port)
-            .finish()
+        f.debug_struct("Bridge").field("host_port", &self.host_port).finish()
     }
 }
 
@@ -203,15 +179,8 @@ pub type Opener = Arc<dyn Fn() -> Result<sill_proto::transport::RawStream> + Sen
 /// lost request is not repeated: the browser retries).
 pub fn opener(actions: Arc<Actions>, session: String, port: u16) -> Opener {
     Arc::new(move || {
-        let opened: sill_proto::host::HostStream = actions.once(|client| {
-            client.call(
-                "_sill/streams.port",
-                sill_proto::host::PortOpen {
-                    session_id: session.clone(),
-                    port,
-                },
-            )
-        })?;
+        let opened: sill_proto::host::HostStream =
+            actions.once(|client| client.call("_sill/streams.port", sill_proto::host::PortOpen { session_id: session.clone(), port }))?;
         sill_proto::transport::open_stream(&opened.token)
     })
 }
@@ -225,15 +194,12 @@ pub fn expose(port: u16, open: Opener) -> Result<Bridge> {
 /// Listen on exactly `port` of this machine's loopback, each connection relayed through a
 /// stream from `open`: for a port that cannot move, such as a login's registered callback.
 pub fn expose_exact(port: u16, open: Opener) -> Result<Bridge> {
-    let listener = TcpListener::bind(("127.0.0.1", port))
-        .with_context(|| format!("port {port} on this machine is in use"))?;
+    let listener = TcpListener::bind(("127.0.0.1", port)).with_context(|| format!("port {port} on this machine is in use"))?;
     serve(listener, port, open)
 }
 
 fn expose_on(port: u16, preferred: u16, open: Opener) -> Result<Bridge> {
-    let listener = TcpListener::bind(("127.0.0.1", preferred))
-        .or_else(|_| TcpListener::bind(("127.0.0.1", 0)))
-        .context("listen on this machine's loopback")?;
+    let listener = TcpListener::bind(("127.0.0.1", preferred)).or_else(|_| TcpListener::bind(("127.0.0.1", 0))).context("listen on this machine's loopback")?;
     serve(listener, port, open)
 }
 
@@ -244,46 +210,28 @@ fn serve(listener: TcpListener, port: u16, open: Opener) -> Result<Bridge> {
     let flag = stop.clone();
     let active: Arc<Mutex<Vec<Weak<Connection>>>> = Arc::default();
     let connections = active.clone();
-    std::thread::Builder::new()
-        .name(format!("sill-port-{port}"))
-        .spawn(move || {
-            while !flag.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((conn, _)) => {
-                        let (flag, connections, open) =
-                            (flag.clone(), connections.clone(), open.clone());
-                        std::thread::spawn(move || {
-                            let _ = conn.set_nonblocking(false);
-                            relay(conn, &open, &flag, &connections);
-                        });
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(100))
-                    }
-                    Err(_) => break,
+    std::thread::Builder::new().name(format!("sill-port-{port}")).spawn(move || {
+        while !flag.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((conn, _)) => {
+                    let (flag, connections, open) = (flag.clone(), connections.clone(), open.clone());
+                    std::thread::spawn(move || {
+                        let _ = conn.set_nonblocking(false);
+                        relay(conn, &open, &flag, &connections);
+                    });
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(std::time::Duration::from_millis(100)),
+                Err(_) => break,
             }
-        })?;
-    Ok(Bridge {
-        host_port,
-        stop,
-        active,
-    })
+        }
+    })?;
+    Ok(Bridge { host_port, stop, active })
 }
 
 /// One browser connection ⇄ the daemon ⇄ the process inside.
-fn relay(
-    host: std::net::TcpStream,
-    open: &Opener,
-    stopped: &AtomicBool,
-    active: &Mutex<Vec<Weak<Connection>>>,
-) {
+fn relay(host: std::net::TcpStream, open: &Opener, stopped: &AtomicBool, active: &Mutex<Vec<Weak<Connection>>>) {
     let Ok(socket) = host.try_clone() else { return };
-    let connection = Arc::new(Connection {
-        socket,
-        closed: AtomicBool::new(false),
-        interrupt: Mutex::new(None),
-    });
+    let connection = Arc::new(Connection { socket, closed: AtomicBool::new(false), interrupt: Mutex::new(None) });
     {
         let mut all = active.lock().unwrap();
         all.retain(|c| c.strong_count() > 0);
@@ -329,10 +277,7 @@ mod tests {
         let (interrupted, closed) = mpsc::channel();
         let open: Opener = Arc::new(move || {
             entered.send(()).unwrap();
-            wait.lock()
-                .unwrap()
-                .recv_timeout(Duration::from_secs(5))
-                .unwrap();
+            wait.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
             let interrupted = interrupted.clone();
             Ok(sill_proto::transport::RawStream {
                 reader: Box::new(std::io::empty()),
@@ -345,20 +290,12 @@ mod tests {
         });
         let bridge = expose(0, open).unwrap();
         let mut browser = std::net::TcpStream::connect(("127.0.0.1", bridge.host_port)).unwrap();
-        browser
-            .set_read_timeout(Some(Duration::from_millis(500)))
-            .unwrap();
+        browser.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
         opening.recv_timeout(Duration::from_secs(5)).unwrap();
         drop(bridge);
-        assert_eq!(
-            browser.read(&mut [0u8; 1]).unwrap(),
-            0,
-            "browser closes before the daemon answers"
-        );
+        assert_eq!(browser.read(&mut [0u8; 1]).unwrap(), 0, "browser closes before the daemon answers");
         release.send(()).unwrap();
-        closed
-            .recv_timeout(Duration::from_secs(5))
-            .expect("late stream is interrupted too");
+        closed.recv_timeout(Duration::from_secs(5)).expect("late stream is interrupted too");
     }
 
     #[test]
@@ -371,17 +308,13 @@ mod tests {
 
     #[test]
     fn the_policy_s_expose_list_decides_which_ports_go_without_asking() {
-        let specs =
-            exposable("[network]\nallow = []\n[processes]\nexpose = [\"3000\", \"8000-8099\"]\n");
+        let specs = exposable("[network]\nallow = []\n[processes]\nexpose = [\"3000\", \"8000-8099\"]\n");
         assert!(allows(&specs, 3000));
         assert!(allows(&specs, 8042));
         assert!(!allows(&specs, 3001));
         assert!(!allows(&specs, 8100));
         assert!(exposable("[processes]\n").is_empty());
-        assert!(
-            exposable("not toml [").is_empty(),
-            "an unreadable policy grants nothing"
-        );
+        assert!(exposable("not toml [").is_empty(), "an unreadable policy grants nothing");
         assert!(!allows(&["junk".into(), "9-x".into()], 9));
     }
 
@@ -403,10 +336,7 @@ mod tests {
 
     #[test]
     fn a_row_says_how_its_process_is() {
-        assert_eq!(
-            state(&process("running", None, 100), 292),
-            "running · 3m12s"
-        );
+        assert_eq!(state(&process("running", None, 100), 292), "running · 3m12s");
         assert_eq!(state(&process("exited", Some(0), 0), 9), "exited");
         assert_eq!(state(&process("exited", Some(2), 0), 9), "failed (2)");
         assert_eq!(state(&process("stopped", None, 0), 9), "stopped");
@@ -432,12 +362,7 @@ mod tests {
         });
         let open: Opener = Arc::new(move || {
             let conn = std::net::TcpStream::connect(("127.0.0.1", inside_port))?;
-            let (reader, writer, half, stop) = (
-                conn.try_clone()?,
-                conn.try_clone()?,
-                conn.try_clone()?,
-                conn,
-            );
+            let (reader, writer, half, stop) = (conn.try_clone()?, conn.try_clone()?, conn.try_clone()?, conn);
             Ok(sill_proto::transport::RawStream {
                 reader: Box::new(reader),
                 writer: Box::new(writer),
@@ -454,24 +379,15 @@ mod tests {
         let wanted = taken.local_addr().unwrap().port();
         let bridge = expose_on(wanted, wanted, open).unwrap();
         assert_ne!(bridge.host_port, wanted);
-        assert_eq!(
-            bridge.url(),
-            format!("http://127.0.0.1:{}", bridge.host_port)
-        );
+        assert_eq!(bridge.url(), format!("http://127.0.0.1:{}", bridge.host_port));
         let mut browser = std::net::TcpStream::connect(("127.0.0.1", bridge.host_port)).unwrap();
-        browser
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-            .unwrap();
+        browser.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
         browser.write_all(b"hello").unwrap();
         let mut got = [0u8; 5];
         browser.read_exact(&mut got).unwrap();
         assert_eq!(&got, b"hello");
         drop(bridge);
         let mut rest = vec![];
-        assert_eq!(
-            browser.read_to_end(&mut rest).unwrap_or(0),
-            0,
-            "closed with the bridge"
-        );
+        assert_eq!(browser.read_to_end(&mut rest).unwrap_or(0), 0, "closed with the bridge");
     }
 }

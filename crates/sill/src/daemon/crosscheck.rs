@@ -5,7 +5,11 @@
 use super::*;
 use anyhow::ensure;
 use rusqlite::OptionalExtension;
-use sill_core::{crosscheck as capture, sfp::Journal, workspace::{flow, records}};
+use sill_core::{
+    crosscheck as capture,
+    sfp::Journal,
+    workspace::{flow, records},
+};
 use sill_proto::{crosscheck as api, sfp as p};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -18,19 +22,26 @@ const REQUEST_BYTES: usize = 16_384;
 pub(super) fn init(db: &rusqlite::Connection) -> Result<()> {
     // `crosscheck_workers` is as the first build (2026-11-13) made it: its worker sessions stay
     // hidden. That build's `crosscheck_runs` and `crosscheck_reviewers` are left as they are.
-    db.execute_batch("CREATE TABLE IF NOT EXISTS crosscheck_reviews (
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS crosscheck_reviews (
             id TEXT PRIMARY KEY, operation_id TEXT UNIQUE NOT NULL, workspace_id TEXT NOT NULL, record TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS crosscheck_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS crosscheck_workers (session_id TEXT PRIMARY KEY, run_id TEXT NOT NULL);")?;
+        CREATE TABLE IF NOT EXISTS crosscheck_workers (session_id TEXT PRIMARY KEY, run_id TEXT NOT NULL);",
+    )?;
     Ok(())
 }
-fn active(state: &str) -> bool { matches!(state, "capturing" | "reviewing") }
-fn root(home: &Path) -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
-        .unwrap_or_else(|| home.join(".local/share")).join("sill/crosschecks")
+fn active(state: &str) -> bool {
+    matches!(state, "capturing" | "reviewing")
 }
-fn parse<T: DeserializeOwned>(v: Value) -> Result<T> { serde_json::from_value(v).map_err(|e| Error::invalid_params(e.to_string()).into()) }
-fn gone() -> anyhow::Error { Error::domain("not_found", "This review was removed").into() }
+fn root(home: &Path) -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(".local/share")).join("sill/crosschecks")
+}
+fn parse<T: DeserializeOwned>(v: Value) -> Result<T> {
+    serde_json::from_value(v).map_err(|e| Error::invalid_params(e.to_string()).into())
+}
+fn gone() -> anyhow::Error {
+    Error::domain("not_found", "This review was removed").into()
+}
 fn load(db: &rusqlite::Connection, id: &str) -> Result<api::Run> {
     let record: Option<String> = db.query_row("SELECT record FROM crosscheck_reviews WHERE id=?1", [id], |r| r.get(0)).optional()?;
     Ok(serde_json::from_str(&record.ok_or_else(gone)?)?)
@@ -57,7 +68,8 @@ fn validate_reviewers(reviewers: &[api::Reviewer]) -> Result<()> {
 
 impl Hub {
     pub(in crate::daemon) fn crosscheck_worker(&self, id: &str) -> bool {
-        self.with_store(|s| Ok(s.conn().query_row("SELECT EXISTS(SELECT 1 FROM crosscheck_workers WHERE session_id=?1)", [id], |r| r.get::<_, bool>(0))?)).unwrap_or(true)
+        self.with_store(|s| Ok(s.conn().query_row("SELECT EXISTS(SELECT 1 FROM crosscheck_workers WHERE session_id=?1)", [id], |r| r.get::<_, bool>(0))?))
+            .unwrap_or(true)
     }
     fn cc_update(&self, id: &str, f: impl FnOnce(&mut api::Run)) -> Result<api::Run> {
         let run = {
@@ -75,7 +87,9 @@ impl Hub {
     fn cc_notice(&self, workspace: &str, run: &str) {
         let req = sill_proto::rpc::Request::new(None, "_sill/crosscheck.changed", json!(api::Notice { workspace_id: workspace.into(), run_id: run.into() }));
         if let Ok(line) = serde_json::to_string(&req) {
-            for conn in self.connections().into_iter().filter(|c| c.has_capability(api::CAPABILITY)) { conn.send(line.clone()); }
+            for conn in self.connections().into_iter().filter(|c| c.has_capability(api::CAPABILITY)) {
+                conn.send(line.clone());
+            }
         }
     }
     /// Whether the review is still wanted: the person may remove it at any moment.
@@ -85,7 +99,11 @@ impl Hub {
     }
     /// A workspace's review with whether it still describes the workspace's files.
     fn cc_current(&self, workspace: &str) -> Result<api::Current> {
-        let id: Option<String> = self.with_store(|s| Ok(s.conn().query_row("SELECT id FROM crosscheck_reviews WHERE workspace_id=?1 ORDER BY rowid DESC LIMIT 1", [workspace], |r| r.get(0)).optional()?))?;
+        let id: Option<String> = self.with_store(|s| {
+            Ok(s.conn()
+                .query_row("SELECT id FROM crosscheck_reviews WHERE workspace_id=?1 ORDER BY rowid DESC LIMIT 1", [workspace], |r| r.get(0))
+                .optional()?)
+        })?;
         let Some(id) = id else { return Ok(api::Current { run: None }) };
         let mut run = self.with_store(|s| load(s.conn(), &id))?;
         run.stale = self.workspace_detail_for_crosscheck(workspace).map_or(true, |d| d.state_tree != run.state_tree);
@@ -101,13 +119,21 @@ impl Hub {
             let reviewers = saved.and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
             let journal = Journal::new(s)?;
             let sessions = s.sessions()?;
-            let agents = registry.values().filter(|a| a.enabled && a.ready(&self.home).is_ok()).map(|a| {
-                let options = sessions.iter().filter(|x| x.agent == a.id).take(64)
-                    .filter_map(|x| journal.session(&x.id).ok()?.controls)
-                    .find(|c| c.status == "ready" && !c.options.is_empty())
-                    .map(|c| c.options).unwrap_or_default();
-                api::AgentOptions { agent: a.id.clone(), title: a.name.clone(), options }
-            }).collect();
+            let agents = registry
+                .values()
+                .filter(|a| a.enabled && a.ready(&self.home).is_ok())
+                .map(|a| {
+                    let options = sessions
+                        .iter()
+                        .filter(|x| x.agent == a.id)
+                        .take(64)
+                        .filter_map(|x| journal.session(&x.id).ok()?.controls)
+                        .find(|c| c.status == "ready" && !c.options.is_empty())
+                        .map(|c| c.options)
+                        .unwrap_or_default();
+                    api::AgentOptions { agent: a.id.clone(), title: a.name.clone(), options }
+                })
+                .collect();
             Ok(api::Reviewers { reviewers, agents })
         })
     }
@@ -122,7 +148,9 @@ impl Hub {
             return Ok(saved.clone());
         }
         let used = self.with_store(|s| {
-            let mut q = s.conn().prepare("SELECT agent FROM sessions WHERE ghost=0 AND id NOT IN (SELECT session_id FROM crosscheck_workers) ORDER BY last_used DESC")?;
+            let mut q = s
+                .conn()
+                .prepare("SELECT agent FROM sessions WHERE ghost=0 AND id NOT IN (SELECT session_id FROM crosscheck_workers) ORDER BY last_used DESC")?;
             Ok(q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?)
         })?;
         let agent = used.iter().find(|a| *a != author && offered(a)).map(String::as_str).unwrap_or(author);
@@ -131,26 +159,37 @@ impl Hub {
     }
 
     pub(super) fn crosscheck(self: &Arc<Self>, conn: &Conn, method: &str, params: Value) -> Option<Result<Value>> {
-        if !method.starts_with("_sill/crosscheck.") { return None; }
+        if !method.starts_with("_sill/crosscheck.") {
+            return None;
+        }
         if !conn.has_capability(api::CAPABILITY) {
             let mut error = Error::domain("unsupported", "Crosscheck needs the sill.crosscheck capability");
             error.data.as_mut().unwrap()["details"] = json!({"capability": api::CAPABILITY});
             return Some(Err(error.into()));
         }
         Some((|| match method {
-            "_sill/crosscheck.reviewers" => { parse::<api::Empty>(params)?; Ok(json!(self.cc_reviewers()?)) }
+            "_sill/crosscheck.reviewers" => {
+                parse::<api::Empty>(params)?;
+                Ok(json!(self.cc_reviewers()?))
+            }
             "_sill/crosscheck.set_reviewers" => {
                 let a: api::SetReviewers = parse(params)?;
                 validate_reviewers(&a.reviewers)?;
                 self.with_store(|s| {
-                    s.conn().execute("INSERT INTO crosscheck_settings(key,value) VALUES('reviewers',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [serde_json::to_string(&a.reviewers)?])?;
+                    s.conn().execute(
+                        "INSERT INTO crosscheck_settings(key,value) VALUES('reviewers',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        [serde_json::to_string(&a.reviewers)?],
+                    )?;
                     Ok(())
                 })?;
                 Ok(json!(self.cc_reviewers()?))
             }
             "_sill/crosscheck.get" => Ok(json!(self.cc_current(&parse::<api::WorkspaceKey>(params)?.workspace_id)?)),
             "_sill/crosscheck.start" => Ok(json!(self.cc_start(parse(params)?)?)),
-            "_sill/crosscheck.remove" => { self.cc_remove(&parse::<api::RunKey>(params)?.run_id)?; Ok(json!({})) }
+            "_sill/crosscheck.remove" => {
+                self.cc_remove(&parse::<api::RunKey>(params)?.run_id)?;
+                Ok(json!({}))
+            }
             _ => Err(Error::method_not_found(method).into()),
         })())
     }
@@ -159,11 +198,16 @@ impl Hub {
         ensure!(!a.operation_id.is_empty() && a.operation_id.len() <= 128 && !a.operation_id.chars().any(char::is_control), "invalid operation_id");
         let earlier = {
             let _lock = self.crosscheck_lock.lock().unwrap();
-            if let Some(id) = self.with_store(|s| Ok(s.conn().query_row("SELECT id FROM crosscheck_reviews WHERE operation_id=?1", [&a.operation_id], |r| r.get::<_, String>(0)).optional()?))? {
+            if let Some(id) = self.with_store(|s| {
+                Ok(s.conn().query_row("SELECT id FROM crosscheck_reviews WHERE operation_id=?1", [&a.operation_id], |r| r.get::<_, String>(0)).optional()?)
+            })? {
                 return self.with_store(|s| load(s.conn(), &id));
             }
             let d = self.workspace_detail_for_crosscheck(&a.workspace_id)?;
-            ensure!(d.workspace.operation.as_ref().is_none_or(|o| matches!(o.state.as_str(), "notice" | "waiting")), "Finish what the workspace is doing before a Crosscheck");
+            ensure!(
+                d.workspace.operation.as_ref().is_none_or(|o| matches!(o.state.as_str(), "notice" | "waiting")),
+                "Finish what the workspace is doing before a Crosscheck"
+            );
             let (source, path) = (d.workspace.source.to_path()?, d.workspace.path.to_path()?);
             // what an Apply would bring, as the shelf counts it: nothing else is reviewed
             let mirror = flow::mirror(&source, &path, &d.workspace.branch)?;
@@ -172,32 +216,57 @@ impl Hub {
             let plan = sill_core::session::recorded_filesystem(&d.workspace.session_id)
                 .context("Crosscheck needs the session's recorded filesystem: start the session once, then review")?;
             let masks = plan.policy_paths.masks.iter().chain(&plan.agent_masks).map(|m| m.path.to_path()).collect::<Result<Vec<_>>>()?;
-            ensure!(!masks_intersect(&source, &masks), "This repository has paths hidden from its agent, which a Reviewer's copy could show: it cannot be reviewed yet");
+            ensure!(
+                !masks_intersect(&source, &masks),
+                "This repository has paths hidden from its agent, which a Reviewer's copy could show: it cannot be reviewed yet"
+            );
             let author = self.with_store(|s| s.session_exact(&d.workspace.session_id))?.map(|x| x.agent).unwrap_or_default();
             let reviewer = self.cc_reviewer(&author)?;
             let run = api::Run {
-                run_id: sill_core::store::new_id(), workspace_id: a.workspace_id.clone(), session_id: d.workspace.session_id.clone(),
-                state_tree: d.state_tree.clone(), base: mirror.upstream, state: "capturing".into(), detail: String::new(),
-                reviewers: vec![api::Participant { reviewer, session_id: None, state: "starting".into(), summary: String::new(), activity: vec![], error: None }],
-                problems: vec![], created_at: sill_core::store::now().to_string(), stale: false,
+                run_id: sill_core::store::new_id(),
+                workspace_id: a.workspace_id.clone(),
+                session_id: d.workspace.session_id.clone(),
+                state_tree: d.state_tree.clone(),
+                base: mirror.upstream,
+                state: "capturing".into(),
+                detail: String::new(),
+                reviewers: vec![api::Participant {
+                    reviewer,
+                    session_id: None,
+                    state: "starting".into(),
+                    summary: String::new(),
+                    activity: vec![],
+                    error: None,
+                }],
+                problems: vec![],
+                created_at: sill_core::store::now().to_string(),
+                stale: false,
             };
             let earlier = self.with_store(|s| {
                 // one review a workspace: a finished one is replaced, one under way is not
                 let earlier: Vec<api::Run> = all(s.conn())?.into_iter().filter(|r| r.workspace_id == run.workspace_id).collect();
                 ensure!(!earlier.iter().any(|r| active(&r.state)), "A review of this work is already under way");
                 s.conn().execute("DELETE FROM crosscheck_reviews WHERE workspace_id=?1", [&run.workspace_id])?;
-                s.conn().execute("INSERT INTO crosscheck_reviews(id,operation_id,workspace_id,record) VALUES(?1,?2,?3,?4)",
-                    rusqlite::params![run.run_id, a.operation_id, run.workspace_id, serde_json::to_string(&run)?])?;
+                s.conn().execute(
+                    "INSERT INTO crosscheck_reviews(id,operation_id,workspace_id,record) VALUES(?1,?2,?3,?4)",
+                    rusqlite::params![run.run_id, a.operation_id, run.workspace_id, serde_json::to_string(&run)?],
+                )?;
                 Ok(earlier)
             })?;
             let (hub, id) = (self.clone(), run.run_id.clone());
             if let Err(e) = std::thread::Builder::new().name(format!("sill-crosscheck-{id}")).spawn(move || hub.cc_run(&id, &path)) {
-                self.with_store(|s| { let mut r = load(s.conn(), &run.run_id)?; fail(&mut r, &e.into()); save(s.conn(), &r) })?;
+                self.with_store(|s| {
+                    let mut r = load(s.conn(), &run.run_id)?;
+                    fail(&mut r, &e.into());
+                    save(s.conn(), &r)
+                })?;
             }
             self.cc_notice(&run.workspace_id, &run.run_id);
             (earlier, run)
         };
-        for old in earlier.0 { let _ = std::fs::remove_dir_all(root(&self.home).join(&old.run_id)); }
+        for old in earlier.0 {
+            let _ = std::fs::remove_dir_all(root(&self.home).join(&old.run_id));
+        }
         Ok(earlier.1)
     }
 
@@ -207,7 +276,11 @@ impl Hub {
         let dir = root(&self.home).join(id);
         if let Err(e) = self.cc_execute(id, workspace, &dir) {
             // a removed review has nobody to tell
-            let _ = self.cc_update(id, |r| if active(&r.state) { fail(r, &e) });
+            let _ = self.cc_update(id, |r| {
+                if active(&r.state) {
+                    fail(r, &e)
+                }
+            });
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -219,22 +292,33 @@ impl Hub {
         let snapshot = capture::capture(workspace, &run.base, &dir.join("snapshot"))?;
         ensure!(snapshot.tree == run.state_tree, "The work changed while it was being captured: press Crosscheck again");
         let copy = capture::reviewer_copy(&snapshot, &dir.join("review-0"))?;
-        self.cc_update(id, |r| if active(&r.state) { r.state = "reviewing".into(); })?;
+        self.cc_update(id, |r| {
+            if active(&r.state) {
+                r.state = "reviewing".into();
+            }
+        })?;
         let reviewer = run.reviewers[0].reviewer.clone();
         let session = self.cc_worker(id, &run.session_id, &reviewer, &copy)?;
         let answer = (|| {
-            self.cc_update(id, |r| { r.reviewers[0].session_id = Some(session.clone()); r.reviewers[0].state = "running".into(); })?;
+            self.cc_update(id, |r| {
+                r.reviewers[0].session_id = Some(session.clone());
+                r.reviewers[0].state = "running".into();
+            })?;
             let asked = self.with_store(|s| requests(s, &run.session_id))?;
             self.cc_prompt(id, &session, &reviewer, &prompt(&run, &copy, &asked), deadline)
         })();
         // The worker is stopped whatever it answered, and before its answer is read.
-        if let Err(e) = self.cc_finish_worker(&session) { eprintln!("sill Crosscheck: stopping worker {session}: {e:#}"); }
+        if let Err(e) = self.cc_finish_worker(&session) {
+            eprintln!("sill Crosscheck: stopping worker {session}: {e:#}");
+        }
         let report = decode_report(&answer?)?;
-        self.cc_update(id, |r| if active(&r.state) {
-            r.state = "complete".into();
-            r.reviewers[0].state = "complete".into();
-            r.reviewers[0].summary = report.summary;
-            r.problems = report.problems;
+        self.cc_update(id, |r| {
+            if active(&r.state) {
+                r.state = "complete".into();
+                r.reviewers[0].state = "complete".into();
+                r.reviewers[0].summary = report.summary;
+                r.problems = report.problems;
+            }
         })?;
         Ok(())
     }
@@ -257,7 +341,18 @@ impl Hub {
             let tx = s.conn().unchecked_transaction()?;
             // a review removed meanwhile gets no worker
             ensure!(active(&load(s.conn(), run)?.state), "The review was stopped");
-            let session = Self::create_session_row(s, NewSession { agent: reviewer.agent.clone(), policy: policy_file.to_string_lossy().into_owned(), pins: vec![copy.into()], memory_scope: "off".into(), follows: String::new(), remember_pins: false, ghost: false })?;
+            let session = Self::create_session_row(
+                s,
+                NewSession {
+                    agent: reviewer.agent.clone(),
+                    policy: policy_file.to_string_lossy().into_owned(),
+                    pins: vec![copy.into()],
+                    memory_scope: "off".into(),
+                    follows: String::new(),
+                    remember_pins: false,
+                    ghost: false,
+                },
+            )?;
             records::set_mode(s.conn(), &session, false)?;
             s.set_auto_allow(&session, true)?;
             // the Reviewer's own options, not the person's defaults for this agent
@@ -266,7 +361,9 @@ impl Hub {
             tx.commit()?;
             Ok(session)
         });
-        if made.is_err() { let _ = std::fs::remove_file(&policy_file); }
+        if made.is_err() {
+            let _ = std::fs::remove_file(&policy_file);
+        }
         made
     }
     /// Ask the worker and wait for its whole answer, keeping the review's steps current.
@@ -276,7 +373,10 @@ impl Hub {
         self.cc_options(run, session, &runner, reviewer, deadline)?;
         self.cc_wanted(run)?;
         let submission = sill_core::store::new_id();
-        runner.sfp_submit(self, p::Submit { session_id: session.into(), submission_id: submission.clone(), text: prompt.into(), attachments: vec![], purpose: None })?;
+        runner.sfp_submit(
+            self,
+            p::Submit { session_id: session.into(), submission_id: submission.clone(), text: prompt.into(), attachments: vec![], purpose: None },
+        )?;
         let mut shown = Vec::new();
         loop {
             let (s, records, state) = self.with_store(|store| {
@@ -314,14 +414,23 @@ impl Hub {
                 match state.controls {
                     Some(c) if c.status == "failed" => bail!("The Reviewer's options could not be read: {}", c.error.as_deref().unwrap_or("unknown error")),
                     Some(c) if c.status == "ready" => {
-                        let taken = |id: &str, want: &str| c.options.iter().find(|o| o.option_id == id).is_some_and(|o| match &o.value {
-                            p::ControlValue::Id { value } => value == want,
-                            p::ControlValue::Boolean { value } => value.to_string() == want,
-                        });
-                        if reviewer.options.iter().all(|(id, want)| taken(id, want)) { return Ok(()); }
-                        let missing: Vec<&str> = reviewer.options.keys().filter(|id| !c.options.iter().any(|o| &o.option_id == *id)).map(String::as_str).collect();
-                        ensure!(missing.is_empty() && c.error.is_none(), "{} no longer offers what the Reviewer is set to ({}): choose its options again in Settings",
-                            reviewer.agent, c.error.clone().unwrap_or_else(|| missing.join(", ")));
+                        let taken = |id: &str, want: &str| {
+                            c.options.iter().find(|o| o.option_id == id).is_some_and(|o| match &o.value {
+                                p::ControlValue::Id { value } => value == want,
+                                p::ControlValue::Boolean { value } => value.to_string() == want,
+                            })
+                        };
+                        if reviewer.options.iter().all(|(id, want)| taken(id, want)) {
+                            return Ok(());
+                        }
+                        let missing: Vec<&str> =
+                            reviewer.options.keys().filter(|id| !c.options.iter().any(|o| &o.option_id == *id)).map(String::as_str).collect();
+                        ensure!(
+                            missing.is_empty() && c.error.is_none(),
+                            "{} no longer offers what the Reviewer is set to ({}): choose its options again in Settings",
+                            reviewer.agent,
+                            c.error.clone().unwrap_or_else(|| missing.join(", "))
+                        );
                     }
                     Some(_) => {}
                     // some agents report no controls at all: they review as they start
@@ -343,23 +452,35 @@ impl Hub {
         // Only copies under the crosschecks directory are the worker's to lose.
         if let Ok(owned) = root(&self.home).canonicalize() {
             for pin in pins {
-                if pin.canonicalize().is_ok_and(|p| p.starts_with(&owned) && p != owned) { let _ = std::fs::remove_dir_all(pin); }
+                if pin.canonicalize().is_ok_and(|p| p.starts_with(&owned) && p != owned) {
+                    let _ = std::fs::remove_dir_all(pin);
+                }
             }
         }
         let _ = sill_core::session::remove_state(rustix::process::getuid().as_raw(), id);
         // its policy file was written for this session alone
         if let (Ok(Some(session)), Ok(db)) = (self.with_store(|s| s.session_exact(id)), sill_core::store::default_path()) {
             let policy = PathBuf::from(&session.policy);
-            if db.parent().is_some_and(|state| policy.parent() == Some(&state.join("crosscheck-policies"))) { let _ = std::fs::remove_file(policy); }
+            if db.parent().is_some_and(|state| policy.parent() == Some(&state.join("crosscheck-policies"))) {
+                let _ = std::fs::remove_file(policy);
+            }
         }
         Ok(())
     }
     fn cc_stop_workers(&self, run: &str) {
-        let ids = self.with_store(|s| {
-            let mut q = s.conn().prepare("SELECT w.session_id FROM crosscheck_workers w JOIN sessions s ON s.id=w.session_id WHERE w.run_id=?1 AND s.ended_at IS NULL")?;
-            Ok(q.query_map([run], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?)
-        }).unwrap_or_default();
-        for id in ids { if let Err(e) = self.cc_finish_worker(&id) { eprintln!("sill Crosscheck: stopping worker {id}: {e:#}"); } }
+        let ids = self
+            .with_store(|s| {
+                let mut q = s
+                    .conn()
+                    .prepare("SELECT w.session_id FROM crosscheck_workers w JOIN sessions s ON s.id=w.session_id WHERE w.run_id=?1 AND s.ended_at IS NULL")?;
+                Ok(q.query_map([run], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?)
+            })
+            .unwrap_or_default();
+        for id in ids {
+            if let Err(e) = self.cc_finish_worker(&id) {
+                eprintln!("sill Crosscheck: stopping worker {id}: {e:#}");
+            }
+        }
     }
     /// The cross: a review under way is cancelled, a finished one forgotten. The review's own
     /// thread sees its record gone and stops its worker; a worker it had already made is stopped
@@ -391,9 +512,13 @@ impl Hub {
             Ok(q.query_map([workspace], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?)
         });
         match ids {
-            Ok(ids) => for id in ids {
-                if let Err(e) = self.cc_remove(&id) { eprintln!("sill Crosscheck: removing review {id} of work no longer waiting: {e:#}"); }
-            },
+            Ok(ids) => {
+                for id in ids {
+                    if let Err(e) = self.cc_remove(&id) {
+                        eprintln!("sill Crosscheck: removing review {id} of work no longer waiting: {e:#}");
+                    }
+                }
+            }
             Err(e) => eprintln!("sill Crosscheck: reading the reviews of workspace {workspace}: {e:#}"),
         }
     }
@@ -403,11 +528,17 @@ impl Hub {
             let _ = self.cc_update(&run.run_id, |r| fail(r, &anyhow::anyhow!("Sill restarted during the review")));
             let _ = std::fs::remove_dir_all(root(&self.home).join(&run.run_id));
         }
-        let ids = self.with_store(|s| {
-            let mut q = s.conn().prepare("SELECT w.session_id FROM crosscheck_workers w JOIN sessions s ON s.id=w.session_id WHERE s.ended_at IS NULL")?;
-            Ok(q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?)
-        }).unwrap_or_default();
-        for id in ids { if let Err(e) = self.cc_finish_worker(&id) { eprintln!("sill Crosscheck: recovering worker {id}: {e:#}"); } }
+        let ids = self
+            .with_store(|s| {
+                let mut q = s.conn().prepare("SELECT w.session_id FROM crosscheck_workers w JOIN sessions s ON s.id=w.session_id WHERE s.ended_at IS NULL")?;
+                Ok(q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?)
+            })
+            .unwrap_or_default();
+        for id in ids {
+            if let Err(e) = self.cc_finish_worker(&id) {
+                eprintln!("sill Crosscheck: recovering worker {id}: {e:#}");
+            }
+        }
     }
 }
 
@@ -421,9 +552,13 @@ fn fail(run: &mut api::Run, why: &anyhow::Error) {
     }
 }
 fn bounded(text: &str, limit: usize) -> String {
-    if text.len() <= limit { return text.into(); }
+    if text.len() <= limit {
+        return text.into();
+    }
     let mut end = limit;
-    while !text.is_char_boundary(end) { end -= 1; }
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
     format!("{}\n[…]", &text[..end])
 }
 /// What the person asked for in the session, oldest first: their own messages, not the prompts
@@ -431,60 +566,107 @@ fn bounded(text: &str, limit: usize) -> String {
 fn requests(store: &Store, session: &str) -> Result<String> {
     // a session that never ran has no journal, and asked for nothing
     let records = Journal::new(store)?.snapshot(session).map(|s| s.1).unwrap_or_default();
-    let asked: Vec<String> = records.into_iter().filter_map(|r| match r {
-        p::Record::Submission { submission } if submission.purpose.is_none() => Some(submission.text), _ => None,
-    }).collect();
+    let asked: Vec<String> = records
+        .into_iter()
+        .filter_map(|r| match r {
+            p::Record::Submission { submission } if submission.purpose.is_none() => Some(submission.text),
+            _ => None,
+        })
+        .collect();
     Ok(bounded(&asked.join("\n\n"), REQUEST_BYTES))
 }
 /// The agent's last message: its report.
 fn answer(records: &[p::Record]) -> String {
-    records.iter().rev().find_map(|r| match r {
-        p::Record::Item { item } if item.kind == "agent" => Some(item.content.iter().filter_map(|c| c.text.as_deref()).collect::<Vec<_>>().join("\n")).filter(|t| !t.trim().is_empty()),
-        _ => None,
-    }).unwrap_or_default()
+    records
+        .iter()
+        .rev()
+        .find_map(|r| match r {
+            p::Record::Item { item } if item.kind == "agent" => {
+                Some(item.content.iter().filter_map(|c| c.text.as_deref()).collect::<Vec<_>>().join("\n")).filter(|t| !t.trim().is_empty())
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 /// The worker's latest steps, one line each: what a frontend shows as its progress. The prompt it
 /// was given and its report are not steps.
 fn activity(records: &[p::Record]) -> Vec<String> {
     const KEPT: usize = 40;
-    let mut steps: Vec<String> = records.iter().filter_map(|r| {
-        let p::Record::Item { item } = r else { return None };
-        let said = match (item.kind.as_str(), &item.tool) {
-            ("tool", Some(tool)) => tool.title.clone(),
-            ("agent" | "thought", _) => item.content.iter().filter_map(|c| c.text.as_deref()).collect::<Vec<_>>().join("\n"),
-            _ => return None,
-        };
-        // a report is JSON, often fenced: its braces are not a step
-        let line = said.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with(['{', '`']))?;
-        Some(if line.chars().count() > 160 { format!("{}…", line.chars().take(159).collect::<String>()) } else { line.to_string() })
-    }).collect();
+    let mut steps: Vec<String> = records
+        .iter()
+        .filter_map(|r| {
+            let p::Record::Item { item } = r else { return None };
+            let said = match (item.kind.as_str(), &item.tool) {
+                ("tool", Some(tool)) => tool.title.clone(),
+                ("agent" | "thought", _) => item.content.iter().filter_map(|c| c.text.as_deref()).collect::<Vec<_>>().join("\n"),
+                _ => return None,
+            };
+            // a report is JSON, often fenced: its braces are not a step
+            let line = said.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with(['{', '`']))?;
+            Some(if line.chars().count() > 160 { format!("{}…", line.chars().take(159).collect::<String>()) } else { line.to_string() })
+        })
+        .collect();
     steps.dedup();
     steps.drain(..steps.len().saturating_sub(KEPT));
     steps
 }
 
 #[derive(Debug)]
-struct Report { summary: String, problems: Vec<api::Problem> }
+struct Report {
+    summary: String,
+    problems: Vec<api::Problem>,
+}
 /// Read the Reviewer's answer. Anything but the document asked for is an error, so that an
 /// answer sill could not read is never shown as "no problems".
 fn decode_report(text: &str) -> Result<Report> {
     #[derive(serde::Deserialize)]
-    struct Raw { summary: String, problems: Vec<RawProblem> }
+    struct Raw {
+        summary: String,
+        problems: Vec<RawProblem>,
+    }
     #[derive(serde::Deserialize)]
-    struct RawProblem { title: String, #[serde(default)] path: Option<String>, #[serde(default)] line: Option<Value>, #[serde(default)] detail: Option<String> }
+    struct RawProblem {
+        title: String,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        line: Option<Value>,
+        #[serde(default)]
+        detail: Option<String>,
+    }
     // the document alone, in a code fence, or with words around it
     let text = text.trim();
-    let raw: Raw = serde_json::from_str(text).ok()
-        .or_else(|| { let (a, b) = (text.find('{')?, text.rfind('}')?); serde_json::from_str(text.get(a..=b)?).ok() })
+    let raw: Raw = serde_json::from_str(text)
+        .ok()
+        .or_else(|| {
+            let (a, b) = (text.find('{')?, text.rfind('}')?);
+            serde_json::from_str(text.get(a..=b)?).ok()
+        })
         .context("The Reviewer's answer was not the report it was asked for")?;
     ensure!(!raw.summary.trim().is_empty(), "The Reviewer's report has no summary");
-    let problems = raw.problems.into_iter().take(api::MAX_PROBLEMS).enumerate().map(|(i, f)| {
-        ensure!(!f.title.trim().is_empty(), "The Reviewer's report has a problem without words");
-        // a place outside the repository is no place
-        let path = f.path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty() && Path::new(p).components().all(|c| matches!(c, std::path::Component::Normal(_))));
-        let line = f.line.and_then(|l| l.as_u64()).and_then(|l| u32::try_from(l).ok()).filter(|l| *l > 0 && path.is_some());
-        Ok(api::Problem { id: format!("r0-p{i}"), reviewer_index: 0, title: bounded(f.title.trim(), 600), path, line, detail: bounded(f.detail.unwrap_or_default().trim(), 4_000) })
-    }).collect::<Result<Vec<_>>>()?;
+    let problems = raw
+        .problems
+        .into_iter()
+        .take(api::MAX_PROBLEMS)
+        .enumerate()
+        .map(|(i, f)| {
+            ensure!(!f.title.trim().is_empty(), "The Reviewer's report has a problem without words");
+            // a place outside the repository is no place
+            let path = f
+                .path
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty() && Path::new(p).components().all(|c| matches!(c, std::path::Component::Normal(_))));
+            let line = f.line.and_then(|l| l.as_u64()).and_then(|l| u32::try_from(l).ok()).filter(|l| *l > 0 && path.is_some());
+            Ok(api::Problem {
+                id: format!("r0-p{i}"),
+                reviewer_index: 0,
+                title: bounded(f.title.trim(), 600),
+                path,
+                line,
+                detail: bounded(f.detail.unwrap_or_default().trim(), 4_000),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(Report { summary: bounded(raw.summary.trim(), 2_000), problems })
 }
 fn prompt(run: &api::Run, copy: &Path, asked: &str) -> String {

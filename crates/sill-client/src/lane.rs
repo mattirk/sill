@@ -80,9 +80,7 @@ impl Status {
                 Status::Reconnecting(why) => Status::Reconnecting(why.clone()),
                 _ => Status::Connecting,
             },
-            Update::Connecting {
-                error: Some(error), ..
-            } => Status::Reconnecting(error.clone()),
+            Update::Connecting { error: Some(error), .. } => Status::Reconnecting(error.clone()),
             Update::Snapshot(_) | Update::Resubscribed { .. } => Status::Loading,
             Update::Event(_) => return,
             Update::Live => Status::Live,
@@ -94,10 +92,7 @@ impl Status {
 
     /// The lane has left: a new one is needed to follow the session again.
     pub fn ended(&self) -> bool {
-        matches!(
-            self,
-            Status::Closed | Status::NotRunning | Status::Gone(_) | Status::Stopped(_)
-        )
+        matches!(self, Status::Closed | Status::NotRunning | Status::Gone(_) | Status::Stopped(_))
     }
 
     /// The trouble to show, if any.
@@ -113,14 +108,8 @@ enum Input {
     Stop,
     Resync,
     Open,
-    Notification {
-        epoch: u64,
-        method: String,
-        params: Value,
-    },
-    Lost {
-        epoch: u64,
-    },
+    Notification { epoch: u64, method: String, params: Value },
+    Lost { epoch: u64 },
 }
 
 /// The handle; the lane lives as long as it does.
@@ -131,27 +120,10 @@ pub struct Lane {
 impl Lane {
     /// Follow `session_id`, reporting to `sink` from the lane's thread. `sink` returning false
     /// (the frontend went away) also ends the lane.
-    pub fn open(
-        session_id: impl Into<String>,
-        mode: Mode,
-        connect: Connector,
-        sink: impl FnMut(Update) -> bool + Send + 'static,
-    ) -> Self {
+    pub fn open(session_id: impl Into<String>, mode: Mode, connect: Connector, sink: impl FnMut(Update) -> bool + Send + 'static) -> Self {
         let (inputs, receiver) = mpsc::channel();
-        let worker = Worker {
-            session_id: session_id.into(),
-            mode,
-            connect,
-            inputs: receiver,
-            forward: inputs.clone(),
-            sink,
-            epoch: 0,
-            cursor: None,
-        };
-        std::thread::Builder::new()
-            .name("sill-lane".into())
-            .spawn(move || worker.run())
-            .expect("start a session lane");
+        let worker = Worker { session_id: session_id.into(), mode, connect, inputs: receiver, forward: inputs.clone(), sink, epoch: 0, cursor: None };
+        std::thread::Builder::new().name("sill-lane".into()).spawn(move || worker.run()).expect("start a session lane");
         Self { inputs }
     }
 
@@ -183,23 +155,14 @@ fn backoff(attempt: u32) -> Duration {
 fn forward(client: &Client, epoch: u64, to: Sender<Input>) {
     let (_, closed) = mpsc::channel();
     let notifications = std::mem::replace(&mut *client.notifications.lock().unwrap(), closed);
-    let _ = std::thread::Builder::new()
-        .name("sill-lane-events".into())
-        .spawn(move || {
-            while let Ok((method, params)) = notifications.recv() {
-                if to
-                    .send(Input::Notification {
-                        epoch,
-                        method,
-                        params,
-                    })
-                    .is_err()
-                {
-                    return;
-                }
+    let _ = std::thread::Builder::new().name("sill-lane-events".into()).spawn(move || {
+        while let Ok((method, params)) = notifications.recv() {
+            if to.send(Input::Notification { epoch, method, params }).is_err() {
+                return;
             }
-            let _ = to.send(Input::Lost { epoch });
-        });
+        }
+        let _ = to.send(Input::Lost { epoch });
+    });
 }
 
 enum Next {
@@ -225,10 +188,7 @@ impl<S: FnMut(Update) -> bool> Worker<S> {
         let mut attempt = 0;
         let mut error = None;
         loop {
-            if !(self.sink)(Update::Connecting {
-                attempt,
-                error: error.take(),
-            }) {
+            if !(self.sink)(Update::Connecting { attempt, error: error.take() }) {
                 return;
             }
             match (self.connect)() {
@@ -268,13 +228,7 @@ impl<S: FnMut(Update) -> bool> Worker<S> {
 
     fn detach(&mut self, client: &Client) {
         if let Some((subscription_id, _)) = self.cursor.take() {
-            let _ = client.call::<Value>(
-                "_sill/sessions.detach",
-                Detach {
-                    session_id: self.session_id.clone(),
-                    subscription_id,
-                },
-            );
+            let _ = client.call::<Value>("_sill/sessions.detach", Detach { session_id: self.session_id.clone(), subscription_id });
         }
     }
 
@@ -283,9 +237,7 @@ impl<S: FnMut(Update) -> bool> Worker<S> {
         if self.mode == Mode::Open {
             return Ok(true);
         }
-        let key = SessionKey {
-            session_id: self.session_id.clone(),
-        };
+        let key = SessionKey { session_id: self.session_id.clone() };
         match client.call::<Session>("_sill/sessions.get", key) {
             Ok(s) if s.ended_at.is_some() => {
                 (self.sink)(Update::Gone("the session ended".into()));
@@ -310,26 +262,12 @@ impl<S: FnMut(Update) -> bool> Worker<S> {
             if let Err(next) = self.may_attach(client) {
                 return next;
             }
-            let since = self.cursor.as_ref().map(|(_, seq)| Cursor {
-                session_id: self.session_id.clone(),
-                seq: seq.to_string(),
-            });
-            let attach = Attach {
-                session_id: self.session_id.clone(),
-                since,
-            };
+            let since = self.cursor.as_ref().map(|(_, seq)| Cursor { session_id: self.session_id.clone(), seq: seq.to_string() });
+            let attach = Attach { session_id: self.session_id.clone(), since };
             // through which sequence a replay goes; none after a snapshot
             let through = match client.call::<Attached>("_sill/sessions.attach", attach) {
-                Ok(Attached::Snapshot {
-                    subscription_id,
-                    snapshot,
-                }) => {
-                    let view = match Conversation::read_snapshot(
-                        client,
-                        &self.session_id,
-                        &subscription_id,
-                        &snapshot,
-                    ) {
+                Ok(Attached::Snapshot { subscription_id, snapshot }) => {
+                    let view = match Conversation::read_snapshot(client, &self.session_id, &subscription_id, &snapshot) {
                         Ok(view) => view,
                         Err(e) => return Next::Reconnect(format!("{e:#}")),
                     };
@@ -339,11 +277,7 @@ impl<S: FnMut(Update) -> bool> Worker<S> {
                     }
                     None
                 }
-                Ok(Attached::Replay {
-                    subscription_id,
-                    after,
-                    through,
-                }) => {
+                Ok(Attached::Replay { subscription_id, after, through }) => {
                     let ours = self.cursor.as_ref().map(|(_, seq)| *seq);
                     if after.seq.parse::<u64>().ok() != ours {
                         // not a replay of what we have: start over
@@ -370,9 +304,7 @@ impl<S: FnMut(Update) -> bool> Worker<S> {
                     _ => return Next::Reconnect(format!("{e:#}")),
                 },
             };
-            let caught_up = |cursor: &Option<(String, u64)>| {
-                through.is_none_or(|t| cursor.as_ref().is_some_and(|(_, seq)| *seq >= t))
-            };
+            let caught_up = |cursor: &Option<(String, u64)>| through.is_none_or(|t| cursor.as_ref().is_some_and(|(_, seq)| *seq >= t));
             let mut live = false;
             if caught_up(&self.cursor) {
                 live = true;
@@ -396,11 +328,7 @@ impl<S: FnMut(Update) -> bool> Worker<S> {
                         return Next::Reconnect("the connection to the daemon was lost".into());
                     }
                     Input::Lost { .. } => {}
-                    Input::Notification {
-                        epoch,
-                        method,
-                        params,
-                    } => {
+                    Input::Notification { epoch, method, params } => {
                         if epoch != self.epoch || method != "_sill/session.event" {
                             continue;
                         }
@@ -417,9 +345,7 @@ impl<S: FnMut(Update) -> bool> Worker<S> {
                         let Some((subscription, seq)) = &mut self.cursor else {
                             continue;
                         };
-                        if event.session_id != self.session_id
-                            || &event.subscription_id != subscription
-                        {
+                        if event.session_id != self.session_id || &event.subscription_id != subscription {
                             continue;
                         }
                         match event.seq.parse::<u64>() {
@@ -486,9 +412,7 @@ mod tests {
     }
 
     fn next(updates: &Receiver<Update>) -> Update {
-        updates
-            .recv_timeout(Duration::from_secs(5))
-            .expect("an update")
+        updates.recv_timeout(Duration::from_secs(5)).expect("an update")
     }
 
     /// The next update that is not `Connecting`.
@@ -523,52 +447,32 @@ mod tests {
         let (second, mut again) = pair();
         let (_lane, updates) = open(vec![first, second], Mode::Open);
         snapshot(&mut peer, 3);
-        let Update::Snapshot(view) = settled(&updates) else {
-            panic!()
-        };
+        let Update::Snapshot(view) = settled(&updates) else { panic!() };
         assert_eq!((view.seq, view.subscription_id.as_str()), (3, "sub-1"));
         assert!(matches!(next(&updates), Update::Live));
         // a duplicate and a foreign subscription's event are dropped; the rest arrive in order
-        for event in [
-            appended("sub-1", 3, "old"),
-            appended("other", 4, "foreign"),
-            appended("sub-1", 4, "four"),
-            appended("sub-1", 5, "five"),
-        ] {
+        for event in [appended("sub-1", 3, "old"), appended("other", 4, "foreign"), appended("sub-1", 4, "four"), appended("sub-1", 5, "five")] {
             peer.notify("_sill/session.event", event);
         }
         assert_eq!(text(next(&updates)), "four");
         assert_eq!(text(next(&updates)), "five");
         // the daemon restarts: the lane comes back and asks to replay from 5
         drop(peer);
-        let Update::Connecting { error, .. } = next(&updates) else {
-            panic!()
-        };
+        let Update::Connecting { error, .. } = next(&updates) else { panic!() };
         assert!(error.unwrap().contains("lost"));
         let attach = again.expect("_sill/sessions.attach");
-        assert_eq!(
-            attach["params"]["since"],
-            json!({"session_id":"s", "seq":"5"})
-        );
+        assert_eq!(attach["params"]["since"], json!({"session_id":"s", "seq":"5"}));
         again.reply(
             &attach,
             json!({"mode":"replay", "subscription_id":"sub-2",
                    "after":{"session_id":"s","seq":"5"}, "through":{"session_id":"s","seq":"6"}}),
         );
-        let Update::Resubscribed { subscription_id } = settled(&updates) else {
-            panic!()
-        };
+        let Update::Resubscribed { subscription_id } = settled(&updates) else { panic!() };
         assert_eq!(subscription_id, "sub-2");
-        again.notify(
-            "_sill/session.event",
-            appended("sub-1", 6, "stale subscription"),
-        );
+        again.notify("_sill/session.event", appended("sub-1", 6, "stale subscription"));
         again.notify("_sill/session.event", appended("sub-2", 6, "six"));
         assert_eq!(text(next(&updates)), "six");
-        assert!(
-            matches!(next(&updates), Update::Live),
-            "caught up through 6"
-        );
+        assert!(matches!(next(&updates), Update::Live), "caught up through 6");
     }
 
     #[test]
@@ -583,9 +487,7 @@ mod tests {
         assert_eq!(detach["params"]["subscription_id"], "sub-1");
         peer.reply(&detach, json!({}));
         snapshot(&mut peer, 5);
-        let Update::Snapshot(view) = settled(&updates) else {
-            panic!()
-        };
+        let Update::Snapshot(view) = settled(&updates) else { panic!() };
         assert_eq!(view.seq, 5);
     }
 
@@ -602,10 +504,7 @@ mod tests {
                    "running":false, "pins":[], "settings":{}, "follows":null, "compacted":"0"}),
         );
         assert!(matches!(settled(&updates), Update::NotRunning));
-        assert!(
-            peer.hung_up(),
-            "no attach: the lane left and closed its connection"
-        );
+        assert!(peer.hung_up(), "no attach: the lane left and closed its connection");
     }
 
     #[test]
@@ -615,10 +514,7 @@ mod tests {
         snapshot(&mut peer, 1);
         assert!(matches!(settled(&updates), Update::Snapshot(_)));
         drop(lane);
-        assert!(
-            peer.hung_up(),
-            "the subscription's connection must close with the lane"
-        );
+        assert!(peer.hung_up(), "the subscription's connection must close with the lane");
     }
 
     #[test]

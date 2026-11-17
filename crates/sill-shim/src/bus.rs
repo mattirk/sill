@@ -46,9 +46,7 @@ pub fn start(socket: &Path) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let _ = std::fs::remove_file(socket);
     let conf = dir.join("sill-bus.conf");
-    std::fs::File::create(&conf)
-        .and_then(|mut f| f.write_all(config(socket).as_bytes()))
-        .with_context(|| format!("writing {}", conf.display()))?;
+    std::fs::File::create(&conf).and_then(|mut f| f.write_all(config(socket).as_bytes())).with_context(|| format!("writing {}", conf.display()))?;
     let mut cmd = Command::new("dbus-daemon");
     cmd.arg("--nofork").arg("--nopidfile").arg(format!("--config-file={}", conf.display())).stdin(Stdio::null()).stdout(Stdio::null());
     // the agent's own service files live under its HOME; dbus-daemon looks under XDG_DATA_HOME

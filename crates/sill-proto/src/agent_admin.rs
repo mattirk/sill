@@ -1,8 +1,8 @@
 //! Public configured-agent administration. Commands refer to the selected daemon host.
-use std::collections::BTreeMap;
-use serde::{Serialize, Deserialize};
-use schemars::JsonSchema;
 use crate::sessions::HostPath;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 /// An agent definition: a result of `agents.get`/`agents.list` and the params of `agents.save`.
 /// Open in the schema because it is a result too; the daemon still refuses unknown fields in
 /// `agents.save` (requests are strict).
@@ -49,7 +49,10 @@ pub struct HomePath {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum HomePathKind { Directory, File }
+pub enum HomePathKind {
+    Directory,
+    File,
+}
 impl HomePath {
     pub fn directory(path: &str) -> Self {
         Self { path: path.into(), kind: HomePathKind::Directory, initial_content: None }
@@ -58,32 +61,65 @@ impl HomePath {
         Self { path: path.into(), kind: HomePathKind::File, initial_content: Some(initial.into()) }
     }
 }
-fn yes()->bool{true}
+fn yes() -> bool {
+    true
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct AgentKey { pub agent_id:String }
+pub struct AgentKey {
+    pub agent_id: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct List { pub after:Option<String>, pub limit:Option<u16> }
+pub struct List {
+    pub after: Option<String>,
+    pub limit: Option<u16>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Page { pub agents:Vec<Definition>, pub next:Option<String> }
+pub struct Page {
+    pub agents: Vec<Definition>,
+    pub next: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Saved { pub path:HostPath }
+pub struct Saved {
+    pub path: HostPath,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Removed { pub removed:bool }
+pub struct Removed {
+    pub removed: bool,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Available { pub path:Option<HostPath> }
+pub struct Available {
+    pub path: Option<HostPath>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Defaults { pub agent_id:String, pub settings:crate::wire::AgentSettings }
+pub struct Defaults {
+    pub agent_id: String,
+    pub settings: crate::wire::AgentSettings,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Installed { pub version:String, pub kind:String, pub command:Vec<String>, pub env:BTreeMap<String,String>, pub source:String }
+pub struct Installed {
+    pub version: String,
+    pub kind: String,
+    pub command: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    pub source: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Installation { pub installed:Option<Installed> }
+pub struct Installation {
+    pub installed: Option<Installed>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct EntryKey { pub entry_id:String, pub version:String, pub source:String }
+pub struct EntryKey {
+    pub entry_id: String,
+    pub version: String,
+    pub source: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Icon { pub bytes_base64:Option<String> }
+pub struct Icon {
+    pub bytes_base64: Option<String>,
+}
 /// A path an agent created under a fresh home on its first start: a proposal for its `home_paths`
 /// (`_sill/agents.discovered`; docs/agent-directories.md "Directory setup by probe").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -130,4 +166,6 @@ pub struct Discovery {
     pub note: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Discovered { pub discovery: Option<Discovery> }
+pub struct Discovered {
+    pub discovery: Option<Discovery>,
+}

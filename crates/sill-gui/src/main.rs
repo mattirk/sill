@@ -1,10 +1,9 @@
 mod agents_ui;
-mod providers_ui;
 mod annotation;
-mod armed;
 mod annotation_state;
 #[cfg(test)]
 mod annotation_tests;
+mod armed;
 mod box_ui;
 mod boxes_ui;
 mod changes_page;
@@ -15,29 +14,32 @@ mod daemon_ui;
 mod demo;
 mod desktop;
 mod desktop_view;
-mod host_control;
-mod host_runs;
 mod details;
 mod diff_ui;
 mod editor;
+mod files;
+mod find;
+mod folds;
 mod fonts;
 mod forms;
 mod geometry;
 mod herring;
+mod host_control;
+mod host_runs;
 mod hotkey;
 mod icons;
 mod keys;
 mod layout;
 mod lists;
-mod login_ui;
 #[cfg(target_os = "macos")]
 mod local_vm;
-#[cfg(target_os = "macos")]
-mod mac_screen;
+mod login_ui;
 #[cfg(target_os = "macos")]
 mod mac_input;
 #[cfg(target_os = "macos")]
 mod mac_procs;
+#[cfg(target_os = "macos")]
+mod mac_screen;
 #[cfg(target_os = "macos")]
 mod macos;
 mod media;
@@ -50,6 +52,7 @@ mod perf;
 mod permissions;
 mod policies;
 mod processes;
+mod providers_ui;
 mod rows;
 mod selection;
 mod session;
@@ -57,10 +60,10 @@ mod settings;
 mod settings_page;
 mod settings_ui;
 mod shell;
-mod start_ui;
 mod shortcuts;
 #[cfg(test)]
 mod snapshots;
+mod start_ui;
 mod style;
 mod syntax;
 mod terminal;
@@ -75,9 +78,6 @@ mod vm_ui;
 mod window;
 mod workspaces;
 mod workspaces_ui;
-mod files;
-mod find;
-mod folds;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -112,8 +112,7 @@ struct Options {
 }
 
 /// What the control socket received, for the window to do (`control.rs`); taken once by the app.
-static CONTROL: std::sync::Mutex<Option<async_channel::Receiver<control::Command>>> =
-    std::sync::Mutex::new(None);
+static CONTROL: std::sync::Mutex<Option<async_channel::Receiver<control::Command>>> = std::sync::Mutex::new(None);
 /// The window started hidden.
 static HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -132,15 +131,11 @@ fn main() -> iced::Result {
             Ok(Some(())) => *CONTROL.lock().unwrap() = Some(rx),
             Ok(None) => {
                 if !options.hidden && !control::send(control::Command::Show) {
-                    eprintln!(
-                        "sill-gui: another sill-gui holds the control socket but did not answer"
-                    );
+                    eprintln!("sill-gui: another sill-gui holds the control socket but did not answer");
                 }
                 return Ok(());
             }
-            Err(e) => eprintln!(
-                "sill-gui: no control socket ({e}): `sill toggle` and a second start cannot reach this window"
-            ),
+            Err(e) => eprintln!("sill-gui: no control socket ({e}): `sill toggle` and a second start cannot reach this window"),
         }
     }
     HIDDEN.store(options.hidden, std::sync::atomic::Ordering::Relaxed);
@@ -156,45 +151,33 @@ fn main() -> iced::Result {
         local_vm::shut_down_on_signals();
     }
     let above = !options.demo && settings::load().always_on_top();
-    let ran = iced::application(
-        move || App::new(options.demo, options.session.clone()),
-        App::update,
-        App::view,
-    )
-    .title("Sill")
-    .theme(|_: &App| style::theme())
-    // Interface scale (Settings): on top of the desktop's own, which iced multiplies in
-    .scale_factor(|app: &App| app.settings.scale())
-    .subscription(App::subscription)
-    .default_font(Font::with_name(fonts::SANS_FAMILY))
-    .window(iced::window::Settings {
-        size: START_SIZE,
-        // no title bar: the top bar's empty space moves the window
-        // the Mac keeps the system's frame for its rounded corners, rim and shadow, the title
-        // bar transparent and its buttons hidden (`macos.rs`)
-        decorations: cfg!(target_os = "macos"),
-        visible: !options.hidden,
-        // closing hides: the window stays, and with it the hotkey and `sill toggle`
-        exit_on_close_request: options.demo,
-        level: if above {
-            iced::window::Level::AlwaysOnTop
-        } else {
-            iced::window::Level::Normal
-        },
-        // the application icon, for the panel's window list and the window switcher
-        icon: tray::rgba(tray::APP_ICON, 128)
-            .and_then(|rgba| iced::window::icon::from_rgba(rgba, 128, 128).ok()),
-        // the window's class, `sill` as `sill.desktop`: the panel and menu match the window to it
-        #[cfg(target_os = "linux")]
-        platform_specific: iced::window::settings::PlatformSpecific {
-            application_id: "sill".into(),
-            ..Default::default()
-        },
-        #[cfg(target_os = "macos")]
-        platform_specific: macos::platform_specific(),
-        ..iced::window::Settings::default()
-    })
-    .run();
+    let ran = iced::application(move || App::new(options.demo, options.session.clone()), App::update, App::view)
+        .title("Sill")
+        .theme(|_: &App| style::theme())
+        // Interface scale (Settings): on top of the desktop's own, which iced multiplies in
+        .scale_factor(|app: &App| app.settings.scale())
+        .subscription(App::subscription)
+        .default_font(Font::with_name(fonts::SANS_FAMILY))
+        .window(iced::window::Settings {
+            size: START_SIZE,
+            // no title bar: the top bar's empty space moves the window
+            // the Mac keeps the system's frame for its rounded corners, rim and shadow, the title
+            // bar transparent and its buttons hidden (`macos.rs`)
+            decorations: cfg!(target_os = "macos"),
+            visible: !options.hidden,
+            // closing hides: the window stays, and with it the hotkey and `sill toggle`
+            exit_on_close_request: options.demo,
+            level: if above { iced::window::Level::AlwaysOnTop } else { iced::window::Level::Normal },
+            // the application icon, for the panel's window list and the window switcher
+            icon: tray::rgba(tray::APP_ICON, 128).and_then(|rgba| iced::window::icon::from_rgba(rgba, 128, 128).ok()),
+            // the window's class, `sill` as `sill.desktop`: the panel and menu match the window to it
+            #[cfg(target_os = "linux")]
+            platform_specific: iced::window::settings::PlatformSpecific { application_id: "sill".into(), ..Default::default() },
+            #[cfg(target_os = "macos")]
+            platform_specific: macos::platform_specific(),
+            ..iced::window::Settings::default()
+        })
+        .run();
     // however the window ended, its VM is shut down cleanly before the process goes
     #[cfg(target_os = "macos")]
     local_vm::shut_down();
@@ -239,12 +222,7 @@ pub struct Tab {
 
 impl From<&Session> for Tab {
     fn from(s: &Session) -> Self {
-        Self {
-            id: s.session_id.clone(),
-            title: s.title.clone(),
-            agent: s.agent.clone(),
-            running: s.running,
-        }
+        Self { id: s.session_id.clone(), title: s.title.clone(), agent: s.agent.clone(), running: s.running }
     }
 }
 
@@ -517,10 +495,7 @@ pub struct SessionView {
 impl SessionView {
     fn select_shell(&mut self, host: bool) {
         if self.terminal_host != host {
-            let old = self
-                .terminal
-                .take()
-                .map(|pane| (pane, self.terminal_generation));
+            let old = self.terminal.take().map(|pane| (pane, self.terminal_generation));
             if let Some((pane, generation)) = self.parked_terminal.take() {
                 self.terminal = Some(pane);
                 self.terminal_generation = generation;
@@ -583,13 +558,9 @@ impl SessionView {
     }
 
     pub fn attention(&self) -> Attention {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
         let mut attention = Attention::of(&self.conversation, &self.outbox, &self.status, now);
-        if attention.failed.is_some()
-            && self.seen_failure.as_deref() == self.conversation.last_turn_id()
-        {
+        if attention.failed.is_some() && self.seen_failure.as_deref() == self.conversation.last_turn_id() {
             attention.failed = None;
         }
         attention
@@ -598,10 +569,7 @@ impl SessionView {
     /// The session's work is sill's summary turn (session state `summarizing`): its tab shows
     /// only the agent glyph.
     pub fn summarizing(&self) -> bool {
-        self.conversation
-            .session
-            .as_ref()
-            .is_some_and(|s| s.summarizing.is_some())
+        self.conversation.session.as_ref().is_some_and(|s| s.summarizing.is_some())
     }
 
     /// The person has looked at this session: a failure shown is no longer news.
@@ -633,9 +601,8 @@ impl SessionView {
                 item_text(&text_item)
             }
         };
-        let previous_images: BTreeSet<String> = self.rendered.get(id)
-            .map(|r| r.markdown.images().iter().map(ToString::to_string).collect())
-            .unwrap_or_default();
+        let previous_images: BTreeSet<String> =
+            self.rendered.get(id).map(|r| r.markdown.images().iter().map(ToString::to_string).collect()).unwrap_or_default();
         match self.rendered.get_mut(id) {
             Some(cached) if cached.source == source => {}
             Some(cached) if source.starts_with(&cached.source) => {
@@ -644,14 +611,7 @@ impl SessionView {
                 cached.leaves = std::sync::OnceLock::new();
             }
             _ => {
-                self.rendered.insert(
-                    id.to_string(),
-                    Rendered {
-                        markdown: markdown::Content::parse(&source),
-                        source,
-                        leaves: std::sync::OnceLock::new(),
-                    },
-                );
+                self.rendered.insert(id.to_string(), Rendered { markdown: markdown::Content::parse(&source), source, leaves: std::sync::OnceLock::new() });
             }
         }
         // A new mention of a mutable file must not reuse an earlier message's preview.
@@ -679,12 +639,7 @@ impl SessionView {
                         self.outbox.reconcile(&self.conversation);
                     }
                     Change::Question(id) => {
-                        if self
-                            .conversation
-                            .questions
-                            .get(id)
-                            .is_some_and(|q| q.state != "open")
-                        {
+                        if self.conversation.questions.get(id).is_some_and(|q| q.state != "open") {
                             self.answering.remove(id);
                         }
                     }
@@ -705,10 +660,7 @@ impl SessionView {
 
     /// The session ended or was deleted, as its own state says.
     fn ended(&self) -> bool {
-        self.conversation
-            .session
-            .as_ref()
-            .is_some_and(|s| s.lifecycle == "ended" || s.deleted)
+        self.conversation.session.as_ref().is_some_and(|s| s.lifecycle == "ended" || s.deleted)
     }
 }
 
@@ -845,16 +797,11 @@ fn x11_window(window: &dyn iced::window::Window) -> Option<u64> {
 }
 
 /// Run `work` on a thread of its own; its result comes back as a message.
-fn blocking<T: Send + 'static>(
-    work: impl FnOnce() -> T + Send + 'static,
-    done: impl FnOnce(T) -> Message + Send + 'static,
-) -> Task<Message> {
+fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static, done: impl FnOnce(T) -> Message + Send + 'static) -> Task<Message> {
     let (tx, rx) = iced::futures::channel::oneshot::channel();
-    let spawned = std::thread::Builder::new()
-        .name("sill-gui-call".into())
-        .spawn(move || {
-            let _ = tx.send(work());
-        });
+    let spawned = std::thread::Builder::new().name("sill-gui-call".into()).spawn(move || {
+        let _ = tx.send(work());
+    });
     if spawned.is_err() {
         return Task::none();
     }
@@ -867,22 +814,14 @@ fn blocking<T: Send + 'static>(
 impl App {
     fn new(demo: bool, initial: Option<String>) -> (Self, Task<Message>) {
         #[cfg(target_os = "macos")]
-        let connect = if local_vm::phase().is_some() {
-            local_vm::connector()
-        } else {
-            sill_client::connect()
-        };
+        let connect = if local_vm::phase().is_some() { local_vm::connector() } else { sill_client::connect() };
         #[cfg(not(target_os = "macos"))]
         let connect = sill_client::connect();
         Self::with(demo, initial, (!demo).then_some(connect))
     }
 
     /// The app on `connect`'s daemon (none in `--demo`).
-    pub fn with(
-        demo: bool,
-        initial: Option<String>,
-        connect: Option<Connector>,
-    ) -> (Self, Task<Message>) {
+    pub fn with(demo: bool, initial: Option<String>, connect: Option<Connector>) -> (Self, Task<Message>) {
         let (drawer, file_task) = files::Drawer::new(connect.clone());
         let mut app = Self {
             daemon: daemon_ui::State::default(),
@@ -963,12 +902,7 @@ impl App {
             if !cfg!(test) {
                 app.settings.interface_scale = settings::load().interface_scale;
             }
-            let tab = Tab {
-                id: "demo".into(),
-                title: "witty-willow".into(),
-                agent: "claude".into(),
-                running: true,
-            };
+            let tab = Tab { id: "demo".into(), title: "witty-willow".into(), agent: "claude".into(), running: true };
             let mut view = SessionView::new("demo");
             view.conversation = demo::conversation();
             view.status = Status::Live;
@@ -987,12 +921,7 @@ impl App {
             app.persist = true;
         }
 
-        app.layout.mode = app
-            .settings
-            .mode
-            .as_deref()
-            .and_then(layout::Mode::from_name)
-            .unwrap_or_default();
+        app.layout.mode = app.settings.mode.as_deref().and_then(layout::Mode::from_name).unwrap_or_default();
         app.layout.drawer = app.settings.drawer_width;
         app.drawer.shown = app.layout.mode == layout::Mode::Drawer;
         if app.layout.plain {
@@ -1003,58 +932,32 @@ impl App {
         // the control socket's commands, and the hotkey (a real window only)
         let mut desktop_tasks = Vec::new();
         if let Some(control) = CONTROL.lock().unwrap().take() {
-            let commands = iced::futures::stream::unfold(control, |rx| async move {
-                rx.recv().await.ok().map(|command| (command, rx))
-            });
+            let commands = iced::futures::stream::unfold(control, |rx| async move { rx.recv().await.ok().map(|command| (command, rx)) });
             desktop_tasks.push(Task::run(commands, Message::Control));
         }
         if !demo && !cfg!(test) {
             let (tx, rx) = async_channel::unbounded();
-            app.hotkey = Some(hotkey::start(move |report| {
-                tx.send_blocking(report).is_ok()
-            }));
-            let reports = iced::futures::stream::unfold(rx, |rx| async move {
-                rx.recv().await.ok().map(|report| (report, rx))
-            });
+            app.hotkey = Some(hotkey::start(move |report| tx.send_blocking(report).is_ok()));
+            let reports = iced::futures::stream::unfold(rx, |rx| async move { rx.recv().await.ok().map(|report| (report, rx)) });
             desktop_tasks.push(Task::run(reports, Message::Hotkey));
             // the tray's clicks; the icon itself once the settings say whether to show it
             let (tx, rx) = async_channel::unbounded();
             app.tray_asked = Some(tx);
-            let asked = iced::futures::stream::unfold(rx, |rx| async move {
-                rx.recv().await.ok().map(|asked| (asked, rx))
-            });
+            let asked = iced::futures::stream::unfold(rx, |rx| async move { rx.recv().await.ok().map(|asked| (asked, rx)) });
             desktop_tasks.push(Task::run(asked, Message::Tray));
         }
         if !demo {
             // SSH's questions during a sign-in to the box
             let (tx, rx) = async_channel::unbounded();
             app.box_link.asker = Some(tx);
-            let asks = iced::futures::stream::unfold(rx, |rx| async move {
-                rx.recv().await.ok().map(|ask| (ask, rx))
-            });
+            let asks = iced::futures::stream::unfold(rx, |rx| async move { rx.recv().await.ok().map(|ask| (ask, rx)) });
             desktop_tasks.push(Task::run(asks, |ask| Message::Box(box_ui::Event::Asked(ask))));
         }
         let (tx, rx) = async_channel::bounded(256);
         app.lanes = Some(tx);
-        let lanes = iced::futures::stream::unfold(rx, |rx| async move {
-            rx.recv().await.ok().map(|update| (update, rx))
-        });
-        let list = Task::batch([
-            app.list(),
-            app.read_daemon_settings(),
-            app.daemon_event(daemon_ui::Event::Check),
-        ]);
-        (
-            app,
-            Task::batch([
-                file_task,
-                Task::run(lanes, |(session, epoch, update)| {
-                    Message::Lane(session, epoch, update)
-                }),
-                list,
-                Task::batch(desktop_tasks),
-            ]),
-        )
+        let lanes = iced::futures::stream::unfold(rx, |rx| async move { rx.recv().await.ok().map(|update| (update, rx)) });
+        let list = Task::batch([app.list(), app.read_daemon_settings(), app.daemon_event(daemon_ui::Event::Check)]);
+        (app, Task::batch([file_task, Task::run(lanes, |(session, epoch, update)| Message::Lane(session, epoch, update)), list, Task::batch(desktop_tasks)]))
     }
 
     /// The prompt takes the keyboard, where a session's conversation is shown.
@@ -1068,16 +971,13 @@ impl App {
     fn subscription(&self) -> Subscription<Message> {
         let mut subscriptions = vec![];
         if self.demo && self.demo_step <= demo::CHUNKS.len() {
-            subscriptions
-                .push(iced::time::every(Duration::from_millis(600)).map(|_| Message::DemoTick));
+            subscriptions.push(iced::time::every(Duration::from_millis(600)).map(|_| Message::DemoTick));
         }
         // the menu bar's icon moves while an agent works; the Mac steps it on the main thread
         // (Linux's tray has a thread of its own)
         #[cfg(target_os = "macos")]
         if self.tray_busy && self.tray.is_some() {
-            subscriptions.push(
-                iced::time::every(Duration::from_millis(tray::FRAME_MS)).map(|_| Message::TrayTick),
-            );
+            subscriptions.push(iced::time::every(Duration::from_millis(tray::FRAME_MS)).map(|_| Message::TrayTick));
         } else if self.tray.is_some() && local_vm::phase().is_some() {
             // the agent's Mac input starts without a message of its own: looked for here
             subscriptions.push(iced::time::every(Duration::from_millis(400)).map(|_| Message::TrayTick));
@@ -1093,55 +993,34 @@ impl App {
         }
         // the VM on its way somewhere while Settings shows it
         if self.vm_ticking() {
-            subscriptions.push(
-                iced::time::every(Duration::from_secs(1)).map(|_| Message::Vm(vm_ui::Event::Tick)),
-            );
+            subscriptions.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Vm(vm_ui::Event::Tick)));
         }
         if !self.demo {
-            subscriptions
-                .push(iced::time::every(Duration::from_secs(2)).map(|_| Message::NetworkPoll));
+            subscriptions.push(iced::time::every(Duration::from_secs(2)).map(|_| Message::NetworkPoll));
             // managed processes: every open session's, so its ports close when they end
-            subscriptions.push(
-                iced::time::every(Duration::from_secs(3))
-                    .map(|_| Message::Procs(processes::Event::Poll)),
-            );
+            subscriptions.push(iced::time::every(Duration::from_secs(3)).map(|_| Message::Procs(processes::Event::Poll)));
         }
-        if !self.demo && !self.backend_shown() && self.details.is_none() && self.current().is_some()
-        {
-            subscriptions.push(
-                iced::time::every(Duration::from_secs(2))
-                    .with("session-files")
-                    .map(|_| Message::FilesPoll),
-            );
+        if !self.demo && !self.backend_shown() && self.details.is_none() && self.current().is_some() {
+            subscriptions.push(iced::time::every(Duration::from_secs(2)).with("session-files").map(|_| Message::FilesPoll));
         }
         // the shown test desktop: a new picture about once a second (an unchanged one is not fetched)
         if !self.demo && self.current().is_some_and(|v| v.desktop.shown) {
-            subscriptions.push(
-                iced::time::every(Duration::from_secs(1)).map(|_| Message::Desktop(desktop_view::Event::Tick)),
-            );
+            subscriptions.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Desktop(desktop_view::Event::Tick)));
         }
         // sessions started or ended elsewhere appear and go
         if !self.demo {
-            subscriptions
-                .push(iced::time::every(Duration::from_secs(15)).map(|_| Message::Refresh));
+            subscriptions.push(iced::time::every(Duration::from_secs(15)).map(|_| Message::Refresh));
         }
         // the displays and the window, read often while the window settles or the person drags
         // it (`geometry.rs`)
         if self.visible && self.xid.is_some() {
-            let every = if self.geometry.busy(Instant::now()) {
-                200
-            } else {
-                1000
-            };
-            subscriptions.push(
-                iced::time::every(Duration::from_millis(every)).map(|_| Message::GeometryTick),
-            );
+            let every = if self.geometry.busy(Instant::now()) { 200 } else { 1000 };
+            subscriptions.push(iced::time::every(Duration::from_millis(every)).map(|_| Message::GeometryTick));
         }
         subscriptions.push(iced::keyboard::listen().filter_map(keys::navigation));
         subscriptions.push(iced::window::resize_events().map(|(_, size)| Message::Resized(size)));
         subscriptions.push(iced::event::listen_with(|event, _status, _window| {
-            matches!(event, iced::Event::Window(iced::window::Event::Moved(_)))
-                .then_some(Message::Moved)
+            matches!(event, iced::Event::Window(iced::window::Event::Moved(_))).then_some(Message::Moved)
         }));
         subscriptions.push(self.layout.subscription());
         // the monitor's size once the window is there: Shelf mode's width comes from it
@@ -1152,10 +1031,7 @@ impl App {
 
     /// The drawer is over the conversation rather than beside it.
     pub fn narrow(&self) -> bool {
-        matches!(
-            self.layout.drawer(self.drawer.shown, self.width),
-            layout::Drawer::Over(_)
-        )
+        matches!(self.layout.drawer(self.drawer.shown, self.width), layout::Drawer::Over(_))
     }
 
     pub fn current(&self) -> Option<&SessionView> {
@@ -1184,10 +1060,7 @@ impl App {
             return Task::none();
         }
         self.list_pending = true;
-        blocking(
-            move || actions.sessions().map_err(|e| format!("{e:#}")),
-            Message::Listed,
-        )
+        blocking(move || actions.sessions().map_err(|e| format!("{e:#}")), Message::Listed)
     }
 
     /// A lane for `id`, replacing any it had; updates from an older lane are ignored.
@@ -1197,16 +1070,11 @@ impl App {
         };
         self.next_lane += 1;
         let epoch = self.next_lane;
-        let view = self
-            .views
-            .entry(id.to_string())
-            .or_insert_with(|| SessionView::new(id));
+        let view = self.views.entry(id.to_string()).or_insert_with(|| SessionView::new(id));
         let session = id.to_string();
         view.lane_epoch = epoch;
         view.status = Status::Connecting;
-        view.lane = Some(Lane::open(id, mode, connect, move |update| {
-            tx.send_blocking((session.clone(), epoch, update)).is_ok()
-        }));
+        view.lane = Some(Lane::open(id, mode, connect, move |update| tx.send_blocking((session.clone(), epoch, update)).is_ok()));
     }
 
     /// The session's jail was started again under this window: attach anew, which starts its
@@ -1219,21 +1087,12 @@ impl App {
     }
 
     /// One request the person made in `session`; its outcome comes back as `Done`.
-    fn act(
-        &self,
-        session: &str,
-        act: Act,
-        method: &'static str,
-        params: serde_json::Value,
-    ) -> Task<Message> {
+    fn act(&self, session: &str, act: Act, method: &'static str, params: serde_json::Value) -> Task<Message> {
         let Some(actions) = self.actions.clone() else {
             return Task::none();
         };
         let session = session.to_string();
-        blocking(
-            move || actions.call(method, params),
-            move |outcome| Message::Done(session, act, outcome),
-        )
+        blocking(move || actions.call(method, params), move |outcome| Message::Done(session, act, outcome))
     }
 
     /// Back to the conversation's last place: its tail when it was following, else its offset.
@@ -1244,13 +1103,7 @@ impl App {
         if view.follow_tail {
             operation::snap_to_end("conversation")
         } else {
-            operation::scroll_to(
-                "conversation",
-                scrollable::AbsoluteOffset {
-                    x: 0.0,
-                    y: view.scroll_offset,
-                },
-            )
+            operation::scroll_to("conversation", scrollable::AbsoluteOffset { x: 0.0, y: view.scroll_offset })
         }
     }
 
@@ -1289,7 +1142,9 @@ impl App {
             }
         }
         for view in self.views.values_mut() {
-            if (hidden || prior_session != self.selected) && let Some(editor) = &mut view.annotation {
+            if (hidden || prior_session != self.selected)
+                && let Some(editor) = &mut view.annotation
+            {
                 editor.drawing = false;
             }
             if !view.pending_attachments.is_empty() {
@@ -1319,11 +1174,7 @@ impl App {
             Message::Media(event) => return self.media_event(event),
             Message::Annotation(event) => return self.annotation_event(event),
             Message::AttachmentPaths(session, token, paths) => {
-                if self
-                    .views
-                    .get(&session)
-                    .is_some_and(|v| v.media_token == token)
-                {
+                if self.views.get(&session).is_some_and(|v| v.media_token == token) {
                     return self.attachment_paths(session, paths);
                 }
                 return Task::none();
@@ -1340,27 +1191,15 @@ impl App {
             Message::Refresh => {
                 // A slow daemon must not accumulate a new thread on each timer tick.
                 // Explicit lifecycle requests still queue a follow-up through list().
-                let list = if self.list_pending {
-                    Task::none()
-                } else {
-                    self.list()
-                };
-                let mut tasks = vec![
-                    list,
-                    self.read_daemon_settings(),
-                    self.daemon_event(daemon_ui::Event::Check),
-                ];
+                let list = if self.list_pending { Task::none() } else { self.list() };
+                let mut tasks = vec![list, self.read_daemon_settings(), self.daemon_event(daemon_ui::Event::Check)];
                 if let Some(id) = self.selected.clone() {
                     tasks.push(self.read_permissions(&id));
                 }
                 if let Some(p) = self.details.as_ref().filter(|p| !p.pending) {
                     tasks.push(self.details_load(p.id.clone()));
                 }
-                if self
-                    .changes
-                    .as_ref()
-                    .is_some_and(|c| !c.history && !c.loading)
-                {
+                if self.changes.as_ref().is_some_and(|c| !c.history && !c.loading) {
                     tasks.push(self.changes_event(changes_ui::Event::Refresh));
                 }
                 return Task::batch(tasks);
@@ -1407,33 +1246,25 @@ impl App {
             Message::Login(session, event) => return self.login_event(session, event),
             Message::ResizeWindow(direction) => {
                 // Shelf mode is locked to its edge: only its right edge is the person's
-                if self.layout.mode == layout::Mode::Shelf
-                    && !matches!(direction, iced::window::Direction::East)
-                {
+                if self.layout.mode == layout::Mode::Shelf && !matches!(direction, iced::window::Direction::East) {
                     return Task::none();
                 }
-                return iced::window::latest()
-                    .and_then(move |id| iced::window::drag_resize(id, direction));
+                return iced::window::latest().and_then(move |id| iced::window::drag_resize(id, direction));
             }
             Message::GeometryTick => {
                 if let Some(xid) = self.xid {
-                    return blocking(
-                        move || desktop::snapshot(xid),
-                        |read| Message::Geometry(Read::Poll, read),
-                    );
+                    return blocking(move || desktop::snapshot(xid), |read| Message::Geometry(Read::Poll, read));
                 }
             }
             Message::Geometry(why, read) => return self.geometry_read(why, read),
             Message::Placed(placed) => {
                 if let Some((displays, target)) = placed {
-                    self.geometry
-                        .placed(displays, target.map(|t| t.rect), Instant::now());
+                    self.geometry.placed(displays, target.map(|t| t.rect), Instant::now());
                 }
             }
             Message::SwitchPlaced(placed) => {
                 if let Some((displays, target)) = placed {
-                    self.geometry
-                        .placed(displays, target.map(|t| t.rect), Instant::now());
+                    self.geometry.placed(displays, target.map(|t| t.rect), Instant::now());
                 }
                 // the mode moved on while this was placed: placed again, for where it is now
                 if self.switching.take().is_some_and(|placed_for| placed_for != self.layout.mode) {
@@ -1518,11 +1349,7 @@ impl App {
                 let dress = iced::window::run(id, macos::dress).discard();
                 #[cfg(not(target_os = "macos"))]
                 let dress = Task::none();
-                return Task::batch([
-                    dress,
-                    iced::window::monitor_size(id).map(Message::Monitor),
-                    iced::window::run(id, x11_window).map(Message::XId),
-                ]);
+                return Task::batch([dress, iced::window::monitor_size(id).map(Message::Monitor), iced::window::run(id, x11_window).map(Message::XId)]);
             }
             Message::XId(xid) => {
                 self.xid = xid;
@@ -1579,9 +1406,7 @@ impl App {
                 return self.set_scale(settings::step_scale(self.settings.scale(), step));
             }
             Message::Layout(action) => match action {
-                layout::Action::Mode(_)
-                | layout::Action::ToggleShelf
-                | layout::Action::ToggleFull => {
+                layout::Action::Mode(_) | layout::Action::ToggleShelf | layout::Action::ToggleFull => {
                     // a plain window (the Mac) has no modes: their keys show and put away
                     // the drawer
                     if self.layout.plain {
@@ -1613,17 +1438,9 @@ impl App {
             },
             Message::Focus(forward) => return keys::step(forward),
             Message::NewSession => {
-                let agent = self
-                    .tabs
-                    .iter()
-                    .find(|tab| Some(&tab.id) == self.selected.as_ref())
-                    .map(|tab| tab.agent.clone());
+                let agent = self.tabs.iter().find(|tab| Some(&tab.id) == self.selected.as_ref()).map(|tab| tab.agent.clone());
                 return match agent {
-                    Some(agent) => self.menu_event(menu::Event::New {
-                        agent,
-                        ghost: false,
-                        workspaces: None,
-                    }),
+                    Some(agent) => self.menu_event(menu::Event::New { agent, ghost: false, workspaces: None }),
                     None if self.menu.is_some() => Task::none(),
                     None => self.menu_event(menu::Event::Toggle),
                 };
@@ -1642,12 +1459,7 @@ impl App {
             }
             Message::StepTab(delta) => {
                 let shown = self.shown_tabs();
-                let Some(at) = self
-                    .selected
-                    .as_ref()
-                    .and_then(|id| shown.iter().position(|t| &t.id == id))
-                    .or((!shown.is_empty()).then_some(0))
-                else {
+                let Some(at) = self.selected.as_ref().and_then(|id| shown.iter().position(|t| &t.id == id)).or((!shown.is_empty()).then_some(0)) else {
                     return Task::none();
                 };
                 let count = shown.len() as i32;
@@ -1659,10 +1471,7 @@ impl App {
             Message::Menu(event) => return self.menu_event(event),
             // the herring: the pages, at the one last shown, or back to the conversation
             Message::ToggleChanges => {
-                if self.changes.take().is_some()
-                    | self.settings_page.take().is_some()
-                    | std::mem::take(&mut self.agents_page.shown)
-                {
+                if self.changes.take().is_some() | self.settings_page.take().is_some() | std::mem::take(&mut self.agents_page.shown) {
                     return self.restore_scroll();
                 }
                 return self.show_page(self.last_page);
@@ -1688,11 +1497,7 @@ impl App {
             Message::Settings(event) => return self.settings_event(event),
             Message::Vm(event) => return self.vm_event(event),
             Message::SettingsReply(token, event) => {
-                if self
-                    .settings_page
-                    .as_ref()
-                    .is_some_and(|p| p.token == token)
-                {
+                if self.settings_page.as_ref().is_some_and(|p| p.token == token) {
                     return self.settings_event(event);
                 }
             }
@@ -1706,11 +1511,7 @@ impl App {
                     // `SILL_GUI_HOTKEY` overrides the shared setting: a second sill-gui beside the
                     // running one, for trying a build
                     let spec = std::env::var("SILL_GUI_HOTKEY").ok();
-                    hotkey.set(
-                        spec.as_deref()
-                            .or(settings.hotkey.as_deref())
-                            .unwrap_or(hotkey::DEFAULT),
-                    );
+                    hotkey.set(spec.as_deref().or(settings.hotkey.as_deref()).unwrap_or(hotkey::DEFAULT));
                 }
                 // the tray icon as the shared setting says (unset: shown)
                 let want = settings.tray.unwrap_or(true);
@@ -1732,10 +1533,7 @@ impl App {
             Message::Workspaces(event) => return self.workspaces_event(event),
             Message::Crosscheck(event) => return self.crosscheck_event(event),
             Message::CloseTab(id) => {
-                let ghost = self
-                    .all_sessions
-                    .iter()
-                    .any(|s| s.session_id == id && s.ghost);
+                let ghost = self.all_sessions.iter().any(|s| s.session_id == id && s.ghost);
                 if self.demo {
                     return Task::none();
                 }
@@ -1748,11 +1546,7 @@ impl App {
             }
             Message::Page(down) => {
                 let reading = self.current().is_some_and(|v| v.files.reader.is_some());
-                let ids: &[&'static str] = if reading {
-                    &["markdown-reader", "diff-reader"]
-                } else {
-                    &["conversation"]
-                };
+                let ids: &[&'static str] = if reading { &["markdown-reader", "diff-reader"] } else { &["conversation"] };
                 return keys::page(ids, down);
             }
             Message::Find(event) => return self.find_event(event),
@@ -1778,18 +1572,12 @@ impl App {
                 if self.changes.is_some() {
                     return Task::none();
                 }
-                self.changes = Some(changes_ui::ChangesPage {
-                    loading: true,
-                    ..changes_ui::ChangesPage::default()
-                });
+                self.changes = Some(changes_ui::ChangesPage { loading: true, ..changes_ui::ChangesPage::default() });
                 self.changes_load()
             }
             Page::Settings => {
                 self.changes = None;
-                self.settings_page = Some(settings_ui::SettingsPage {
-                    category: self.settings.settings_category,
-                    ..settings_ui::SettingsPage::default()
-                });
+                self.settings_page = Some(settings_ui::SettingsPage { category: self.settings.settings_category, ..settings_ui::SettingsPage::default() });
                 Task::batch([
                     self.settings_load(),
                     self.vm_event(vm_ui::Event::Read),
@@ -1830,10 +1618,7 @@ impl App {
             return self.restore_scroll();
         }
         // the backend's page: back to the session
-        if self.changes.take().is_some()
-            | self.settings_page.take().is_some()
-            | std::mem::take(&mut self.agents_page.shown)
-        {
+        if self.changes.take().is_some() | self.settings_page.take().is_some() | std::mem::take(&mut self.agents_page.shown) {
             return self.restore_scroll();
         }
         // the session's shell has the keys, Escape included (an editor in it needs it)
@@ -1853,11 +1638,7 @@ impl App {
     /// The page Escape opens from the conversation: Settings → Default page (the daemon's
     /// `default_page` setting; Changes unless set).
     fn default_page(&self) -> Page {
-        match self
-            .daemon_settings
-            .as_ref()
-            .and_then(|s| s.default_page.as_deref())
-        {
+        match self.daemon_settings.as_ref().and_then(|s| s.default_page.as_deref()) {
             Some("agents") => Page::Agents,
             Some("settings") => Page::Settings,
             _ => Page::Changes,
@@ -1867,21 +1648,13 @@ impl App {
     fn lane_update(&mut self, session: String, epoch: u64, update: lane::Update) -> Task<Message> {
         let selected = self.selected.as_deref() == Some(session.as_str());
         let selecting = self.selecting;
-        let Some(view) = self
-            .views
-            .get_mut(&session)
-            .filter(|v| v.lane_epoch == epoch)
-        else {
+        let Some(view) = self.views.get_mut(&session).filter(|v| v.lane_epoch == epoch) else {
             return Task::none();
         };
         if !matches!(update, lane::Update::Event(_)) {
             trace(|| match &update {
                 lane::Update::Snapshot(c) => {
-                    format!(
-                        "{session} lane {epoch}: snapshot of {} items at {}",
-                        c.items().len(),
-                        c.seq
-                    )
+                    format!("{session} lane {epoch}: snapshot of {} items at {}", c.items().len(), c.seq)
                 }
                 other => format!("{session} lane {epoch}: {other:?}"),
             });
@@ -1934,34 +1707,14 @@ impl App {
         let began_summary = !was_summarizing && view.summarizing();
         let ended_now = !was_ended && view.ended();
         let followed_from = view.scroll_offset;
-        let find_task = if grew && selected {
-            self.find_streamed()
-        } else {
-            Task::none()
-        };
-        let snap = grew
-            && selected
-            && !selecting
-            && self
-                .views
-                .get(&session)
-                .is_some_and(|v| v.follow_tail && v.conversation_shown());
-        let mut tasks: Vec<Task<Message>> = checks
-            .into_iter()
-            .map(|(id, key)| {
-                self.act(
-                    &session,
-                    Act::Check(id),
-                    "_sill/submissions.get",
-                    json!(key),
-                )
-            })
-            .collect();
+        let find_task = if grew && selected { self.find_streamed() } else { Task::none() };
+        let snap = grew && selected && !selecting && self.views.get(&session).is_some_and(|v| v.follow_tail && v.conversation_shown());
+        let mut tasks: Vec<Task<Message>> =
+            checks.into_iter().map(|(id, key)| self.act(&session, Act::Check(id), "_sill/submissions.get", json!(key))).collect();
         tasks.push(find_task);
         if connection_lost {
             if self.daemon.problem.is_none() && !self.daemon.restarting {
-                self.daemon.problem =
-                    Some("Checking daemon after a session connection interruption…".into());
+                self.daemon.problem = Some("Checking daemon after a session connection interruption…".into());
             }
             tasks.push(self.daemon_event(daemon_ui::Event::Check));
         }
@@ -2023,9 +1776,13 @@ impl App {
             };
             for id in wanted {
                 let bytes = (|| -> anyhow::Result<Option<Vec<u8>>> {
-                    let installed: sill_proto::agent_admin::Installation = client.call("_sill/registry.installed", sill_proto::agent_admin::AgentKey { agent_id: id.clone() })?;
+                    let installed: sill_proto::agent_admin::Installation =
+                        client.call("_sill/registry.installed", sill_proto::agent_admin::AgentKey { agent_id: id.clone() })?;
                     let Some(installed) = installed.installed else { return Ok(None) };
-                    sill_client::agents::icon(&client, sill_proto::agent_admin::EntryKey { entry_id: id.clone(), version: installed.version, source: installed.source })
+                    sill_client::agents::icon(
+                        &client,
+                        sill_proto::agent_admin::EntryKey { entry_id: id.clone(), version: installed.version, source: installed.source },
+                    )
                 })()
                 .ok()
                 .flatten();
@@ -2034,10 +1791,7 @@ impl App {
                 }
             }
         });
-        Task::run(
-            iced::futures::stream::unfold(rx, |rx| async move { rx.recv().await.ok().map(|m| (m, rx)) }),
-            |m| m,
-        )
+        Task::run(iced::futures::stream::unfold(rx, |rx| async move { rx.recv().await.ok().map(|m| (m, rx)) }), |m| m)
     }
 
     /// Read the agents a session can start with, for the window with no open session.
@@ -2049,10 +1803,7 @@ impl App {
         if std::mem::replace(&mut self.start_agents_pending, true) {
             return Task::none();
         }
-        blocking(
-            move || actions.reading(sill_client::sessions::startable).map_err(|e| format!("{e:#}")),
-            Message::StartAgents,
-        )
+        blocking(move || actions.reading(sill_client::sessions::startable).map_err(|e| format!("{e:#}")), Message::StartAgents)
     }
 
     fn listed(&mut self, result: Result<Vec<Session>, String>) -> Task<Message> {
@@ -2081,27 +1832,10 @@ impl App {
         let icons = self.agent_icons_load(sessions.iter().map(|s| s.agent.clone()).collect::<Vec<_>>());
         // Refreshes may arrive newest-first or in activity order. Existing tab positions are
         // stable; newly discovered/reopened sessions append, oldest first within the batch.
-        let positions: BTreeMap<String, usize> = self
-            .tabs
-            .iter()
-            .enumerate()
-            .map(|(index, tab)| (tab.id.clone(), index))
-            .collect();
-        let created: BTreeMap<&str, u64> = sessions
-            .iter()
-            .map(|s| (s.session_id.as_str(), s.created_at.parse().unwrap_or(0)))
-            .collect();
-        let drafts: Vec<_> = self
-            .tabs
-            .iter()
-            .filter(|tab| self.unsaved_source(&tab.id))
-            .cloned()
-            .collect();
-        self.tabs = sessions
-            .iter()
-            .filter(|s| s.ended_at.is_none())
-            .map(Tab::from)
-            .collect();
+        let positions: BTreeMap<String, usize> = self.tabs.iter().enumerate().map(|(index, tab)| (tab.id.clone(), index)).collect();
+        let created: BTreeMap<&str, u64> = sessions.iter().map(|s| (s.session_id.as_str(), s.created_at.parse().unwrap_or(0))).collect();
+        let drafts: Vec<_> = self.tabs.iter().filter(|tab| self.unsaved_source(&tab.id)).cloned().collect();
+        self.tabs = sessions.iter().filter(|s| s.ended_at.is_none()).map(Tab::from).collect();
         // An externally ended session retains its tab while it holds unsaved source edits.
         for tab in drafts {
             if !self.tabs.iter().any(|t| t.id == tab.id) {
@@ -2120,18 +1854,12 @@ impl App {
         self.prune_closed();
         // the window with no open session offers the agents: read them as it empties, and again
         // after a failed read
-        let start = if self.tabs.is_empty() && (!positions.is_empty() || !matches!(self.start_agents, Some(Ok(_)))) {
-            self.start_agents_load()
-        } else {
-            Task::none()
-        };
+        let start =
+            if self.tabs.is_empty() && (!positions.is_empty() || !matches!(self.start_agents, Some(Ok(_)))) { self.start_agents_load() } else { Task::none() };
         // A stopped jail has no live processes or exposed ports, even while its tab (or an
         // externally ended session's unsaved source) remains open. Invalidate in-flight polls.
         for (id, view) in &mut self.views {
-            if !sessions
-                .iter()
-                .any(|s| s.session_id == *id && s.running && s.ended_at.is_none())
-            {
+            if !sessions.iter().any(|s| s.session_id == *id && s.running && s.ended_at.is_none()) {
                 view.processes.read(vec![], None);
             }
         }
@@ -2140,11 +1868,7 @@ impl App {
             .tabs
             .iter()
             .filter(|t| t.running)
-            .filter(|t| {
-                self.views
-                    .get(&t.id)
-                    .is_none_or(|v| matches!(v.status, Status::Closed | Status::NotRunning))
-            })
+            .filter(|t| self.views.get(&t.id).is_none_or(|v| matches!(v.status, Status::Closed | Status::NotRunning)))
             .map(|t| t.id.clone())
             .collect();
         for id in watch {
@@ -2152,11 +1876,8 @@ impl App {
         }
         let mut tasks = vec![start];
         if let Some(key) = self.initial.take() {
-            let found: Vec<&Session> = sessions
-                .iter()
-                .filter(|s| s.ended_at.is_none())
-                .filter(|s| s.session_id == key || s.session_id.starts_with(&key) || s.title == key)
-                .collect();
+            let found: Vec<&Session> =
+                sessions.iter().filter(|s| s.ended_at.is_none()).filter(|s| s.session_id == key || s.session_id.starts_with(&key) || s.title == key).collect();
             let exact = found.iter().find(|s| s.session_id == key);
             match (exact, found.as_slice()) {
                 (Some(s), _) | (None, [s]) => {
@@ -2167,10 +1888,7 @@ impl App {
                 (None, _) => self.list_error = Some(format!("ambiguous session {key}")),
             }
         }
-        if let Some(id) = self
-            .pending_choose
-            .take_if(|id| self.tabs.iter().any(|t| &t.id == id))
-        {
+        if let Some(id) = self.pending_choose.take_if(|id| self.tabs.iter().any(|t| &t.id == id)) {
             let choose = self.choose(id);
             tasks.push(choose.chain(self.focus_prompt()));
         }
@@ -2181,10 +1899,7 @@ impl App {
 
     /// The session holds source edits not yet saved: its tab stays when it ends.
     fn unsaved_source(&self, id: &str) -> bool {
-        self.views
-            .get(id)
-            .and_then(|v| v.reader.as_ref())
-            .is_some_and(|r| r.dirty || r.saving.is_some())
+        self.views.get(id).and_then(|v| v.reader.as_ref()).is_some_and(|r| r.dirty || r.saving.is_some())
     }
 
     /// After `tabs` lost a session that ended or went: its view goes, and with it its lane and
@@ -2193,11 +1908,7 @@ impl App {
         let open: BTreeSet<&str> = self.tabs.iter().map(|t| t.id.as_str()).collect();
         self.views.retain(|id, _| open.contains(id.as_str()));
         self.tab_history.retain(|id| open.contains(id.as_str()));
-        if self
-            .selected
-            .as_ref()
-            .is_some_and(|s| !open.contains(s.as_str()))
-        {
+        if self.selected.as_ref().is_some_and(|s| !open.contains(s.as_str())) {
             self.selected = None;
         }
     }
@@ -2207,11 +1918,7 @@ impl App {
         if self.selected.is_some() {
             return Task::none();
         }
-        let next = self
-            .tab_history
-            .last()
-            .cloned()
-            .or_else(|| self.tabs.iter().find(|t| t.running).map(|t| t.id.clone()));
+        let next = self.tab_history.last().cloned().or_else(|| self.tabs.iter().find(|t| t.running).map(|t| t.id.clone()));
         match next {
             Some(id) => self.choose(id),
             None => Task::none(),
@@ -2249,10 +1956,7 @@ impl App {
             .iter()
             .rev()
             .filter(|id| id.as_str() != session)
-            .find(|id| {
-                self.tabs.iter().any(|t| &t.id == *id)
-                    && !self.views.get(*id).is_some_and(SessionView::summarizing)
-            })
+            .find(|id| self.tabs.iter().any(|t| &t.id == *id) && !self.views.get(*id).is_some_and(SessionView::summarizing))
             .cloned();
         match back {
             Some(id) => self.choose(id),
@@ -2267,19 +1971,14 @@ impl App {
         if !self.tabs.iter().any(|t| t.id == id) {
             return Task::none();
         }
-        let again = self.selected.as_deref() == Some(id.as_str())
-            && self.changes.is_none()
-            && !details_open;
+        let again = self.selected.as_deref() == Some(id.as_str()) && self.changes.is_none() && !details_open;
         self.changes = None;
         self.settings_page = None;
         self.agents_page.shown = false;
         self.tab_history.retain(|visited| visited != &id);
         self.tab_history.push(id.clone());
         self.selected = Some(id.clone());
-        let view = self
-            .views
-            .entry(id.clone())
-            .or_insert_with(|| SessionView::new(&id));
+        let view = self.views.entry(id.clone()).or_insert_with(|| SessionView::new(&id));
         view.seen();
         // the person opened it: attaching may start it now
         if let Some(lane) = &view.lane {
@@ -2352,9 +2051,7 @@ impl App {
         };
         match settled {
             // it never reached the agent: the text goes back where it was typed, if that is free
-            Some((id, Settled::Kept))
-                if view.draft.text().trim().is_empty() && view.attachments.is_empty() =>
-            {
+            Some((id, Settled::Kept)) if view.draft.text().trim().is_empty() && view.attachments.is_empty() => {
                 if let Some(pending) = view.outbox.take(&id) {
                     let reason = match &pending.state {
                         sill_client::outbox::State::Failed(reason) => reason.clone(),
@@ -2365,9 +2062,7 @@ impl App {
                     view.workspaces.branch_after_commit = false;
                     view.draft = editor::Editor::with_text(pending.text());
                     view.attachments = view.pending_attachments.remove(&id).unwrap_or_else(|| pending.submit.attachments.into_iter().map(Into::into).collect());
-                    view.failed = Some(format!(
-                        "Not sent: {reason}. The prompt is back in the composer."
-                    ));
+                    view.failed = Some(format!("Not sent: {reason}. The prompt is back in the composer."));
                     if self.selected.as_deref() == Some(session.as_str()) {
                         return operation::focus("prompt");
                     }
@@ -2378,11 +2073,7 @@ impl App {
                 if let Some(problem) = outcome.problem() {
                     let what = match act {
                         Act::Resume => "Sending the held prompt",
-                        Act::Create
-                        | Act::Reopen(_)
-                        | Act::End(_)
-                        | Act::Delete
-                        | Act::Changes(_) => unreachable!(),
+                        Act::Create | Act::Reopen(_) | Act::End(_) | Act::Delete | Act::Changes(_) => unreachable!(),
                         Act::Stop => "Stopping the turn",
                         Act::Answer(_) => "Answering the question",
                         Act::Unqueue => "Removing the queued prompt",
@@ -2394,9 +2085,7 @@ impl App {
                     };
                     let uncertain = matches!(outcome, Outcome::Uncertain(_));
                     view.failed = Some(if uncertain {
-                        format!(
-                            "{what}: the connection was lost ({problem}); it may have taken effect — the conversation shows what did."
-                        )
+                        format!("{what}: the connection was lost ({problem}); it may have taken effect — the conversation shows what did.")
                     } else {
                         format!("{what}: {problem}")
                     });
@@ -2421,16 +2110,8 @@ impl App {
         }
         let scroll_offset = view.scroll_offset;
         let find_task = self.find_streamed();
-        let snap = !self.selecting
-            && self
-                .views
-                .get("demo")
-                .is_some_and(|v| v.follow_tail && v.conversation_shown());
-        if snap {
-            Task::batch([find_task, keys::follow_end("conversation", scroll_offset)])
-        } else {
-            find_task
-        }
+        let snap = !self.selecting && self.views.get("demo").is_some_and(|v| v.follow_tail && v.conversation_shown());
+        if snap { Task::batch([find_task, keys::follow_end("conversation", scroll_offset)]) } else { find_task }
     }
 }
 

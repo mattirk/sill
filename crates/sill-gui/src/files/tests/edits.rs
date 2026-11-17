@@ -5,37 +5,17 @@ use super::*;
 fn source_is_editable_and_binary_file_errors_are_visible() {
     let mut app = app();
     let file = path("/home/demo/project/README.md");
-    act(
-        &mut app,
-        Action::Open {
-            path: file.clone(),
-            repo: None,
-        },
-    );
+    act(&mut app, Action::Open { path: file.clone(), repo: None });
     act(&mut app, Action::Source);
     let original = app.views["demo"].reader.as_ref().unwrap().content.text();
     assert!(original.contains("Your session's files"));
-    act(
-        &mut app,
-        Action::Text(text_editor::Action::Edit(text_editor::Edit::Insert('X'))),
-    );
-    assert_eq!(
-        app.views["demo"].reader.as_ref().unwrap().content.text(),
-        format!("X{original}")
-    );
+    act(&mut app, Action::Text(text_editor::Action::Edit(text_editor::Edit::Insert('X'))));
+    assert_eq!(app.views["demo"].reader.as_ref().unwrap().content.text(), format!("X{original}"));
     assert!(app.views["demo"].reader.as_ref().unwrap().dirty);
     let open = app.views.get_mut("demo").unwrap().files.open(file, None);
     let (serial, open) = pending(&mut app, "demo", open);
     reply(&mut app, "demo", serial, open, Err("Binary file".into()));
-    assert_eq!(
-        files(&app, "demo")
-            .reader
-            .as_ref()
-            .unwrap()
-            .error
-            .as_deref(),
-        Some("Binary file")
-    );
+    assert_eq!(files(&app, "demo").reader.as_ref().unwrap().error.as_deref(), Some("Binary file"));
 }
 
 #[test]
@@ -46,97 +26,45 @@ fn unsaved_source_survives_navigation_and_close_requires_explicit_discard() {
     let edited = app.views["demo"].reader.as_ref().unwrap().content.text();
     let _ = app.update(Message::Choose("b".into()));
     let _ = app.update(Message::Choose("demo".into()));
-    assert_eq!(
-        app.views["demo"].reader.as_ref().unwrap().content.text(),
-        edited
-    );
+    assert_eq!(app.views["demo"].reader.as_ref().unwrap().content.text(), edited);
     let _ = app.update(Message::Escape);
     assert!(app.views["demo"].reader.as_ref().unwrap().dirty);
     assert!(app.drawer.pending_discard.is_some());
     act(&mut app, Action::CancelDiscard);
     assert!(app.drawer.pending_discard.is_none());
     act(&mut app, Action::RefreshFile);
-    assert_eq!(
-        app.views["demo"].reader.as_ref().unwrap().content.text(),
-        edited
-    );
+    assert_eq!(app.views["demo"].reader.as_ref().unwrap().content.text(), edited);
     act(&mut app, Action::CancelDiscard);
     let _ = app.update(Message::CloseRequested);
     assert!(app.drawer.pending_discard.is_some());
     act(&mut app, Action::CancelDiscard);
-    act(
-        &mut app,
-        Action::Open {
-            path: path("/home/demo/project/README.md"),
-            repo: None,
-        },
-    );
-    assert_eq!(
-        app.views["demo"].reader.as_ref().unwrap().content.text(),
-        edited
-    );
+    act(&mut app, Action::Open { path: path("/home/demo/project/README.md"), repo: None });
+    assert_eq!(app.views["demo"].reader.as_ref().unwrap().content.text(), edited);
     act(&mut app, Action::DiscardEdits);
     assert!(!app.views["demo"].reader.as_ref().unwrap().dirty);
-    assert!(
-        app.views["demo"]
-            .files
-            .reader
-            .as_ref()
-            .unwrap()
-            .path
-            .display
-            .ends_with("README.md")
-    );
+    assert!(app.views["demo"].files.reader.as_ref().unwrap().path.display.ends_with("README.md"));
 }
 #[test]
 fn markdown_preview_and_diff_are_read_only_but_source_edits_survive_preview() {
     let mut app = app();
-    act(
-        &mut app,
-        Action::Open {
-            path: path("/home/demo/project/README.md"),
-            repo: None,
-        },
-    );
+    act(&mut app, Action::Open { path: path("/home/demo/project/README.md"), repo: None });
     let original = app.views["demo"].reader.as_ref().unwrap().content.text();
     insert(&mut app, 'X');
-    assert_eq!(
-        app.views["demo"].reader.as_ref().unwrap().content.text(),
-        original
-    );
+    assert_eq!(app.views["demo"].reader.as_ref().unwrap().content.text(), original);
     act(&mut app, Action::Source);
     insert(&mut app, 'X');
     act(&mut app, Action::Source);
-    assert!(
-        app.views["demo"]
-            .reader
-            .as_ref()
-            .unwrap()
-            .markdown
-            .is_some()
-    );
+    assert!(app.views["demo"].reader.as_ref().unwrap().markdown.is_some());
     assert!(app.views["demo"].reader.as_ref().unwrap().dirty);
     insert(&mut app, 'Y');
-    assert_eq!(
-        app.views["demo"].reader.as_ref().unwrap().content.text(),
-        format!("X{original}")
-    );
+    assert_eq!(app.views["demo"].reader.as_ref().unwrap().content.text(), format!("X{original}"));
     act(&mut app, Action::CloseViewer);
     act(&mut app, Action::DiscardEdits);
-    act(
-        &mut app,
-        Action::Open {
-            path: path("/home/demo/project/src/main.rs"),
-            repo: Some(path("/home/demo/project")),
-        },
-    );
+    act(&mut app, Action::Open { path: path("/home/demo/project/src/main.rs"), repo: Some(path("/home/demo/project")) });
     act(&mut app, Action::Source);
     let original = app.views["demo"].reader.as_ref().unwrap().content.text();
     insert(&mut app, 'Z');
-    assert_eq!(
-        app.views["demo"].reader.as_ref().unwrap().content.text(),
-        original
-    );
+    assert_eq!(app.views["demo"].reader.as_ref().unwrap().content.text(), original);
     assert!(!app.views["demo"].reader.as_ref().unwrap().dirty);
 }
 #[test]
@@ -160,13 +88,8 @@ fn save_writes_exact_source_and_failed_save_keeps_the_edits() {
     app.actions = Some(sill_client::actions::Actions::new(connector(vec![client])));
     let server = std::thread::spawn(move || {
         let request = peer.expect("_sill/files.write");
-        assert_eq!(
-            request["params"]["path"]["display"],
-            "/home/demo/project/src/main.rs"
-        );
-        let bytes =
-            sill_proto::admin::decode_bytes(request["params"]["bytes_base64"].as_str().unwrap())
-                .unwrap();
+        assert_eq!(request["params"]["path"]["display"], "/home/demo/project/src/main.rs");
+        let bytes = sill_proto::admin::decode_bytes(request["params"]["bytes_base64"].as_str().unwrap()).unwrap();
         assert_eq!(bytes, wire.as_bytes());
         peer.reply(&request, serde_json::json!({}));
         let request = peer.expect("_sill/files.write");
@@ -175,21 +98,12 @@ fn save_writes_exact_source_and_failed_save_keeps_the_edits() {
     let task = app.update(Message::Files(Action::SaveFile));
     settle_task(&mut app, task);
     assert!(!app.views["demo"].reader.as_ref().unwrap().dirty);
-    assert_eq!(
-        app.views["demo"].files.reader.as_ref().unwrap().text,
-        expected
-    );
+    assert_eq!(app.views["demo"].files.reader.as_ref().unwrap().text, expected);
     act(&mut app, Action::History(false));
-    assert_eq!(
-        app.views["demo"].reader.as_ref().unwrap().content.text(),
-        "let café = 1;\r\n// end"
-    );
+    assert_eq!(app.views["demo"].reader.as_ref().unwrap().content.text(), "let café = 1;\r\n// end");
     assert!(app.views["demo"].reader.as_ref().unwrap().dirty);
     act(&mut app, Action::History(true));
-    assert_eq!(
-        app.views["demo"].reader.as_ref().unwrap().content.text(),
-        expected
-    );
+    assert_eq!(app.views["demo"].reader.as_ref().unwrap().content.text(), expected);
     assert!(!app.views["demo"].reader.as_ref().unwrap().dirty);
     insert(&mut app, 'Y');
     let second = app.views["demo"].reader.as_ref().unwrap().content.text();
@@ -213,34 +127,13 @@ fn a_save_reply_does_not_mark_newer_edits_saved_or_overwrite_another_file() {
     r.saving = Some(900);
     insert(&mut app, 'Y');
     let edited = app.views["demo"].reader.as_ref().unwrap().content.text();
-    act(
-        &mut app,
-        Action::Saved {
-            session: "demo".into(),
-            key: key.clone(),
-            serial: 900,
-            text: saved.clone(),
-            outcome: Outcome::Done(serde_json::json!({})),
-        },
-    );
+    act(&mut app, Action::Saved { session: "demo".into(), key: key.clone(), serial: 900, text: saved.clone(), outcome: Outcome::Done(serde_json::json!({})) });
     let r = app.views["demo"].reader.as_ref().unwrap();
     assert!(r.dirty);
     assert_eq!(r.saved, saved);
     assert_eq!(r.content.text(), edited);
-    act(
-        &mut app,
-        Action::Saved {
-            session: "demo".into(),
-            key,
-            serial: 900,
-            text: "stale".into(),
-            outcome: Outcome::Done(serde_json::json!({})),
-        },
-    );
-    assert_eq!(
-        app.views["demo"].reader.as_ref().unwrap().content.text(),
-        edited
-    );
+    act(&mut app, Action::Saved { session: "demo".into(), key, serial: 900, text: "stale".into(), outcome: Outcome::Done(serde_json::json!({})) });
+    assert_eq!(app.views["demo"].reader.as_ref().unwrap().content.text(), edited);
 }
 
 #[test]
@@ -253,26 +146,14 @@ fn an_ended_session_keeps_its_unsaved_buffer_and_uncertain_save_does_not_clear_i
     let edited = r.content.text();
     let key = r.key.clone();
     r.saving = Some(800);
-    act(
-        &mut app,
-        Action::Saved {
-            session: "demo".into(),
-            key,
-            serial: 800,
-            text: edited.clone(),
-            outcome: Outcome::Uncertain("connection lost".into()),
-        },
-    );
+    act(&mut app, Action::Saved { session: "demo".into(), key, serial: 800, text: edited.clone(), outcome: Outcome::Uncertain("connection lost".into()) });
     let r = app.views["demo"].reader.as_ref().unwrap();
     assert!(r.dirty);
     assert_eq!(r.content.text(), edited);
     assert!(r.notice.as_deref().unwrap().contains("outcome unknown"));
     let _ = app.listed(Ok(vec![]));
     assert!(app.tabs.iter().any(|t| t.id == "demo"));
-    assert_eq!(
-        app.views["demo"].reader.as_ref().unwrap().content.text(),
-        edited
-    );
+    assert_eq!(app.views["demo"].reader.as_ref().unwrap().content.text(), edited);
 }
 
 #[test]
@@ -283,23 +164,10 @@ fn source_extent_accounts_for_tabs_wide_characters_and_edits() {
     let mut app = app();
     open_source(&mut app);
     act(&mut app, Action::Text(text_editor::Action::SelectAll));
-    act(
-        &mut app,
-        Action::Text(text_editor::Action::Edit(text_editor::Edit::Paste(
-            std::sync::Arc::new("x".repeat(300)),
-        ))),
-    );
-    assert_eq!(
-        app.views["demo"].reader.as_ref().unwrap().source_columns,
-        300
-    );
+    act(&mut app, Action::Text(text_editor::Action::Edit(text_editor::Edit::Paste(std::sync::Arc::new("x".repeat(300))))));
+    assert_eq!(app.views["demo"].reader.as_ref().unwrap().source_columns, 300);
     act(&mut app, Action::Text(text_editor::Action::SelectAll));
-    act(
-        &mut app,
-        Action::Text(text_editor::Action::Edit(text_editor::Edit::Paste(
-            std::sync::Arc::new("short".into()),
-        ))),
-    );
+    act(&mut app, Action::Text(text_editor::Action::Edit(text_editor::Edit::Paste(std::sync::Arc::new("short".into())))));
     assert_eq!(app.views["demo"].reader.as_ref().unwrap().source_columns, 5);
 }
 
@@ -310,12 +178,7 @@ fn source_history_restores_selection_extent_and_respects_preview_and_reload() {
     let original = app.views["demo"].reader.as_ref().unwrap().content.text();
     act(&mut app, Action::Text(text_editor::Action::SelectAll));
     let cursor = app.views["demo"].reader.as_ref().unwrap().content.cursor();
-    act(
-        &mut app,
-        Action::Text(text_editor::Action::Edit(text_editor::Edit::Paste(
-            std::sync::Arc::new("long".repeat(100)),
-        ))),
-    );
+    act(&mut app, Action::Text(text_editor::Action::Edit(text_editor::Edit::Paste(std::sync::Arc::new("long".repeat(100))))));
     act(&mut app, Action::History(false));
     let r = app.views["demo"].reader.as_ref().unwrap();
     assert_eq!(r.content.text(), original);
@@ -323,25 +186,16 @@ fn source_history_restores_selection_extent_and_respects_preview_and_reload() {
     assert!(!r.dirty);
     assert_eq!(r.source_columns, source_columns(&original));
     act(&mut app, Action::History(true));
-    assert_eq!(
-        app.views["demo"].reader.as_ref().unwrap().source_columns,
-        400
-    );
+    assert_eq!(app.views["demo"].reader.as_ref().unwrap().source_columns, 400);
     act(&mut app, Action::Source);
     act(&mut app, Action::History(false));
-    assert_eq!(
-        app.views["demo"].reader.as_ref().unwrap().content.text(),
-        "long".repeat(100)
-    );
+    assert_eq!(app.views["demo"].reader.as_ref().unwrap().content.text(), "long".repeat(100));
     act(&mut app, Action::Source);
     act(&mut app, Action::History(false));
     act(&mut app, Action::RefreshFile);
     let refreshed = app.views["demo"].reader.as_ref().unwrap().content.text();
     act(&mut app, Action::History(true));
-    assert_eq!(
-        app.views["demo"].reader.as_ref().unwrap().content.text(),
-        refreshed
-    );
+    assert_eq!(app.views["demo"].reader.as_ref().unwrap().content.text(), refreshed);
 }
 
 /// A trackpad reports both axes in nearly every wheel event, and the source editor sits in a
@@ -355,10 +209,7 @@ fn source_scrolls_down_right_after_scrolling_sideways() {
     open_source(&mut app);
     let long = format!("{}\n", "x".repeat(600)).repeat(200);
     act(&mut app, Action::Text(text_editor::Action::SelectAll));
-    act(
-        &mut app,
-        Action::Text(text_editor::Action::Edit(text_editor::Edit::Paste(long.into()))),
-    );
+    act(&mut app, Action::Text(text_editor::Action::Edit(text_editor::Edit::Paste(long.into()))));
     let wheel = |x, y| iced::Event::Mouse(WheelScrolled { delta: Pixels { x, y } });
     let scrolled = |events: Vec<iced::Event>| {
         let mut ui = crate::tests::simulator(&app, (1000.0, 700.0));
@@ -366,15 +217,9 @@ fn source_scrolls_down_right_after_scrolling_sideways() {
         let bounds = ui.find(iced_test::selector::id("file-reader")).expect("the source editor").bounds();
         ui.point_at(iced::Point::new(bounds.x + 120.0, bounds.center_y()));
         let _ = ui.simulate(events);
-        ui.into_messages()
-            .filter(|m| matches!(m, Message::Files(Action::Text(text_editor::Action::Scroll { lines })) if *lines > 0))
-            .count()
+        ui.into_messages().filter(|m| matches!(m, Message::Files(Action::Text(text_editor::Action::Scroll { lines })) if *lines > 0)).count()
     };
     assert_eq!(scrolled(vec![wheel(-3.0, -80.0)]), 1, "a slight sideways drift still scrolls down");
     assert_eq!(scrolled(vec![wheel(-80.0, -3.0)]), 0, "a sideways scroll is the scrollable's");
-    assert_eq!(
-        scrolled(vec![wheel(-80.0, 0.0), wheel(-2.0, -80.0)]),
-        1,
-        "down right after sideways"
-    );
+    assert_eq!(scrolled(vec![wheel(-80.0, 0.0), wheel(-2.0, -80.0)]), 1, "down right after sideways");
 }

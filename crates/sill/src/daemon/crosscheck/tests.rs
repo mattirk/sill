@@ -17,20 +17,39 @@ fn only_the_report_asked_for_is_a_review() {
         assert!(report.problems.is_empty());
     }
     // an answer sill cannot read is never "no problems"
-    for invalid in ["Looks good to me", "{}", r#"{"problems":[]}"#, r#"{"summary":"fine","problems":null}"#, r#"{"summary":"  ","problems":[]}"#, r#"{"summary":"fine","problems":[{"title":" "}]}"#, r#"{"summary":"fine""#] {
+    for invalid in [
+        "Looks good to me",
+        "{}",
+        r#"{"problems":[]}"#,
+        r#"{"summary":"fine","problems":null}"#,
+        r#"{"summary":"  ","problems":[]}"#,
+        r#"{"summary":"fine","problems":[{"title":" "}]}"#,
+        r#"{"summary":"fine""#,
+    ] {
         assert!(decode_report(invalid).is_err(), "{invalid}");
     }
 }
 
 #[test]
 fn problems_keep_their_order_and_only_places_inside_the_repository() {
-    let report = decode_report(r#"{"summary":"Two things.","problems":[
+    let report = decode_report(
+        r#"{"summary":"Two things.","problems":[
         {"title":"First.","path":"src/lib.rs","line":12,"detail":"Why."},
         {"title":"Second.","path":"/etc/passwd","line":3},
         {"title":"Third.","path":"../outside","line":"7"},
-        {"title":"Fourth.","path":null,"line":4,"detail":null}]}"#).unwrap();
+        {"title":"Fourth.","path":null,"line":4,"detail":null}]}"#,
+    )
+    .unwrap();
     let got: Vec<_> = report.problems.iter().map(|p| (p.id.as_str(), p.title.as_str(), p.path.as_deref(), p.line)).collect();
-    assert_eq!(got, [("r0-p0", "First.", Some("src/lib.rs"), Some(12)), ("r0-p1", "Second.", None, None), ("r0-p2", "Third.", None, None), ("r0-p3", "Fourth.", None, None)]);
+    assert_eq!(
+        got,
+        [
+            ("r0-p0", "First.", Some("src/lib.rs"), Some(12)),
+            ("r0-p1", "Second.", None, None),
+            ("r0-p2", "Third.", None, None),
+            ("r0-p3", "Fourth.", None, None)
+        ]
+    );
     assert_eq!(report.problems[0].detail, "Why.");
     let many = format!(r#"{{"summary":"Many.","problems":[{}]}}"#, (0..12).map(|i| format!(r#"{{"title":"Problem {i}."}}"#)).collect::<Vec<_>>().join(","));
     let report = decode_report(&many).unwrap();
@@ -58,8 +77,17 @@ fn steps_are_what_the_reviewer_did_and_the_answer_is_its_last_message() {
 #[test]
 fn the_prompt_names_the_copy_the_base_and_what_was_asked() {
     let run = api::Run {
-        run_id: "run".into(), workspace_id: "workspace".into(), session_id: "origin".into(), state_tree: "tree".into(), base: "abc123".into(),
-        state: "reviewing".into(), detail: String::new(), reviewers: vec![], problems: vec![], created_at: "0".into(), stale: false,
+        run_id: "run".into(),
+        workspace_id: "workspace".into(),
+        session_id: "origin".into(),
+        state_tree: "tree".into(),
+        base: "abc123".into(),
+        state: "reviewing".into(),
+        detail: String::new(),
+        reviewers: vec![],
+        problems: vec![],
+        created_at: "0".into(),
+        stale: false,
     };
     let text = prompt(&run, Path::new("/data/crosschecks/run/review-0"), "make the test pass");
     for part in ["/data/crosschecks/run/review-0", "refs/crosscheck/base (abc123)", "make the test pass", "\"problems\"", "At most 7 problems", "20 minutes"] {
@@ -71,10 +99,24 @@ fn the_prompt_names_the_copy_the_base_and_what_was_asked() {
 #[test]
 fn a_failed_review_says_why_and_reviewers_are_bounded() {
     let mut run = api::Run {
-        run_id: "run".into(), workspace_id: "workspace".into(), session_id: "origin".into(), state_tree: "tree".into(), base: "base".into(),
-        state: "reviewing".into(), detail: String::new(),
-        reviewers: vec![api::Participant { reviewer: api::Reviewer { name: String::new(), agent: "codex".into(), options: Default::default() }, session_id: None, state: "running".into(), summary: String::new(), activity: vec!["Read a file".into()], error: None }],
-        problems: vec![], created_at: "0".into(), stale: false,
+        run_id: "run".into(),
+        workspace_id: "workspace".into(),
+        session_id: "origin".into(),
+        state_tree: "tree".into(),
+        base: "base".into(),
+        state: "reviewing".into(),
+        detail: String::new(),
+        reviewers: vec![api::Participant {
+            reviewer: api::Reviewer { name: String::new(), agent: "codex".into(), options: Default::default() },
+            session_id: None,
+            state: "running".into(),
+            summary: String::new(),
+            activity: vec!["Read a file".into()],
+            error: None,
+        }],
+        problems: vec![],
+        created_at: "0".into(),
+        stale: false,
     };
     fail(&mut run, &anyhow::anyhow!("inner cause").context("Stopped after 20 minutes"));
     assert_eq!((run.state.as_str(), run.detail.as_str(), run.reviewers[0].state.as_str()), ("failed", "Stopped after 20 minutes", "failed"));

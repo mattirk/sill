@@ -59,9 +59,10 @@ fn fill(from: &Path, to: &Path, how: How, itself: &Path, top: bool) -> Result<()
 }
 
 fn cannot_share(error: &anyhow::Error) -> bool {
-    matches!(error.downcast_ref::<rustix::io::Errno>(),
-        Some(&rustix::io::Errno::OPNOTSUPP | &rustix::io::Errno::XDEV |
-             &rustix::io::Errno::NOTTY | &rustix::io::Errno::INVAL))
+    matches!(
+        error.downcast_ref::<rustix::io::Errno>(),
+        Some(&rustix::io::Errno::OPNOTSUPP | &rustix::io::Errno::XDEV | &rustix::io::Errno::NOTTY | &rustix::io::Errno::INVAL)
+    )
 }
 
 fn copy_entry(src: &Path, dst: &Path, how: How, itself: &Path) -> Result<()> {

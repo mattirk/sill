@@ -114,7 +114,9 @@ fn independent_copy(source: &Path, base: &str, commit: &str, output: &Path) -> R
         let mut pack = source_git.cmd();
         pack.args(["-c", "pack.threads=1", "pack-objects", "--revs"])
             .arg(output.join(".git/objects/pack/pack"))
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let mut child = pack.spawn().context("pack Crosscheck objects")?;
         {
             let mut stdin = child.stdin.take().context("Crosscheck pack stdin")?;

@@ -38,11 +38,7 @@ fn login_env() -> &'static BTreeMap<String, String> {
     static ENV: OnceLock<BTreeMap<String, String>> = OnceLock::new();
     ENV.get_or_init(|| {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        let read = Command::new(&shell)
-            .args(["-l", "-c", "/usr/bin/env -0"])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output();
+        let read = Command::new(&shell).args(["-l", "-c", "/usr/bin/env -0"]).stdin(Stdio::null()).stderr(Stdio::null()).output();
         let mut env: BTreeMap<String, String> = match read {
             Ok(out) if out.status.success() => out
                 .stdout
@@ -71,16 +67,11 @@ fn resolve(program: &str, path: &str) -> Option<PathBuf> {
     }
     path.split(':')
         .map(|dir| Path::new(dir).join(program))
-        .find(|candidate| {
-            std::fs::metadata(candidate)
-                .is_ok_and(|m| m.is_file() && std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o111 != 0)
-        })
+        .find(|candidate| std::fs::metadata(candidate).is_ok_and(|m| m.is_file() && std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o111 != 0))
 }
 
 fn number(name: &str) -> Result<u64, String> {
-    name.strip_prefix("mac:")
-        .and_then(|n| n.parse().ok())
-        .ok_or_else(|| format!("{name} is not a Mac process name (mac:N)"))
+    name.strip_prefix("mac:").and_then(|n| n.parse().ok()).ok_or_else(|| format!("{name} is not a Mac process name (mac:N)"))
 }
 
 /// One `mac_commands` request of `session`; `shared` are the folders shared with the VM.
@@ -101,27 +92,15 @@ pub fn handle(session: &str, args: &Value, shared: &[PathBuf]) -> Result<Value, 
 }
 
 fn start(session: &str, run: &Value, shared: &[PathBuf]) -> Result<Value, String> {
-    let argv: Vec<String> = run["argv"]
-        .as_array()
-        .ok_or("run needs argv")?
-        .iter()
-        .map(|a| a.as_str().map(str::to_owned).ok_or("argv is strings"))
-        .collect::<Result<_, _>>()?;
+    let argv: Vec<String> =
+        run["argv"].as_array().ok_or("run needs argv")?.iter().map(|a| a.as_str().map(str::to_owned).ok_or("argv is strings")).collect::<Result<_, _>>()?;
     let program = argv.first().ok_or("run needs a program")?;
     let cwd = run["cwd"].as_str().ok_or("run needs cwd")?;
     let cwd = std::fs::canonicalize(cwd).map_err(|e| format!("{cwd}: {e}"))?;
     if !shared.iter().any(|folder| cwd.starts_with(folder)) {
-        return Err(format!(
-            "{} is not inside a folder shared with Sill's VM: the person shares it (Pin a folder) first",
-            cwd.display()
-        ));
+        return Err(format!("{} is not inside a folder shared with Sill's VM: the person shares it (Pin a folder) first", cwd.display()));
     }
-    let running = PROCS
-        .lock()
-        .unwrap()
-        .values()
-        .filter(|p| p.session == session && p.ended.is_none())
-        .count();
+    let running = PROCS.lock().unwrap().values().filter(|p| p.session == session && p.ended.is_none()).count();
     if running >= MAX_RUNNING {
         return Err(format!("this session already runs {MAX_RUNNING} Mac processes: stop one first"));
     }
@@ -142,10 +121,7 @@ fn start(session: &str, run: &Value, shared: &[PathBuf]) -> Result<Value, String
     let pid = spawn(&executable, &argv, &cwd, &env, &out).map_err(|e| format!("{program}: {e}"))?;
     drop(out);
     let started = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    PROCS.lock().unwrap().insert(
-        id,
-        Proc { session: session.into(), argv: argv.clone(), cwd: cwd.clone(), pid, started, ended: None, log },
-    );
+    PROCS.lock().unwrap().insert(id, Proc { session: session.into(), argv: argv.clone(), cwd: cwd.clone(), pid, started, ended: None, log });
     // its end, recorded when it comes
     std::thread::Builder::new()
         .name("sill-gui-mac-proc".into())
@@ -163,23 +139,14 @@ unsafe extern "C" {
     /// The spawned program answers to macOS for itself, not as Sill: private but long-standing
     /// (libSystem, since macOS 10.14; Chromium and LLDB start their helpers so).
     fn responsibility_spawnattrs_setdisclaim(attr: *mut libc::posix_spawnattr_t, disclaim: libc::c_int) -> libc::c_int;
-    fn posix_spawn_file_actions_addchdir_np(
-        actions: *mut libc::posix_spawn_file_actions_t,
-        path: *const libc::c_char,
-    ) -> libc::c_int;
+    fn posix_spawn_file_actions_addchdir_np(actions: *mut libc::posix_spawn_file_actions_t, path: *const libc::c_char) -> libc::c_int;
 }
 
 /// Start `executable` as `argv` in `cwd` with `env`, its output in `log`: the leader of a group
 /// of its own (stopping it stops what it started), with no signal blocked or ignored and no
 /// descriptor of Sill's but the log, and responsible for itself to macOS, so it has none of
 /// Sill's consents (Screen Recording, Accessibility; security review, 2026-11-13).
-fn spawn(
-    executable: &Path,
-    argv: &[String],
-    cwd: &Path,
-    env: &BTreeMap<String, String>,
-    log: &std::fs::File,
-) -> Result<i32, String> {
+fn spawn(executable: &Path, argv: &[String], cwd: &Path, env: &BTreeMap<String, String>, log: &std::fs::File) -> Result<i32, String> {
     use std::ffi::CString;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
@@ -188,9 +155,7 @@ fn spawn(
     let dir = c(cwd.as_os_str().as_bytes())?;
     let args: Vec<CString> = argv.iter().map(|a| c(a.as_bytes())).collect::<Result<_, _>>()?;
     let vars: Vec<CString> = env.iter().map(|(k, v)| c(format!("{k}={v}").as_bytes())).collect::<Result<_, _>>()?;
-    let pointers = |list: &[CString]| -> Vec<*mut libc::c_char> {
-        list.iter().map(|s| s.as_ptr().cast_mut()).chain([std::ptr::null_mut()]).collect()
-    };
+    let pointers = |list: &[CString]| -> Vec<*mut libc::c_char> { list.iter().map(|s| s.as_ptr().cast_mut()).chain([std::ptr::null_mut()]).collect() };
     let (args, vars) = (pointers(&args), pointers(&vars));
     let step = |code: libc::c_int, what: &str| match code {
         0 => Ok(()),
@@ -204,10 +169,7 @@ fn spawn(
         step(libc::posix_spawnattr_init(&mut attr), "spawn attributes")?;
         step(libc::posix_spawn_file_actions_init(&mut actions), "spawn actions")?;
         let result = (|| {
-            let flags = libc::POSIX_SPAWN_SETPGROUP
-                | libc::POSIX_SPAWN_SETSIGMASK
-                | libc::POSIX_SPAWN_SETSIGDEF
-                | libc::POSIX_SPAWN_CLOEXEC_DEFAULT;
+            let flags = libc::POSIX_SPAWN_SETPGROUP | libc::POSIX_SPAWN_SETSIGMASK | libc::POSIX_SPAWN_SETSIGDEF | libc::POSIX_SPAWN_CLOEXEC_DEFAULT;
             step(libc::posix_spawnattr_setflags(&mut attr, flags as libc::c_short), "spawn flags")?;
             step(libc::posix_spawnattr_setpgroup(&mut attr, 0), "process group")?;
             let mut none: libc::sigset_t = std::mem::zeroed();
@@ -217,10 +179,7 @@ fn spawn(
             step(libc::posix_spawnattr_setsigmask(&mut attr, &none), "signal mask")?;
             step(libc::posix_spawnattr_setsigdefault(&mut attr, &all), "signal defaults")?;
             step(responsibility_spawnattrs_setdisclaim(&mut attr, 1), "disclaiming responsibility")?;
-            step(
-                libc::posix_spawn_file_actions_addopen(&mut actions, 0, c"/dev/null".as_ptr(), libc::O_RDONLY, 0),
-                "stdin",
-            )?;
+            step(libc::posix_spawn_file_actions_addopen(&mut actions, 0, c"/dev/null".as_ptr(), libc::O_RDONLY, 0), "stdin")?;
             step(libc::posix_spawn_file_actions_adddup2(&mut actions, log.as_raw_fd(), 1), "stdout")?;
             step(libc::posix_spawn_file_actions_adddup2(&mut actions, log.as_raw_fd(), 2), "stderr")?;
             step(posix_spawn_file_actions_addchdir_np(&mut actions, dir.as_ptr()), "working directory")?;
@@ -322,8 +281,7 @@ fn stop(session: &str, id: u64) -> Result<Option<String>, String> {
 
 /// Sessions with Mac processes still running.
 pub fn sessions_running() -> Vec<String> {
-    let mut sessions: Vec<String> =
-        PROCS.lock().unwrap().values().filter(|p| p.ended.is_none()).map(|p| p.session.clone()).collect();
+    let mut sessions: Vec<String> = PROCS.lock().unwrap().values().filter(|p| p.ended.is_none()).map(|p| p.session.clone()).collect();
     sessions.sort();
     sessions.dedup();
     sessions
@@ -331,13 +289,7 @@ pub fn sessions_running() -> Vec<String> {
 
 /// Stop every running Mac process of `session` (its grant went).
 pub fn stop_session(session: &str) {
-    let ids: Vec<u64> = PROCS
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(_, p)| p.session == session && p.ended.is_none())
-        .map(|(id, _)| *id)
-        .collect();
+    let ids: Vec<u64> = PROCS.lock().unwrap().iter().filter(|(_, p)| p.session == session && p.ended.is_none()).map(|(id, _)| *id).collect();
     for id in ids {
         let _ = stop(session, id);
     }
@@ -346,8 +298,7 @@ pub fn stop_session(session: &str) {
 /// Stop every running Mac process: Sill quits, or its VM is shut down or restarted. All are asked
 /// at once and those left after 3 s made to, so many of them still take seconds, not 3 s each.
 pub fn stop_all() {
-    let running: Vec<(u64, i32)> =
-        PROCS.lock().unwrap().iter().filter(|(_, p)| p.ended.is_none()).map(|(id, p)| (*id, p.pid)).collect();
+    let running: Vec<(u64, i32)> = PROCS.lock().unwrap().iter().filter(|(_, p)| p.ended.is_none()).map(|(id, p)| (*id, p.pid)).collect();
     let left = || -> Vec<i32> {
         let procs = PROCS.lock().unwrap();
         running.iter().filter(|(id, _)| procs.get(id).is_some_and(|p| p.ended.is_none())).map(|(_, pid)| *pid).collect()
@@ -437,10 +388,7 @@ mod tests {
         assert!(super::sessions_running().is_empty());
         for (session, started) in [("s1", a), ("s3", b)] {
             let list = super::handle(session, &json!({"list": true}), &[]).unwrap();
-            assert!(
-                list["processes"].as_array().unwrap().iter().any(|p| p["name"] == started["name"] && p["ended"] == "signal 15"),
-                "{list}"
-            );
+            assert!(list["processes"].as_array().unwrap().iter().any(|p| p["name"] == started["name"] && p["ended"] == "signal 15"), "{list}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

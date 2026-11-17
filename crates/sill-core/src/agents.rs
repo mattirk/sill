@@ -1,10 +1,10 @@
 //! Agent registry (SPEC §4.1): how to start each ACP agent inside the jail. Built-in entries plus
 //! TOML files in `~/.config/sill/agents/` and `/usr/share/sill/agents/` (user files win).
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf, Component};
 use anyhow::{Context, Result, bail, ensure};
 pub use sill_proto::agent_admin::{HomePath, HomePathKind};
+use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -71,14 +71,21 @@ pub struct Agent {
 fn declared_paths<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<Vec<HomePath>>, D::Error> {
     use serde::de::Error;
     let value = Option::<Vec<serde_json::Value>>::deserialize(d)?;
-    value.map(|entries| entries.into_iter().map(|entry| {
-        if let Some(object) = entry.as_object() {
-            if let Some(key) = object.keys().find(|key| !["path", "kind", "initial_content"].contains(&key.as_str())) {
-                return Err(D::Error::custom(format!("unknown home_paths field {key}")));
-            }
-        }
-        serde_json::from_value(entry).map_err(D::Error::custom)
-    }).collect()).transpose()
+    value
+        .map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| {
+                    if let Some(object) = entry.as_object() {
+                        if let Some(key) = object.keys().find(|key| !["path", "kind", "initial_content"].contains(&key.as_str())) {
+                            return Err(D::Error::custom(format!("unknown home_paths field {key}")));
+                        }
+                    }
+                    serde_json::from_value(entry).map_err(D::Error::custom)
+                })
+                .collect()
+        })
+        .transpose()
 }
 
 fn yes() -> bool {
@@ -123,7 +130,14 @@ pub fn builtin() -> Vec<Agent> {
             experimental_acp_v2: false,
             // claude.com: its login exchanges the code and renews the token at platform.claude.com
             // (refused there, a login never finished and an expired token was not renewed, 2026-11-05)
-            domains: vec!["api.anthropic.com".into(), "*.anthropic.com".into(), "claude.ai".into(), "*.claude.ai".into(), "claude.com".into(), "*.claude.com".into()],
+            domains: vec![
+                "api.anthropic.com".into(),
+                "*.anthropic.com".into(),
+                "claude.ai".into(),
+                "*.claude.ai".into(),
+                "claude.com".into(),
+                "*.claude.com".into(),
+            ],
             sandbox_off_env: Default::default(),
             home_paths: Some(vec![HomePath::directory("~/.claude"), HomePath::file("~/.claude.json", "{}")]),
             login_files: vec![".claude/.credentials.json".into()],
@@ -265,7 +279,9 @@ pub fn load(home: &Path) -> Result<BTreeMap<String, Agent>> {
         };
         for entry in rd {
             let p = entry?.path();
-            if p.extension().and_then(|x| x.to_str()) != Some("toml") { continue; }
+            if p.extension().and_then(|x| x.to_str()) != Some("toml") {
+                continue;
+            }
             let text = std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
             let a: Agent = toml::from_str(&text).with_context(|| format!("invalid agent definition {}; update it to the current format", p.display()))?;
             a.validate().with_context(|| format!("invalid agent definition {}", p.display()))?;
@@ -295,14 +311,21 @@ impl Agent {
         let mut roots = Vec::new();
         for entry in paths {
             let rel = relative_path(entry.path.strip_prefix("~/").context("home_paths must start with ~/")?)?;
-            ensure!(![".config", ".local", ".local/share", ".local/state", ".local/bin", ".cache"].iter().any(|p| rel == Path::new(p)), "{} is a shared parent", entry.path);
+            ensure!(
+                ![".config", ".local", ".local/share", ".local/state", ".local/bin", ".cache"].iter().any(|p| rel == Path::new(p)),
+                "{} is a shared parent",
+                entry.path
+            );
             ensure!(entry.kind == HomePathKind::File || entry.initial_content.is_none(), "directory cannot have initial_content");
             ensure!(!roots.iter().any(|p: &PathBuf| rel.starts_with(p) || p.starts_with(&rel)), "overlapping home_paths: {}", entry.path);
             roots.push(rel);
         }
         for credential in &self.login_files {
             let rel = relative_path(credential)?;
-            ensure!(paths.iter().zip(&roots).any(|(entry, root)| entry.kind == HomePathKind::Directory && rel != *root && rel.starts_with(root)), "credential {credential} must be below a declared directory");
+            ensure!(
+                paths.iter().zip(&roots).any(|(entry, root)| entry.kind == HomePathKind::Directory && rel != *root && rel.starts_with(root)),
+                "credential {credential} must be below a declared directory"
+            );
         }
         if self.home_env.is_some() {
             ensure!(paths.first().is_some_and(|p| p.kind == HomePathKind::Directory), "home_env requires a directory as the first home_paths entry");
@@ -338,12 +361,7 @@ pub fn reset_homes(homes: &[std::path::PathBuf]) -> anyhow::Result<usize> {
 /// not in any folder bound into a jail (`~/.local/state/sill` shows only `tools/` there), so the
 /// agent's commands cannot read them; the agent gets a key only in its login request.
 pub fn api_key_dir(home: &Path, agent_id: &str) -> std::path::PathBuf {
-    std::env::var("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| home.join(".local/state"))
-        .join("sill")
-        .join("keys")
-        .join(agent_id)
+    std::env::var("XDG_STATE_HOME").map(std::path::PathBuf::from).unwrap_or_else(|_| home.join(".local/state")).join("sill").join("keys").join(agent_id)
 }
 
 fn plain_id(id: &str) -> bool {
@@ -377,13 +395,7 @@ pub fn save_api_key(home: &Path, agent_id: &str, method_id: &str, key: &str) -> 
 
 /// The agent's saved API keys, if any.
 pub fn api_key_files(home: &Path, agent_id: &str) -> Vec<std::path::PathBuf> {
-    std::fs::read_dir(api_key_dir(home, agent_id))
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.is_file())
-        .collect()
+    std::fs::read_dir(api_key_dir(home, agent_id)).into_iter().flatten().filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_file()).collect()
 }
 
 /// Forget the agent's saved API keys; how many went.
@@ -418,7 +430,13 @@ mod login_tests {
     #[test]
     fn declarations_reject_legacy_keys_unknown_fields_and_ambiguous_paths() {
         let base = "id = 'fixture'\nname = 'Fixture'\ncommand = ['true']\n";
-        for extra in ["state_dirs = []", "shared_files = []", "seed_files = []", "home_paths = ['~/.fixture']", "home_paths = [{path = '~/.fixture', kind = 'directory', typo = true}]"] {
+        for extra in [
+            "state_dirs = []",
+            "shared_files = []",
+            "seed_files = []",
+            "home_paths = ['~/.fixture']",
+            "home_paths = [{path = '~/.fixture', kind = 'directory', typo = true}]",
+        ] {
             assert!(toml::from_str::<Agent>(&format!("{base}{extra}")).is_err(), "{extra}");
         }
         let mut a = builtin().remove(1);

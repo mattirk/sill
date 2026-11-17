@@ -32,23 +32,12 @@ impl App {
                 let settings = actions.clone();
                 return Task::batch([
                     blocking(
-                        move || {
-                            actions
-                                .reading(sill_client::sessions::startable)
-                                .map_err(|e| format!("{e:#}"))
-                        },
+                        move || actions.reading(sill_client::sessions::startable).map_err(|e| format!("{e:#}")),
                         |agents| Message::Menu(Event::Agents(agents)),
                     ),
                     blocking(
                         move || {
-                            settings
-                                .read::<sill_proto::admin::Settings>(
-                                    "_sill/settings.get",
-                                    json!({}),
-                                )
-                                .ok()
-                                .and_then(|s| s.remember_pins)
-                                .unwrap_or(false)
+                            settings.read::<sill_proto::admin::Settings>("_sill/settings.get", json!({})).ok().and_then(|s| s.remember_pins).unwrap_or(false)
                         },
                         |on| Message::Menu(Event::RememberPins(on)),
                     ),
@@ -82,16 +71,8 @@ impl App {
                 }
             }
             Event::New { agent, ghost, workspaces } => {
-                let remember = self
-                    .menu
-                    .take()
-                    .map(|m| m.remember_pins)
-                    .unwrap_or_else(|| {
-                        self.daemon_settings
-                            .as_ref()
-                            .and_then(|s| s.remember_pins)
-                            .unwrap_or(false)
-                    });
+                let remember =
+                    self.menu.take().map(|m| m.remember_pins).unwrap_or_else(|| self.daemon_settings.as_ref().and_then(|s| s.remember_pins).unwrap_or(false));
                 if self.demo {
                     return Task::none();
                 }
@@ -100,10 +81,7 @@ impl App {
             }
             Event::Reopen(id) => {
                 self.menu = None;
-                let ended = self
-                    .all_sessions
-                    .iter()
-                    .any(|s| s.session_id == id && s.ended_at.is_some());
+                let ended = self.all_sessions.iter().any(|s| s.session_id == id && s.ended_at.is_some());
                 if !ended {
                     return self.choose(id);
                 }

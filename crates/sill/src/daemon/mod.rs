@@ -16,28 +16,28 @@ use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use anyhow::{Context, Result, bail};
 use sill_proto::rpc::{Error, Incoming, Response};
 
-mod hub;
 mod adapter;
-mod sfp;
-mod uploads;
-mod sfp_adapter;
-mod runner;
-mod streams;
-mod terminals;
+mod admin;
+mod agent_admin;
+mod context;
+mod discovery;
+mod frontend;
 mod host;
-mod host_control;
 mod host_bridge;
+mod host_control;
 mod host_display;
 mod host_mac;
-mod context;
-mod frontend;
-mod admin;
-mod storage;
-mod discovery;
+mod hub;
 mod memory_api;
-mod agent_admin;
 mod providers;
 pub mod relay;
+mod runner;
+mod sfp;
+mod sfp_adapter;
+mod storage;
+mod streams;
+mod terminals;
+mod uploads;
 pub use hub::Hub;
 
 /// How long a hub lock may stay taken before the watchdog calls it a deadlock: a jail start holds
@@ -60,15 +60,25 @@ const QUEUE: usize = 20_000;
 const CONNECTION_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 const GLOBAL_QUEUE_BYTES: usize = 256 * 1024 * 1024;
 static QUEUED_BYTES: AtomicUsize = AtomicUsize::new(0);
-struct QueuedLine { text: String, bytes: usize, connection: Arc<AtomicUsize> }
+struct QueuedLine {
+    text: String,
+    bytes: usize,
+    connection: Arc<AtomicUsize>,
+}
 impl Drop for QueuedLine {
-    fn drop(&mut self) { self.connection.fetch_sub(self.bytes, Ordering::Relaxed); QUEUED_BYTES.fetch_sub(self.bytes, Ordering::Relaxed); }
+    fn drop(&mut self) {
+        self.connection.fetch_sub(self.bytes, Ordering::Relaxed);
+        QUEUED_BYTES.fetch_sub(self.bytes, Ordering::Relaxed);
+    }
 }
 #[allow(deprecated)] // fetch_update also supports the workspace's Rust 1.90 minimum.
 fn reserve_bytes(counter: &AtomicUsize, bytes: usize, limit: usize) -> bool {
     counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(bytes).filter(|v| *v <= limit)).is_ok()
 }
-enum WriteItem { Line(QueuedLine), Flush(std::sync::mpsc::Sender<()>) }
+enum WriteItem {
+    Line(QueuedLine),
+    Flush(std::sync::mpsc::Sender<()>),
+}
 
 pub struct Conn {
     pub id: u64,
@@ -94,11 +104,13 @@ impl Conn {
         }
         let bytes = line.len() + 1;
         if !reserve_bytes(&self.queued_bytes, bytes, CONNECTION_QUEUE_BYTES) {
-            let _ = self.sock.shutdown(std::net::Shutdown::Both); return false;
+            let _ = self.sock.shutdown(std::net::Shutdown::Both);
+            return false;
         }
         if !reserve_bytes(&QUEUED_BYTES, bytes, GLOBAL_QUEUE_BYTES) {
             self.queued_bytes.fetch_sub(bytes, Ordering::Relaxed);
-            let _ = self.sock.shutdown(std::net::Shutdown::Both); return false;
+            let _ = self.sock.shutdown(std::net::Shutdown::Both);
+            return false;
         }
         let queued = QueuedLine { text: line, bytes, connection: self.queued_bytes.clone() };
         match self.tx.try_send(WriteItem::Line(queued)) {
@@ -162,7 +174,9 @@ pub fn run() -> Result<()> {
             let mut last_error = None;
             loop {
                 let error = hub.sync_credentials().err().map(|e| format!("{e:#}"));
-                if error != last_error && let Some(e) = &error {
+                if error != last_error
+                    && let Some(e) = &error
+                {
                     eprintln!("sill daemon: synchronizing credentials: {e}");
                 }
                 last_error = error;
@@ -210,7 +224,13 @@ pub fn run() -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("daemon.pid"), std::process::id().to_string())?;
     notify("READY=1");
-    eprintln!("sill daemon: {}, pid {}, {} sessions in the store, protocol {}", mode, std::process::id(), hub.session_count(), sill_proto::initialize::PROTOCOL_ID);
+    eprintln!(
+        "sill daemon: {}, pid {}, {} sessions in the store, protocol {}",
+        mode,
+        std::process::id(),
+        hub.session_count(),
+        sill_proto::initialize::PROTOCOL_ID
+    );
     {
         // recovery after READY, on a thread (docs/daemon.md §3.9 item 3): reconnecting a relay can
         // take seconds each, and the unit's start timeout must not depend on how many there are
@@ -269,7 +289,9 @@ impl ConnSlot {
     }
 }
 impl Drop for ConnSlot {
-    fn drop(&mut self) { OPEN_CONNECTIONS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel); }
+    fn drop(&mut self) {
+        OPEN_CONNECTIONS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 /// `sd_notify` without libsystemd: a datagram to `$NOTIFY_SOCKET` (a path, or abstract with a
@@ -376,19 +398,35 @@ fn serve(stream: UnixStream, hub: Arc<Hub>) -> Result<()> {
     let Some(first) = sill_proto::initialize::read_frame(&mut reader, sill_proto::initialize::MAX_MESSAGE_BYTES)? else { return Ok(()) };
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&first)
         && let Some(token) = value.get("_sill_stream").and_then(|v| v.as_str())
-    { reader.get_ref().set_read_timeout(None)?; return streams::claim(token, reader); }
+    {
+        reader.get_ref().set_read_timeout(None)?;
+        return streams::claim(token, reader);
+    }
     let stream = reader.get_ref();
     let (tx, rx) = sync_channel::<WriteItem>(QUEUE);
-    let conn = Arc::new(Conn { id: NEXT_CONN.fetch_add(1, Ordering::Relaxed), tx, queued_bytes: Arc::new(AtomicUsize::new(0)), sock: stream.try_clone()?, capabilities: Default::default() });
+    let conn = Arc::new(Conn {
+        id: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
+        tx,
+        queued_bytes: Arc::new(AtomicUsize::new(0)),
+        sock: stream.try_clone()?,
+        capabilities: Default::default(),
+    });
     let mut writer = stream.try_clone()?;
     std::thread::Builder::new().name(format!("sill-daemon-write-{}", conn.id)).spawn(move || {
         for item in rx {
             match item {
                 WriteItem::Line(mut line) => {
                     line.text.push('\n');
-                    if writer.write_all(line.text.as_bytes()).is_err() { let _ = writer.shutdown(std::net::Shutdown::Both); break; }
+                    if writer.write_all(line.text.as_bytes()).is_err() {
+                        let _ = writer.shutdown(std::net::Shutdown::Both);
+                        break;
+                    }
                 }
-                WriteItem::Flush(done) => { if writer.flush().is_ok() { let _ = done.send(()); } }
+                WriteItem::Flush(done) => {
+                    if writer.flush().is_ok() {
+                        let _ = done.send(());
+                    }
+                }
             }
         }
     })?;
@@ -402,7 +440,9 @@ fn read_loop(mut reader: BufReader<UnixStream>, first: String, hub: &Arc<Hub>, c
     let mut state = sill_proto::initialize::ConnectionState::default();
     let handshake_deadline = std::time::Instant::now() + std::time::Duration::from_secs(sill_proto::initialize::INITIALIZE_TIMEOUT_SECONDS);
     loop {
-        if !state.is_initialized() && std::time::Instant::now() >= handshake_deadline { break; }
+        if !state.is_initialized() && std::time::Instant::now() >= handshake_deadline {
+            break;
+        }
         let frame = match first.take() {
             Some(line) => Ok(Some(line)),
             None => sill_proto::initialize::read_frame(&mut reader, sill_proto::initialize::MAX_MESSAGE_BYTES),
@@ -445,7 +485,9 @@ fn read_loop(mut reader: BufReader<UnixStream>, first: String, hub: &Arc<Hub>, c
             conn.reply(&Response::err(Some(id), error));
             continue;
         }
-        if hub.sfp_request(conn, id, method, msg.params.clone().unwrap_or(serde_json::Value::Null))? { continue; }
+        if hub.sfp_request(conn, id, method, msg.params.clone().unwrap_or(serde_json::Value::Null))? {
+            continue;
+        }
         // debug builds only: how tests/daemon.rs sees the panic hook end the process
         #[cfg(debug_assertions)]
         if method == "_sill/daemon.panic" {
@@ -475,7 +517,9 @@ fn read_loop(mut reader: BufReader<UnixStream>, first: String, hub: &Arc<Hub>, c
             if let Ok(dir) = sill_proto::runtime_dir() {
                 let _ = std::fs::remove_file(dir.join("daemon.pid"));
             }
-            if let Err(e) = conn.drain() { eprintln!("sill daemon: {e:#}"); }
+            if let Err(e) = conn.drain() {
+                eprintln!("sill daemon: {e:#}");
+            }
             std::process::exit(0);
         }
     }
@@ -487,27 +531,27 @@ mod queue_budget_tests {
     use super::*;
     #[test]
     fn byte_reservations_are_bounded_and_failed_reservations_leave_accounting_unchanged() {
-        let count=AtomicUsize::new(0);
-        assert!(reserve_bytes(&count,7,10));
-        assert!(!reserve_bytes(&count,4,10));
-        assert_eq!(count.load(Ordering::Relaxed),7);
-        assert!(reserve_bytes(&count,3,10));
-        assert!(!reserve_bytes(&count,usize::MAX,10));
-        assert_eq!(count.load(Ordering::Relaxed),10);
+        let count = AtomicUsize::new(0);
+        assert!(reserve_bytes(&count, 7, 10));
+        assert!(!reserve_bytes(&count, 4, 10));
+        assert_eq!(count.load(Ordering::Relaxed), 7);
+        assert!(reserve_bytes(&count, 3, 10));
+        assert!(!reserve_bytes(&count, usize::MAX, 10));
+        assert_eq!(count.load(Ordering::Relaxed), 10);
     }
 
     #[test]
     fn failed_sends_and_abandoned_queues_release_their_byte_reservations() {
-        let (sock,_peer)=UnixStream::pair().unwrap();
-        let (tx,rx)=sync_channel(1);
-        let conn=Conn{id:0,tx,queued_bytes:Arc::new(AtomicUsize::new(0)),sock,capabilities:Default::default()};
+        let (sock, _peer) = UnixStream::pair().unwrap();
+        let (tx, rx) = sync_channel(1);
+        let conn = Conn { id: 0, tx, queued_bytes: Arc::new(AtomicUsize::new(0)), sock, capabilities: Default::default() };
         assert!(conn.send("queued".into()));
-        assert_eq!(conn.queued_bytes.load(Ordering::Relaxed),7);
-        assert!(!conn.send("cannot fit".into()),"full channel refuses and releases the new reservation");
-        assert_eq!(conn.queued_bytes.load(Ordering::Relaxed),7);
+        assert_eq!(conn.queued_bytes.load(Ordering::Relaxed), 7);
+        assert!(!conn.send("cannot fit".into()), "full channel refuses and releases the new reservation");
+        assert_eq!(conn.queued_bytes.load(Ordering::Relaxed), 7);
         drop(rx);
-        assert_eq!(conn.queued_bytes.load(Ordering::Relaxed),0,"abandoning the writer releases queued data");
+        assert_eq!(conn.queued_bytes.load(Ordering::Relaxed), 0, "abandoning the writer releases queued data");
         assert!(!conn.send("disconnected".into()));
-        assert_eq!(conn.queued_bytes.load(Ordering::Relaxed),0,"disconnected sends leave no reservation");
+        assert_eq!(conn.queued_bytes.load(Ordering::Relaxed), 0, "disconnected sends leave no reservation");
     }
 }

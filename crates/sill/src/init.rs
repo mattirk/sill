@@ -307,7 +307,9 @@ fn install_files(i: &mut Init, prefix: &Path, has_systemd: bool, headless: bool)
     let src_dir = me.parent().context("executable has no parent")?.to_path_buf();
     // sill-gui is the desktop window: beside sill on a desktop, absent from a headless box
     for name in ["sill", "sill-shim", "sill-gui"] {
-        if headless && name == "sill-gui" { continue; }
+        if headless && name == "sill-gui" {
+            continue;
+        }
         let src = src_dir.join(name);
         let dst = bin.join(name);
         if !src.is_file() {
@@ -328,19 +330,19 @@ fn install_files(i: &mut Init, prefix: &Path, has_systemd: bool, headless: bool)
     install_policy(i, Path::new("/etc/sill/policies"))?;
     // icons and the desktop file
     if !headless {
-    let share = prefix.join("share");
-    i.put_file(&share.join("sill/sill.svg"), ICON.as_bytes(), 0o644)?;
-    i.put_file(&share.join("icons/hicolor/scalable/apps/sill.svg"), ICON.as_bytes(), 0o644)?;
-    let desktop = DESKTOP.replace("@PREFIX@", &prefix.display().to_string());
-    if i.put_file(&share.join("applications/sill.desktop"), desktop.as_bytes(), 0o644)? && !i.dry {
-        let _ = std::process::Command::new("update-desktop-database").arg("-q").arg(share.join("applications")).status();
-    }
+        let share = prefix.join("share");
+        i.put_file(&share.join("sill/sill.svg"), ICON.as_bytes(), 0o644)?;
+        i.put_file(&share.join("icons/hicolor/scalable/apps/sill.svg"), ICON.as_bytes(), 0o644)?;
+        let desktop = DESKTOP.replace("@PREFIX@", &prefix.display().to_string());
+        if i.put_file(&share.join("applications/sill.desktop"), desktop.as_bytes(), 0o644)? && !i.dry {
+            let _ = std::process::Command::new("update-desktop-database").arg("-q").arg(share.join("applications")).status();
+        }
     }
     // sill-gui as a systemd user service (per user: sill init --user enables it)
     if has_systemd {
         if !headless {
-        let unit = UNIT_GUI.replace("/usr/local/bin/sill", &bin.join("sill").display().to_string());
-        i.put_file(Path::new("/etc/systemd/user/sill-gui.service"), unit.as_bytes(), 0o644)?;
+            let unit = UNIT_GUI.replace("/usr/local/bin/sill", &bin.join("sill").display().to_string());
+            i.put_file(Path::new("/etc/systemd/user/sill-gui.service"), unit.as_bytes(), 0o644)?;
         }
         // the daemon: socket-activated (docs/daemon.md §3.1); per user `sill init --user` enables the socket
         let unit = UNIT_DAEMON.replace("/usr/local/bin/sill", &bin.join("sill").display().to_string());
@@ -436,15 +438,12 @@ fn state_fs(i: &mut Init, a: &InitArgs, has_systemd: bool) -> Result<()> {
                 Err(rustix::io::Errno::EXIST) => false,
                 Err(e) => return Err(e).with_context(|| format!("create {}", mine.display())),
             };
-            let fd = rustix::fs::open(&mine, rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty())
-                .with_context(|| format!("open {} (not through a symlink)", mine.display()))?;
+            let fd =
+                rustix::fs::open(&mine, rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty())
+                    .with_context(|| format!("open {} (not through a symlink)", mine.display()))?;
             let st = rustix::fs::fstat(&fd)?;
             if !created && st.st_uid != uid && st.st_uid != 0 {
-                bail!(
-                    "{} belongs to uid {}, not uid {uid}: someone else put it there — remove it (or chown it) and run init again",
-                    mine.display(),
-                    st.st_uid
-                );
+                bail!("{} belongs to uid {}, not uid {uid}: someone else put it there — remove it (or chown it) and run init again", mine.display(), st.st_uid);
             }
             rustix::fs::fchmod(&fd, rustix::fs::Mode::from_raw_mode(0o700))?;
             rustix::fs::fchown(&fd, Some(rustix::fs::Uid::from_raw(uid)), Some(rustix::fs::Gid::from_raw(gid)))?;
@@ -718,11 +717,8 @@ fn user_setup(a: &InitArgs) -> Result<()> {
             // watchdog, docs/daemon.md §3.7); this user's manager still runs the old text
             i.run("reload user units (sill.service changed)", "systemctl", &["--user", "daemon-reload"])?;
         }
-        let socket_enabled = std::process::Command::new("systemctl")
-            .args(["--user", "is-enabled", "--quiet", "sill.socket"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let socket_enabled =
+            std::process::Command::new("systemctl").args(["--user", "is-enabled", "--quiet", "sill.socket"]).status().map(|s| s.success()).unwrap_or(false);
         if socket_enabled {
             i.skip("sill.socket already enabled".to_string());
         } else {
@@ -745,7 +741,9 @@ fn user_setup(a: &InitArgs) -> Result<()> {
         i.put_file(&home.join(".config/autostart/sill.desktop"), entry.as_bytes(), 0o644)?;
     }
     summary(&i)?;
-    if a.headless { return Ok(()); }
+    if a.headless {
+        return Ok(());
+    }
     let on_path = which("sill").and_then(|p| p.canonicalize().ok()) == exe.canonicalize().ok();
     println!(
         "hotkey: bind `{} toggle` to a key in your desktop's keyboard shortcuts (Alt+Space is the usual choice; \
@@ -840,16 +838,21 @@ pub fn autostart(value: Option<&str>) -> Result<()> {
     let path = sill_proto::autostart_disabled_path()?;
     if value == "on" {
         match std::fs::remove_file(&path) {
-            Ok(()) => {},
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
         // Reuse the installer so private units and non-systemd desktops follow the same path.
         let args = InitArgs {
-            dry_run: false, prefix: "/usr/local".into(), user: true,
+            dry_run: false,
+            prefix: "/usr/local".into(),
+            user: true,
             headless: !std::env::current_exe()?.with_file_name("sill-gui").is_file(),
-            state_dir: None, state_size: "32G".into(), delegate_cgroup: false,
-            cgroup_only: false, no_copy: false,
+            state_dir: None,
+            state_size: "32G".into(),
+            delegate_cgroup: false,
+            cgroup_only: false,
+            no_copy: false,
         };
         user_setup(&args)?;
     } else {
@@ -868,11 +871,13 @@ pub fn autostart(value: Option<&str>) -> Result<()> {
         }
         let home = PathBuf::from(std::env::var_os("HOME").context("HOME not set")?);
         match std::fs::remove_file(home.join(".config/autostart/sill.desktop")) {
-            Ok(()) => {},
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
-        println!("Autostart off. The window stays open; stopping socket activation may stop the daemon. Sessions keep running. Start manually with `sill daemon`.");
+        println!(
+            "Autostart off. The window stays open; stopping socket activation may stop the daemon. Sessions keep running. Start manually with `sill daemon`."
+        );
     }
     Ok(())
 }

@@ -38,11 +38,7 @@ pub fn prepare(dir: &Path, image_dir: &Path) -> Result<Prepared> {
     }
     let key = dir.join("key");
     if !key.exists() {
-        let made = Command::new("ssh-keygen")
-            .args(["-q", "-t", "ed25519", "-N", "", "-C", "sill-app", "-f"])
-            .arg(&key)
-            .status()
-            .context("ssh-keygen")?;
+        let made = Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-C", "sill-app", "-f"]).arg(&key).status().context("ssh-keygen")?;
         if !made.success() {
             bail!("ssh-keygen could not make the VM's key");
         }
@@ -164,16 +160,8 @@ fn seed(dir: &Path, user_data: &str) -> Result<()> {
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work)?;
     std::fs::write(work.join("user-data"), user_data)?;
-    let instance = format!(
-        "sill-app-{:x}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    );
-    std::fs::write(
-        work.join("meta-data"),
-        format!("instance-id: {instance}\nlocal-hostname: sill-box\n"),
-    )?;
+    let instance = format!("sill-app-{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+    std::fs::write(work.join("meta-data"), format!("instance-id: {instance}\nlocal-hostname: sill-box\n"))?;
     let iso = dir.join("seed.iso");
     // hdiutil refuses to write over a file: a seed made again replaces the one before it
     let _ = std::fs::remove_file(&iso);
@@ -236,8 +224,7 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
 
 /// The VM directory on this Mac.
 pub fn default_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join("Library/Application Support/Sill/vm"))
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Application Support/Sill/vm"))
 }
 
 #[cfg(test)]
@@ -300,10 +287,7 @@ mod tests {
         let said = super::user_data("ssh-ed25519 AAAA sill-app\n");
         assert!(!said.contains("sudo"), "{said}");
         assert!(said.contains("\n      - ssh-ed25519 AAAA sill-app\n"), "{said}");
-        assert!(
-            said.ends_with("\n      command=\"/usr/local/lib/sill/sill-mac-folders\",restrict ssh-ed25519 AAAA sill-app\n"),
-            "{said}"
-        );
+        assert!(said.ends_with("\n      command=\"/usr/local/lib/sill/sill-mac-folders\",restrict ssh-ed25519 AAAA sill-app\n"), "{said}");
         // root's key appears nowhere without the command it is bound to
         assert_eq!(said.matches("ssh-ed25519").count(), 2);
     }

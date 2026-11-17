@@ -122,23 +122,14 @@ pub enum Group {
 
 /// The groups this window offers, with their names and operations.
 pub fn groups() -> Vec<(Group, &'static str, Vec<&'static str>)> {
-    let (mac, rest): (Vec<_>, Vec<_>) =
-        offered().into_iter().partition(|op| sill_proto::host_control::MAC_OPERATIONS.contains(op));
-    if mac.is_empty() {
-        vec![(Group::Host, "Host", rest)]
-    } else {
-        vec![(Group::Vm, "VM", rest), (Group::Host, "Host", mac)]
-    }
+    let (mac, rest): (Vec<_>, Vec<_>) = offered().into_iter().partition(|op| sill_proto::host_control::MAC_OPERATIONS.contains(op));
+    if mac.is_empty() { vec![(Group::Host, "Host", rest)] } else { vec![(Group::Vm, "VM", rest), (Group::Host, "Host", mac)] }
 }
 
 /// The groups with an operation in the session's active control.
 pub fn groups_on(session: &Session) -> Vec<Group> {
     let Some(brief) = &session.host_control else { return vec![] };
-    groups()
-        .into_iter()
-        .filter(|(_, _, operations)| brief.operations.iter().any(|op| operations.contains(&op.as_str())))
-        .map(|(group, _, _)| group)
-        .collect()
+    groups().into_iter().filter(|(_, _, operations)| brief.operations.iter().any(|op| operations.contains(&op.as_str()))).map(|(group, _, _)| group).collect()
 }
 
 fn mac_attached() -> bool {
@@ -251,11 +242,7 @@ impl App {
                 }
                 view.host_control.busy = false;
                 #[cfg(target_os = "macos")]
-                crate::local_vm::person_answered(
-                    &id,
-                    outcome.as_ref().ok().filter(|s| s.active).map(|s| (s.generation, s.since.clone())),
-                    outcome.is_err(),
-                );
+                crate::local_vm::person_answered(&id, outcome.as_ref().ok().filter(|s| s.active).map(|s| (s.generation, s.since.clone())), outcome.is_err());
                 match outcome {
                     Ok(state) => {
                         if state.active {
@@ -300,8 +287,7 @@ impl App {
             move || actions.call_needing(CAPABILITY, method, params),
             move |outcome: Outcome| {
                 let result = match outcome {
-                    Outcome::Done(value) => serde_json::from_value::<State>(value)
-                        .map_err(|e| format!("the daemon's answer could not be read: {e}")),
+                    Outcome::Done(value) => serde_json::from_value::<State>(value).map_err(|e| format!("the daemon's answer could not be read: {e}")),
                     other => Err(other.problem().unwrap_or("failed").to_string()),
                 };
                 Message::HostControl(Event::Done(id, serial, result))
@@ -383,11 +369,7 @@ pub fn buttons<'a>(view: &'a SessionView, session: &'a Session, can_change: bool
     let is_active = session.host_control.is_some();
     let selection_differs = hc.selected != brief;
     let forbidden = hc.state.as_ref().and_then(|s| s.forbidden.clone());
-    let can_activate = can_change
-        && !hc.busy
-        && !hc.selected.is_empty()
-        && (!is_active || selection_differs)
-        && forbidden.is_none();
+    let can_activate = can_change && !hc.busy && !hc.selected.is_empty() && (!is_active || selection_differs) && forbidden.is_none();
     let activate_tip = if let Some(forbidden) = forbidden {
         forbidden
     } else if is_active && !selection_differs {
@@ -409,28 +391,17 @@ pub fn buttons<'a>(view: &'a SessionView, session: &'a Session, can_change: bool
     };
     row![
         crate::permissions::tip(
-            crate::permissions::small(
-                "Activate host control",
-                can_activate.then(|| Message::HostControl(Event::Activate(id.into()))),
-            ),
+            crate::permissions::small("Activate host control", can_activate.then(|| Message::HostControl(Event::Activate(id.into()))),),
             activate_tip,
         ),
         crate::permissions::tip(
-            crate::permissions::small(
-                "Revoke",
-                (can_change && !hc.busy && is_active).then(|| Message::HostControl(Event::Revoke(id.into()))),
-            ),
+            crate::permissions::small("Revoke", (can_change && !hc.busy && is_active).then(|| Message::HostControl(Event::Revoke(id.into()))),),
             "Ends Host control for this session. Processes it launched are stopped unless kept; what already happened on the host stays.".into(),
         ),
         crate::permissions::tip(
-            container(
-                text(said.clone())
-                    .size(style::TINY)
-                    .color(if hc.error.is_some() { P.error } else { alpha(P.fg, 0.7) })
-                    .wrapping(text::Wrapping::None),
-            )
-            .width(Fill)
-            .clip(true),
+            container(text(said.clone()).size(style::TINY).color(if hc.error.is_some() { P.error } else { alpha(P.fg, 0.7) }).wrapping(text::Wrapping::None),)
+                .width(Fill)
+                .clip(true),
             said,
         ),
     ]
@@ -443,19 +414,14 @@ pub fn buttons<'a>(view: &'a SessionView, session: &'a Session, can_change: bool
 /// stronger colour; in Sill.app, with only the VM's operations active, VM control in yellow (the
 /// agent acts outside its jail but inside Sill's VM; the person, 2026-11-13).
 fn caption_words(operations: &[String]) -> (&'static str, iced::Color) {
-    let vm_only = groups().len() > 1
-        && !operations.iter().any(|op| sill_proto::host_control::MAC_OPERATIONS.contains(&op.as_str()));
+    let vm_only = groups().len() > 1 && !operations.iter().any(|op| sill_proto::host_control::MAC_OPERATIONS.contains(&op.as_str()));
     if vm_only { (VM_CAPTION, style::yellow()) } else { (CAPTION, P.error) }
 }
 
 /// The colour of the daemon's "Host control activated" notice in the conversation: yellow when
 /// it activated only the VM's operations in Sill.app, else `color` as given.
 pub fn notice_color(text: &str, color: iced::Color) -> iced::Color {
-    if text.starts_with("Host control activated") && groups().len() > 1 && !text.contains("mac_") {
-        style::yellow()
-    } else {
-        color
-    }
+    if text.starts_with("Host control activated") && groups().len() > 1 && !text.contains("mac_") { style::yellow() } else { color }
 }
 
 /// The caption over the composer while the session has active Host control.
@@ -472,11 +438,7 @@ pub fn caption<'a>(session: &Session, view: &View) -> Option<Element<'a, Message
         column![
             rule::horizontal(1).style(style::rule_style(color)),
             container(
-                text(format!("{words} · {}", brief.operations.join(", ")))
-                    .size(style::TINY)
-                    .color(color)
-                    .width(Fill)
-                    .wrapping(text::Wrapping::WordOrGlyph)
+                text(format!("{words} · {}", brief.operations.join(", "))).size(style::TINY).color(color).width(Fill).wrapping(text::Wrapping::WordOrGlyph)
             )
             .width(Fill)
             .padding([2, 8])
@@ -532,13 +494,17 @@ pub(crate) fn notice_summary(message: &str) -> String {
             let command = if words.len() == 3 && words[1] == "-c" {
                 words[2].to_owned()
             } else {
-                words.iter().map(|word| {
-                    if word.chars().all(|c| c.is_ascii_alphanumeric() || "_-./=:".contains(c)) && !word.is_empty() {
-                        (*word).to_owned()
-                    } else {
-                        format!("'{}'", word.replace('\'', "'\\''"))
-                    }
-                }).collect::<Vec<_>>().join(" ")
+                words
+                    .iter()
+                    .map(|word| {
+                        if word.chars().all(|c| c.is_ascii_alphanumeric() || "_-./=:".contains(c)) && !word.is_empty() {
+                            (*word).to_owned()
+                        } else {
+                            format!("'{}'", word.replace('\'', "'\\''"))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
             };
             return format!("HOST · {command}");
         }
@@ -630,10 +596,7 @@ mod tests {
     }
 
     fn with_control(mut session: Session, operations: &[&str]) -> Session {
-        session.host_control = Some(sill_proto::host_control::Brief {
-            generation: 1,
-            operations: operations.iter().map(|s| s.to_string()).collect(),
-        });
+        session.host_control = Some(sill_proto::host_control::Brief { generation: 1, operations: operations.iter().map(|s| s.to_string()).collect() });
         session
     }
 
@@ -655,7 +618,8 @@ mod tests {
         assert!(activates(&app), "open before the ban is known");
         let state: State = serde_json::from_value(json!({"session_id": "demo", "active": false, "generation": 0,
             "operations": [], "displaying": 0, "since": null, "ended": null,
-            "forbidden": "Host control is forbidden by the session's policy"})).unwrap();
+            "forbidden": "Host control is forbidden by the session's policy"}))
+        .unwrap();
         let task = app.update(Message::HostControl(Event::Read("demo".into(), Ok(state))));
         settle_task(&mut app, task);
         simulator(&app, (900.0, 1100.0)).find("Host control is forbidden by the session's policy.").unwrap();
@@ -686,8 +650,11 @@ mod tests {
                 match request["method"].as_str().unwrap() {
                     "_sill/host_control.activate" => {
                         assert_eq!(request["params"], json!({"session_id": "demo", "operations": ["launch", "stop"]}));
-                        daemon.reply(&request, json!({"session_id": "demo", "active": true, "generation": 1,
-                            "operations": ["launch", "stop"], "displaying": 1, "since": "1", "ended": null}));
+                        daemon.reply(
+                            &request,
+                            json!({"session_id": "demo", "active": true, "generation": 1,
+                            "operations": ["launch", "stop"], "displaying": 1, "since": "1", "ended": null}),
+                        );
                     }
                     "_sill/sessions.list" => {
                         let session = with_control(session_record("demo", "demo", false, false), &["launch", "stop"]);
@@ -734,8 +701,11 @@ mod tests {
                 match request["method"].as_str().unwrap() {
                     "_sill/host_control.activate" => {
                         assert_eq!(request["params"], json!({"session_id": "demo", "operations": all}));
-                        daemon.reply(&request, json!({"session_id": "demo", "active": true, "generation": 1,
-                            "operations": all, "displaying": 1, "since": "1", "ended": null}));
+                        daemon.reply(
+                            &request,
+                            json!({"session_id": "demo", "active": true, "generation": 1,
+                            "operations": all, "displaying": 1, "since": "1", "ended": null}),
+                        );
                         if listed {
                             return;
                         }

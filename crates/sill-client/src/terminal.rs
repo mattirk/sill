@@ -119,16 +119,14 @@ impl Link {
         let (ops, commands) = mpsc::channel();
         let cancel = Arc::new(Cancel::default());
         let stop = cancel.clone();
-        let spawned = std::thread::Builder::new()
-            .name("sill-terminal".into())
-            .spawn(move || match connect(cols, rows) {
-                Err(error) => {
-                    if !stop.cancelled() {
-                        events(Event::Failed(format!("{error:#}")));
-                    }
+        let spawned = std::thread::Builder::new().name("sill-terminal".into()).spawn(move || match connect(cols, rows) {
+            Err(error) => {
+                if !stop.cancelled() {
+                    events(Event::Failed(format!("{error:#}")));
                 }
-                Ok(connection) => run(connection, screen, &stop, commands, events),
-            });
+            }
+            Ok(connection) => run(connection, screen, &stop, commands, events),
+        });
         if let Err(error) = spawned {
             eprintln!("sill-client: starting a terminal: {error}");
         }
@@ -161,25 +159,9 @@ impl Drop for Link {
 }
 
 /// Bytes both ways until the stream ends or the link goes.
-fn run(
-    connection: Connection,
-    mut screen: impl Screen,
-    cancel: &Cancel,
-    commands: mpsc::Receiver<Op>,
-    events: impl Fn(Event) -> bool + Send + Sync + 'static,
-) {
-    let Connection {
-        discarded,
-        size: (cols, rows),
-        stream,
-        mut control,
-    } = connection;
-    let RawStream {
-        mut reader,
-        mut writer,
-        interrupt,
-        ..
-    } = stream;
+fn run(connection: Connection, mut screen: impl Screen, cancel: &Cancel, commands: mpsc::Receiver<Op>, events: impl Fn(Event) -> bool + Send + Sync + 'static) {
+    let Connection { discarded, size: (cols, rows), stream, mut control } = connection;
+    let RawStream { mut reader, mut writer, interrupt, .. } = stream;
     if !cancel.arm(interrupt.clone()) {
         return;
     }
@@ -191,23 +173,21 @@ fn run(
     }
     let ended = events.clone();
     let stop = interrupt.clone();
-    let reading = std::thread::Builder::new()
-        .name("sill-terminal-output".into())
-        .spawn(move || {
-            let mut bytes = [0u8; 32 * 1024];
-            loop {
-                match reader.read(&mut bytes) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if !screen.output(&bytes[..n]) {
-                            break;
-                        }
+    let reading = std::thread::Builder::new().name("sill-terminal-output".into()).spawn(move || {
+        let mut bytes = [0u8; 32 * 1024];
+        loop {
+            match reader.read(&mut bytes) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if !screen.output(&bytes[..n]) {
+                        break;
                     }
                 }
             }
-            ended(Event::Ended);
-            stop();
-        });
+        }
+        ended(Event::Ended);
+        stop();
+    });
     if reading.is_err() {
         events(Event::Failed("could not read the terminal".into()));
         interrupt();
@@ -216,11 +196,7 @@ fn run(
     while let Ok(op) = commands.recv() {
         match op {
             Op::Input(bytes) => {
-                if writer
-                    .write_all(&bytes)
-                    .and_then(|()| writer.flush())
-                    .is_err()
-                {
+                if writer.write_all(&bytes).and_then(|()| writer.flush()).is_err() {
                     break;
                 }
             }
@@ -243,10 +219,7 @@ fn run(
 
 /// The session's jail shell over a connection of its own: the running one under [`LABEL`] when
 /// there is one (from before a window restart), else a new login shell.
-pub fn jail_shell(
-    connect: crate::Connector,
-    session_id: String,
-) -> impl FnOnce(u16, u16) -> anyhow::Result<Connection> + Send + 'static {
+pub fn jail_shell(connect: crate::Connector, session_id: String) -> impl FnOnce(u16, u16) -> anyhow::Result<Connection> + Send + 'static {
     jail_terminal(connect, session_id, LABEL, vec![], BTreeMap::new())
 }
 
@@ -273,14 +246,7 @@ pub fn host_shell(
         None,
         format!("host:{session_id}"),
         vec![],
-        [
-            ("SILL_HOST_SHELL".into(), "1".into()),
-            (
-                "GIT_CONFIG_PARAMETERS".into(),
-                "'core.fsmonitor=false' 'core.useBuiltinFSMonitor=false'".into(),
-            ),
-        ]
-        .into(),
+        [("SILL_HOST_SHELL".into(), "1".into()), ("GIT_CONFIG_PARAMETERS".into(), "'core.fsmonitor=false' 'core.useBuiltinFSMonitor=false'".into())].into(),
         cwd,
     )
 }
@@ -295,17 +261,8 @@ fn named_terminal(
 ) -> impl FnOnce(u16, u16) -> anyhow::Result<Connection> + Send + 'static {
     move |cols, rows| {
         let client = connect()?;
-        let listed: api::Terminals = client.call(
-            "_sill/terminals.list",
-            api::List {
-                session_id: session_id.clone(),
-            },
-        )?;
-        let found = listed
-            .terminals
-            .into_iter()
-            .rev()
-            .find(|t| t.session_id == session_id && t.label == label && t.state == "running");
+        let listed: api::Terminals = client.call("_sill/terminals.list", api::List { session_id: session_id.clone() })?;
+        let found = listed.terminals.into_iter().rev().find(|t| t.session_id == session_id && t.label == label && t.state == "running");
         let terminal = match found {
             Some(t) => t,
             None => client.call(
@@ -315,11 +272,7 @@ fn named_terminal(
                     label: label.into(),
                     argv,
                     // the frontend emulates xterm, whatever the jail's default is
-                    env: [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")]
-                        .into_iter()
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .chain(env)
-                        .collect(),
+                    env: [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).chain(env).collect(),
                     cwd,
                     cols,
                     rows,
@@ -327,31 +280,17 @@ fn named_terminal(
             )?,
         };
         let id = terminal.terminal_id.clone();
-        let key = |id: &str| api::TerminalKey {
-            terminal_id: id.to_string(),
-        };
+        let key = |id: &str| api::TerminalKey { terminal_id: id.to_string() };
         let stream: api::Stream = client.call("_sill/terminals.attach", key(&id))?;
         let stream = sill_proto::transport::open_stream(&stream.token)?;
         let control = move |control: Control| -> anyhow::Result<()> {
             let _: serde_json::Value = match control {
-                Control::Resize(cols, rows) => client.call(
-                    "_sill/terminals.resize",
-                    api::Resize {
-                        terminal_id: id.clone(),
-                        cols,
-                        rows,
-                    },
-                )?,
+                Control::Resize(cols, rows) => client.call("_sill/terminals.resize", api::Resize { terminal_id: id.clone(), cols, rows })?,
                 Control::Close => client.call("_sill/terminals.close", key(&id))?,
             };
             Ok(())
         };
-        Ok(Connection {
-            discarded: terminal.discarded_bytes != "0",
-            size: (terminal.cols, terminal.rows),
-            stream,
-            control: Box::new(control),
-        })
+        Ok(Connection { discarded: terminal.discarded_bytes != "0", size: (terminal.cols, terminal.rows), stream, control: Box::new(control) })
     }
 }
 
@@ -392,22 +331,11 @@ mod tests {
     #[test]
     fn dropping_a_link_detaches_its_stream_while_a_reply_handle_lives() {
         let (ours, mut remote) = UnixStream::pair().unwrap();
-        remote
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        remote.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let (tx, rx) = mpsc::channel();
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let link = Link::open(
-            80,
-            24,
-            move |_, _| Ok(over(ours)),
-            Collect(seen.clone()),
-            move |e| tx.send(e).is_ok(),
-        );
-        assert_eq!(
-            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-            Event::Opened
-        );
+        let link = Link::open(80, 24, move |_, _| Ok(over(ours)), Collect(seen.clone()), move |e| tx.send(e).is_ok());
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Event::Opened);
         remote.write_all(b"hello").unwrap();
         // the output must be on the screen before the drop: detaching discards what is unread
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -423,10 +351,7 @@ mod tests {
         drop(link);
         let mut rest = [0u8; 16];
         assert_eq!(remote.read(&mut rest).unwrap(), 0, "the stream must close");
-        assert_eq!(
-            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-            Event::Ended
-        );
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Event::Ended);
         // a reply after the link is gone goes nowhere, without harm
         replies.send(b"late".to_vec());
     }
@@ -435,9 +360,7 @@ mod tests {
     #[test]
     fn a_link_dropped_while_connecting_never_keeps_the_stream() {
         let (ours, mut remote) = UnixStream::pair().unwrap();
-        remote
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        remote.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let (go, wait) = mpsc::channel::<()>();
         let (tx, rx) = mpsc::channel();
         let link = Link::open(
@@ -454,9 +377,6 @@ mod tests {
         go.send(()).unwrap();
         let mut rest = [0u8; 16];
         assert_eq!(remote.read(&mut rest).unwrap(), 0);
-        assert!(
-            rx.recv_timeout(Duration::from_millis(200)).is_err(),
-            "nothing opened"
-        );
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "nothing opened");
     }
 }

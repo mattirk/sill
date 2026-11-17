@@ -2,15 +2,23 @@
 use super::*;
 use sill_proto::{pins as api, sessions::HostPath};
 
-fn pin_path(path: &HostPath) -> Result<PathBuf> { path.to_path().map_err(|e| Error::invalid_params(e).into()) }
+fn pin_path(path: &HostPath) -> Result<PathBuf> {
+    path.to_path().map_err(|e| Error::invalid_params(e).into())
+}
 fn list(store: &Store, a: api::List) -> Result<api::Page> {
     let n = a.limit.unwrap_or(64) as usize;
-    if !(1..=128).contains(&n) { return Err(Error::invalid_params("limit must be 1–128").into()); }
+    if !(1..=128).contains(&n) {
+        return Err(Error::invalid_params("limit must be 1–128").into());
+    }
     let after = a.after.as_ref().map(pin_path).transpose()?;
     let mut pins = if let Some(id) = a.session_id {
-        if store.session_exact(&id)?.is_none() { return Err(Error::domain("not_found", "session not found").into()); }
+        if store.session_exact(&id)?.is_none() {
+            return Err(Error::domain("not_found", "session not found").into());
+        }
         store.pins(&id)?
-    } else { store.global_pins()? };
+    } else {
+        store.global_pins()?
+    };
     use std::os::unix::ffi::OsStrExt;
     pins.sort_by(|a, b| a.as_os_str().as_bytes().cmp(b.as_os_str().as_bytes()));
     pins.retain(|p| after.as_ref().is_none_or(|a| p.as_os_str().as_bytes() > a.as_os_str().as_bytes()));
@@ -26,12 +34,20 @@ impl Hub {
                 "_sill/pins.list" => self.with_store(|store| Ok(json!(list(store, args(params)?)?))),
                 "_sill/pins.add" => {
                     let a: api::GlobalPin = args(params)?;
-                    let path = pin_path(&a.path)?.canonicalize().map_err(|e| Error::domain(if e.kind() == std::io::ErrorKind::NotFound { "not_found" } else { "permission_denied" }, e.to_string()))?;
-                    if !path.is_dir() && !path.is_file() { return Err(Error::invalid_params("pin must be a file or directory").into()); }
+                    let path = pin_path(&a.path)?
+                        .canonicalize()
+                        .map_err(|e| Error::domain(if e.kind() == std::io::ErrorKind::NotFound { "not_found" } else { "permission_denied" }, e.to_string()))?;
+                    if !path.is_dir() && !path.is_file() {
+                        return Err(Error::invalid_params("pin must be a file or directory").into());
+                    }
                     self.with_store(|store| {
                         let held = store.global_pins()?;
-                        if held.contains(&path) { return Ok(()); }
-                        if held.len() >= 128 { return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Capacity, Some(128), "at most 128 shortcuts").into()); }
+                        if held.contains(&path) {
+                            return Ok(());
+                        }
+                        if held.len() >= 128 {
+                            return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Capacity, Some(128), "at most 128 shortcuts").into());
+                        }
                         store.global_pin(&path)
                     })?;
                     Ok(json!(api::Pinned { path: HostPath::from_path(&path) }))
@@ -48,11 +64,17 @@ impl Hub {
                     self.with_store(|store| {
                         let session = store.session_exact(&a.session_id)?.ok_or_else(|| Error::domain("not_found", "session not found"))?;
                         if method == "_sill/sessions.pin" {
-                            if session.ghost { return Err(Error::domain("invalid_state", GHOST_NO_PINS).into()); }
+                            if session.ghost {
+                                return Err(Error::domain("invalid_state", GHOST_NO_PINS).into());
+                            }
                             let held = store.pins(&a.session_id)?;
-                            if held.len() >= 128 && !held.contains(&path) { return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Capacity, Some(128), "at most 128 session pins").into()); }
+                            if held.len() >= 128 && !held.contains(&path) {
+                                return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Capacity, Some(128), "at most 128 session pins").into());
+                            }
                             store.pin(&a.session_id, &path)?;
-                        } else { store.unpin(&a.session_id, &path)?; }
+                        } else {
+                            store.unpin(&a.session_id, &path)?;
+                        }
                         Ok(())
                     })?;
                     self.pins_changed(Some(&a.session_id));
@@ -63,7 +85,9 @@ impl Hub {
         };
         if matches!(method, "_sill/pins.list" | "_sill/pins.add" | "_sill/pins.remove" | "_sill/sessions.pin" | "_sill/sessions.unpin") {
             Some(result().map_err(crate::daemon::sfp::failure))
-        } else { None }
+        } else {
+            None
+        }
     }
 }
 

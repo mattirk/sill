@@ -124,7 +124,12 @@ pub fn stop_scope(unit: &str) -> Result<bool> {
         return Ok(false);
     }
     let _ = std::process::Command::new("systemctl").args(["--user", "stop", "--quiet", &name]).stdin(std::process::Stdio::null()).status();
-    let _ = std::process::Command::new("systemctl").args(["--user", "reset-failed", "--quiet", &name]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "reset-failed", "--quiet", &name])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
     Ok(true)
 }
 
@@ -235,8 +240,7 @@ pub const CGROUP_FS: &str = "/sys/fs/cgroup";
 pub fn delegated_subtree() -> Option<PathBuf> {
     let uid = rustix::process::getuid().as_raw();
     let dir = Path::new(CGROUP_FS).join("sill").join(uid.to_string());
-    let writable = std::fs::metadata(&dir).ok().map(|m| m.is_dir()).unwrap_or(false)
-        && rustix::fs::access(&dir, rustix::fs::Access::WRITE_OK).is_ok();
+    let writable = std::fs::metadata(&dir).ok().map(|m| m.is_dir()).unwrap_or(false) && rustix::fs::access(&dir, rustix::fs::Access::WRITE_OK).is_ok();
     writable.then_some(dir)
 }
 
@@ -268,7 +272,9 @@ pub fn make_session_cgroup(root: &Path, session: &str, limits: &Limits, warnings
     }
     let mut set = |file: &str, value: String| {
         if let Err(e) = std::fs::write(dir.join(file), &value) {
-            if limits.required { return Err(anyhow::anyhow!("required cgroup {file}={value} not applied ({e}); controller not delegated?")); }
+            if limits.required {
+                return Err(anyhow::anyhow!("required cgroup {file}={value} not applied ({e}); controller not delegated?"));
+            }
             warnings.push(format!("cgroup {file}={value} not applied ({e}); controller not delegated?"));
         }
         Ok(())
@@ -458,7 +464,8 @@ mod tests {
     #[test]
     fn a_session_process_is_known_by_its_command_line() {
         // a loop of short sleeps: killing the shell leaves at most a second's orphan behind
-        let mut launcher = std::process::Command::new("sh").args(["-c", "while :; do sleep 1; done", "sill", "launch", "--session", "abcd1234"]).spawn().unwrap();
+        let mut launcher =
+            std::process::Command::new("sh").args(["-c", "while :; do sleep 1; done", "sill", "launch", "--session", "abcd1234"]).spawn().unwrap();
         let mut other = std::process::Command::new("sleep").arg("30").spawn().unwrap();
         assert!(is_session_process(launcher.id(), "abcd1234", SessionProcess::Launcher));
         assert!(!is_session_process(launcher.id(), "abcd12", SessionProcess::Launcher), "a prefix of the id is another session");

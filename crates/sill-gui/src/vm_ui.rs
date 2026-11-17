@@ -35,14 +35,7 @@ pub enum Phase {
 impl Phase {
     /// On its way somewhere: the section looks again until it gets there.
     pub fn moving(&self) -> bool {
-        matches!(
-            self,
-            Phase::Checking
-                | Phase::SettingUp
-                | Phase::Updating
-                | Phase::Starting
-                | Phase::Stopping
-        )
+        matches!(self, Phase::Checking | Phase::SettingUp | Phase::Updating | Phase::Starting | Phase::Stopping)
     }
 }
 
@@ -199,31 +192,19 @@ impl App {
     }
 
     fn vm_phase(&self) -> Option<Phase> {
-        if self.demo {
-            Some(Phase::Ready)
-        } else {
-            backend::phase()
-        }
+        if self.demo { Some(Phase::Ready) } else { backend::phase() }
     }
 
     /// While Settings shows a VM on its way somewhere, or an action under way: look once a second.
     pub(crate) fn vm_ticking(&self) -> bool {
-        self.settings_page.is_some()
-            && !self.demo
-            && (self.vm.busy.is_some()
-                || self
-                    .vm_phase()
-                    .is_some_and(|p| p.moving() || p == Phase::Ready))
+        self.settings_page.is_some() && !self.demo && (self.vm.busy.is_some() || self.vm_phase().is_some_and(|p| p.moving() || p == Phase::Ready))
     }
 
     pub(crate) fn vm_event(&mut self, event: Event) -> Task<Message> {
         if !self.vm_shown() {
             return Task::none();
         }
-        let act = |busy: &'static str,
-                   state: &mut State,
-                   work: fn() -> Result<String, String>|
-         -> Task<Message> {
+        let act = |busy: &'static str, state: &mut State, work: fn() -> Result<String, String>| -> Task<Message> {
             if state.busy.is_some() {
                 return Task::none();
             }
@@ -234,11 +215,7 @@ impl App {
         };
         match event {
             Event::OpenStorage => {
-                let task = if self.settings_page.is_none() {
-                    self.show_page(crate::Page::Settings)
-                } else {
-                    Task::none()
-                };
+                let task = if self.settings_page.is_none() { self.show_page(crate::Page::Settings) } else { Task::none() };
                 if let Some(page) = &mut self.settings_page {
                     page.category = crate::settings_ui::Category::System;
                     page.collapsed.remove("Virtual machine");
@@ -247,10 +224,7 @@ impl App {
                 return Task::batch([
                     task,
                     self.vm_event(Event::ReadSpace),
-                    iced::widget::operation::snap_to(
-                        "settings",
-                        iced::widget::scrollable::RelativeOffset::START,
-                    ),
+                    iced::widget::operation::snap_to("settings", iced::widget::scrollable::RelativeOffset::START),
                 ]);
             }
             Event::ReadSpace => {
@@ -259,16 +233,8 @@ impl App {
                 }
                 if self.demo {
                     self.vm.space = Some(Ok(sill_proto::storage::Space {
-                        home: sill_proto::storage::DiskSpace {
-                            total: 63 << 30,
-                            used: 16 << 30,
-                            available: 47 << 30,
-                        },
-                        state: sill_proto::storage::DiskSpace {
-                            total: 63 << 30,
-                            used: 46 << 30,
-                            available: 17 << 30,
-                        },
+                        home: sill_proto::storage::DiskSpace { total: 63 << 30, used: 16 << 30, available: 47 << 30 },
+                        state: sill_proto::storage::DiskSpace { total: 63 << 30, used: 46 << 30, available: 17 << 30 },
                     }));
                     return Task::none();
                 }
@@ -281,18 +247,9 @@ impl App {
                     move || {
                         let client = connect().map_err(|e| format!("{e:#}"))?;
                         if !client.has_capability("sill.storage") {
-                            return Err(
-                                "Update the VM's daemon to read free space and clear build caches."
-                                    .into(),
-                            );
+                            return Err("Update the VM's daemon to read free space and clear build caches.".into());
                         }
-                        client
-                            .call_within(
-                                "_sill/storage.space",
-                                sill_proto::Empty {},
-                                sill_proto::client::QUICK_TIMEOUT,
-                            )
-                            .map_err(|e| format!("{e:#}"))
+                        client.call_within("_sill/storage.space", sill_proto::Empty {}, sill_proto::client::QUICK_TIMEOUT).map_err(|e| format!("{e:#}"))
                     },
                     |r| msg(Event::Space(r)),
                 );
@@ -328,13 +285,7 @@ impl App {
                 return blocking(
                     move || {
                         let client = connect().map_err(|e| format!("{e:#}"))?;
-                        client
-                            .call_within(
-                                "_sill/storage.caches",
-                                sill_proto::Empty {},
-                                std::time::Duration::from_secs(120),
-                            )
-                            .map_err(|e| format!("{e:#}"))
+                        client.call_within("_sill/storage.caches", sill_proto::Empty {}, std::time::Duration::from_secs(120)).map_err(|e| format!("{e:#}"))
                     },
                     |r| msg(Event::Caches(r)),
                 );
@@ -353,13 +304,7 @@ impl App {
                     .caches
                     .as_ref()
                     .and_then(|r| r.as_ref().ok())
-                    .map(|r| {
-                        r.caches
-                            .iter()
-                            .filter(|c| !c.active && c.problem.is_none())
-                            .map(|c| c.session_id.clone())
-                            .collect()
-                    })
+                    .map(|r| r.caches.iter().filter(|c| !c.active && c.problem.is_none()).map(|c| c.session_id.clone()).collect())
                     .unwrap_or_default();
                 if ids.is_empty() {
                     return Task::none();
@@ -383,22 +328,13 @@ impl App {
                         for id in ids {
                             if let Err(error) = client.call_within::<serde_json::Value>(
                                 "_sill/storage.clear_build_cache",
-                                sill_proto::storage::ClearBuildCache {
-                                    session_id: id.clone(),
-                                },
+                                sill_proto::storage::ClearBuildCache { session_id: id.clone() },
                                 std::time::Duration::from_secs(120),
                             ) {
                                 failures.push(format!("{id}: {error:#}"));
                             }
                         }
-                        if failures.is_empty() {
-                            Ok(())
-                        } else {
-                            Err(format!(
-                                "Some build caches could not be cleared: {}",
-                                failures.join("; ")
-                            ))
-                        }
+                        if failures.is_empty() { Ok(()) } else { Err(format!("Some build caches could not be cleared: {}", failures.join("; "))) }
                     },
                     |r| msg(Event::Cleared(r)),
                 );
@@ -408,10 +344,7 @@ impl App {
                 self.vm.said = Some(result.map(|()| "All eligible build caches cleared.".into()));
                 // Never retry a timed-out deletion. A fresh scan shows what remains.
                 self.vm.caches = None;
-                return Task::batch([
-                    self.vm_event(Event::ReadSpace),
-                    self.vm_event(Event::ScanCaches),
-                ]);
+                return Task::batch([self.vm_event(Event::ReadSpace), self.vm_event(Event::ScanCaches)]);
             }
             Event::Read => {
                 if self.demo {
@@ -422,10 +355,7 @@ impl App {
                     return Task::none();
                 }
                 self.vm.reading = true;
-                return blocking(
-                    || backend::info().map(Box::new),
-                    |info| msg(Event::Info(info)),
-                );
+                return blocking(|| backend::info().map(Box::new), |info| msg(Event::Info(info)));
             }
             Event::Info(info) => {
                 self.vm.reading = false;
@@ -438,12 +368,7 @@ impl App {
                     self.vm.seen = phase;
                     return self.vm_event(Event::Read);
                 }
-                if phase == Some(Phase::Ready)
-                    && self
-                        .vm
-                        .space_read_at
-                        .is_none_or(|t| t.elapsed().as_secs() >= 15)
-                {
+                if phase == Some(Phase::Ready) && self.vm.space_read_at.is_none_or(|t| t.elapsed().as_secs() >= 15) {
                     return self.vm_event(Event::ReadSpace);
                 }
             }
@@ -451,21 +376,15 @@ impl App {
                 self.vm.said = Some(Err(DEMO.into()));
             }
             Event::Restart => {
-                return act("Restarting…", &mut self.vm, || {
-                    backend::restart().map(|()| "The VM restarted; sessions reconnect.".into())
-                });
+                return act("Restarting…", &mut self.vm, || backend::restart().map(|()| "The VM restarted; sessions reconnect.".into()));
             }
             Event::Stop => {
                 return act("Shutting down…", &mut self.vm, || {
-                    backend::stop().map(|()| {
-                        "The VM is shut down: no session runs until it starts again.".into()
-                    })
+                    backend::stop().map(|()| "The VM is shut down: no session runs until it starts again.".into())
                 });
             }
             Event::Start => {
-                return act("Starting…", &mut self.vm, || {
-                    backend::start().map(|()| "The VM started.".into())
-                });
+                return act("Starting…", &mut self.vm, || backend::start().map(|()| "The VM started.".into()));
             }
             Event::Resources(chosen) => {
                 if self.demo {
@@ -476,11 +395,7 @@ impl App {
                 }
                 self.vm.said = None;
                 return blocking(
-                    move || {
-                        backend::set_resources(chosen).map(|()| {
-                            "Saved: the VM gets it at its next start (Restart).".to_string()
-                        })
-                    },
+                    move || backend::set_resources(chosen).map(|()| "Saved: the VM gets it at its next start (Restart).".to_string()),
                     |result| msg(Event::Done(result)),
                 );
             }
@@ -491,13 +406,7 @@ impl App {
                 self.vm.busy = Some("Choosing a folder…");
                 self.vm.said = None;
                 return Task::perform(
-                    async {
-                        rfd::AsyncFileDialog::new()
-                            .set_title("Share a folder with the VM")
-                            .pick_folder()
-                            .await
-                            .map(|folder| folder.path().to_path_buf())
-                    },
+                    async { rfd::AsyncFileDialog::new().set_title("Share a folder with the VM").pick_folder().await.map(|folder| folder.path().to_path_buf()) },
                     |path| msg(Event::Picked(path)),
                 );
             }
@@ -510,10 +419,7 @@ impl App {
                 }
                 self.vm.busy = Some("Sharing…");
                 return blocking(
-                    move || {
-                        backend::expose(&path)
-                            .map(|path| format!("{} is shared with the VM.", path.display()))
-                    },
+                    move || backend::expose(&path).map(|path| format!("{} is shared with the VM.", path.display())),
                     |result| msg(Event::Done(result)),
                 );
             }
@@ -532,10 +438,7 @@ impl App {
                 self.vm.busy = Some("Unsharing…");
                 self.vm.said = None;
                 return blocking(
-                    move || {
-                        backend::unshare(&path)
-                            .map(|()| format!("{} is no longer shared.", path.display()))
-                    },
+                    move || backend::unshare(&path).map(|()| format!("{} is no longer shared.", path.display())),
                     |result| msg(Event::Done(result)),
                 );
             }
@@ -573,41 +476,23 @@ impl App {
                 for (label, disk) in [("Home disk", &space.home), ("State disk", &space.state)] {
                     body = body.push(crate::daemon_ui::detail_row(label, space_label(disk)));
                     if low_space(disk) {
-                        body = body.push(text(format!("{label} is low on space. Clear unused build caches or make room before starting more work."))
-                            .size(style::SMALL).color(P.warning));
+                        body = body.push(
+                            text(format!("{label} is low on space. Clear unused build caches or make room before starting more work."))
+                                .size(style::SMALL)
+                                .color(P.warning),
+                        );
                     }
                 }
             }
             Some(Err(why)) => body = body.push(text(why).size(style::SMALL).color(P.warning)),
-            _ => {
-                body = body.push(
-                    text(if ready {
-                        "Reading free space…"
-                    } else {
-                        "Start the VM to read its free space."
-                    })
-                    .size(style::SMALL)
-                    .color(P.fg_dim),
-                )
-            }
+            _ => body = body.push(text(if ready { "Reading free space…" } else { "Start the VM to read its free space." }).size(style::SMALL).color(P.fg_dim)),
         }
         let supported = vm.space.as_ref().is_some_and(|r| r.is_ok()) && ready;
         body = body.push(
             row![
+                quiet_button(if vm.space_reading { "Refreshing…" } else { "Refresh space" }, (ready && !vm.space_reading).then(|| msg(Event::ReadSpace))),
                 quiet_button(
-                    if vm.space_reading {
-                        "Refreshing…"
-                    } else {
-                        "Refresh space"
-                    },
-                    (ready && !vm.space_reading).then(|| msg(Event::ReadSpace))
-                ),
-                quiet_button(
-                    if vm.scanning {
-                        "Scanning…"
-                    } else {
-                        "Scan build caches"
-                    },
+                    if vm.scanning { "Scanning…" } else { "Scan build caches" },
                     (supported && !vm.scanning && !vm.clearing).then(|| msg(Event::ScanCaches))
                 ),
             ]
@@ -618,16 +503,9 @@ impl App {
         match &vm.caches {
             Some(Ok(report)) => {
                 if report.caches.is_empty() {
-                    body = body.push(
-                        text("No build caches found.")
-                            .size(style::SMALL)
-                            .color(P.fg_dim),
-                    );
+                    body = body.push(text("No build caches found.").size(style::SMALL).color(P.fg_dim));
                 }
-                let eligible = report
-                    .caches
-                    .iter()
-                    .any(|c| !c.active && c.problem.is_none());
+                let eligible = report.caches.iter().any(|c| !c.active && c.problem.is_none());
                 let mut actions = row![quiet_button(
                     if vm.clearing {
                         "Clearing…"
@@ -636,8 +514,7 @@ impl App {
                     } else {
                         "Clear all build caches"
                     },
-                    (supported && eligible && !vm.scanning && !vm.clearing)
-                        .then(|| msg(Event::ClearCaches)),
+                    (supported && eligible && !vm.scanning && !vm.clearing).then(|| msg(Event::ClearCaches)),
                 )]
                 .spacing(8);
                 if vm.armed_clear.is(&()) {
@@ -646,21 +523,10 @@ impl App {
                 body = body.push(actions);
                 for cache in &report.caches {
                     let id = &cache.session_id;
-                    let title = if cache.title.is_empty() {
-                        id.clone()
-                    } else {
-                        format!("{} · {id}", cache.title)
-                    };
+                    let title = if cache.title.is_empty() { id.clone() } else { format!("{} · {id}", cache.title) };
                     let mut line = column![
-                        row![
-                            text(title).size(style::SMALL),
-                            space().width(Fill),
-                            text(readable_size(cache.bytes)).size(style::SMALL)
-                        ]
-                        .spacing(8),
-                        text(cache.path.display.clone())
-                            .size(style::TINY)
-                            .color(P.fg_dim),
+                        row![text(title).size(style::SMALL), space().width(Fill), text(readable_size(cache.bytes)).size(style::SMALL)].spacing(8),
+                        text(cache.path.display.clone()).size(style::TINY).color(P.fg_dim),
                     ]
                     .spacing(4);
                     if let Some(problem) = &cache.problem {
@@ -685,9 +551,7 @@ impl App {
         let mut rows = Vec::new();
 
         // ---- Status and actions
-        let acting = vm
-            .busy
-            .filter(|b| matches!(*b, "Restarting…" | "Shutting down…" | "Starting…"));
+        let acting = vm.busy.filter(|b| matches!(*b, "Restarting…" | "Shutting down…" | "Starting…"));
         let (label, color) = match &phase {
             _ if acting.is_some() => (acting.unwrap_or_default(), P.warning),
             Phase::Ready => ("Running", P.success),
@@ -700,23 +564,12 @@ impl App {
         };
         let dot = container(space().width(6).height(6)).style(move |_| container::Style {
             background: Some(color.into()),
-            border: iced::Border {
-                radius: 3.0.into(),
-                ..Default::default()
-            },
+            border: iced::Border { radius: 3.0.into(), ..Default::default() },
             ..Default::default()
         });
         let mut status = column![
-            row![
-                text("Linux VM").size(style::TEXT).width(Fill),
-                text(label).size(style::TEXT).color(color),
-                dot,
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-            text("The daemon and every session run in it; it starts with Sill and ends when Sill quits.")
-                .size(style::SMALL)
-                .color(P.fg_dim),
+            row![text("Linux VM").size(style::TEXT).width(Fill), text(label).size(style::TEXT).color(color), dot,].spacing(8).align_y(Alignment::Center),
+            text("The daemon and every session run in it; it starts with Sill and ends when Sill quits.").size(style::SMALL).color(P.fg_dim),
         ]
         .spacing(10);
         if let Phase::Failed(said) = &phase {
@@ -725,28 +578,20 @@ impl App {
         if let Some((cpus, memory)) = info.and_then(|i| i.running)
             && phase == Phase::Ready
         {
-            status = status.push(crate::daemon_ui::detail_row(
-                "Running with",
-                format!("{cpus} processors · {memory} GB memory"),
-            ));
+            status = status.push(crate::daemon_ui::detail_row("Running with", format!("{cpus} processors · {memory} GB memory")));
         }
         let idle = vm.busy.is_none() && !phase.moving();
         let can_stop = idle && matches!(phase, Phase::Ready | Phase::Failed(_));
         let can_start = idle && matches!(phase, Phase::Stopped | Phase::Failed(_));
         let mut buttons = row![
             quiet_button("Restart", can_stop.then(|| msg(Event::Restart))),
-            quiet_button(
-                "Shut down",
-                (can_stop && phase == Phase::Ready).then(|| msg(Event::Stop))
-            ),
+            quiet_button("Shut down", (can_stop && phase == Phase::Ready).then(|| msg(Event::Stop))),
         ]
         .spacing(8);
         if matches!(phase, Phase::Stopped | Phase::Failed(_)) {
             buttons = buttons.push(quiet_button("Start", can_start.then(|| msg(Event::Start))));
         }
-        buttons = buttons
-            .push(space().width(Fill))
-            .push(quiet_button("Show in Finder", Some(msg(Event::Reveal))));
+        buttons = buttons.push(space().width(Fill)).push(quiet_button("Show in Finder", Some(msg(Event::Reveal))));
         status = status.push(buttons);
         match &vm.said {
             Some(Ok(said)) => {
@@ -758,14 +603,14 @@ impl App {
             None => {}
         }
         rows.push(container(status).padding([12, 16]).into());
-        rows.push(wide("Storage inside the VM", Some("Available space inside the VM is separate from the disk images' size on the Mac. Refreshes every 15 seconds while Settings is open."), self.vm_storage()));
+        rows.push(wide(
+            "Storage inside the VM",
+            Some("Available space inside the VM is separate from the disk images' size on the Mac. Refreshes every 15 seconds while Settings is open."),
+            self.vm_storage(),
+        ));
 
         let Some(info) = info else {
-            rows.push(
-                container(text("Reading the VM…").size(style::SMALL).color(P.fg_dim))
-                    .padding([12, 16])
-                    .into(),
-            );
+            rows.push(container(text("Reading the VM…").size(style::SMALL).color(P.fg_dim)).padding([12, 16]).into());
             return rows;
         };
 
@@ -773,55 +618,26 @@ impl App {
         // each row says whether its own choice differs from what the running VM has
         let running = info.running.filter(|_| phase == Phase::Ready);
         let note = |differs: bool| {
-            if differs {
-                "Changed: Restart to apply"
-            } else {
-                "Applies when the VM starts"
-            }
+            if differs { "Changed: Restart to apply" } else { "Applies when the VM starts" }
         };
-        let cpus_note = note(
-            running.is_some_and(|(cpus, _)| info.chosen.cpus.unwrap_or(info.automatic.0) != cpus),
-        );
-        let memory_note = note(running.is_some_and(|(_, memory)| {
-            info.chosen.memory_gb.unwrap_or(info.automatic.1) != memory
-        }));
+        let cpus_note = note(running.is_some_and(|(cpus, _)| info.chosen.cpus.unwrap_or(info.automatic.0) != cpus));
+        let memory_note = note(running.is_some_and(|(_, memory)| info.chosen.memory_gb.unwrap_or(info.automatic.1) != memory));
         let chosen = info.chosen;
-        let cpu_options: Vec<Choice> = std::iter::once(Choice::automatic(format!(
-            "Automatic ({})",
-            info.automatic.0
-        )))
-        .chain((2..=info.max.0.max(2)).map(|n| Choice::value(n as u64, format!("{n}"))))
-        .collect();
-        let memory_options: Vec<Choice> = std::iter::once(Choice::automatic(format!(
-            "Automatic ({} GB)",
-            info.automatic.1
-        )))
-        .chain(
-            MEMORY_GB
-                .iter()
-                .filter(|gb| **gb <= info.max.1.max(2))
-                .map(|gb| Choice::value(*gb, format!("{gb} GB"))),
-        )
-        .collect();
+        let cpu_options: Vec<Choice> = std::iter::once(Choice::automatic(format!("Automatic ({})", info.automatic.0)))
+            .chain((2..=info.max.0.max(2)).map(|n| Choice::value(n as u64, format!("{n}"))))
+            .collect();
+        let memory_options: Vec<Choice> = std::iter::once(Choice::automatic(format!("Automatic ({} GB)", info.automatic.1)))
+            .chain(MEMORY_GB.iter().filter(|gb| **gb <= info.max.1.max(2)).map(|gb| Choice::value(*gb, format!("{gb} GB"))))
+            .collect();
         rows.push(setting(
             "Processors",
             Some(cpus_note),
-            choose(cpu_options, chosen.cpus.map(|n| n as u64), move |v| {
-                msg(Event::Resources(Resources {
-                    cpus: v.map(|n| n as usize),
-                    ..chosen
-                }))
-            }),
+            choose(cpu_options, chosen.cpus.map(|n| n as u64), move |v| msg(Event::Resources(Resources { cpus: v.map(|n| n as usize), ..chosen }))),
         ));
         rows.push(setting(
             "Memory",
             Some(memory_note),
-            choose(memory_options, chosen.memory_gb, move |v| {
-                msg(Event::Resources(Resources {
-                    memory_gb: v,
-                    ..chosen
-                }))
-            }),
+            choose(memory_options, chosen.memory_gb, move |v| msg(Event::Resources(Resources { memory_gb: v, ..chosen }))),
         ));
 
         // ---- Shared folders
@@ -830,27 +646,14 @@ impl App {
             let armed = vm.armed_remove.is(path);
             let mut line = column![text(home_relative(path)).size(style::TEXT)].width(Fill);
             if !present {
-                line = line.push(
-                    text("Not on this Mac now (a disk not connected?)")
-                        .size(style::SMALL)
-                        .color(P.warning),
-                );
+                line = line.push(text("Not on this Mac now (a disk not connected?)").size(style::SMALL).color(P.warning));
             }
             let remove: Element<'_, Message> = if armed {
-                quiet_button(
-                    "Unshare?",
-                    idle.then(|| msg(Event::RemoveFolder(path.clone()))),
-                )
+                quiet_button("Unshare?", idle.then(|| msg(Event::RemoveFolder(path.clone()))))
             } else {
                 // waits while the VM restarts or another change is under way
                 crate::keys::press_maybe(
-                    iced::widget::button(crate::icons::glyph(
-                        "minus",
-                        13.0,
-                        alpha(P.fg, if idle { 0.7 } else { 0.25 }),
-                    ))
-                    .padding([6, 8])
-                    .style(style::quiet),
+                    iced::widget::button(crate::icons::glyph("minus", 13.0, alpha(P.fg, if idle { 0.7 } else { 0.25 }))).padding([6, 8]).style(style::quiet),
                     idle.then(|| msg(Event::RemoveFolder(path.clone()))),
                 )
             };
@@ -860,22 +663,12 @@ impl App {
             folders = folders.push(text("None").size(style::SMALL).color(P.fg_dim));
         }
         if vm.armed_remove.get().is_some() {
-            folders = folders.push(
-                text("Sessions that pin something in it lose it. Press again to unshare.")
-                    .size(style::SMALL)
-                    .color(P.warning),
-            );
+            folders = folders.push(text("Sessions that pin something in it lose it. Press again to unshare.").size(style::SMALL).color(P.warning));
         }
         let full = info.folders.len() >= info.slots;
         folders = folders.push(
-            row![quiet_button(
-                "Share a folder…",
-                (idle && phase == Phase::Ready && !full).then(|| msg(Event::AddFolder)),
-            )]
-            .padding(iced::Padding {
-                top: 6.0,
-                ..Default::default()
-            }),
+            row![quiet_button("Share a folder…", (idle && phase == Phase::Ready && !full).then(|| msg(Event::AddFolder)),)]
+                .padding(iced::Padding { top: 6.0, ..Default::default() }),
         );
         rows.push(wide(
             "Shared Mac folders",
@@ -897,10 +690,7 @@ impl App {
             "",
             None,
             column![
-                crate::daemon_ui::detail_row(
-                    "System image",
-                    info.image.clone().unwrap_or_else(|| "–".into())
-                ),
+                crate::daemon_ui::detail_row("System image", info.image.clone().unwrap_or_else(|| "–".into())),
                 crate::daemon_ui::detail_row("System image on Mac", size(info.system_used)),
                 crate::daemon_ui::detail_row("Home image on Mac", data(info.home_used)),
                 crate::daemon_ui::detail_row("State image on Mac", data(info.state_used)),
@@ -927,10 +717,7 @@ impl Choice {
         Self { value: None, label }
     }
     fn value(value: u64, label: String) -> Self {
-        Self {
-            value: Some(value),
-            label,
-        }
+        Self { value: Some(value), label }
     }
 }
 
@@ -940,20 +727,10 @@ impl std::fmt::Display for Choice {
     }
 }
 
-fn choose<'a>(
-    options: Vec<Choice>,
-    value: Option<u64>,
-    on: impl Fn(Option<u64>) -> Message + 'a,
-) -> Element<'a, Message> {
+fn choose<'a>(options: Vec<Choice>, value: Option<u64>, on: impl Fn(Option<u64>) -> Message + 'a) -> Element<'a, Message> {
     // a hand-edited value not among the options shows as itself
-    let selected = options
-        .iter()
-        .find(|c| c.value == value)
-        .cloned()
-        .unwrap_or_else(|| Choice {
-            value,
-            label: value.map_or_else(String::new, |v| v.to_string()),
-        });
+    let selected =
+        options.iter().find(|c| c.value == value).cloned().unwrap_or_else(|| Choice { value, label: value.map_or_else(String::new, |v| v.to_string()) });
     pick_list(options, Some(selected), move |c: Choice| on(c.value))
         .text_size(style::TEXT)
         .padding([6, 12])
@@ -993,16 +770,9 @@ mod tests {
 
     #[test]
     fn resources_keep_only_what_was_chosen() {
-        let json = serde_json::to_string(&Resources {
-            cpus: Some(4),
-            memory_gb: None,
-        })
-        .unwrap();
+        let json = serde_json::to_string(&Resources { cpus: Some(4), memory_gb: None }).unwrap();
         assert_eq!(json, r#"{"cpus":4}"#);
-        assert_eq!(
-            serde_json::from_str::<Resources>("{}").unwrap(),
-            Resources::default()
-        );
+        assert_eq!(serde_json::from_str::<Resources>("{}").unwrap(), Resources::default());
     }
 
     #[test]
@@ -1021,21 +791,9 @@ mod tests {
     #[test]
     fn storage_warning_and_confirmation() {
         use sill_proto::storage::DiskSpace;
-        assert!(low_space(&DiskSpace {
-            total: 64 << 30,
-            used: 63 << 30,
-            available: 0
-        }));
-        assert!(low_space(&DiskSpace {
-            total: 64 << 30,
-            used: 60 << 30,
-            available: 4 << 30
-        }));
-        assert!(!low_space(&DiskSpace {
-            total: 64 << 30,
-            used: 40 << 30,
-            available: 24 << 30
-        }));
+        assert!(low_space(&DiskSpace { total: 64 << 30, used: 63 << 30, available: 0 }));
+        assert!(low_space(&DiskSpace { total: 64 << 30, used: 60 << 30, available: 4 << 30 }));
+        assert!(!low_space(&DiskSpace { total: 64 << 30, used: 40 << 30, available: 24 << 30 }));
         let (mut app, _) = App::new(true, None);
         let _ = app.vm_event(Event::Read);
         let _ = app.vm_event(Event::ScanCaches);
@@ -1061,19 +819,13 @@ mod tests {
         disk.available = 1 << 30;
         let _ = app.vm_event(Event::ClearCaches);
         let content = container(app.vm_storage()).padding(20).width(Fill);
-        let mut ui =
-            iced_test::Simulator::with_size(crate::snapshots::settings(), (680.0, 600.0), content);
+        let mut ui = iced_test::Simulator::with_size(crate::snapshots::settings(), (680.0, 600.0), content);
         let snapshot = ui.snapshot(&crate::style::theme()).unwrap();
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/sill-gui-snapshots");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/sill-gui-snapshots");
         std::fs::create_dir_all(&dir).unwrap();
         // Like the other manual renders, write a fresh review image rather than a golden test.
         for entry in std::fs::read_dir(&dir).unwrap().flatten() {
-            if entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("vm-storage-")
-            {
+            if entry.file_name().to_string_lossy().starts_with("vm-storage-") {
                 std::fs::remove_file(entry.path()).unwrap();
             }
         }
@@ -1107,12 +859,7 @@ fn low_space(disk: &sill_proto::storage::DiskSpace) -> bool {
     disk.available < (2 << 30) || disk.available < disk.total / 10
 }
 fn space_label(disk: &sill_proto::storage::DiskSpace) -> String {
-    format!(
-        "{} available · {} used of {}",
-        readable_size(disk.available),
-        readable_size(disk.used),
-        readable_size(disk.total)
-    )
+    format!("{} available · {} used of {}", readable_size(disk.available), readable_size(disk.used), readable_size(disk.total))
 }
 pub(crate) fn storage_error(why: &str) -> bool {
     why.contains("No space left on device") || why.contains("os error 28")

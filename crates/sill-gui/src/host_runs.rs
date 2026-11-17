@@ -227,7 +227,10 @@ mod tests {
         assert_eq!(one("mac_commands", r#"{"run":{"argv":["ls","two words"],"cwd":"/x"}}"#), "ls 'two words'");
         assert_eq!(one("mac_commands", r#"{"stop":"mac:3"}"#), "stop mac:3");
         assert_eq!(one("mac_view", r#"{"list":"windows"}"#), "windows");
-        assert_eq!(one("mac_input", r#"{"frame":"f","actions":[{"click":[820,410],"button":"right"},{"type":"hello"},{"key":"return"}]}"#), "click 820,410 · type hello · key return");
+        assert_eq!(
+            one("mac_input", r#"{"frame":"f","actions":[{"click":[820,410],"button":"right"},{"type":"hello"},{"key":"return"}]}"#),
+            "click 820,410 · type hello · key return"
+        );
         let ended = actions(&[("p", "HOST process host:4 ended: Ok(ExitStatus(0))")]);
         assert_eq!((ended[0].op.as_str(), ended[0].status()), ("process", "completed"));
     }

@@ -12,14 +12,8 @@ pub fn run(args: &[String]) -> Result<()> {
         anyhow::ensure!(args.len() == 1, "state takes no arguments");
         (None, Value::Null)
     } else {
-        anyhow::ensure!(
-            args.len() == 3,
-            "expected OP GENERATION JSON_ARGS (use state to read the generation)"
-        );
-        (
-            Some(args[1].parse::<u64>()?),
-            serde_json::from_str::<Value>(&args[2])?,
-        )
+        anyhow::ensure!(args.len() == 3, "expected OP GENERATION JSON_ARGS (use state to read the generation)");
+        (Some(args[1].parse::<u64>()?), serde_json::from_str::<Value>(&args[2])?)
     };
     let result = call(operation, generation, parameters)?;
     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -61,11 +55,7 @@ pub fn run_mac(args: &[String]) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
     }
-    let generation: u64 = args
-        .get(1)
-        .context(MAC_USAGE)?
-        .parse()
-        .context("GENERATION is a number: `sill-mac state` reports it")?;
+    let generation: u64 = args.get(1).context(MAC_USAGE)?.parse().context("GENERATION is a number: `sill-mac state` reports it")?;
     let rest = &args[2..];
     let (request, output) = match command {
         "displays" | "windows" => {
@@ -194,21 +184,14 @@ fn mac_input(command: &str, rest: &[String]) -> Result<Value> {
 
 /// One request on the session's bridge: the result, or the refusal as the error.
 fn call(operation: &str, generation: Option<u64>, parameters: Value) -> Result<Value> {
-    let mut socket = UnixStream::connect("/.sill/bridge/host.sock").context(
-        "Host control is inactive, or this session needs a restart to install the bridge",
-    )?;
+    let mut socket =
+        UnixStream::connect("/.sill/bridge/host.sock").context("Host control is inactive, or this session needs a restart to install the bridge")?;
     socket.set_read_timeout(Some(std::time::Duration::from_secs(40)))?;
     socket.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
-    writeln!(
-        socket,
-        "{}",
-        json!({"operation":operation,"generation":generation,"args":parameters})
-    )?;
+    writeln!(socket, "{}", json!({"operation":operation,"generation":generation,"args":parameters}))?;
     let mut line = String::new();
     BufReader::new(socket).read_line(&mut line)?;
-    let response: Value = serde_json::from_str(&line).context(
-        "host bridge disconnected; action outcome may be unknown; do not replay automatically",
-    )?;
+    let response: Value = serde_json::from_str(&line).context("host bridge disconnected; action outcome may be unknown; do not replay automatically")?;
     if let Some(error) = response.get("error") {
         anyhow::bail!("{error}");
     }

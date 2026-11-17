@@ -36,12 +36,7 @@ pub struct StartOptions {
 /// The sill-owned home of an agent: `~/.local/state/sill/agents/<id>/`, holding the jail's copy of
 /// each declared home path under its full relative path.
 pub fn agent_home(home: &Path, agent_id: &str) -> PathBuf {
-    std::env::var("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home.join(".local/state"))
-        .join("sill")
-        .join("agents")
-        .join(agent_id)
+    std::env::var("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|_| home.join(".local/state")).join("sill").join("agents").join(agent_id)
 }
 
 /// Where a ghost session's copy of its agent's home lives (docs/memory.md §3.2): in the session's
@@ -64,11 +59,15 @@ pub fn existing_ghost_homes(sessions: &[crate::store::Session], agent_id: &str) 
 
 /// Only recorded credential declarations authorize writes into an existing ghost.
 pub fn ghost_credential_homes(sessions: &[crate::store::Session], agent_id: &str) -> Vec<(PathBuf, crate::credentials::Rules)> {
-    sessions.iter().filter(|s| s.ghost && s.agent == agent_id).filter_map(|s| {
-        let plan = recorded_filesystem(&s.id).ok()?;
-        let path = plan.profile.to_path().ok()?;
-        path.is_dir().then_some((path, plan.credentials))
-    }).collect()
+    sessions
+        .iter()
+        .filter(|s| s.ghost && s.agent == agent_id)
+        .filter_map(|s| {
+            let plan = recorded_filesystem(&s.id).ok()?;
+            let path = plan.profile.to_path().ok()?;
+            path.is_dir().then_some((path, plan.credentials))
+        })
+        .collect()
 }
 
 /// The policy a session's jail runs with: its own, tightened for a ghost (`Policy::ghostly`).
@@ -82,8 +81,7 @@ pub fn policy_of(s: &crate::store::Session, home: &Path) -> Result<Policy> {
 
 /// Reading session state must not create directories or inspect today's ownership declarations.
 pub fn recorded_filesystem(session: &str) -> Result<crate::agent_storage::Plan> {
-    policy_snapshot(session)?.and_then(|s| s.filesystem)
-        .context("filesystem plan not recorded; rebuild this session before inspecting or changing its files")
+    policy_snapshot(session)?.and_then(|s| s.filesystem).context("filesystem plan not recorded; rebuild this session before inspecting or changing its files")
 }
 
 pub fn state_dir_path(uid: u32, session: &str) -> Result<PathBuf> {
@@ -91,7 +89,15 @@ pub fn state_dir_path(uid: u32, session: &str) -> Result<PathBuf> {
     Ok(Path::new(crate::jail::STATE_FS).join(uid.to_string()).join("sessions").join(session))
 }
 
-pub fn freeze_filesystem(mut resolution: Resolution, agent_id: &str, home: &Path, state_dir: &Path, pins: &[PathBuf], ghost: bool, workspace: &[crate::agent_storage::WorkspaceBind]) -> Result<Resolution> {
+pub fn freeze_filesystem(
+    mut resolution: Resolution,
+    agent_id: &str,
+    home: &Path,
+    state_dir: &Path,
+    pins: &[PathBuf],
+    ghost: bool,
+    workspace: &[crate::agent_storage::WorkspaceBind],
+) -> Result<Resolution> {
     let registry = crate::agents::load(home)?;
     let agent = registry.get(agent_id).context("unknown agent")?;
     let mut plan = crate::agent_storage::resolve(agent, &registry, &resolution.policy, state_dir, home, pins, ghost)?;
@@ -172,7 +178,10 @@ pub enum LogSource {
     Journal(String),
     Files(Vec<PathBuf>),
     /// A managed process's output, read from the shim (docs/tasks.md §2.4).
-    Proc { socket: PathBuf, name: String },
+    Proc {
+        socket: PathBuf,
+        name: String,
+    },
 }
 
 pub fn log_source(session: &str) -> LogSource {
@@ -236,7 +245,9 @@ pub fn socket_path(session: &str) -> Result<PathBuf> {
 /// Resolve the base with the same overrides the launcher uses.
 pub fn effective_base_policy(name: &str, home: &Path, ghost: bool) -> Result<Policy> {
     let mut p = Policy::load(name, home)?;
-    if ghost { p.ghostly(home); }
+    if ghost {
+        p.ghostly(home);
+    }
     Ok(p)
 }
 
@@ -253,7 +264,9 @@ pub fn session_base_policy(name: &str, home: &Path, ghost: bool, agent: Option<&
         // removed makes a running jail outdated.
         if let Some(id) = agent {
             for endpoint in crate::providers::agent_endpoints(home, id)? {
-                if !policy.network.allow_local.contains(&endpoint) { policy.network.allow_local.push(endpoint); }
+                if !policy.network.allow_local.contains(&endpoint) {
+                    policy.network.allow_local.push(endpoint);
+                }
             }
         }
     }
@@ -389,7 +402,9 @@ pub fn grants_outdated(launch: &Resolution, choices: &std::collections::BTreeMap
 }
 
 fn snapshot_dir(session: &str) -> Result<PathBuf> {
-    if !valid_id(session) { bail!("not a session id"); }
+    if !valid_id(session) {
+        bail!("not a session id");
+    }
     Ok(crate::store::default_path()?.with_file_name("policy-snapshots").join(session))
 }
 
@@ -418,11 +433,15 @@ pub fn record_launch_warnings(runtime: &Path, warnings: &[String]) -> Result<()>
     if warnings.is_empty() {
         return Ok(());
     }
-    let text: String = warnings.iter().take(MAX_LAUNCH_WARNINGS).map(|w| {
-        let line: String = w.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
-        let cut = (0..=line.len().min(MAX_LAUNCH_WARNING_BYTES)).rev().find(|&i| line.is_char_boundary(i)).unwrap_or(0);
-        format!("{}\n", &line[..cut])
-    }).collect();
+    let text: String = warnings
+        .iter()
+        .take(MAX_LAUNCH_WARNINGS)
+        .map(|w| {
+            let line: String = w.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+            let cut = (0..=line.len().min(MAX_LAUNCH_WARNING_BYTES)).rev().find(|&i| line.is_char_boundary(i)).unwrap_or(0);
+            format!("{}\n", &line[..cut])
+        })
+        .collect();
     crate::safe_fs::write_file_beneath(runtime, Path::new(LAUNCH_WARNINGS), text.as_bytes(), 0o600).context("record the launch's warnings")
 }
 
@@ -434,14 +453,18 @@ pub fn launch_warnings(session: &str) -> Result<Vec<String>> {
 fn read_launch_warnings(runtime: &Path) -> Result<Vec<String>> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
-    let file = match std::fs::OpenOptions::new().read(true)
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
         .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
-        .open(runtime.join(LAUNCH_WARNINGS)) {
+        .open(runtime.join(LAUNCH_WARNINGS))
+    {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
         Err(e) => return Err(e).context("open the launch's warnings"),
     };
-    if !file.metadata()?.is_file() { bail!("the launch's warnings are not a regular file"); }
+    if !file.metadata()?.is_file() {
+        bail!("the launch's warnings are not a regular file");
+    }
     let mut text = String::new();
     file.take((MAX_LAUNCH_WARNINGS * (MAX_LAUNCH_WARNING_BYTES + 1)) as u64).read_to_string(&mut text).context("read the launch's warnings")?;
     Ok(text.lines().filter(|l| !l.is_empty()).take(MAX_LAUNCH_WARNINGS).map(str::to_string).collect())
@@ -458,8 +481,8 @@ pub fn policy_snapshot(session: &str) -> Result<Option<Resolution>> {
 pub fn forget_policy_snapshots(session: &str) -> Result<()> {
     for dir in [snapshot_dir(session)?, shim::runtime_dir(session)?.join("policy-snapshot")] {
         match std::fs::remove_dir_all(dir) {
-            Ok(()) => {},
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
     }
@@ -470,17 +493,20 @@ fn read_policy_snapshot(dir: &Path) -> Result<Option<Resolution>> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
     let path = dir.join("latest.json");
-    let file = match std::fs::OpenOptions::new().read(true)
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
-        .open(&path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).context("open launch policy snapshot"),
-    };
-    if !file.metadata()?.is_file() { bail!("launch policy snapshot is not a regular file"); }
+    let file =
+        match std::fs::OpenOptions::new().read(true).custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32).open(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).context("open launch policy snapshot"),
+        };
+    if !file.metadata()?.is_file() {
+        bail!("launch policy snapshot is not a regular file");
+    }
     let mut bytes = Vec::new();
     file.take(MAX_POLICY_SNAPSHOT_BYTES as u64 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_POLICY_SNAPSHOT_BYTES { bail!("launch policy snapshot exceeds 4 MiB"); }
+    if bytes.len() > MAX_POLICY_SNAPSHOT_BYTES {
+        bail!("launch policy snapshot exceeds 4 MiB");
+    }
     Ok(Some(serde_json::from_slice(&bytes).context("read launch policy snapshot")?))
 }
 
@@ -490,15 +516,17 @@ fn record_policy_snapshot(session: &str, resolution: &Resolution) -> Result<()> 
 }
 
 fn write_policy_snapshot(dir: &Path, resolution: &Resolution) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
     use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     std::fs::create_dir_all(dir)?;
     let _owner = crate::safe_fs::owned_dir(dir, rustix::process::getuid().as_raw(), false)?;
     let bytes = serde_json::to_vec_pretty(resolution)?;
-    if bytes.len() > MAX_POLICY_SNAPSHOT_BYTES { bail!("launch policy snapshot exceeds 4 MiB"); }
+    if bytes.len() > MAX_POLICY_SNAPSHOT_BYTES {
+        bail!("launch policy snapshot exceeds 4 MiB");
+    }
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
-    let mut archive = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
-        .open(dir.join(format!("{stamp}-{:032x}.json", rand::random::<u128>())))?;
+    let mut archive =
+        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(dir.join(format!("{stamp}-{:032x}.json", rand::random::<u128>())))?;
     archive.write_all(&bytes)?;
     archive.sync_all()?;
     let temp = dir.join(format!("latest-{:032x}.tmp", rand::random::<u128>()));
@@ -524,7 +552,9 @@ pub fn jail_outdated_with_grants(session: &str, base: &Policy, pins: &[PathBuf],
     let snapshot = policy_snapshot(session);
     if let Ok(Some(launch)) = &snapshot {
         let (Ok(choices), Ok(hosts)) = (store.permission_choices(session), store.network_hosts(session)) else { return true };
-        if grants_outdated(launch, &choices, &hosts) { return true; }
+        if grants_outdated(launch, &choices, &hosts) {
+            return true;
+        }
     }
     snapshot_outdated(snapshot, base, pins, agent_domains)
 }
@@ -538,10 +568,11 @@ fn snapshot_outdated(snapshot: Result<Option<Resolution>>, base: &Policy, pins: 
             }
             // Only agent defaults added since the launch? Then the base without them is the
             // launch's. The launch's own allow-list, less its session grants, is what it had.
-            let launched: Vec<&String> = snapshot.policy.network.allow.iter()
-                .filter(|h| !snapshot.session_hosts.contains(h)).collect();
+            let launched: Vec<&String> = snapshot.policy.network.allow.iter().filter(|h| !snapshot.session_hosts.contains(h)).collect();
             let added: Vec<&String> = agent_domains.iter().filter(|d| !launched.contains(d)).collect();
-            if added.is_empty() { return true; }
+            if added.is_empty() {
+                return true;
+            }
             let mut without = base.clone();
             without.network.allow.retain(|h| !added.contains(&h));
             fingerprint(&without).map(|current| current != snapshot.fingerprint).unwrap_or(true)
@@ -567,7 +598,9 @@ fn masks_git_cannot_undo(masks: &[PathBuf], pins: &[PathBuf], workspaces: &[Path
         };
         let Some(repo) = repo else { continue };
         let Ok(relative) = mask.strip_prefix(&repo) else { continue };
-        if relative.starts_with(".git") { continue; }
+        if relative.starts_with(".git") {
+            continue;
+        }
         let git = crate::changes::Git::open(&repo).with_context(|| format!("reading the repository of masked {}", mask.display()))?;
         let found = |args: &[&str]| -> Result<bool> {
             let out = git.cmd().arg("--literal-pathspecs").args(args).arg("--").arg(relative).output()?;
@@ -578,7 +611,8 @@ fn masks_git_cannot_undo(masks: &[PathBuf], pins: &[PathBuf], workspaces: &[Path
             bail!(
                 "{} is masked by the policy, but Git has it in {}: what was committed there stays readable through the repository (git show), so the mask would hide nothing. \
                  Take it out of the repository and its history, or out of the policy's mask, or do not pin the repository",
-                mask.display(), repo.display()
+                mask.display(),
+                repo.display()
             );
         }
     }
@@ -597,10 +631,7 @@ pub fn is_running(session: &str) -> bool {
 /// when the daemon started, which is the moment the person chose to run this build.
 pub fn staged_exe() -> Result<PathBuf> {
     static STAGED: std::sync::OnceLock<std::result::Result<PathBuf, String>> = std::sync::OnceLock::new();
-    STAGED
-        .get_or_init(|| stage_exe().map_err(|e| format!("{e:#}")))
-        .clone()
-        .map_err(|e| anyhow::anyhow!("staging the launcher: {e}"))
+    STAGED.get_or_init(|| stage_exe().map_err(|e| format!("{e:#}"))).clone().map_err(|e| anyhow::anyhow!("staging the launcher: {e}"))
 }
 
 fn stage_exe() -> Result<PathBuf> {
@@ -720,7 +751,9 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
         plan.prepare()?;
     }
     let serialized_resolution = serde_json::to_vec_pretty(&resolution)?;
-    if serialized_resolution.len() > MAX_POLICY_SNAPSHOT_BYTES { bail!("launch policy snapshot exceeds 4 MiB"); }
+    if serialized_resolution.len() > MAX_POLICY_SNAPSHOT_BYTES {
+        bail!("launch policy snapshot exceeds 4 MiB");
+    }
     let policy = &resolution.policy;
     let launcher = crate::launcher::current();
     if !launcher.has_limits() && policy.limits.required {
@@ -759,10 +792,15 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
     // Private host-side launch input: the child builds exactly what was resolved here.
     let resolved_path = rt.join("launch-policy.json");
     {
-        use std::os::unix::fs::OpenOptionsExt;
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600)
-            .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32).open(&resolved_path)?;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
+            .open(&resolved_path)?;
         file.write_all(&serialized_resolution)?;
     }
     cmd.args(launch_args(opts)).arg("--resolved-policy").arg(&resolved_path).arg("--child");
@@ -777,9 +815,8 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
         if shim::answers(&sock) {
-            let recorded = if opts.ghost {
-                write_policy_snapshot(&rt.join("policy-snapshot"), &resolution)
-            } else { record_policy_snapshot(&opts.session, &resolution) };
+            let recorded =
+                if opts.ghost { write_policy_snapshot(&rt.join("policy-snapshot"), &resolution) } else { record_policy_snapshot(&opts.session, &resolution) };
             if let Err(error) = recorded {
                 let _ = stop(&opts.session);
                 let _ = child.kill();
@@ -794,9 +831,8 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
             let status = if st.success() { String::new() } else { format!(" ({st})") };
             // the launcher's own reason when it failed before the jail ran (a test desktop that
             // would not start), bounded
-            let reason = std::fs::read_to_string(rt.join("launch-error"))
-                .map(|e| format!(": {}", e.chars().take(600).collect::<String>().trim()))
-                .unwrap_or_default();
+            let reason =
+                std::fs::read_to_string(rt.join("launch-error")).map(|e| format!(": {}", e.chars().take(600).collect::<String>().trim())).unwrap_or_default();
             bail!("the jail could not start{status}{reason}; see {}", log_hint(&opts.session));
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -885,14 +921,20 @@ mod tests {
             std::fs::create_dir_all(root.join("repo")).unwrap();
             Self(root)
         }
-        fn repo(&self) -> PathBuf { self.0.join("repo") }
-        fn snapshots(&self) -> PathBuf { self.0.join("snapshots") }
+        fn repo(&self) -> PathBuf {
+            self.0.join("repo")
+        }
+        fn snapshots(&self) -> PathBuf {
+            self.0.join("snapshots")
+        }
         fn resolve(&self, base: &Policy) -> Resolution {
             resolve(base, &[self.repo()]).unwrap()
         }
     }
     impl Drop for PolicyTestTree {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
@@ -944,8 +986,7 @@ mod tests {
         write_policy_snapshot(&tree.snapshots(), &second).unwrap();
         let latest = read_policy_snapshot(&tree.snapshots()).unwrap().unwrap();
         assert_eq!(latest.policy.network.mode, crate::policy::NetMode::None);
-        let archives: Vec<_> = std::fs::read_dir(tree.snapshots()).unwrap().flatten()
-            .filter(|e| e.file_name() != "latest.json").collect();
+        let archives: Vec<_> = std::fs::read_dir(tree.snapshots()).unwrap().flatten().filter(|e| e.file_name() != "latest.json").collect();
         assert_eq!(archives.len(), 2);
         assert!(archives.into_iter().any(|entry| {
             let old: Resolution = serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap();
@@ -1035,9 +1076,14 @@ mod tests {
         let tree = PolicyTestTree::new();
         let repo = tree.repo();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git").arg("-C").arg(&repo)
-                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"]).args(args)
-                .env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"])
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
             assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         };
         git(&["init", "-q"]);

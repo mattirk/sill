@@ -24,11 +24,8 @@ pub struct Mount {
 /// its other views by device and root, which a bind mount shares.
 pub fn state_aliases(mounts: &[Mount], state_fs: &Path) -> Vec<PathBuf> {
     let Some(state) = mounts.iter().rev().find(|m| m.mount_point == state_fs && !m.device.is_empty()) else { return vec![] };
-    let mut out: Vec<PathBuf> = mounts
-        .iter()
-        .filter(|m| m.device == state.device && m.root == state.root && m.mount_point != state_fs)
-        .map(|m| m.mount_point.clone())
-        .collect();
+    let mut out: Vec<PathBuf> =
+        mounts.iter().filter(|m| m.device == state.device && m.root == state.root && m.mount_point != state_fs).map(|m| m.mount_point.clone()).collect();
     out.sort();
     out.dedup();
     out
@@ -37,10 +34,8 @@ pub fn state_aliases(mounts: &[Mount], state_fs: &Path) -> Vec<PathBuf> {
 /// Filesystem types that hold persistent data worth overlaying. Pseudo filesystems, tmpfs, FUSE
 /// mounts (GVfs, sshfs — not reliably overlayable, usually per-session anyway) and the overlay type
 /// itself are left out.
-const REAL_FS: &[&str] = &[
-    "ext2", "ext3", "ext4", "xfs", "btrfs", "f2fs", "vfat", "exfat", "ntfs", "ntfs3", "jfs", "zfs",
-    "bcachefs", "nfs", "nfs4", "cifs", "iso9660", "udf",
-];
+const REAL_FS: &[&str] =
+    &["ext2", "ext3", "ext4", "xfs", "btrfs", "f2fs", "vfat", "exfat", "ntfs", "ntfs3", "jfs", "zfs", "bcachefs", "nfs", "nfs4", "cifs", "iso9660", "udf"];
 
 /// Persistent filesystems overlayfs refuses as a lower layer: their names compare
 /// case-insensitively (dentry hash/compare operations), and the overlay mount fails with EINVAL —
@@ -65,7 +60,9 @@ fn parse_mountinfo_bytes(text: &[u8]) -> Vec<Mount> {
         let Some(separator) = line.windows(3).position(|s| s == b" - ") else { continue };
         let pre: Vec<_> = line[..separator].split(|b| *b == b' ').collect();
         let post: Vec<_> = line[separator + 3..].split(|b| *b == b' ').collect();
-        if pre.len() < 5 || post.len() < 2 { continue; }
+        if pre.len() < 5 || post.len() < 2 {
+            continue;
+        }
         out.push(Mount {
             mount_point: std::ffi::OsString::from_vec(unescape_bytes(pre[4])).into(),
             fstype: String::from_utf8_lossy(post[0]).into_owned(),
@@ -82,9 +79,13 @@ fn unescape_bytes(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 3 < bytes.len() && bytes[i+1..i+4].iter().all(|b| (b'0'..=b'7').contains(b)) {
-            let value = (bytes[i+1] - b'0') as u16 * 64 + (bytes[i+2] - b'0') as u16 * 8 + (bytes[i+3] - b'0') as u16;
-            if value <= 255 { out.push(value as u8); i += 4; continue; }
+        if bytes[i] == b'\\' && i + 3 < bytes.len() && bytes[i + 1..i + 4].iter().all(|b| (b'0'..=b'7').contains(b)) {
+            let value = (bytes[i + 1] - b'0') as u16 * 64 + (bytes[i + 2] - b'0') as u16 * 8 + (bytes[i + 3] - b'0') as u16;
+            if value <= 255 {
+                out.push(value as u8);
+                i += 4;
+                continue;
+            }
         }
         out.push(bytes[i]);
         i += 1;
@@ -130,9 +131,13 @@ fn shared_fs(fstype: &str) -> bool {
 /// a jail makes fresh or the kernel's own. Sorted, parents first, a path under another left out.
 pub fn personal_data(mounts: &[Mount]) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = DATA_ROOTS.iter().map(PathBuf::from).collect();
-    out.extend(mounts.iter().filter(|m| shared_fs(&m.fstype)).map(|m| m.mount_point.clone()).filter(|p| {
-        p != Path::new("/") && !["/run", "/tmp", "/proc", "/sys", "/dev"].iter().any(|fresh| p.starts_with(fresh))
-    }));
+    out.extend(
+        mounts
+            .iter()
+            .filter(|m| shared_fs(&m.fstype))
+            .map(|m| m.mount_point.clone())
+            .filter(|p| p != Path::new("/") && !["/run", "/tmp", "/proc", "/sys", "/dev"].iter().any(|fresh| p.starts_with(fresh))),
+    );
     out.sort();
     out.dedup();
     let mut kept: Vec<PathBuf> = Vec::new();
@@ -155,7 +160,13 @@ mod tests {
 
     #[test]
     fn personal_data_is_the_data_roots_and_shared_filesystems_elsewhere() {
-        let mount = |point: &str, fstype: &str| Mount { mount_point: point.into(), fstype: fstype.into(), source: String::new(), device: String::new(), root: "/".into() };
+        let mount = |point: &str, fstype: &str| Mount {
+            mount_point: point.into(),
+            fstype: fstype.into(),
+            source: String::new(),
+            device: String::new(),
+            root: "/".into(),
+        };
         let mounts = [
             mount("/", "virtiofs"),
             mount("/usr", "ext4"),

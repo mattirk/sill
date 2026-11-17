@@ -41,17 +41,11 @@ fn visible(data: &NetworkDenied) -> Vec<String> {
     data.hosts
         .iter()
         .filter(|host| {
-            let name = host
-                .rsplit_once(':')
-                .filter(|(_, p)| p.parse::<u16>().is_ok())
-                .map_or(host.as_str(), |(h, _)| h);
+            let name = host.rsplit_once(':').filter(|(_, p)| p.parse::<u16>().is_ok()).map_or(host.as_str(), |(h, _)| h);
             !data.answered.contains(host)
                 && !data.quiet.iter().any(|p| {
                     p.eq_ignore_ascii_case(name)
-                        || p.strip_prefix("*.").is_some_and(|suffix| {
-                            name.to_ascii_lowercase()
-                                .ends_with(&format!(".{}", suffix.to_ascii_lowercase()))
-                        })
+                        || p.strip_prefix("*.").is_some_and(|suffix| name.to_ascii_lowercase().ends_with(&format!(".{}", suffix.to_ascii_lowercase())))
                 })
         })
         .take(8)
@@ -84,10 +78,7 @@ impl State {
             Some(problem) => (format!("{host}: {problem}"), true),
             None if choice.quiet => (format!("{host}: won’t ask again in any session. Network access is unchanged."), false),
             None if !choice.allow => (format!("{host} stays blocked."), false),
-            None if choice.restarted => (
-                format!("{host} allowed for {agent}; the session starts again."),
-                false,
-            ),
+            None if choice.restarted => (format!("{host} allowed for {agent}; the session starts again."), false),
             None => (format!("{host} allowed for this session."), false),
         };
         self.notice_serial += 1;
@@ -116,23 +107,11 @@ impl App {
             move || {
                 actions
                     .reading(|client| {
-                        let mut all = NetworkDenied {
-                            next: None,
-                            hosts: vec![],
-                            answered: vec![],
-                            quiet: vec![],
-                            agent_name: String::new(),
-                        };
+                        let mut all = NetworkDenied { next: None, hosts: vec![], answered: vec![], quiet: vec![], agent_name: String::new() };
                         let mut after = None;
                         loop {
-                            let page: NetworkDenied = client.call(
-                                "_sill/policy.denied",
-                                DeniedList {
-                                    session_id: session.clone(),
-                                    after,
-                                    limit: Some(128),
-                                },
-                            )?;
+                            let page: NetworkDenied =
+                                client.call("_sill/policy.denied", DeniedList { session_id: session.clone(), after, limit: Some(128) })?;
                             all.hosts.extend(page.hosts);
                             all.answered.extend(page.answered);
                             all.quiet.extend(page.quiet);
@@ -149,13 +128,7 @@ impl App {
         )
     }
 
-    pub(crate) fn answer_network(
-        &mut self,
-        id: String,
-        host: String,
-        allow: bool,
-        quiet: bool,
-    ) -> Task<Message> {
+    pub(crate) fn answer_network(&mut self, id: String, host: String, allow: bool, quiet: bool) -> Task<Message> {
         let Some(actions) = self.actions.clone() else {
             return Task::none();
         };
@@ -194,43 +167,21 @@ impl App {
                         restarted = true;
                     }
                 }
-                (
-                    actions.call("_sill/policy.remember_denied", params),
-                    restarted,
-                )
+                (actions.call("_sill/policy.remember_denied", params), restarted)
             },
-            move |(outcome, restarted)| {
-                Message::NetworkDone(
-                    id,
-                    Choice {
-                        host,
-                        allow,
-                        quiet,
-                        restarted,
-                    },
-                    outcome,
-                )
-            },
+            move |(outcome, restarted)| Message::NetworkDone(id, Choice { host, allow, quiet, restarted }, outcome),
         )
     }
 
     /// A choice's outcome: its note, gone after a while; and after a restart the session is
     /// attached anew, which starts its agent (a restart alone leaves it down until a prompt).
-    pub(crate) fn network_done(
-        &mut self,
-        id: String,
-        choice: Choice,
-        outcome: Outcome,
-    ) -> Task<Message> {
+    pub(crate) fn network_done(&mut self, id: String, choice: Choice, outcome: Outcome) -> Task<Message> {
         let serial = self.network.done(id.clone(), &choice, &outcome);
         if choice.restarted {
             self.reattach(&id);
         }
         let session = id.clone();
-        let expire = blocking(
-            move || std::thread::sleep(NOTICE),
-            move |()| Message::NetworkNoticeExpired(session, serial),
-        );
+        let expire = blocking(move || std::thread::sleep(NOTICE), move |()| Message::NetworkNoticeExpired(session, serial));
         // the agent usually ended its turn on the refusal: it is told to go on, so the work
         // continues without the person asking again (a busy agent sees the host work next time)
         let idle = self.views.get(&id).is_some_and(|v| !v.conversation.busy());
@@ -246,18 +197,11 @@ impl App {
         let submit = sill_proto::sfp::Submit {
             session_id: id.to_string(),
             submission_id: sill_client::request_id("carry-on"),
-            text: format!(
-                "[sill: the person allowed network access to {host}. Carry on with what needed it.]"
-            ),
+            text: format!("[sill: the person allowed network access to {host}. Carry on with what needed it.]"),
             attachments: vec![],
             purpose: None,
         };
-        self.act(
-            id,
-            crate::Act::CarryOn,
-            "_sill/sessions.submit",
-            json!(submit),
-        )
+        self.act(id, crate::Act::CarryOn, "_sill/sessions.submit", json!(submit))
     }
 
     /// A card per refused host, then the note on the last choice; nothing at all otherwise.
@@ -267,67 +211,35 @@ impl App {
         if hosts.is_none() && notice.is_none() {
             return space().height(0).into();
         }
-        let agent = self
-            .network
-            .agents
-            .get(&view.id)
-            .map_or("The agent", String::as_str);
+        let agent = self.network.agents.get(&view.id).map_or("The agent", String::as_str);
         let pending = !self.network.pending.is_empty();
         let mut content = Column::new().spacing(6);
         for host in hosts.into_iter().flatten() {
             // the HTTPS port goes without saying; another port is part of the name
             let shown = host.strip_suffix(":443").unwrap_or(host);
-            let answer = |allow| {
-                (!pending).then(|| Message::NetworkAnswer(view.id.clone(), host.clone(), allow, false))
-            };
+            let answer = |allow| (!pending).then(|| Message::NetworkAnswer(view.id.clone(), host.clone(), allow, false));
             let card = Column::new()
                 .spacing(8)
-                .push(
-                    text(format!(
-                        "{agent} tried to reach {shown} and the proxy refused it: the host is not on this agent's allow-list."
-                    ))
-                    .size(style::SMALL),
-                )
+                .push(text(format!("{agent} tried to reach {shown} and the proxy refused it: the host is not on this agent's allow-list.")).size(style::SMALL))
                 .push(
                     row![
                         keys::press_maybe(
-                            button(text(format!("Allow {shown}")).size(style::SMALL))
-                                .padding([4, 10])
-                                .style(style::solid(P.accent)),
+                            button(text(format!("Allow {shown}")).size(style::SMALL)).padding([4, 10]).style(style::solid(P.accent)),
                             answer(true),
                         ),
+                        keys::press_maybe(button(text("Keep blocked").size(style::SMALL)).padding([4, 10]).style(style::quiet), answer(false),),
                         keys::press_maybe(
-                            button(text("Keep blocked").size(style::SMALL))
-                                .padding([4, 10])
-                                .style(style::quiet),
-                            answer(false),
-                        ),
-                        keys::press_maybe(
-                            button(text("Don’t ask again").size(style::SMALL))
-                                .padding([4, 10])
-                                .style(style::quiet),
-                            (!pending).then(|| Message::NetworkAnswer(
-                                view.id.clone(), host.clone(), false, true,
-                            )),
+                            button(text("Don’t ask again").size(style::SMALL)).padding([4, 10]).style(style::quiet),
+                            (!pending).then(|| Message::NetworkAnswer(view.id.clone(), host.clone(), false, true,)),
                         ),
                     ]
                     .spacing(8),
                 );
-            content = content.push(crate::ui::ruled(
-                2.0,
-                P.warning,
-                container(card)
-                    .padding([6, 10])
-                    .width(Fill)
-                    .style(style::card_right(alpha(P.warning, 0.10))),
-            ));
+            content =
+                content.push(crate::ui::ruled(2.0, P.warning, container(card).padding([6, 10]).width(Fill).style(style::card_right(alpha(P.warning, 0.10)))));
         }
         if let Some((_, note, failed)) = notice {
-            content = content.push(text(note).size(style::TINY).color(if *failed {
-                P.error
-            } else {
-                alpha(P.fg, 0.7)
-            }));
+            content = content.push(text(note).size(style::TINY).color(if *failed { P.error } else { alpha(P.fg, 0.7) }));
         }
         container(content).padding([6, 12]).width(Fill).into()
     }
@@ -339,31 +251,17 @@ mod tests {
     #[test]
     fn failed_choice_stays_visible_and_success_removes_only_chosen_host() {
         let mut state = State::default();
-        state
-            .hosts
-            .insert("s".into(), vec!["a.com".into(), "b.com".into()]);
+        state.hosts.insert("s".into(), vec!["a.com".into(), "b.com".into()]);
         state.pending.insert(("s".into(), "a.com".into()));
-        let allow = Choice {
-            host: "a.com".into(),
-            allow: true,
-            quiet: false,
-            restarted: true,
-        };
-        state.done(
-            "s".into(),
-            &allow,
-            &Outcome::Uncertain("connection lost".into()),
-        );
+        let allow = Choice { host: "a.com".into(), allow: true, quiet: false, restarted: true };
+        state.done("s".into(), &allow, &Outcome::Uncertain("connection lost".into()));
         assert!(state.pending.is_empty());
         assert_eq!(state.hosts["s"].len(), 2);
         assert_eq!(state.notices["s"].1, "a.com: connection lost");
         assert!(state.notices["s"].2, "a failure");
         let serial = state.done("s".into(), &allow, &Outcome::Done(json!({})));
         assert_eq!(state.hosts["s"], vec!["b.com"]);
-        assert_eq!(
-            state.notices["s"].1,
-            "a.com allowed for the agent; the session starts again."
-        );
+        assert_eq!(state.notices["s"].1, "a.com allowed for the agent; the session starts again.");
         // a note goes after its time, but not one that came after it
         state.expire("s", serial - 1);
         assert!(state.notices.contains_key("s"));
@@ -380,14 +278,7 @@ mod tests {
         app.demo = false;
         app.actions = Some(sill_client::actions::Actions::new(connector(vec![client])));
         // the agent ended its turn on the refusal
-        let session = app
-            .views
-            .get_mut("demo")
-            .unwrap()
-            .conversation
-            .session
-            .as_mut()
-            .unwrap();
+        let session = app.views.get_mut("demo").unwrap().conversation.session.as_mut().unwrap();
         session.activity = "idle".into();
         session.turn_id = None;
         let fake = std::thread::spawn(move || {
@@ -402,17 +293,11 @@ mod tests {
             daemon.reply(&submit, json!({}));
             seen
         });
-        let task = app.update(Message::NetworkAnswer(
-            "demo".into(),
-            "example.com:443".into(),
-            true,
-            false,
-        ));
+        let task = app.update(Message::NetworkAnswer("demo".into(), "example.com:443".into(), true, false));
         settle_task(&mut app, task);
         let seen = fake.join().unwrap();
         assert_eq!(
-            seen[1],
-            "[sill: the person allowed network access to example.com. Carry on with what needed it.]",
+            seen[1], "[sill: the person allowed network access to example.com. Carry on with what needed it.]",
             "no stop or start came between: {seen:?}"
         );
     }
@@ -421,11 +306,7 @@ mod tests {
     fn prompts_exclude_answered_and_quiet_hosts_and_are_bounded() {
         let mut data = NetworkDenied {
             next: None,
-            hosts: vec![
-                "terminalcolors.com".into(),
-                "answered.com".into(),
-                "metrics.example.com:443".into(),
-            ],
+            hosts: vec!["terminalcolors.com".into(), "answered.com".into(), "metrics.example.com:443".into()],
             answered: vec!["answered.com".into()],
             quiet: vec!["*.example.com".into()],
             agent_name: "Claude".into(),

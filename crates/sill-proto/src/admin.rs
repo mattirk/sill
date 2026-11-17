@@ -306,7 +306,9 @@ pub struct Process {
     #[serde(default)]
     pub kept: bool,
 }
-fn jail_location() -> String { "jail".into() }
+fn jail_location() -> String {
+    "jail".into()
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ProcessesPage {
     pub processes: Vec<Process>,

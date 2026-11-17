@@ -46,11 +46,15 @@ pub(crate) fn ssh_program(host: &str) -> Command {
     command
 }
 
-fn default_binary() -> String { "sill".into() }
+fn default_binary() -> String {
+    "sill".into()
+}
 
 fn config_path() -> Result<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))).context("HOME is not set")?;
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .context("HOME is not set")?;
     Ok(base.join("sill/boxes.json"))
 }
 
@@ -69,7 +73,9 @@ pub fn selected() -> Result<Option<BoxTarget>> {
     }
     let Some(name) = std::env::var_os("SILL_BOX") else { return Ok(None) };
     let name = name.to_str().context("SILL_BOX is not UTF-8")?;
-    if name.is_empty() || name == "local" { return Ok(None); }
+    if name.is_empty() || name == "local" {
+        return Ok(None);
+    }
     list()?.remove(name).map(Some).with_context(|| format!("unknown sill box {name:?}; `sill box list` lists saved boxes"))
 }
 
@@ -84,19 +90,28 @@ pub fn save(name: &str, target: BoxTarget) -> Result<()> {
 
 pub fn remove(name: &str) -> Result<()> {
     let mut all = list()?;
-    if all.remove(name).is_none() { bail!("unknown sill box {name:?}"); }
+    if all.remove(name).is_none() {
+        bail!("unknown sill box {name:?}");
+    }
     write(&all)
 }
 
 fn write(all: &BTreeMap<String, BoxTarget>) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
     use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let path = config_path()?;
     std::fs::create_dir_all(path.parent().unwrap())?;
     let temp = path.with_extension(format!("json.{}", std::process::id()));
     let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp)?;
-    let result = (|| { file.write_all(&serde_json::to_vec_pretty(all)?)?; file.sync_all()?; std::fs::rename(&temp, &path)?; Ok(()) })();
-    if result.is_err() { let _ = std::fs::remove_file(temp); }
+    let result = (|| {
+        file.write_all(&serde_json::to_vec_pretty(all)?)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, &path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temp);
+    }
     result
 }
 
@@ -112,9 +127,7 @@ pub fn validate_name(name: &str) -> Result<()> {
 pub fn default_name(host: &str) -> String {
     let host = host.strip_prefix("ssh://").unwrap_or(host);
     let host = host.rsplit('@').next().unwrap_or(host);
-    let name: String = host.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' })
-        .collect();
+    let name: String = host.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' }).collect();
     let name = name.trim_matches('-').to_string();
     if name.is_empty() || name == "local" { "box".into() } else { name }
 }
@@ -125,8 +138,7 @@ pub fn verify_and_save(name: &str, host: &str, binary: &str) -> Result<crate::Da
     validate_name(name)?;
     validate_host(host)?;
     validate_binary(binary)?;
-    let client = crate::Client::ssh(host, binary)
-        .context("checking the box over SSH; verify SSH access and the remote sill binary path")?;
+    let client = crate::Client::ssh(host, binary).context("checking the box over SSH; verify SSH access and the remote sill binary path")?;
     let status: crate::DaemonStatus = client.call(crate::method::DAEMON_STATUS, crate::Empty::default())?;
     drop(client);
     save(name, BoxTarget { host: host.to_string(), binary: binary.to_string(), ssh_config: None })?;
@@ -134,16 +146,22 @@ pub fn verify_and_save(name: &str, host: &str, binary: &str) -> Result<crate::Da
 }
 
 pub(crate) fn validate_host(host: &str) -> Result<()> {
-    if host.is_empty() || host.starts_with('-') || host.chars().any(|c| c.is_control() || c.is_whitespace()) { bail!("invalid SSH destination"); }
+    if host.is_empty() || host.starts_with('-') || host.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        bail!("invalid SSH destination");
+    }
     Ok(())
 }
 
 fn validate_binary(binary: &str) -> Result<()> {
-    if binary.is_empty() || binary.chars().any(char::is_control) { bail!("invalid remote sill executable path"); }
+    if binary.is_empty() || binary.chars().any(char::is_control) {
+        bail!("invalid remote sill executable path");
+    }
     Ok(())
 }
 
-fn quote(s: &str) -> String { format!("'{}'", s.replace('\'', "'\\''")) }
+fn quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
 
 pub fn binary_command(binary: &str) -> Result<String> {
     validate_binary(binary)?;
@@ -158,8 +176,12 @@ pub fn binary_command(binary: &str) -> Result<String> {
 pub fn ssh_base(host: &str) -> Result<Command> {
     validate_host(host)?;
     let mut command = ssh_program(host);
-    command.args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ControlMaster=no"])
-        .arg("-o").arg(crate::boxlink::control_path()?).arg("--").arg(host);
+    command
+        .args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ControlMaster=no"])
+        .arg("-o")
+        .arg(crate::boxlink::control_path()?)
+        .arg("--")
+        .arg(host);
     Ok(command)
 }
 
@@ -179,9 +201,13 @@ pub fn install(host: &str, source: &Path) -> Result<()> {
     let shim_file = std::fs::File::open(&shim).with_context(|| format!("{} must be beside the headless sill binary", shim.display()))?;
     crate::boxlink::ensure(host)?;
     for (file, name) in [(shim_file, "sill-shim"), (daemon_file, "sill")] {
-        let script = format!("set -eu; mkdir -p \"$HOME/.local/bin\"; sill_tmp=$(mktemp \"$HOME/.local/bin/.{name}.XXXXXX\"); trap 'rm -f \"$sill_tmp\"' EXIT; cat > \"$sill_tmp\"; chmod 755 \"$sill_tmp\"; mv -f \"$sill_tmp\" \"$HOME/.local/bin/{name}\"");
+        let script = format!(
+            "set -eu; mkdir -p \"$HOME/.local/bin\"; sill_tmp=$(mktemp \"$HOME/.local/bin/.{name}.XXXXXX\"); trap 'rm -f \"$sill_tmp\"' EXIT; cat > \"$sill_tmp\"; chmod 755 \"$sill_tmp\"; mv -f \"$sill_tmp\" \"$HOME/.local/bin/{name}\""
+        );
         let status = ssh_base(host)?.arg(script).stdin(file).status().context("copying sill to the box over ssh")?;
-        if !status.success() { bail!("installing {name} on {host} failed ({status})"); }
+        if !status.success() {
+            bail!("installing {name} on {host} failed ({status})");
+        }
     }
     Ok(())
 }
@@ -221,8 +247,8 @@ mod tests {
     fn closing_pipe_input_preserves_the_response_direction() {
         use std::io::{Read, Write};
         use std::sync::{Arc, Mutex};
-        let mut child = Command::new("/bin/sh").args(["-c", "cat; printf done"])
-            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let mut child =
+            Command::new("/bin/sh").args(["-c", "cat; printf done"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
         let input = Arc::new(Mutex::new(child.stdin.take()));
         let mut writer = PipeInput(input.clone());
         writer.write_all(b"request").unwrap();
@@ -233,7 +259,6 @@ mod tests {
         assert_eq!(writer.write(b"late").unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
         assert!(child.wait().unwrap().success());
     }
-
 }
 
 /// An unframed byte connection, used for terminals and ports after its one-time token line.
@@ -252,31 +277,59 @@ impl std::io::Write for PipeInput {
         self.0.lock().unwrap().as_mut().ok_or_else(|| Error::new(ErrorKind::BrokenPipe, "stream input closed"))?.write(bytes)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        match self.0.lock().unwrap().as_mut() { Some(input) => input.flush(), None => Ok(()) }
+        match self.0.lock().unwrap().as_mut() {
+            Some(input) => input.flush(),
+            None => Ok(()),
+        }
     }
 }
 
 pub fn open_stream(token: &str) -> Result<RawStream> {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
-    if token.is_empty() || token.chars().any(char::is_control) { bail!("invalid stream token"); }
+    if token.is_empty() || token.chars().any(char::is_control) {
+        bail!("invalid stream token");
+    }
     let handshake = serde_json::to_vec(&serde_json::json!({"_sill_stream":token}))?;
     let mut stream = if let Some(target) = selected()? {
         crate::boxlink::ensure(&target.host)?;
-        let mut child = ssh_command(&target.host, &target.binary)?.stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit()).spawn().context("opening SSH stream")?;
+        let mut child = ssh_command(&target.host, &target.binary)?
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .context("opening SSH stream")?;
         let reader = child.stdout.take().context("ssh stdout")?;
         let writer = Arc::new(Mutex::new(Some(child.stdin.take().context("ssh stdin")?)));
         let half = writer.clone();
         let child = Arc::new(Mutex::new(child));
-        RawStream { reader: Box::new(reader), writer: Box::new(PipeInput(writer)), shutdown_write: Arc::new(move || { half.lock().unwrap().take(); }), interrupt: Arc::new(move || {
-            if let Ok(mut child) = child.lock() { let _ = child.kill(); let _ = child.wait(); }
-        }) }
+        RawStream {
+            reader: Box::new(reader),
+            writer: Box::new(PipeInput(writer)),
+            shutdown_write: Arc::new(move || {
+                half.lock().unwrap().take();
+            }),
+            interrupt: Arc::new(move || {
+                if let Ok(mut child) = child.lock() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }),
+        }
     } else {
         let socket = std::os::unix::net::UnixStream::connect(crate::socket_path()?).context("opening daemon byte stream")?;
         let close = socket.try_clone()?;
         let half = socket.try_clone()?;
-        RawStream { reader: Box::new(socket.try_clone()?), writer: Box::new(socket), shutdown_write: Arc::new(move || { let _ = half.shutdown(std::net::Shutdown::Write); }), interrupt: Arc::new(move || { let _ = close.shutdown(std::net::Shutdown::Both); }) }
+        RawStream {
+            reader: Box::new(socket.try_clone()?),
+            writer: Box::new(socket),
+            shutdown_write: Arc::new(move || {
+                let _ = half.shutdown(std::net::Shutdown::Write);
+            }),
+            interrupt: Arc::new(move || {
+                let _ = close.shutdown(std::net::Shutdown::Both);
+            }),
+        }
     };
     if let Err(error) = stream.writer.write_all(&handshake).and_then(|()| stream.writer.write_all(b"\n")).and_then(|()| stream.writer.flush()) {
         (stream.interrupt)();

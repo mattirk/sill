@@ -60,145 +60,540 @@ const fn notification<P: JsonSchema>(name: &'static str, doc: &'static str) -> M
 
 /// Every method the daemon answers and every notification it sends, in the order of docs/protocol.md.
 pub const METHODS: &[Method] = &[
-    req_needing::<crate::Empty, crate::storage::Space>("_sill/storage.space", "sill.storage", 1, "Read used, total and available bytes on the daemon host home and state filesystems."),
-    req_needing::<crate::Empty, crate::storage::Caches>("_sill/storage.caches", "sill.storage", 1, "Scan known session build caches; active sessions cannot be cleared."),
-    req_empty_needing::<crate::storage::ClearBuildCache>("_sill/storage.clear_build_cache", "sill.storage", 1, "Detach and remove only the known build cache of an inactive session; read caches again after uncertainty before repeating."),
-    req_needing::<crate::crosscheck::Empty,crate::crosscheck::Reviewers>("_sill/crosscheck.reviewers","sill.crosscheck",1,"Read the saved Reviewers and, for every agent that can review, the options its latest session reported."),
-    req_needing::<crate::crosscheck::SetReviewers,crate::crosscheck::Reviewers>("_sill/crosscheck.set_reviewers","sill.crosscheck",1,"Save the Reviewers. Read them after uncertainty before repeating."),
-    req_needing::<crate::crosscheck::WorkspaceKey,crate::crosscheck::Current>("_sill/crosscheck.get","sill.crosscheck",1,"Read a workspace's review, when it has one, and whether its files are still the ones reviewed."),
-    req_needing::<crate::crosscheck::Start,crate::crosscheck::Run>("_sill/crosscheck.start","sill.crosscheck",1,"Capture the workspace's work and start a Reviewer on it, replacing the workspace's earlier review. The same operation_id answers with the review it started; never replay uncertain work under a new one."),
-    req_empty_needing::<crate::crosscheck::RunKey>("_sill/crosscheck.remove","sill.crosscheck",1,"Remove a review: one under way is cancelled and its Reviewer stopped. A review already gone is not an error."),
-    notification_needing::<crate::crosscheck::Notice>("_sill/crosscheck.changed","sill.crosscheck",1,"A workspace's review changed or was removed; read it again. Sent only to connections answered sill.crosscheck."),
+    req_needing::<crate::Empty, crate::storage::Space>(
+        "_sill/storage.space",
+        "sill.storage",
+        1,
+        "Read used, total and available bytes on the daemon host home and state filesystems.",
+    ),
+    req_needing::<crate::Empty, crate::storage::Caches>(
+        "_sill/storage.caches",
+        "sill.storage",
+        1,
+        "Scan known session build caches; active sessions cannot be cleared.",
+    ),
+    req_empty_needing::<crate::storage::ClearBuildCache>(
+        "_sill/storage.clear_build_cache",
+        "sill.storage",
+        1,
+        "Detach and remove only the known build cache of an inactive session; read caches again after uncertainty before repeating.",
+    ),
+    req_needing::<crate::crosscheck::Empty, crate::crosscheck::Reviewers>(
+        "_sill/crosscheck.reviewers",
+        "sill.crosscheck",
+        1,
+        "Read the saved Reviewers and, for every agent that can review, the options its latest session reported.",
+    ),
+    req_needing::<crate::crosscheck::SetReviewers, crate::crosscheck::Reviewers>(
+        "_sill/crosscheck.set_reviewers",
+        "sill.crosscheck",
+        1,
+        "Save the Reviewers. Read them after uncertainty before repeating.",
+    ),
+    req_needing::<crate::crosscheck::WorkspaceKey, crate::crosscheck::Current>(
+        "_sill/crosscheck.get",
+        "sill.crosscheck",
+        1,
+        "Read a workspace's review, when it has one, and whether its files are still the ones reviewed.",
+    ),
+    req_needing::<crate::crosscheck::Start, crate::crosscheck::Run>(
+        "_sill/crosscheck.start",
+        "sill.crosscheck",
+        1,
+        "Capture the workspace's work and start a Reviewer on it, replacing the workspace's earlier review. The same operation_id answers with the review it started; never replay uncertain work under a new one.",
+    ),
+    req_empty_needing::<crate::crosscheck::RunKey>(
+        "_sill/crosscheck.remove",
+        "sill.crosscheck",
+        1,
+        "Remove a review: one under way is cancelled and its Reviewer stopped. A review already gone is not an error.",
+    ),
+    notification_needing::<crate::crosscheck::Notice>(
+        "_sill/crosscheck.changed",
+        "sill.crosscheck",
+        1,
+        "A workspace's review changed or was removed; read it again. Sent only to connections answered sill.crosscheck.",
+    ),
     req_empty::<crate::memory::TextClose>("_sill/memory.text.close", "Release this connection's immutable memory text snapshot early."),
-    req_empty::<crate::sessions::SessionKey>("_sill/sessions.delete", "Delete one exact session. Inspect existence after uncertainty; never replay against a replacement identity."),
+    req_empty::<crate::sessions::SessionKey>(
+        "_sill/sessions.delete",
+        "Delete one exact session. Inspect existence after uncertainty; never replay against a replacement identity.",
+    ),
     req_empty::<crate::sessions::SessionKey>("_sill/sessions.reset", "Explicitly replace a conversation generation. Never blindly retry after uncertainty."),
-    req::<crate::sessions::Log,crate::Text>("_sill/sessions.log", "Read a bounded daemon-host session log tail."),
-    req::<crate::discovery::Find,crate::discovery::Found>("_sill/files.find", "Read daemon-host file/repository information with exact path bytes and bounded results."),
-    req::<crate::discovery::PathKey,crate::discovery::Root>("_sill/repos.root", "The repository containing the path: the nearest directory with `.git`, the path itself when it is a directory; null outside any repository."),
-    req::<crate::discovery::PathKey,crate::discovery::HeadResult>("_sill/repos.head", "Read daemon-host file/repository information with exact path bytes and bounded results."),
-    req::<crate::discovery::SummaryKey,crate::discovery::SummaryResult>("_sill/repos.summary", "Read daemon-host file/repository information with exact path bytes and bounded results."),
-    req::<crate::discovery::ChangedLines,crate::discovery::Lines>("_sill/repos.changed_lines", "Read daemon-host file/repository information with exact path bytes and bounded results."),
-    req::<crate::discovery::Status,crate::discovery::StatusPage>("_sill/repos.status", "Read daemon-host file/repository information with exact path bytes and bounded results."),
-
-    req::<crate::Empty,crate::memory::Compacted>("_sill/memory.compact","Apply configured compaction and retention; inspect memory after uncertainty before retrying."),
-    req::<crate::Empty,crate::memory::Forgotten>("_sill/memory.forget","Delete ended sessions; do not blindly retry because newly ended sessions may appear."),
-    req::<crate::admin::SessionImage,crate::admin::FileBytes>("_sill/files.image","Read an image visible through the session filesystem view in bounded chunks; revision detects concurrent edits."),
-    req::<crate::admin::DeniedList,crate::admin::NetworkDenied>("_sill/policy.denied","Read network denials and their acknowledgement state (4 MiB response bound)."),
-    req_empty_needing::<crate::admin::NetworkHost>("_sill/policy.quiet_host", "sill.network_quiet", 1,"Hide refusal banners for an exact hostname across sessions; network access is unchanged."),
-    req_empty::<crate::admin::NetworkHost>("_sill/policy.remember_denied","Acknowledge a denial; inspect denied state after uncertainty before retrying."),
-    req::<crate::admin::NetworkHost,crate::admin::AllowedHost>("_sill/policy.allow_host","Approve a concrete host for this session only; policy limits apply. Inspect policy after uncertainty."),
-    req_needing::<crate::admin::DesktopCapture,crate::admin::DesktopFrame>("_sill/desktop.capture","sill.desktop_view",1,"Take a picture of the session's test desktop (Desktop development), on the host, outside the jail. A new one is kept for `_sill/desktop.read`; when it is still the `since` revision nothing is encoded and `changed` is false. `not_found` when the session has no test desktop running."),
-    req_needing::<crate::admin::DesktopRead,crate::admin::FileBytes>("_sill/desktop.read","sill.desktop_view",1,"Read the latest test desktop picture (PNG) in chunks of at most 1 MiB; `conflict` when a newer capture replaced that revision."),
-    req_needing::<crate::admin::NetworkHost,crate::admin::SavedHost>("_sill/policy.save_host","sill.permission_modes",1,"Save for future sessions: add a host pattern to the session agent's network defaults. Existing sessions and their grants are unchanged."),
-    req_needing::<crate::admin::PermissionChoice,crate::admin::PermissionsChanged>("_sill/permissions.set","sill.permission_modes",1,"Remember a contained capability choice for this session within policy limits; blocked widening is refused. Inspect the preview after uncertainty."),
-    req_needing::<crate::sessions::SessionKey,crate::admin::PermissionsChanged>("_sill/permissions.apply_development","sill.permission_modes",1,"Apply development permissions: remember the test desktop and the private bus as session choices together; refused as a whole, recording nothing, when a limit or a missing backend blocks either."),
-    req_needing::<crate::host_control::Activate,crate::host_control::State>("_sill/host_control.activate","sill.host_control",1,"Activate Host control for a running session with exactly these operations, or change an active one's scope: a new generation each time. Refused for ghosts, a policy that forbids it and a stopped session; never a saved choice."),
-    req_needing::<crate::sessions::SessionKey,crate::host_control::State>("_sill/host_control.revoke","sill.host_control",1,"End the session's Host control activation; a no-op without one. Host processes it launched are stopped, except those marked to keep."),
-    req_needing::<crate::host_control::Keep,crate::Empty>("_sill/host_control.keep","sill.host_control",1,"Mark a bridge-launched host process (by its process-list name, host:<id>) to keep running after Host control ends, or not."),
-    req_needing::<crate::sessions::SessionKey,crate::host_control::State>("_sill/host_control.state","sill.permission_modes",1,"A session's Host control state: active, generation, operations, displaying frontends, the last end and the policy's ban. Session records carry the active brief for every client."),
-    req_needing::<crate::sessions::SessionKey,crate::admin::PermissionsChanged>("_sill/permissions.restore_defaults","sill.permission_modes",1,"Restore defaults: remove this session's added capability and host grants, keeping its policy and pins. A running jail keeps its launch state until restarted."),
+    req::<crate::sessions::Log, crate::Text>("_sill/sessions.log", "Read a bounded daemon-host session log tail."),
+    req::<crate::discovery::Find, crate::discovery::Found>(
+        "_sill/files.find",
+        "Read daemon-host file/repository information with exact path bytes and bounded results.",
+    ),
+    req::<crate::discovery::PathKey, crate::discovery::Root>(
+        "_sill/repos.root",
+        "The repository containing the path: the nearest directory with `.git`, the path itself when it is a directory; null outside any repository.",
+    ),
+    req::<crate::discovery::PathKey, crate::discovery::HeadResult>(
+        "_sill/repos.head",
+        "Read daemon-host file/repository information with exact path bytes and bounded results.",
+    ),
+    req::<crate::discovery::SummaryKey, crate::discovery::SummaryResult>(
+        "_sill/repos.summary",
+        "Read daemon-host file/repository information with exact path bytes and bounded results.",
+    ),
+    req::<crate::discovery::ChangedLines, crate::discovery::Lines>(
+        "_sill/repos.changed_lines",
+        "Read daemon-host file/repository information with exact path bytes and bounded results.",
+    ),
+    req::<crate::discovery::Status, crate::discovery::StatusPage>(
+        "_sill/repos.status",
+        "Read daemon-host file/repository information with exact path bytes and bounded results.",
+    ),
+    req::<crate::Empty, crate::memory::Compacted>(
+        "_sill/memory.compact",
+        "Apply configured compaction and retention; inspect memory after uncertainty before retrying.",
+    ),
+    req::<crate::Empty, crate::memory::Forgotten>(
+        "_sill/memory.forget",
+        "Delete ended sessions; do not blindly retry because newly ended sessions may appear.",
+    ),
+    req::<crate::admin::SessionImage, crate::admin::FileBytes>(
+        "_sill/files.image",
+        "Read an image visible through the session filesystem view in bounded chunks; revision detects concurrent edits.",
+    ),
+    req::<crate::admin::DeniedList, crate::admin::NetworkDenied>(
+        "_sill/policy.denied",
+        "Read network denials and their acknowledgement state (4 MiB response bound).",
+    ),
+    req_empty_needing::<crate::admin::NetworkHost>(
+        "_sill/policy.quiet_host",
+        "sill.network_quiet",
+        1,
+        "Hide refusal banners for an exact hostname across sessions; network access is unchanged.",
+    ),
+    req_empty::<crate::admin::NetworkHost>("_sill/policy.remember_denied", "Acknowledge a denial; inspect denied state after uncertainty before retrying."),
+    req::<crate::admin::NetworkHost, crate::admin::AllowedHost>(
+        "_sill/policy.allow_host",
+        "Approve a concrete host for this session only; policy limits apply. Inspect policy after uncertainty.",
+    ),
+    req_needing::<crate::admin::DesktopCapture, crate::admin::DesktopFrame>(
+        "_sill/desktop.capture",
+        "sill.desktop_view",
+        1,
+        "Take a picture of the session's test desktop (Desktop development), on the host, outside the jail. A new one is kept for `_sill/desktop.read`; when it is still the `since` revision nothing is encoded and `changed` is false. `not_found` when the session has no test desktop running.",
+    ),
+    req_needing::<crate::admin::DesktopRead, crate::admin::FileBytes>(
+        "_sill/desktop.read",
+        "sill.desktop_view",
+        1,
+        "Read the latest test desktop picture (PNG) in chunks of at most 1 MiB; `conflict` when a newer capture replaced that revision.",
+    ),
+    req_needing::<crate::admin::NetworkHost, crate::admin::SavedHost>(
+        "_sill/policy.save_host",
+        "sill.permission_modes",
+        1,
+        "Save for future sessions: add a host pattern to the session agent's network defaults. Existing sessions and their grants are unchanged.",
+    ),
+    req_needing::<crate::admin::PermissionChoice, crate::admin::PermissionsChanged>(
+        "_sill/permissions.set",
+        "sill.permission_modes",
+        1,
+        "Remember a contained capability choice for this session within policy limits; blocked widening is refused. Inspect the preview after uncertainty.",
+    ),
+    req_needing::<crate::sessions::SessionKey, crate::admin::PermissionsChanged>(
+        "_sill/permissions.apply_development",
+        "sill.permission_modes",
+        1,
+        "Apply development permissions: remember the test desktop and the private bus as session choices together; refused as a whole, recording nothing, when a limit or a missing backend blocks either.",
+    ),
+    req_needing::<crate::host_control::Activate, crate::host_control::State>(
+        "_sill/host_control.activate",
+        "sill.host_control",
+        1,
+        "Activate Host control for a running session with exactly these operations, or change an active one's scope: a new generation each time. Refused for ghosts, a policy that forbids it and a stopped session; never a saved choice.",
+    ),
+    req_needing::<crate::sessions::SessionKey, crate::host_control::State>(
+        "_sill/host_control.revoke",
+        "sill.host_control",
+        1,
+        "End the session's Host control activation; a no-op without one. Host processes it launched are stopped, except those marked to keep.",
+    ),
+    req_needing::<crate::host_control::Keep, crate::Empty>(
+        "_sill/host_control.keep",
+        "sill.host_control",
+        1,
+        "Mark a bridge-launched host process (by its process-list name, host:<id>) to keep running after Host control ends, or not.",
+    ),
+    req_needing::<crate::sessions::SessionKey, crate::host_control::State>(
+        "_sill/host_control.state",
+        "sill.permission_modes",
+        1,
+        "A session's Host control state: active, generation, operations, displaying frontends, the last end and the policy's ban. Session records carry the active brief for every client.",
+    ),
+    req_needing::<crate::sessions::SessionKey, crate::admin::PermissionsChanged>(
+        "_sill/permissions.restore_defaults",
+        "sill.permission_modes",
+        1,
+        "Restore defaults: remove this session's added capability and host grants, keeping its policy and pins. A running jail keeps its launch state until restarted.",
+    ),
     notification::<crate::Empty>("_sill/changes.changed", "Filesystem changes changed; refresh bounded public pages."),
-    req_needing::<crate::workspaces::List,crate::workspaces::Listed>("_sill/workspaces.list","sill.workspaces",1,"Workspaces, newest first, in live keyset pages (1–128), optionally one session's; the first page also lists discarded work still undoable. Reading settles: a workspace whose session ended is a result, or is freed when nothing is left to apply."),
-    req_needing::<crate::workspaces::SessionKey,crate::workspaces::SessionView>("_sill/workspaces.session","sill.workspaces",1,"A session's pinned repositories as its jail has them: whether it works in workspaces, each workspace (its clone stands at the repository's path in the jail), and repositories kept live with why."),
-    req_needing::<crate::workspaces::Key,crate::workspaces::Detail>("_sill/workspaces.get","sill.workspaces",1,"A workspace with its current revision and what an Apply would bring (since the last Apply), through the hardened Git view."),
-    req_needing::<crate::workspaces::DiffRequest,crate::workspaces::DiffText>("_sill/workspaces.diff","sill.workspaces",1,"The workspace's working tree against what the person already has, or against where it started; at most 4 MiB."),
-    req_needing::<crate::workspaces::Operate,crate::workspaces::Prepared>("_sill/workspaces.prepare","sill.workspaces",1,"When the person's checkout moved, rebase the workspace onto it in a helper jail with the session's restrictions — its uncommitted work committed first, as for an Apply (refused as uncommitted while the session's agent can commit it) — and return the revision an Apply would bring. A rebase that stops leaves conflicts (resolve in the workspace, or abort)."),
-    req_needing::<crate::workspaces::Apply,crate::workspaces::Changed>("_sill/workspaces.apply","sill.workspaces",1,"Bring the workspace's commits into the person's checkout by fast-forward, exactly this revision; repeatable, the workspace goes on. Commits only: uncommitted work is refused as uncommitted while the session's agent can commit it, and committed by sill as the person otherwise. Refusals: invalid_state with reason stale_revision, source_moved, source_overlap, untracked_collision, uncommitted, no_identity, workspace_detached, writer_active, rebase_in_progress."),
-    req_needing::<crate::workspaces::Apply,crate::workspaces::Changed>("_sill/workspaces.copy","sill.workspaces",1,"Apply without commit: write the workspace's whole state, committed or not, into the person's checkout as uncommitted changes for them to try, exactly this revision. No commit is made on either side and the workspace keeps its work for a later apply; repeatable. Refusals: invalid_state with reason stale_revision, source_moved, source_overlap, untracked_collision, workspace_detached, writer_active, rebase_in_progress."),
-    req_needing::<crate::workspaces::Apply,crate::workspaces::Branched>("_sill/workspaces.branch","sill.workspaces",1,"Apply as branch: make a new branch in the person's checkout at the workspace's commits, exactly this revision's work, without switching to it: the checkout's branch, index and files are untouched. The name is the branch the agent works on, or the session's title in snake_case when the workspace is on sill's own branch. Commits only, as for apply. Repeating it with the branch already there at those commits does nothing. Refusals: invalid_state with reason branch_exists (the name holds other commits; never moved), stale_revision, uncommitted, no_identity, workspace_detached, writer_active, rebase_in_progress."),
-    req_needing::<crate::workspaces::Apply,crate::workspaces::Changed>("_sill/workspaces.discard","sill.workspaces",1,"Throw away what the workspace has beyond the last Apply, exactly this revision; the work is kept 7 days for Undo."),
-    req_needing::<crate::workspaces::Undo,crate::workspaces::Changed>("_sill/workspaces.undo","sill.workspaces",1,"Put discarded work back: into its workspace when nothing happened there since (changed_since otherwise), or into a workspace of its own when that is gone."),
-    req_needing::<crate::workspaces::Operate,crate::workspaces::Changed>("_sill/workspaces.remove","sill.workspaces",1,"Remove a workspace that cannot be read (its operation is of kind read) or whose folder or repository is gone: its folder and record go with whatever work the folder holds, and there is no Undo. Refusals: invalid_state with reason session_active (its session has not ended), readable (apply or discard it instead)."),
-    req_needing::<crate::workspaces::Operate,crate::workspaces::Changed>("_sill/workspaces.abort","sill.workspaces",1,"Abort a rebase that prepare left stopped, in the same helper jail."),
-    notification_needing::<crate::workspaces::Notice>("_sill/workspaces.changed", "sill.workspaces", 1, "A workspace changed; refresh it. Sent only to connections answered sill.workspaces."),
-    req::<crate::changes::List, crate::changes::Page>("_sill/changes.list", "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry."),
-    req::<crate::changes::Diff, crate::changes::DiffPage>("_sill/changes.diff", "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry."),
-    req::<crate::changes::Keep, crate::changes::Done>("_sill/changes.keep", "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry."),
-    req::<crate::changes::Revert, crate::changes::Done>("_sill/changes.revert", "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry."),
-    req::<crate::changes::Undo, crate::changes::Done>("_sill/changes.undo", "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry."),
-    req::<crate::changes::GitRevert, crate::Text>("_sill/changes.git-revert", "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry."),
-    req::<crate::changes::History, crate::changes::HistoryPage>("_sill/changes.history", "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry."),
-
-    req::<crate::memory::List, crate::memory::Page>("_sill/memory.list", "Read live bounded memory pages; after uncertain mutations inspect current state before retrying."),
-    req::<crate::memory::TextRead, crate::memory::TextPage>("_sill/memory.text", "Read live bounded memory pages; after uncertain mutations inspect current state before retrying."),
-    req::<crate::memory::Search, crate::memory::Hits>("_sill/memory.search", "Read live bounded memory pages; after uncertain mutations inspect current state before retrying."),
-    req::<crate::memory::NotesList, crate::memory::Notes>("_sill/memory.notes.list", "Read live bounded memory pages; after uncertain mutations inspect current state before retrying."),
-    req::<crate::memory::AddNote, crate::Empty>("_sill/memory.notes.add", "Read live bounded memory pages; after uncertain mutations inspect current state before retrying."),
-    req::<crate::memory::RemoveNote, crate::Empty>("_sill/memory.notes.remove", "Read live bounded memory pages; after uncertain mutations inspect current state before retrying."),
-    req::<crate::Empty, crate::Empty>("_sill/memory.refresh", "Read live bounded memory pages; after uncertain mutations inspect current state before retrying."),
-
-    req::<crate::agent_admin::List, crate::agent_admin::Page>("_sill/agents.list", "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation."),
-    req::<crate::agent_admin::AgentKey, crate::agent_admin::Definition>("_sill/agents.get", "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation."),
-    req::<crate::agent_admin::Definition, crate::agent_admin::Saved>("_sill/agents.save", "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation."),
-    req::<crate::agent_admin::AgentKey, crate::agent_admin::Removed>("_sill/agents.remove", "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation."),
-    req::<crate::agent_admin::AgentKey, crate::agent_admin::Available>("_sill/agents.available", "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation."),
-    req::<crate::agent_admin::AgentKey, crate::wire::AgentSettings>("_sill/agents.defaults.get", "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation."),
-    req::<crate::agent_admin::Defaults, crate::Empty>("_sill/agents.defaults.set", "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation."),
-    req_needing::<crate::agent_admin::AgentKey, crate::agent_admin::Discovered>("_sill/agents.discovered", "sill.agent_setup", 1, "What the agent's last first-start probe created under an empty home: proposals for its home_paths, or none when no probe has run."),
-    req::<crate::Empty, crate::Empty>("_sill/registry.refresh", "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation."),
-    req_needing::<crate::Empty, crate::providers::Listed>("_sill/providers.list", "sill.providers", 1, "Model providers on the daemon host, each with whether a key is saved (never the key) and the host:port sessions may reach, and the agents the daemon hands providers to."),
-    req_needing::<crate::providers::Save, crate::providers::Saved>("_sill/providers.save", "sill.providers", 1, "Write a provider record; a key, when given, replaces the saved one. Running sessions of agents that use providers become outdated. Inspect the list after uncertainty before retrying."),
-    req_needing::<crate::providers::Key, crate::providers::Removed>("_sill/providers.remove", "sill.providers", 1, "Remove a provider record and its key. A provider already gone is not an error."),
-    req_needing::<crate::providers::Test, crate::providers::Tested>("_sill/providers.test", "sill.providers", 1, "Ask an endpoint for its models from the daemon host, with the given key or the one saved for provider_id. Changes nothing; fails with the endpoint's own error."),
-    req_needing::<crate::providers::DetectLimits, crate::providers::DetectedLimits>("_sill/providers.detect_limits", "sill.provider_limits", 1, "Read Ollama's active context allocation for one model, from the same host and path prefix as the provider; does not load or modify models."),
-    req::<crate::agent_admin::AgentKey, crate::agent_admin::Installation>("_sill/registry.installed", "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation."),
-    req::<crate::agent_admin::EntryKey, crate::Empty>("_sill/registry.uninstall", "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation."),
-    req::<crate::agent_admin::EntryKey, crate::agent_admin::Icon>("_sill/registry.icon", "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation."),
-
+    req_needing::<crate::workspaces::List, crate::workspaces::Listed>(
+        "_sill/workspaces.list",
+        "sill.workspaces",
+        1,
+        "Workspaces, newest first, in live keyset pages (1–128), optionally one session's; the first page also lists discarded work still undoable. Reading settles: a workspace whose session ended is a result, or is freed when nothing is left to apply.",
+    ),
+    req_needing::<crate::workspaces::SessionKey, crate::workspaces::SessionView>(
+        "_sill/workspaces.session",
+        "sill.workspaces",
+        1,
+        "A session's pinned repositories as its jail has them: whether it works in workspaces, each workspace (its clone stands at the repository's path in the jail), and repositories kept live with why.",
+    ),
+    req_needing::<crate::workspaces::Key, crate::workspaces::Detail>(
+        "_sill/workspaces.get",
+        "sill.workspaces",
+        1,
+        "A workspace with its current revision and what an Apply would bring (since the last Apply), through the hardened Git view.",
+    ),
+    req_needing::<crate::workspaces::DiffRequest, crate::workspaces::DiffText>(
+        "_sill/workspaces.diff",
+        "sill.workspaces",
+        1,
+        "The workspace's working tree against what the person already has, or against where it started; at most 4 MiB.",
+    ),
+    req_needing::<crate::workspaces::Operate, crate::workspaces::Prepared>(
+        "_sill/workspaces.prepare",
+        "sill.workspaces",
+        1,
+        "When the person's checkout moved, rebase the workspace onto it in a helper jail with the session's restrictions — its uncommitted work committed first, as for an Apply (refused as uncommitted while the session's agent can commit it) — and return the revision an Apply would bring. A rebase that stops leaves conflicts (resolve in the workspace, or abort).",
+    ),
+    req_needing::<crate::workspaces::Apply, crate::workspaces::Changed>(
+        "_sill/workspaces.apply",
+        "sill.workspaces",
+        1,
+        "Bring the workspace's commits into the person's checkout by fast-forward, exactly this revision; repeatable, the workspace goes on. Commits only: uncommitted work is refused as uncommitted while the session's agent can commit it, and committed by sill as the person otherwise. Refusals: invalid_state with reason stale_revision, source_moved, source_overlap, untracked_collision, uncommitted, no_identity, workspace_detached, writer_active, rebase_in_progress.",
+    ),
+    req_needing::<crate::workspaces::Apply, crate::workspaces::Changed>(
+        "_sill/workspaces.copy",
+        "sill.workspaces",
+        1,
+        "Apply without commit: write the workspace's whole state, committed or not, into the person's checkout as uncommitted changes for them to try, exactly this revision. No commit is made on either side and the workspace keeps its work for a later apply; repeatable. Refusals: invalid_state with reason stale_revision, source_moved, source_overlap, untracked_collision, workspace_detached, writer_active, rebase_in_progress.",
+    ),
+    req_needing::<crate::workspaces::Apply, crate::workspaces::Branched>(
+        "_sill/workspaces.branch",
+        "sill.workspaces",
+        1,
+        "Apply as branch: make a new branch in the person's checkout at the workspace's commits, exactly this revision's work, without switching to it: the checkout's branch, index and files are untouched. The name is the branch the agent works on, or the session's title in snake_case when the workspace is on sill's own branch. Commits only, as for apply. Repeating it with the branch already there at those commits does nothing. Refusals: invalid_state with reason branch_exists (the name holds other commits; never moved), stale_revision, uncommitted, no_identity, workspace_detached, writer_active, rebase_in_progress.",
+    ),
+    req_needing::<crate::workspaces::Apply, crate::workspaces::Changed>(
+        "_sill/workspaces.discard",
+        "sill.workspaces",
+        1,
+        "Throw away what the workspace has beyond the last Apply, exactly this revision; the work is kept 7 days for Undo.",
+    ),
+    req_needing::<crate::workspaces::Undo, crate::workspaces::Changed>(
+        "_sill/workspaces.undo",
+        "sill.workspaces",
+        1,
+        "Put discarded work back: into its workspace when nothing happened there since (changed_since otherwise), or into a workspace of its own when that is gone.",
+    ),
+    req_needing::<crate::workspaces::Operate, crate::workspaces::Changed>(
+        "_sill/workspaces.remove",
+        "sill.workspaces",
+        1,
+        "Remove a workspace that cannot be read (its operation is of kind read) or whose folder or repository is gone: its folder and record go with whatever work the folder holds, and there is no Undo. Refusals: invalid_state with reason session_active (its session has not ended), readable (apply or discard it instead).",
+    ),
+    req_needing::<crate::workspaces::Operate, crate::workspaces::Changed>(
+        "_sill/workspaces.abort",
+        "sill.workspaces",
+        1,
+        "Abort a rebase that prepare left stopped, in the same helper jail.",
+    ),
+    notification_needing::<crate::workspaces::Notice>(
+        "_sill/workspaces.changed",
+        "sill.workspaces",
+        1,
+        "A workspace changed; refresh it. Sent only to connections answered sill.workspaces.",
+    ),
+    req::<crate::changes::List, crate::changes::Page>(
+        "_sill/changes.list",
+        "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry.",
+    ),
+    req::<crate::changes::Diff, crate::changes::DiffPage>(
+        "_sill/changes.diff",
+        "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry.",
+    ),
+    req::<crate::changes::Keep, crate::changes::Done>(
+        "_sill/changes.keep",
+        "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry.",
+    ),
+    req::<crate::changes::Revert, crate::changes::Done>(
+        "_sill/changes.revert",
+        "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry.",
+    ),
+    req::<crate::changes::Undo, crate::changes::Done>(
+        "_sill/changes.undo",
+        "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry.",
+    ),
+    req::<crate::changes::GitRevert, crate::Text>(
+        "_sill/changes.git-revert",
+        "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry.",
+    ),
+    req::<crate::changes::History, crate::changes::HistoryPage>(
+        "_sill/changes.history",
+        "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry.",
+    ),
+    req::<crate::memory::List, crate::memory::Page>(
+        "_sill/memory.list",
+        "Read live bounded memory pages; after uncertain mutations inspect current state before retrying.",
+    ),
+    req::<crate::memory::TextRead, crate::memory::TextPage>(
+        "_sill/memory.text",
+        "Read live bounded memory pages; after uncertain mutations inspect current state before retrying.",
+    ),
+    req::<crate::memory::Search, crate::memory::Hits>(
+        "_sill/memory.search",
+        "Read live bounded memory pages; after uncertain mutations inspect current state before retrying.",
+    ),
+    req::<crate::memory::NotesList, crate::memory::Notes>(
+        "_sill/memory.notes.list",
+        "Read live bounded memory pages; after uncertain mutations inspect current state before retrying.",
+    ),
+    req::<crate::memory::AddNote, crate::Empty>(
+        "_sill/memory.notes.add",
+        "Read live bounded memory pages; after uncertain mutations inspect current state before retrying.",
+    ),
+    req::<crate::memory::RemoveNote, crate::Empty>(
+        "_sill/memory.notes.remove",
+        "Read live bounded memory pages; after uncertain mutations inspect current state before retrying.",
+    ),
+    req::<crate::Empty, crate::Empty>(
+        "_sill/memory.refresh",
+        "Read live bounded memory pages; after uncertain mutations inspect current state before retrying.",
+    ),
+    req::<crate::agent_admin::List, crate::agent_admin::Page>(
+        "_sill/agents.list",
+        "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
+    ),
+    req::<crate::agent_admin::AgentKey, crate::agent_admin::Definition>(
+        "_sill/agents.get",
+        "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
+    ),
+    req::<crate::agent_admin::Definition, crate::agent_admin::Saved>(
+        "_sill/agents.save",
+        "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
+    ),
+    req::<crate::agent_admin::AgentKey, crate::agent_admin::Removed>(
+        "_sill/agents.remove",
+        "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
+    ),
+    req::<crate::agent_admin::AgentKey, crate::agent_admin::Available>(
+        "_sill/agents.available",
+        "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
+    ),
+    req::<crate::agent_admin::AgentKey, crate::wire::AgentSettings>(
+        "_sill/agents.defaults.get",
+        "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
+    ),
+    req::<crate::agent_admin::Defaults, crate::Empty>(
+        "_sill/agents.defaults.set",
+        "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
+    ),
+    req_needing::<crate::agent_admin::AgentKey, crate::agent_admin::Discovered>(
+        "_sill/agents.discovered",
+        "sill.agent_setup",
+        1,
+        "What the agent's last first-start probe created under an empty home: proposals for its home_paths, or none when no probe has run.",
+    ),
+    req::<crate::Empty, crate::Empty>(
+        "_sill/registry.refresh",
+        "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
+    ),
+    req_needing::<crate::Empty, crate::providers::Listed>(
+        "_sill/providers.list",
+        "sill.providers",
+        1,
+        "Model providers on the daemon host, each with whether a key is saved (never the key) and the host:port sessions may reach, and the agents the daemon hands providers to.",
+    ),
+    req_needing::<crate::providers::Save, crate::providers::Saved>(
+        "_sill/providers.save",
+        "sill.providers",
+        1,
+        "Write a provider record; a key, when given, replaces the saved one. Running sessions of agents that use providers become outdated. Inspect the list after uncertainty before retrying.",
+    ),
+    req_needing::<crate::providers::Key, crate::providers::Removed>(
+        "_sill/providers.remove",
+        "sill.providers",
+        1,
+        "Remove a provider record and its key. A provider already gone is not an error.",
+    ),
+    req_needing::<crate::providers::Test, crate::providers::Tested>(
+        "_sill/providers.test",
+        "sill.providers",
+        1,
+        "Ask an endpoint for its models from the daemon host, with the given key or the one saved for provider_id. Changes nothing; fails with the endpoint's own error.",
+    ),
+    req_needing::<crate::providers::DetectLimits, crate::providers::DetectedLimits>(
+        "_sill/providers.detect_limits",
+        "sill.provider_limits",
+        1,
+        "Read Ollama's active context allocation for one model, from the same host and path prefix as the provider; does not load or modify models.",
+    ),
+    req::<crate::agent_admin::AgentKey, crate::agent_admin::Installation>(
+        "_sill/registry.installed",
+        "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
+    ),
+    req::<crate::agent_admin::EntryKey, crate::Empty>(
+        "_sill/registry.uninstall",
+        "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
+    ),
+    req::<crate::agent_admin::EntryKey, crate::agent_admin::Icon>(
+        "_sill/registry.icon",
+        "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
+    ),
     req::<crate::pins::List, crate::pins::Page>("_sill/pins.list", "List global or session pins in bounded live byte-ordered pages."),
     req::<crate::pins::GlobalPin, crate::pins::Pinned>("_sill/pins.add", "Ensure global pin membership; returns the canonical daemon-host path."),
     req_empty::<crate::pins::GlobalPin>("_sill/pins.remove", "Ensure a path is not globally pinned; inspect membership after uncertainty."),
     req_empty::<crate::pins::SessionPin>("_sill/sessions.pin", "Ensure session pin membership; inspect membership after uncertainty."),
     req_empty::<crate::pins::SessionPin>("_sill/sessions.unpin", "Ensure a path is not pinned in a session; inspect membership after uncertainty."),
-    req::<crate::host::OperationKey, crate::host::Operation>("_sill/operations.get", "Recover durable login/install status after disconnect or restart. Unknown outcomes must not be replayed."),
+    req::<crate::host::OperationKey, crate::host::Operation>(
+        "_sill/operations.get",
+        "Recover durable login/install status after disconnect or restart. Unknown outcomes must not be replayed.",
+    ),
     req::<crate::Empty, crate::sessions::HostPath>("_sill/files.home", "Read the daemon host home directory."),
     req::<crate::admin::FileKey, crate::admin::FileMetadata>("_sill/files.metadata", "Read metadata of an exact daemon-host path."),
     req::<crate::admin::FilesList, crate::admin::FilesPage>("_sill/files.list", "List directory children in bounded live byte-ordered pages."),
-    req::<crate::admin::FileRead, crate::admin::FileBytes>("_sill/files.read", "Read at most 1 MiB from a regular daemon-host file; chunks are not an immutable snapshot."),
-    req::<crate::admin::FileWrite, crate::Empty>("_sill/files.write", "Atomically replace a daemon-host file with at most 1 MiB. Do not blindly retry; read the file after uncertainty."),
+    req::<crate::admin::FileRead, crate::admin::FileBytes>(
+        "_sill/files.read",
+        "Read at most 1 MiB from a regular daemon-host file; chunks are not an immutable snapshot.",
+    ),
+    req::<crate::admin::FileWrite, crate::Empty>(
+        "_sill/files.write",
+        "Atomically replace a daemon-host file with at most 1 MiB. Do not blindly retry; read the file after uncertainty.",
+    ),
     req::<crate::Empty, crate::admin::Settings>("_sill/settings.get", "Read daemon settings."),
-    req_needing::<crate::admin::ActiveTimeQuery, crate::admin::ActiveTime>("_sill/usage.active_time", "sill.usage", 1, "Read the time agents worked per UTC hour over the last days, summed over all sessions including deleted ones."),
-    req::<crate::admin::SettingsPatch, crate::Empty>("_sill/settings.patch", "Apply named settings changes. Read settings after an uncertain outcome before retrying."),
+    req_needing::<crate::admin::ActiveTimeQuery, crate::admin::ActiveTime>(
+        "_sill/usage.active_time",
+        "sill.usage",
+        1,
+        "Read the time agents worked per UTC hour over the last days, summed over all sessions including deleted ones.",
+    ),
+    req::<crate::admin::SettingsPatch, crate::Empty>(
+        "_sill/settings.patch",
+        "Apply named settings changes. Read settings after an uncertain outcome before retrying.",
+    ),
     req::<crate::Empty, crate::Text>("_sill/settings.instructions.get", "Read global instructions."),
-    req::<crate::admin::Text, crate::Empty>("_sill/settings.instructions.set", "Replace global instructions (at most 1 MiB). Read back after uncertainty before retrying."),
+    req::<crate::admin::Text, crate::Empty>(
+        "_sill/settings.instructions.set",
+        "Replace global instructions (at most 1 MiB). Read back after uncertainty before retrying.",
+    ),
     req::<crate::admin::NamesList, crate::admin::Names>("_sill/policy.list", "List available daemon policy names (4 MiB result bound)."),
     req::<crate::admin::PolicyKey, crate::admin::PolicyEntry>("_sill/policy.get", "Read a named daemon policy."),
-    req::<crate::sessions::SessionKey, crate::admin::PolicyView>("_sill/policy.preview", "Preview next-build session rules and diagnostics; this view is not enforced by a running jail."),
-    req::<crate::sessions::SessionKey, crate::admin::PolicySnapshot>("_sill/policy.snapshot", "Inspect retained launch rules; null means no snapshot was recorded."),
-    req::<crate::admin::PolicyCheck, crate::admin::PolicyChecked>("_sill/policy.check", "Validate at most 1 MiB of transferred complete-policy text without installation or grants."),
-    req::<crate::admin::PolicyImport, crate::admin::PolicyEntry>("_sill/policy.import", "Install at most 1 MiB of complete policy text in the daemon host user policy directory. Explicit replace permits overwrite; inspect named policy after uncertain replies."),
+    req::<crate::sessions::SessionKey, crate::admin::PolicyView>(
+        "_sill/policy.preview",
+        "Preview next-build session rules and diagnostics; this view is not enforced by a running jail.",
+    ),
+    req::<crate::sessions::SessionKey, crate::admin::PolicySnapshot>(
+        "_sill/policy.snapshot",
+        "Inspect retained launch rules; null means no snapshot was recorded.",
+    ),
+    req::<crate::admin::PolicyCheck, crate::admin::PolicyChecked>(
+        "_sill/policy.check",
+        "Validate at most 1 MiB of transferred complete-policy text without installation or grants.",
+    ),
+    req::<crate::admin::PolicyImport, crate::admin::PolicyEntry>(
+        "_sill/policy.import",
+        "Install at most 1 MiB of complete policy text in the daemon host user policy directory. Explicit replace permits overwrite; inspect named policy after uncertain replies.",
+    ),
     req::<crate::admin::ProcessesList, crate::admin::ProcessesPage>("_sill/procs.list", "List managed session processes in bounded live name-ordered pages."),
     req::<crate::admin::ProcessTail, crate::Text>("_sill/procs.tail", "Read at most 10000 lines and 4 MiB of managed-process output."),
-    req::<crate::admin::ProcessKey, crate::Empty>("_sill/procs.stop", "Request stop of one named process. List its state after an uncertain outcome; do not blindly retry."),
-    req_needing::<crate::sessions::SessionKey, crate::admin::JailProcesses>("_sill/procs.running", "sill.jail_processes", 1, "What runs in the session's jail now: the commands the agent started, each tree once at its root, and services (managed processes and programs listening on a port). A reading of this moment; empty when the jail is not running."),
-    req_needing::<crate::admin::CommandKey, crate::Empty>("_sill/procs.stop_command", "sill.jail_processes", 1, "Stop a command running in the jail, with everything it started (asked, then made to after 3 s). The pid is the jail's, as _sill/procs.running names it."),
+    req::<crate::admin::ProcessKey, crate::Empty>(
+        "_sill/procs.stop",
+        "Request stop of one named process. List its state after an uncertain outcome; do not blindly retry.",
+    ),
+    req_needing::<crate::sessions::SessionKey, crate::admin::JailProcesses>(
+        "_sill/procs.running",
+        "sill.jail_processes",
+        1,
+        "What runs in the session's jail now: the commands the agent started, each tree once at its root, and services (managed processes and programs listening on a port). A reading of this moment; empty when the jail is not running.",
+    ),
+    req_needing::<crate::admin::CommandKey, crate::Empty>(
+        "_sill/procs.stop_command",
+        "sill.jail_processes",
+        1,
+        "Stop a command running in the jail, with everything it started (asked, then made to after 3 s). The pid is the jail's, as _sill/procs.running names it.",
+    ),
     req::<crate::admin::ProcessKey, crate::Empty>("_sill/procs.dismiss", "Dismiss one named process. List after an uncertain outcome; do not blindly retry."),
-    req::<crate::sessions::List, crate::sessions::Page>("_sill/sessions.list", "List sessions in bounded live pages ordered by immutable creation time and identity."),
+    req::<crate::sessions::List, crate::sessions::Page>(
+        "_sill/sessions.list",
+        "List sessions in bounded live pages ordered by immutable creation time and identity.",
+    ),
     req::<crate::sessions::SessionKey, crate::sessions::Session>("_sill/sessions.get", "Read one exact session identity."),
-    req::<crate::sessions::Create, crate::sessions::SessionKey>("_sill/sessions.create", "Atomically create a session; retry the same create_id and input to recover its identity."),
+    req::<crate::sessions::Create, crate::sessions::SessionKey>(
+        "_sill/sessions.create",
+        "Atomically create a session; retry the same create_id and input to recover its identity.",
+    ),
     req_empty::<crate::sessions::Update>("_sill/sessions.update", "Update one session field. Do not blindly retry after connection loss."),
     req::<crate::sessions::SessionKey, crate::sessions::Started>("_sill/sessions.start", "Start a jail. Do not blindly retry after connection loss."),
     req_empty::<crate::sessions::SessionKey>("_sill/sessions.stop", "Stop the jail, preserving the session. Do not blindly retry after connection loss."),
-    req::<crate::sessions::End, crate::sessions::Ending>("_sill/sessions.end", "End a session, possibly waiting for its summary. Do not blindly retry after connection loss."),
+    req::<crate::sessions::End, crate::sessions::Ending>(
+        "_sill/sessions.end",
+        "End a session, possibly waiting for its summary. Do not blindly retry after connection loss.",
+    ),
     req_empty::<crate::sessions::SessionKey>("_sill/sessions.checkpoint", "Request a summary. Do not blindly retry after connection loss."),
-    req::<crate::host::PortOpen, crate::host::HostStream>("_sill/streams.port", "Connect to a TCP port in a running session jail; close the byte stream to close the connection. Do not blindly retry."),
-    req_needing::<crate::host::OperationKey, crate::host::HostStream>("_sill/streams.login_callback", "sill.login_browser", 1, "Connect to the loopback callback port a running login reported in `open_url`, on the daemon host; raw TCP bytes. `not_found` when no such login runs, `invalid_state` when it reported no port or nothing listens. Do not blindly retry."),
-    req_needing::<crate::host::OperationKey, crate::Empty>("_sill/operations.cancel", "sill.login_browser", 1, "Stop a running login (also one run by directory setup): its agent and helpers end and the operation fails with code `cancelled`. `not_found` when no such login runs."),
-    req::<crate::host::AgentLogin, crate::host::JobStream>("_sill/agents.login", "Start host login with tagged progress. Disconnect does not cancel; do not blindly retry."),
-    req_needing::<crate::host::AgentDiscover, crate::host::JobStream>("_sill/agents.discover", "sill.agent_setup", 1, "Start the agent once in a throwaway jail with an empty home and record what it creates as home_paths proposals, with tagged progress. Declares nothing. Disconnect does not cancel; do not blindly retry."),
-    req::<crate::host::AgentReset, crate::host::AgentResetDone>("_sill/agents.reset", "Reset an agent as if newly installed: stop its running sessions, then remove its sill-owned home (login, settings, history, memory), ghost copies and saved API keys. The host's own files are untouched."),
-    req::<crate::host::RegistryInstall, crate::host::JobStream>("_sill/registry.install", "Install a daemon registry entry with tagged progress. Disconnect does not cancel; do not blindly retry."),
-    req::<crate::host::RegistryList, crate::host::RegistryPage>("_sill/registry.list", "List the daemon's registry in bounded live pages, including install selectors and trust source."),
-    req::<crate::terminals::Open, crate::terminals::Terminal>("_sill/terminals.open", "Open a daemon-owned terminal in a session's jail or on the daemon host. Do not blindly retry after connection loss: list first."),
+    req::<crate::host::PortOpen, crate::host::HostStream>(
+        "_sill/streams.port",
+        "Connect to a TCP port in a running session jail; close the byte stream to close the connection. Do not blindly retry.",
+    ),
+    req_needing::<crate::host::OperationKey, crate::host::HostStream>(
+        "_sill/streams.login_callback",
+        "sill.login_browser",
+        1,
+        "Connect to the loopback callback port a running login reported in `open_url`, on the daemon host; raw TCP bytes. `not_found` when no such login runs, `invalid_state` when it reported no port or nothing listens. Do not blindly retry.",
+    ),
+    req_needing::<crate::host::OperationKey, crate::Empty>(
+        "_sill/operations.cancel",
+        "sill.login_browser",
+        1,
+        "Stop a running login (also one run by directory setup): its agent and helpers end and the operation fails with code `cancelled`. `not_found` when no such login runs.",
+    ),
+    req::<crate::host::AgentLogin, crate::host::JobStream>(
+        "_sill/agents.login",
+        "Start host login with tagged progress. Disconnect does not cancel; do not blindly retry.",
+    ),
+    req_needing::<crate::host::AgentDiscover, crate::host::JobStream>(
+        "_sill/agents.discover",
+        "sill.agent_setup",
+        1,
+        "Start the agent once in a throwaway jail with an empty home and record what it creates as home_paths proposals, with tagged progress. Declares nothing. Disconnect does not cancel; do not blindly retry.",
+    ),
+    req::<crate::host::AgentReset, crate::host::AgentResetDone>(
+        "_sill/agents.reset",
+        "Reset an agent as if newly installed: stop its running sessions, then remove its sill-owned home (login, settings, history, memory), ghost copies and saved API keys. The host's own files are untouched.",
+    ),
+    req::<crate::host::RegistryInstall, crate::host::JobStream>(
+        "_sill/registry.install",
+        "Install a daemon registry entry with tagged progress. Disconnect does not cancel; do not blindly retry.",
+    ),
+    req::<crate::host::RegistryList, crate::host::RegistryPage>(
+        "_sill/registry.list",
+        "List the daemon's registry in bounded live pages, including install selectors and trust source.",
+    ),
+    req::<crate::terminals::Open, crate::terminals::Terminal>(
+        "_sill/terminals.open",
+        "Open a daemon-owned terminal in a session's jail or on the daemon host. Do not blindly retry after connection loss: list first.",
+    ),
     req::<crate::terminals::List, crate::terminals::Terminals>("_sill/terminals.list", "Running and recently exited terminals, at most 64."),
     req::<crate::terminals::TerminalKey, crate::terminals::Terminal>("_sill/terminals.get", "Read one terminal, including its exit."),
-    req::<crate::terminals::TerminalKey, crate::terminals::Stream>("_sill/terminals.attach", "A byte-stream token: recent output first, then live; closing the stream detaches without ending the terminal."),
+    req::<crate::terminals::TerminalKey, crate::terminals::Stream>(
+        "_sill/terminals.attach",
+        "A byte-stream token: recent output first, then live; closing the stream detaches without ending the terminal.",
+    ),
     req_empty::<crate::terminals::Resize>("_sill/terminals.resize", "Set the terminal's window size."),
     req::<crate::terminals::TerminalKey, crate::terminals::Cwd>("_sill/terminals.cwd", "A host terminal's current working directory."),
     req_empty::<crate::terminals::TerminalKey>("_sill/terminals.close", "Hang up the terminal and forget it; attached streams end."),
     req::<crate::sfp::UploadCreate, crate::sfp::UploadCreated>("_sill/uploads.create", "Create an immutable session upload with an idempotency key."),
     req::<crate::sfp::UploadGet, crate::sfp::Upload>("_sill/uploads.get", "Read an upload's immutable bytes (attachments are referenced, never embedded)."),
-    req_empty::<crate::sfp::SessionControl>("_sill/sessions.control", "Change adapter controls; do not blindly retry an uncertain login or retry-session action."),
+    req_empty::<crate::sfp::SessionControl>(
+        "_sill/sessions.control",
+        "Change adapter controls; do not blindly retry an uncertain login or retry-session action.",
+    ),
     req::<crate::sfp::CancelTurn, crate::sfp::CancellationRequested>("_sill/sessions.cancel", "Request cancellation of one identified active turn."),
     req::<crate::initialize::Initialize, crate::initialize::Initialized>(crate::initialize::METHOD, "Initialize an SFP control connection."),
     req::<crate::sfp::Attach, crate::sfp::Attached>("_sill/sessions.attach", "Subscribe with a durable cursor or immutable paginated snapshot."),
@@ -208,7 +603,12 @@ pub const METHODS: &[Method] = &[
     req::<crate::sfp::SubmissionKey, crate::sfp::Submission>("_sill/submissions.get", "Recover the outcome of a submission."),
     req::<crate::sfp::SubmissionKey, crate::sfp::Submission>("_sill/submissions.cancel", "Cancel a knowingly unsent queued submission."),
     req::<crate::sfp::SubmissionKey, crate::sfp::Submission>("_sill/submissions.resume", "Resume a held queued submission, retaining acceptance order."),
-    req_needing::<crate::sfp::SubmissionKey, crate::sfp::Submission>("_sill/submissions.send_now", "sill.send_now", 1, "Send a queued submission next, stopping the active turn."),
+    req_needing::<crate::sfp::SubmissionKey, crate::sfp::Submission>(
+        "_sill/submissions.send_now",
+        "sill.send_now",
+        1,
+        "Send a queued submission next, stopping the active turn.",
+    ),
     req::<crate::sfp::AnswerQuestion, crate::sfp::Question>("_sill/questions.answer", "Record the first valid answer with a durable idempotency key."),
     notification::<crate::sfp::SessionEvent>("_sill/session.event", "A committed ordered session event."),
     req::<crate::Empty, Value>(method::DAEMON_SCHEMA, "The Sill Frontend Protocol schema and method capabilities, for remote negotiation."),
@@ -238,19 +638,22 @@ pub fn document() -> Value {
     let progress = g.subschema_for::<crate::host::Progress>().to_value();
     let error = g.subschema_for::<crate::rpc::Error>().to_value();
     let domain_data = g.subschema_for::<crate::rpc::DomainData>().to_value();
-    let details: serde_json::Map<String, Value> = crate::rpc::detail_codes().into_iter().map(|(code, always)| {
-        let shape = match code {
-            "incompatible" => g.subschema_for::<crate::rpc::IncompatibleDetails>(),
-            "stale_answer" => g.subschema_for::<crate::rpc::StaleAnswerDetails>(),
-            "limit_exceeded" => g.subschema_for::<crate::rpc::LimitDetails>(),
-            "unsupported" => g.subschema_for::<crate::rpc::UnsupportedDetails>(),
-            "invalid_state" => g.subschema_for::<crate::rpc::InvalidStateDetails>(),
-            other => unreachable!("detail schema for {other}"),
-        }.to_value();
-        (code.to_string(), json!({"required": always, "shape": shape}))
-    }).collect();
-    let capabilities: Vec<Value> = crate::initialize::CAPABILITIES.iter()
-        .map(|c| json!({"name": c.name, "version": c.version, "doc": c.doc})).collect();
+    let details: serde_json::Map<String, Value> = crate::rpc::detail_codes()
+        .into_iter()
+        .map(|(code, always)| {
+            let shape = match code {
+                "incompatible" => g.subschema_for::<crate::rpc::IncompatibleDetails>(),
+                "stale_answer" => g.subschema_for::<crate::rpc::StaleAnswerDetails>(),
+                "limit_exceeded" => g.subschema_for::<crate::rpc::LimitDetails>(),
+                "unsupported" => g.subschema_for::<crate::rpc::UnsupportedDetails>(),
+                "invalid_state" => g.subschema_for::<crate::rpc::InvalidStateDetails>(),
+                other => unreachable!("detail schema for {other}"),
+            }
+            .to_value();
+            (code.to_string(), json!({"required": always, "shape": shape}))
+        })
+        .collect();
+    let capabilities: Vec<Value> = crate::initialize::CAPABILITIES.iter().map(|c| json!({"name": c.name, "version": c.version, "doc": c.doc})).collect();
     let defs = g.take_definitions(true);
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -392,7 +795,10 @@ mod tests {
         // a limit error's data reads back as typed details
         let e = crate::rpc::Error::limit(crate::rpc::LimitScope::Result, Some(4), "too big");
         let data: crate::rpc::DomainData = serde_json::from_value(e.data.unwrap()).unwrap();
-        assert!(matches!(data.details, Some(crate::rpc::DomainDetails::LimitExceeded(crate::rpc::LimitDetails { scope: crate::rpc::LimitScope::Result, maximum: Some(4) }))));
+        assert!(matches!(
+            data.details,
+            Some(crate::rpc::DomainDetails::LimitExceeded(crate::rpc::LimitDetails { scope: crate::rpc::LimitScope::Result, maximum: Some(4) }))
+        ));
     }
 
     /// docs/protocol.md is the human reading of this table: a method the daemon answers is in it.

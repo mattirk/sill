@@ -50,9 +50,7 @@ pub fn text<'a, Message>(content: impl IntoFragment<'a>) -> Text<'a, (), Message
 }
 
 /// Selectable rich text.
-pub fn rich_text<'a, Link, Message>(
-    spans: impl AsRef<[Span<'a, Link, Font>]> + 'a,
-) -> Text<'a, Link, Message>
+pub fn rich_text<'a, Link, Message>(spans: impl AsRef<[Span<'a, Link, Font>]> + 'a) -> Text<'a, Link, Message>
 where
     Link: Clone + 'static,
 {
@@ -157,27 +155,14 @@ where
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(State::<Link> {
-            last: Last::Nothing,
-            selectable: Selectable::default(),
-            span_pressed: None,
-            hovered_link: None,
-        })
+        tree::State::new(State::<Link> { last: Last::Nothing, selectable: Selectable::default(), span_pressed: None, hovered_link: None })
     }
 
     fn size(&self) -> Size<Length> {
-        Size {
-            width: self.width,
-            height: Length::Shrink,
-        }
+        Size { width: self.width, height: Length::Shrink }
     }
 
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) -> layout::Node {
         use iced::advanced::text::Renderer as _;
 
         let state = tree.state.downcast_mut::<State<Link>>();
@@ -205,11 +190,7 @@ where
                         state.last = Last::Plain(content.to_string());
                         state.selectable.set_paragraph(Paragraph::with_text(text));
                     } else {
-                        match state
-                            .selectable
-                            .paragraph()
-                            .compare(shape(Shaping::default()))
-                        {
+                        match state.selectable.paragraph().compare(shape(Shaping::default())) {
                             Difference::None => {}
                             Difference::Bounds => state.selectable.resize(bounds),
                             Difference::Shape => {
@@ -224,15 +205,10 @@ where
                     let text = shape(Shaping::Advanced).with_content(spans);
                     let same = matches!(&state.last, Last::Rich(last) if last.as_slice() == spans);
                     if !same {
-                        state.last =
-                            Last::Rich(spans.iter().cloned().map(Span::to_static).collect());
+                        state.last = Last::Rich(spans.iter().cloned().map(Span::to_static).collect());
                         state.selectable.set_paragraph(Paragraph::with_spans(text));
                     } else {
-                        match state
-                            .selectable
-                            .paragraph()
-                            .compare(shape(Shaping::Advanced))
-                        {
+                        match state.selectable.paragraph().compare(shape(Shaping::Advanced)) {
                             Difference::None => {}
                             Difference::Bounds => state.selectable.resize(bounds),
                             Difference::Shape => {
@@ -271,11 +247,7 @@ where
         // span decorations, as iced's and iced_selection's rich text draw them
         for (index, span) in self.spans().iter().enumerate() {
             let is_hovered_link = self.on_link_click.is_some() && Some(index) == state.hovered_link;
-            if span.highlight.is_none()
-                && !span.underline
-                && !span.strikethrough
-                && !is_hovered_link
-            {
+            if span.highlight.is_none() && !span.underline && !span.strikethrough && !is_hovered_link {
                 continue;
             }
             let regions = state.selectable.paragraph().span_bounds(index);
@@ -286,11 +258,7 @@ where
                         region.size() + Size::new(span.padding.x(), span.padding.y()),
                     );
                     renderer.fill_quad(
-                        renderer::Quad {
-                            bounds: region + translation,
-                            border: highlight.border,
-                            ..renderer::Quad::default()
-                        },
+                        renderer::Quad { bounds: region + translation, border: highlight.border, ..renderer::Quad::default() },
                         highlight.background,
                     );
                 }
@@ -299,8 +267,7 @@ where
                 let size = span.size.or(self.size).unwrap_or(renderer.default_size());
                 let line_height = span.line_height.unwrap_or_default().to_absolute(size);
                 let color = span.color.or(style.color).unwrap_or(defaults.text_color);
-                let baseline =
-                    translation + Vector::new(0.0, size.0 + (line_height.0 - size.0) / 2.0);
+                let baseline = translation + Vector::new(0.0, size.0 + (line_height.0 - size.0) / 2.0);
                 let underline = span.underline || is_hovered_link;
                 let offsets: &[f32] = match (underline, span.strikethrough) {
                     (true, true) => &[size.0 * 0.08, size.0 / 2.0],
@@ -312,10 +279,7 @@ where
                     for offset in offsets {
                         renderer.fill_quad(
                             renderer::Quad {
-                                bounds: Rectangle::new(
-                                    region.position() + baseline - Vector::new(0.0, *offset),
-                                    Size::new(region.width, 1.0),
-                                ),
+                                bounds: Rectangle::new(region.position() + baseline - Vector::new(0.0, *offset), Size::new(region.width, 1.0)),
                                 ..renderer::Quad::default()
                             },
                             color,
@@ -326,23 +290,14 @@ where
         }
 
         // find matches under the selection and glyphs
-        for (rects, current) in [
-            (state.selectable.find_rects(), false),
-            (state.selectable.find_current_rects(), true),
-        ] {
+        for (rects, current) in [(state.selectable.find_rects(), false), (state.selectable.find_current_rects(), true)] {
             if rects.is_empty() {
                 continue;
             }
             let color = crate::style::find_match(current);
             for rect in rects {
                 if let Some(visible) = bounds.intersection(&(*rect + translation)) {
-                    renderer.fill_quad(
-                        renderer::Quad {
-                            bounds: visible,
-                            ..renderer::Quad::default()
-                        },
-                        color,
-                    );
+                    renderer.fill_quad(renderer::Quad { bounds: visible, ..renderer::Quad::default() }, color);
                 }
             }
         }
@@ -350,22 +305,11 @@ where
         // this leaf's part of the area's selection, under the glyphs
         for rect in state.selectable.highlight_rects().iter() {
             if let Some(visible) = bounds.intersection(&(*rect + translation)) {
-                renderer.fill_quad(
-                    renderer::Quad {
-                        bounds: visible,
-                        ..renderer::Quad::default()
-                    },
-                    style.selection,
-                );
+                renderer.fill_quad(renderer::Quad { bounds: visible, ..renderer::Quad::default() }, style.selection);
             }
         }
 
-        renderer.fill_paragraph(
-            state.selectable.paragraph(),
-            origin,
-            style.color.unwrap_or(defaults.text_color),
-            *viewport,
-        );
+        renderer.fill_paragraph(state.selectable.paragraph(), origin, style.color.unwrap_or(defaults.text_color), *viewport);
     }
 
     fn update(
@@ -388,12 +332,7 @@ where
         let origin = state.selectable.origin(bounds);
         state.hovered_link = cursor
             .position_over(bounds)
-            .and_then(|position| {
-                state
-                    .selectable
-                    .paragraph()
-                    .hit_span(position - (origin - Point::ORIGIN))
-            })
+            .and_then(|position| state.selectable.paragraph().hit_span(position - (origin - Point::ORIGIN)))
             .filter(|span| self.spans().get(*span).is_some_and(|s| s.link.is_some()));
 
         match event {
@@ -406,15 +345,13 @@ where
                     shell.capture_event();
                 }
             }
-            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
-            | Event::Touch(touch::Event::FingerPressed { .. }) => {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) | Event::Touch(touch::Event::FingerPressed { .. }) => {
                 if state.hovered_link.is_some() {
                     state.span_pressed = state.hovered_link;
                     shell.capture_event();
                 }
             }
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-            | Event::Touch(touch::Event::FingerLifted { .. }) => {
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) | Event::Touch(touch::Event::FingerLifted { .. }) => {
                 if let Some(span) = state.span_pressed.take()
                     && Some(span) == state.hovered_link
                     && let Some(link) = self.spans().get(span).and_then(|s| s.link.clone())
@@ -432,27 +369,14 @@ where
         }
     }
 
-    fn operate(
-        &mut self,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        _renderer: &Renderer,
-        operation: &mut dyn Operation,
-    ) {
+    fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, _renderer: &Renderer, operation: &mut dyn Operation) {
         let state = tree.state.downcast_mut::<State<Link>>();
         // as iced's own text does, so selectors in tests find leaves by their text
         operation.text(None, layout.bounds(), state.selectable.text());
         operation.custom(None, layout.bounds(), &mut state.selectable);
     }
 
-    fn mouse_interaction(
-        &self,
-        tree: &Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        _viewport: &Rectangle,
-        _renderer: &Renderer,
-    ) -> mouse::Interaction {
+    fn mouse_interaction(&self, tree: &Tree, layout: Layout<'_>, cursor: mouse::Cursor, _viewport: &Rectangle, _renderer: &Renderer) -> mouse::Interaction {
         let state = tree.state.downcast_ref::<State<Link>>();
         if state.hovered_link.is_some() {
             mouse::Interaction::Pointer

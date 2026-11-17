@@ -108,11 +108,22 @@ pub struct HostStream {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Progress {
-    Status { text: String },
-    Stderr { text: String },
-    Output { text: String },
-    Completed { agent_id: String },
-    Failed { code: String, message: String },
+    Status {
+        text: String,
+    },
+    Stderr {
+        text: String,
+    },
+    Output {
+        text: String,
+    },
+    Completed {
+        agent_id: String,
+    },
+    Failed {
+        code: String,
+        message: String,
+    },
     /// A login page for the frontend to open in the person's browser (capability
     /// `sill.login_browser`); the daemon opens none. `callback_port`: the daemon host's loopback
     /// port the page redirects to, which a frontend on another machine relays with
@@ -140,10 +151,17 @@ pub struct Operation {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum OperationState { Running, Completed, Failed, Unknown }
+pub enum OperationState {
+    Running,
+    Completed,
+    Failed,
+    Unknown,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct OperationKey { pub operation_id: String }
+pub struct OperationKey {
+    pub operation_id: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct JobStream {
     /// Present for a newly started job only. Repeated requests recover the receipt, not output.

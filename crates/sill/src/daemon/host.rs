@@ -1,23 +1,27 @@
 //! Public host operations. Resolve identifiers against daemon-owned configuration, never a
 //! frontend-supplied command/distribution. Login/install jobs continue if their viewer leaves.
+use super::Hub;
 use anyhow::Result;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sill_proto::{host as api, rpc::Error};
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use super::Hub;
 
 fn domain(code: &'static str, message: &str) -> anyhow::Error {
     sill_core::sfp::DomainError { code, message: message.into(), details: None }.into()
 }
-fn invalid(message: &str) -> anyhow::Error { Error::invalid_params(message).into() }
-fn args<T: DeserializeOwned>(value: Value) -> Result<T> { serde_json::from_value(value).map_err(|e| invalid(&e.to_string())) }
+fn invalid(message: &str) -> anyhow::Error {
+    Error::invalid_params(message).into()
+}
+fn args<T: DeserializeOwned>(value: Value) -> Result<T> {
+    serde_json::from_value(value).map_err(|e| invalid(&e.to_string()))
+}
 fn valid_id(id: &str) -> Result<()> {
     if id.is_empty() || id.len() > 128 || id == "." || id == ".." || !id.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.')) {
         return Err(invalid("invalid agent/entry id"));
@@ -25,10 +29,15 @@ fn valid_id(id: &str) -> Result<()> {
     Ok(())
 }
 /// Running jobs by key, each with its operation when it has one.
-fn jobs() -> &'static Mutex<HashMap<String, Option<String>>> { static JOBS: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new(); JOBS.get_or_init(Default::default) }
+fn jobs() -> &'static Mutex<HashMap<String, Option<String>>> {
+    static JOBS: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    JOBS.get_or_init(Default::default)
+}
 pub(super) struct Job(String);
 impl Job {
-    pub(super) fn reserve(key: String) -> Result<Self> { Self::reserve_for(key, None) }
+    pub(super) fn reserve(key: String) -> Result<Self> {
+        Self::reserve_for(key, None)
+    }
     /// `busy` names the running job's operation, so another frontend can cancel a login it did not start.
     fn reserve_for(key: String, operation_id: Option<&str>) -> Result<Self> {
         let mut jobs = jobs().lock().unwrap();
@@ -36,7 +45,9 @@ impl Job {
             let details = running.as_ref().map(|id| json!({ "operation_id": id }));
             return Err(sill_core::sfp::DomainError { code: "busy", message: "this host operation is already running".into(), details }.into());
         }
-        if jobs.len() >= api::MAX_JOBS { return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Capacity, None, "too many host jobs")); }
+        if jobs.len() >= api::MAX_JOBS {
+            return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Capacity, None, "too many host jobs"));
+        }
         jobs.insert(key.clone(), operation_id.map(str::to_owned));
         Ok(Self(key))
     }
@@ -44,8 +55,14 @@ impl Job {
 
 /// A running login: whether it is cancelled, and the callback port its page reported.
 #[derive(Default)]
-struct LoginCtl { cancelled: AtomicBool, callback_port: Mutex<Option<u16>> }
-fn logins() -> &'static Mutex<HashMap<String, Arc<LoginCtl>>> { static L: OnceLock<Mutex<HashMap<String, Arc<LoginCtl>>>> = OnceLock::new(); L.get_or_init(Default::default) }
+struct LoginCtl {
+    cancelled: AtomicBool,
+    callback_port: Mutex<Option<u16>>,
+}
+fn logins() -> &'static Mutex<HashMap<String, Arc<LoginCtl>>> {
+    static L: OnceLock<Mutex<HashMap<String, Arc<LoginCtl>>>> = OnceLock::new();
+    L.get_or_init(Default::default)
+}
 /// Registered while its job runs, by operation.
 struct LoginEntry(String, Arc<LoginCtl>);
 impl LoginEntry {
@@ -54,45 +71,82 @@ impl LoginEntry {
         logins().lock().unwrap().insert(operation_id.to_owned(), ctl.clone());
         Self(operation_id.to_owned(), ctl)
     }
-    fn cancelled(&self) -> bool { self.1.cancelled.load(Ordering::Acquire) }
+    fn cancelled(&self) -> bool {
+        self.1.cancelled.load(Ordering::Acquire)
+    }
     /// A login line as progress; an `open_url`'s port is the one the callback relay may reach.
     fn progress(&self, line: sill_core::login::Line) -> api::Progress {
         match line {
             sill_core::login::Line::Status(s) => api::Progress::Status { text: text(s) },
             sill_core::login::Line::Stderr(s) => api::Progress::Stderr { text: text(s) },
             sill_core::login::Line::OpenUrl { url, callback_port } => {
-                if callback_port.is_some() { *self.1.callback_port.lock().unwrap() = callback_port; }
+                if callback_port.is_some() {
+                    *self.1.callback_port.lock().unwrap() = callback_port;
+                }
                 api::Progress::OpenUrl { url, callback_port }
             }
         }
     }
 }
-impl Drop for LoginEntry { fn drop(&mut self) { logins().lock().unwrap().remove(&self.0); } }
+impl Drop for LoginEntry {
+    fn drop(&mut self) {
+        logins().lock().unwrap().remove(&self.0);
+    }
+}
 fn running_login(operation_id: &str) -> Result<Arc<LoginCtl>> {
     logins().lock().unwrap().get(operation_id).cloned().ok_or_else(|| domain("not_found", "no such login is running"))
 }
-impl Drop for Job { fn drop(&mut self) { jobs().lock().unwrap().remove(&self.0); } }
+impl Drop for Job {
+    fn drop(&mut self) {
+        jobs().lock().unwrap().remove(&self.0);
+    }
+}
 
 fn source(entry: &sill_core::registry::Entry) -> &'static str {
-    match entry.trust { sill_core::registry::Trust::Snapshot => "snapshot", sill_core::registry::Trust::Live => "live" }
+    match entry.trust {
+        sill_core::registry::Trust::Snapshot => "snapshot",
+        sill_core::registry::Trust::Live => "live",
+    }
 }
 fn summary(entry: &sill_core::registry::Entry) -> api::RegistryEntry {
-    api::RegistryEntry { entry_id: entry.id.clone(), name: entry.name.clone(), version: entry.version.clone(), source: source(entry).into(), installable: entry.how().is_some(),
-        description:entry.description.clone(),repository:entry.repository.clone(),website:entry.website.clone(),
-        install_kind:entry.how().map(str::to_owned),install_spec:entry.install_spec(),package_name:entry.package_name(),has_icon:entry.icon.is_some(),builtin_agent_id:sill_core::registry::builtin_for(entry).map(str::to_owned),tested:sill_core::registry::is_tested(&entry.id),
-        newer: entry.newer.as_ref().map(|e| Box::new(summary(e))) }
+    api::RegistryEntry {
+        entry_id: entry.id.clone(),
+        name: entry.name.clone(),
+        version: entry.version.clone(),
+        source: source(entry).into(),
+        installable: entry.how().is_some(),
+        description: entry.description.clone(),
+        repository: entry.repository.clone(),
+        website: entry.website.clone(),
+        install_kind: entry.how().map(str::to_owned),
+        install_spec: entry.install_spec(),
+        package_name: entry.package_name(),
+        has_icon: entry.icon.is_some(),
+        builtin_agent_id: sill_core::registry::builtin_for(entry).map(str::to_owned),
+        tested: sill_core::registry::is_tested(&entry.id),
+        newer: entry.newer.as_ref().map(|e| Box::new(summary(e))),
+    }
 }
 fn select(home: &Path, a: &api::RegistryInstall) -> Result<sill_core::registry::Entry> {
     valid_id(&a.entry_id)?;
-    if !matches!(a.source.as_str(), "snapshot" | "live") { return Err(invalid("source must be snapshot or live")); }
+    if !matches!(a.source.as_str(), "snapshot" | "live") {
+        return Err(invalid("source must be snapshot or live"));
+    }
     let entries = sill_core::registry::merged(home).0;
-    let found = entries.into_iter().flat_map(|mut e| {
-        let newer = e.newer.take();
-        std::iter::once(e).chain(newer.map(|n| *n))
-    }).find(|e| e.id == a.entry_id && e.version == a.version && source(e) == a.source)
+    let found = entries
+        .into_iter()
+        .flat_map(|mut e| {
+            let newer = e.newer.take();
+            std::iter::once(e).chain(newer.map(|n| *n))
+        })
+        .find(|e| e.id == a.entry_id && e.version == a.version && source(e) == a.source)
         .ok_or_else(|| domain("not_found", "entry version/source is no longer in the daemon registry; refresh before installing"))?;
-    if found.trust == sill_core::registry::Trust::Live && !a.allow_unreviewed { return Err(domain("permission_denied", "live registry installs require allow_unreviewed")); }
-    if found.how().is_none() { return Err(domain("unsupported", "entry cannot be installed on this platform")); }
+    if found.trust == sill_core::registry::Trust::Live && !a.allow_unreviewed {
+        return Err(domain("permission_denied", "live registry installs require allow_unreviewed"));
+    }
+    if found.how().is_none() {
+        return Err(domain("unsupported", "entry cannot be installed on this platform"));
+    }
     Ok(found)
 }
 
@@ -103,28 +157,43 @@ impl ProgressWriter {
     fn send(&mut self, event: api::Progress) {
         if let Some(socket) = self.0.as_mut() {
             let result = writeln!(socket, "{}", serde_json::to_string(&event).expect("progress serialization"));
-            if result.is_err() { self.0 = None; }
+            if result.is_err() {
+                self.0 = None;
+            }
         }
     }
 }
 fn text(mut value: String) -> String {
     if value.len() > api::MAX_PROGRESS_TEXT {
         let mut end = api::MAX_PROGRESS_TEXT;
-        while !value.is_char_boundary(end) { end -= 1; }
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
         value.truncate(end);
     }
     value
 }
 fn identity<T: serde::Serialize>(requested: &Option<String>, input: &T) -> Result<(String, Value)> {
-    let id = requested.clone().unwrap_or_else(|| format!("{}{}{}{}", sill_core::store::new_id(), sill_core::store::new_id(), sill_core::store::new_id(), sill_core::store::new_id()));
+    let id = requested
+        .clone()
+        .unwrap_or_else(|| format!("{}{}{}{}", sill_core::store::new_id(), sill_core::store::new_id(), sill_core::store::new_id(), sill_core::store::new_id()));
     let mut input = serde_json::to_value(input)?;
     input.as_object_mut().unwrap().remove("operation_id");
     Ok((id, input))
 }
 fn existing(hub: &Hub, id: &str, method: &str, input: &Value) -> Result<Option<api::JobStream>> {
-    hub.with_store(|s| Ok(sill_core::operations::Journal::new(s.conn())?.existing(id, method, input)?.map(|operation| api::JobStream { token: None, operation })))
+    hub.with_store(|s| {
+        Ok(sill_core::operations::Journal::new(s.conn())?.existing(id, method, input)?.map(|operation| api::JobStream { token: None, operation }))
+    })
 }
-fn start(hub: &Hub, id: String, method: &str, input: Value, key: String, run: impl FnOnce(&mut ProgressWriter) -> Result<String> + Send + 'static) -> Result<api::JobStream> {
+fn start(
+    hub: &Hub,
+    id: String,
+    method: &str,
+    input: Value,
+    key: String,
+    run: impl FnOnce(&mut ProgressWriter) -> Result<String> + Send + 'static,
+) -> Result<api::JobStream> {
     let job = Job::reserve_for(key, Some(&id))?;
     let (reader, writer) = UnixStream::pair()?;
     writer.set_write_timeout(Some(std::time::Duration::from_secs(1)))?;
@@ -137,9 +206,15 @@ fn start(hub: &Hub, id: String, method: &str, input: Value, key: String, run: im
     })();
     let (store, operation, fresh) = match accepted {
         Ok(result) => result,
-        Err(error) => { super::streams::discard(&token); return Err(error); }
+        Err(error) => {
+            super::streams::discard(&token);
+            return Err(error);
+        }
     };
-    if !fresh { super::streams::discard(&token); return Ok(api::JobStream { token: None, operation }); }
+    if !fresh {
+        super::streams::discard(&token);
+        return Ok(api::JobStream { token: None, operation });
+    }
     let operation_id = id.clone();
     let spawned = std::thread::Builder::new().name("sill-host-job".into()).spawn(move || {
         let _job = job;
@@ -168,7 +243,20 @@ fn start(hub: &Hub, id: String, method: &str, input: Value, key: String, run: im
 }
 
 pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
-    if !matches!(method, "_sill/streams.port" | "_sill/streams.login_callback" | "_sill/operations.cancel" | "_sill/agents.login" | "_sill/agents.discover" | "_sill/agents.reset" | "_sill/registry.install" | "_sill/registry.list" | "_sill/operations.get") { return None; }
+    if !matches!(
+        method,
+        "_sill/streams.port"
+            | "_sill/streams.login_callback"
+            | "_sill/operations.cancel"
+            | "_sill/agents.login"
+            | "_sill/agents.discover"
+            | "_sill/agents.reset"
+            | "_sill/registry.install"
+            | "_sill/registry.list"
+            | "_sill/operations.get"
+    ) {
+        return None;
+    }
     Some((|| {
         match method {
             "_sill/operations.get" => {
@@ -177,13 +265,19 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
             }
             "_sill/streams.port" => {
                 let a: api::PortOpen = args(params)?;
-                if !sill_core::session::valid_id(&a.session_id) || a.port == 0 { return Err(invalid("valid session_id and nonzero port required")); }
+                if !sill_core::session::valid_id(&a.session_id) || a.port == 0 {
+                    return Err(invalid("valid session_id and nonzero port required"));
+                }
                 hub.with_store(|s| {
-                    if !s.sessions()?.iter().any(|s| s.id == a.session_id) { return Err(domain("not_found", "session not found")); }
+                    if !s.sessions()?.iter().any(|s| s.id == a.session_id) {
+                        return Err(domain("not_found", "session not found"));
+                    }
                     Ok(())
                 })?;
                 let socket = sill_core::session::socket_path(&a.session_id)?;
-                if !socket.exists() { return Err(domain("invalid_state", "session jail is not running")); }
+                if !socket.exists() {
+                    return Err(domain("invalid_state", "session jail is not running"));
+                }
                 Ok(json!(api::HostStream { token: super::streams::port(&a.session_id, a.port)? }))
             }
             "_sill/streams.login_callback" => {
@@ -203,9 +297,13 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
             "_sill/agents.login" => {
                 let a: api::AgentLogin = args(params)?;
                 let (id, input) = identity(&a.operation_id, &a)?;
-                if let Some(result) = existing(hub, &id, method, &input)? { return Ok(json!(result)); }
+                if let Some(result) = existing(hub, &id, method, &input)? {
+                    return Ok(json!(result));
+                }
                 valid_id(&a.agent_id)?;
-                if a.method_id.is_empty() || a.method_id.len() > 256 || a.method_id.chars().any(char::is_control) { return Err(invalid("invalid method_id")); }
+                if a.method_id.is_empty() || a.method_id.len() > 256 || a.method_id.chars().any(char::is_control) {
+                    return Err(invalid("invalid method_id"));
+                }
                 let home = sill_core::changes::home()?;
                 let agent = sill_core::agents::load(&home)?.remove(&a.agent_id).ok_or_else(|| domain("not_found", "agent not found"))?;
                 agent.ready(&home)?;
@@ -219,17 +317,27 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
             "_sill/agents.discover" => {
                 let a: api::AgentDiscover = args(params)?;
                 let (id, input) = identity(&a.operation_id, &a)?;
-                if let Some(result) = existing(hub, &id, method, &input)? { return Ok(json!(result)); }
+                if let Some(result) = existing(hub, &id, method, &input)? {
+                    return Ok(json!(result));
+                }
                 valid_id(&a.agent_id)?;
                 let home = sill_core::changes::home()?;
                 let agent = sill_core::agents::load(&home)?.remove(&a.agent_id).ok_or_else(|| domain("not_found", "agent not found"))?;
-                if sill_core::registry::installed(&home, &agent.id).is_none() { return Err(domain("invalid_state", "the agent is not installed by sill; discovery runs the installed command")); }
-                if let Some(m) = &a.method_id && (m.is_empty() || m.len() > 256 || m.chars().any(char::is_control)) { return Err(invalid("invalid method_id")); }
+                if sill_core::registry::installed(&home, &agent.id).is_none() {
+                    return Err(domain("invalid_state", "the agent is not installed by sill; discovery runs the installed command"));
+                }
+                if let Some(m) = &a.method_id
+                    && (m.is_empty() || m.len() > 256 || m.chars().any(char::is_control))
+                {
+                    return Err(invalid("invalid method_id"));
+                }
                 // the same key as its install: never two first starts, or one during an install
                 let login = a.method_id.is_some().then(|| LoginEntry::new(&id));
                 Ok(json!(start(hub, id, method, input, format!("install:{}", agent.id), move |progress| {
                     match &a.method_id {
-                        None => { sill_core::registry::discover(&home, &agent, &mut |s| progress.send(api::Progress::Output { text: text(s) }))?; }
+                        None => {
+                            sill_core::registry::discover(&home, &agent, &mut |s| progress.send(api::Progress::Output { text: text(s) }))?;
+                        }
                         Some(m) => {
                             let login = login.as_ref().expect("registered for a login");
                             sill_core::login::setup_cancellable(&agent, &home, m, &|| login.cancelled(), |line| progress.send(login.progress(line)))?;
@@ -257,7 +365,9 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
             "_sill/registry.install" => {
                 let a: api::RegistryInstall = args(params)?;
                 let (id, input) = identity(&a.operation_id, &a)?;
-                if let Some(result) = existing(hub, &id, method, &input)? { return Ok(json!(result)); }
+                if let Some(result) = existing(hub, &id, method, &input)? {
+                    return Ok(json!(result));
+                }
                 let home = sill_core::changes::home()?;
                 let entry = select(&home, &a)?;
                 Ok(json!(start(hub, id, method, input, format!("install:{}", entry.id), move |progress| {
@@ -268,23 +378,36 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
             "_sill/registry.list" => {
                 let a: api::RegistryList = args(params)?;
                 let limit = a.limit.unwrap_or(64) as usize;
-                if !(1..=128).contains(&limit) { return Err(invalid("limit must be 1–128")); }
+                if !(1..=128).contains(&limit) {
+                    return Err(invalid("limit must be 1–128"));
+                }
                 let home = sill_core::changes::home()?;
                 let (mut entries, fetched_at) = sill_core::registry::merged(&home);
-                entries.sort_by(|a,b| a.id.cmp(&b.id));
+                entries.sort_by(|a, b| a.id.cmp(&b.id));
                 let mut entries = entries.iter().filter(|e| a.after.as_ref().is_none_or(|id| e.id > *id)).peekable();
-                let mut page = api::RegistryPage { entries: Vec::new(), next: None, fetched_at:fetched_at.and_then(|t|t.duration_since(std::time::UNIX_EPOCH).ok()).map(|t|t.as_secs().to_string()) };
+                let mut page = api::RegistryPage {
+                    entries: Vec::new(),
+                    next: None,
+                    fetched_at: fetched_at.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|t| t.as_secs().to_string()),
+                };
                 let mut bytes = 0;
                 while page.entries.len() < limit {
                     let Some(entry) = entries.next() else { break };
                     let entry = summary(entry);
                     let size = serde_json::to_vec(&entry)?.len();
-                    if size > 4 * 1024 * 1024 { return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(4194304), "registry entry too large")); }
-                    if bytes + size > 4 * 1024 * 1024 { page.next = page.entries.last().map(|e| e.entry_id.clone()); break; }
+                    if size > 4 * 1024 * 1024 {
+                        return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(4194304), "registry entry too large"));
+                    }
+                    if bytes + size > 4 * 1024 * 1024 {
+                        page.next = page.entries.last().map(|e| e.entry_id.clone());
+                        break;
+                    }
                     bytes += size;
                     page.entries.push(entry);
                 }
-                if entries.peek().is_some() && page.next.is_none() { page.next = page.entries.last().map(|e| e.entry_id.clone()); }
+                if entries.peek().is_some() && page.next.is_none() {
+                    page.next = page.entries.last().map(|e| e.entry_id.clone());
+                }
                 Ok(json!(page))
             }
             _ => unreachable!(),
@@ -297,22 +420,29 @@ mod tests {
     use super::*;
     #[test]
     fn registry_summary_preserves_ui_metadata_without_install_manifests() {
-        let entry=sill_core::registry::snapshot().agents.iter().find(|e|e.npm_lock.is_some()).unwrap();
-        let wire=summary(entry);
-        assert_eq!(wire.source,"snapshot");
-        assert_eq!(wire.description,entry.description);
-        assert_eq!(wire.install_kind.as_deref(),entry.how());
-        assert_eq!(wire.install_spec,entry.install_spec());
-        assert_eq!(wire.package_name,entry.package_name());
-        assert_eq!(wire.builtin_agent_id.as_deref(),sill_core::registry::builtin_for(entry));
-        let json=serde_json::to_value(wire).unwrap();
-        assert!(json.get("npm_lock").is_none());assert!(json.get("distribution").is_none());
+        let entry = sill_core::registry::snapshot().agents.iter().find(|e| e.npm_lock.is_some()).unwrap();
+        let wire = summary(entry);
+        assert_eq!(wire.source, "snapshot");
+        assert_eq!(wire.description, entry.description);
+        assert_eq!(wire.install_kind.as_deref(), entry.how());
+        assert_eq!(wire.install_spec, entry.install_spec());
+        assert_eq!(wire.package_name, entry.package_name());
+        assert_eq!(wire.builtin_agent_id.as_deref(), sill_core::registry::builtin_for(entry));
+        let json = serde_json::to_value(wire).unwrap();
+        assert!(json.get("npm_lock").is_none());
+        assert!(json.get("distribution").is_none());
     }
     #[test]
     fn selection_preserves_reviewed_metadata_and_refuses_unknown_sources() {
         let home = std::env::temp_dir().join(format!("sill-host-select-{}", std::process::id()));
         let entry = sill_core::registry::snapshot().agents.iter().find(|e| e.npm_lock.is_some()).unwrap();
-        let mut request = api::RegistryInstall { operation_id: None, entry_id: entry.id.clone(), version: entry.version.clone(), source: "snapshot".into(), allow_unreviewed: false };
+        let mut request = api::RegistryInstall {
+            operation_id: None,
+            entry_id: entry.id.clone(),
+            version: entry.version.clone(),
+            source: "snapshot".into(),
+            allow_unreviewed: false,
+        };
         let resolved = select(&home, &request).unwrap();
         assert_eq!(resolved.trust, sill_core::registry::Trust::Snapshot);
         assert_eq!(resolved.npm_lock, entry.npm_lock);
@@ -329,7 +459,9 @@ mod tests {
         let started = std::time::Instant::now();
         for _ in 0..256 {
             progress.send(api::Progress::Output { text: "x".repeat(api::MAX_PROGRESS_TEXT) });
-            if progress.0.is_none() { break; }
+            if progress.0.is_none() {
+                break;
+            }
         }
         assert!(progress.0.is_none(), "the stalled reader still holds the writer");
         assert!(started.elapsed() < std::time::Duration::from_secs(5));

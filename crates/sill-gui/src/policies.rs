@@ -57,11 +57,7 @@ pub enum Event {
 pub enum Reply {
     Names(Vec<String>),
     Entry(api::PolicyEntry),
-    File {
-        text: String,
-        path: String,
-        name: String,
-    },
+    File { text: String, path: String, name: String },
     Checked(api::PolicyChecked),
     Imported(api::PolicyEntry),
 }
@@ -70,11 +66,7 @@ fn event(e: Event) -> Message {
 }
 impl State {
     pub fn view(&self) -> Element<'_, Message> {
-        let mut names = pick_list(self.names.clone(), self.selected.clone(), |n| {
-            event(Event::Inspect(n))
-        })
-        .placeholder("Select installed policy")
-        .width(Fill);
+        let mut names = pick_list(self.names.clone(), self.selected.clone(), |n| event(Event::Inspect(n))).placeholder("Select installed policy").width(Fill);
         // Busy events are also rejected by the update handler.
         if self.busy {
             names = names.placeholder("Working…");
@@ -82,14 +74,11 @@ impl State {
         let mut path = text_input("Absolute path to a local TOML file", &self.path).padding(7);
         let mut name = text_input("Import as policy name", &self.name).padding(7);
         if !self.busy {
-            path = path
-                .on_input(|s| event(Event::Path(s)))
-                .on_submit(event(Event::Load));
+            path = path.on_input(|s| event(Event::Path(s))).on_submit(event(Event::Load));
             name = name.on_input(|s| event(Event::Name(s)));
         }
-        let replace = iced::widget::checkbox(self.replace)
-            .label("Replace an existing user policy")
-            .on_toggle_maybe((!self.busy).then_some(|v| event(Event::Replace(v))));
+        let replace =
+            iced::widget::checkbox(self.replace).label("Replace an existing user policy").on_toggle_maybe((!self.busy).then_some(|v| event(Event::Replace(v))));
         column![
             row![names, quiet_button("Refresh", (!self.busy).then(|| event(Event::Refresh)))].spacing(8),
             text(&self.source).size(style::SMALL),
@@ -121,17 +110,11 @@ fn read_file(path: String) -> Result<Reply, String> {
         return Err("Choose a regular file.".into());
     }
     let mut text = String::new();
-    file.take(api::TEXT_BYTES as u64 + 1)
-        .read_to_string(&mut text)
-        .map_err(|e| e.to_string())?;
+    file.take(api::TEXT_BYTES as u64 + 1).read_to_string(&mut text).map_err(|e| e.to_string())?;
     if text.len() > api::TEXT_BYTES {
         return Err("Policy file exceeds 1 MiB.".into());
     }
-    Ok(Reply::File {
-        text,
-        name: p.file_stem().and_then(|s| s.to_str()).unwrap_or("").into(),
-        path: p.display().to_string(),
-    })
+    Ok(Reply::File { text, name: p.file_stem().and_then(|s| s.to_str()).unwrap_or("").into(), path: p.display().to_string() })
 }
 
 impl App {
@@ -180,10 +163,7 @@ impl App {
                         state.names.push(entry.name.clone());
                         state.names.sort();
                     }
-                    state.status = format!(
-                        "Installed {}. Existing jails keep their launch rules until rebuilt.",
-                        entry.name
-                    );
+                    state.status = format!("Installed {}. Existing jails keep their launch rules until rebuilt.", entry.name);
                     state.source = format!("Installed base policy: {}", entry.name);
                     state.selected = Some(entry.name);
                     state.preview = entry.text;
@@ -241,29 +221,39 @@ impl App {
                 }
                 let actions = actions.ok_or("The demo has no policy daemon.")?;
                 match e {
-                Event::Refresh => actions.reading(|client| {
-                    let mut names = Vec::new(); let mut after = None;
-                    loop {
-                        let page: api::Names = client.call("_sill/policy.list", api::NamesList { after: after.clone(), limit: Some(128) })?;
-                        names.extend(page.names);
-                        anyhow::ensure!(names.len() <= 4096, "Too many policies to display");
-                        let Some(next) = page.next else { break; };
-                        anyhow::ensure!(after.as_ref().is_none_or(|last| &next > last), "Invalid policy list cursor");
-                        after = Some(next);
+                    Event::Refresh => actions
+                        .reading(|client| {
+                            let mut names = Vec::new();
+                            let mut after = None;
+                            loop {
+                                let page: api::Names = client.call("_sill/policy.list", api::NamesList { after: after.clone(), limit: Some(128) })?;
+                                names.extend(page.names);
+                                anyhow::ensure!(names.len() <= 4096, "Too many policies to display");
+                                let Some(next) = page.next else {
+                                    break;
+                                };
+                                anyhow::ensure!(after.as_ref().is_none_or(|last| &next > last), "Invalid policy list cursor");
+                                after = Some(next);
+                            }
+                            Ok(Reply::Names(names))
+                        })
+                        .map_err(|e| format!("{e:#}")),
+                    Event::Inspect(name) => {
+                        actions.read::<api::PolicyEntry>("_sill/policy.get", serde_json::json!({"name": name})).map(Reply::Entry).map_err(|e| format!("{e:#}"))
                     }
-                    Ok(Reply::Names(names))
-                }).map_err(|e| format!("{e:#}")),
-                Event::Inspect(name) => actions.read::<api::PolicyEntry>("_sill/policy.get", serde_json::json!({"name": name}))
-                    .map(Reply::Entry).map_err(|e| format!("{e:#}")),
-                Event::Check => actions.read::<api::PolicyChecked>("_sill/policy.check", serde_json::to_value(api::PolicyCheck { text }).unwrap())
-                    .map(Reply::Checked).map_err(|e| format!("{e:#}")),
-                Event::Import => match actions.call("_sill/policy.import", serde_json::to_value(api::PolicyImport { name, text, replace }).unwrap()) {
-                    sill_client::actions::Outcome::Done(v) => serde_json::from_value(v).map(Reply::Imported).map_err(|e| format!("Import response unreadable; refresh and inspect before retrying: {e}")),
-                    sill_client::actions::Outcome::Uncertain(why) => Err(format!("Import outcome unknown. Refresh and inspect before retrying. {why}")),
-                    other => Err(other.problem().unwrap_or("Import failed").into()),
-                },
-                _ => unreachable!(),
-            }
+                    Event::Check => actions
+                        .read::<api::PolicyChecked>("_sill/policy.check", serde_json::to_value(api::PolicyCheck { text }).unwrap())
+                        .map(Reply::Checked)
+                        .map_err(|e| format!("{e:#}")),
+                    Event::Import => match actions.call("_sill/policy.import", serde_json::to_value(api::PolicyImport { name, text, replace }).unwrap()) {
+                        sill_client::actions::Outcome::Done(v) => serde_json::from_value(v)
+                            .map(Reply::Imported)
+                            .map_err(|e| format!("Import response unreadable; refresh and inspect before retrying: {e}")),
+                        sill_client::actions::Outcome::Uncertain(why) => Err(format!("Import outcome unknown. Refresh and inspect before retrying. {why}")),
+                        other => Err(other.problem().unwrap_or("Import failed").into()),
+                    },
+                    _ => unreachable!(),
+                }
             },
             move |r| event(Event::Done(token, r)),
         )
@@ -280,14 +270,7 @@ mod tests {
     }
     fn file(app: &mut App) {
         let token = app.settings_page.as_ref().unwrap().policies.token;
-        let _ = app.policy_event(Event::Done(
-            token,
-            Ok(Reply::File {
-                text: "policy text".into(),
-                path: "/tmp/policy.toml".into(),
-                name: "reviewed".into(),
-            }),
-        ));
+        let _ = app.policy_event(Event::Done(token, Ok(Reply::File { text: "policy text".into(), path: "/tmp/policy.toml".into(), name: "reviewed".into() })));
     }
     #[test]
     fn import_requires_checked_file_and_name_change_clears_replacement() {
@@ -298,13 +281,7 @@ mod tests {
         let token = state.token;
         let _ = app.policy_event(Event::Import);
         assert!(!app.settings_page.as_ref().unwrap().policies.busy);
-        let _ = app.policy_event(Event::Done(
-            token,
-            Ok(Reply::Checked(api::PolicyChecked {
-                valid: true,
-                diagnostics: vec![],
-            })),
-        ));
+        let _ = app.policy_event(Event::Done(token, Ok(Reply::Checked(api::PolicyChecked { valid: true, diagnostics: vec![] }))));
         assert!(app.settings_page.as_ref().unwrap().policies.can_import());
         let _ = app.policy_event(Event::Replace(true));
         let _ = app.policy_event(Event::Name("different".into()));
@@ -318,14 +295,7 @@ mod tests {
         let old = app.settings_page.as_ref().unwrap().policies.token;
         app.settings_page = Some(settings_ui::SettingsPage::default());
         let _ = app.policy_event(Event::Done(old, Ok(Reply::Names(vec!["stale".into()]))));
-        assert!(
-            app.settings_page
-                .as_ref()
-                .unwrap()
-                .policies
-                .names
-                .is_empty()
-        );
+        assert!(app.settings_page.as_ref().unwrap().policies.names.is_empty());
         let _ = app.policy_event(Event::Refresh);
         let _ = app.policy_event(Event::Name("changed during request".into()));
         assert!(app.settings_page.as_ref().unwrap().policies.name.is_empty());
@@ -335,13 +305,7 @@ mod tests {
         let mut app = app();
         file(&mut app);
         let token = app.settings_page.as_ref().unwrap().policies.token;
-        let _ = app.policy_event(Event::Done(
-            token,
-            Ok(Reply::Checked(api::PolicyChecked {
-                valid: false,
-                diagnostics: vec!["Invalid TOML".into()],
-            })),
-        ));
+        let _ = app.policy_event(Event::Done(token, Ok(Reply::Checked(api::PolicyChecked { valid: false, diagnostics: vec!["Invalid TOML".into()] }))));
         let page = app.settings_page.as_ref().unwrap();
         assert!(page.collapsed.contains("Policies"));
         assert_eq!(page.policies.status, "Invalid TOML");
@@ -350,21 +314,11 @@ mod tests {
     #[test]
     fn file_reader_rejects_relative_paths_and_oversize_files() {
         assert!(read_file("relative.toml".into()).is_err());
-        let path = std::env::temp_dir().join(format!(
-            "sill-policy-{}-{}.toml",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let path = std::env::temp_dir().join(format!("sill-policy-{}-{}.toml", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         std::fs::write(&path, vec![b'x'; api::TEXT_BYTES + 1]).unwrap();
-        assert!(
-            read_file(path.display().to_string())
-                .unwrap_err()
-                .contains("1 MiB")
-        );
+        assert!(read_file(path.display().to_string()).unwrap_err().contains("1 MiB"));
         std::fs::write(&path, "[policy]\n").unwrap();
-        assert!(
-            matches!(read_file(path.display().to_string()), Ok(Reply::File { text, .. }) if text == "[policy]\n")
-        );
+        assert!(matches!(read_file(path.display().to_string()), Ok(Reply::File { text, .. }) if text == "[policy]\n"));
         std::fs::remove_file(path).unwrap();
     }
 }

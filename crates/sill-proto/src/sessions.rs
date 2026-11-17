@@ -16,19 +16,13 @@ pub struct HostPath {
 impl HostPath {
     pub fn from_path(path: &Path) -> Self {
         use std::os::unix::ffi::OsStrExt;
-        Self {
-            bytes_base64: STANDARD.encode(path.as_os_str().as_bytes()),
-            display: path.to_string_lossy().into_owned(),
-        }
+        Self { bytes_base64: STANDARD.encode(path.as_os_str().as_bytes()), display: path.to_string_lossy().into_owned() }
     }
     pub fn to_path(&self) -> anyhow::Result<PathBuf> {
         use std::os::unix::ffi::OsStringExt;
         anyhow::ensure!(self.bytes_base64.len() <= 5464, "path exceeds 4096 bytes");
         let bytes = STANDARD.decode(&self.bytes_base64)?;
-        anyhow::ensure!(
-            !bytes.is_empty() && bytes.len() <= 4096 && !bytes.contains(&0) && bytes[0] == b'/',
-            "expected an absolute host path without NUL"
-        );
+        anyhow::ensure!(!bytes.is_empty() && bytes.len() <= 4096 && !bytes.contains(&0) && bytes[0] == b'/', "expected an absolute host path without NUL");
         Ok(std::ffi::OsString::from_vec(bytes).into())
     }
 }
@@ -151,18 +145,12 @@ pub struct Ending {
 // Conversion helpers are local conveniences, never additional wire shapes.
 impl From<crate::wire::AgentSettings> for Settings {
     fn from(s: crate::wire::AgentSettings) -> Self {
-        Self {
-            mode: s.mode,
-            options: s.config,
-        }
+        Self { mode: s.mode, options: s.config }
     }
 }
 impl From<Settings> for crate::wire::AgentSettings {
     fn from(s: Settings) -> Self {
-        Self {
-            mode: s.mode,
-            config: s.options,
-        }
+        Self { mode: s.mode, config: s.options }
     }
 }
 impl From<crate::wire::SessionSet> for Change {
@@ -237,6 +225,9 @@ mod path_tests {
     }
 }
 
-#[derive(Debug,Clone,serde::Serialize,serde::Deserialize,schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Log { pub session_id:String, pub lines:Option<u16> }
+pub struct Log {
+    pub session_id: String,
+    pub lines: Option<u16>,
+}

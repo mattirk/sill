@@ -42,80 +42,37 @@ pub enum Event {
     Clear,
     Cancel,
     Save,
-    Saved {
-        session: String,
-        token: String,
-        attachment_id: String,
-        revision: String,
-        result: Result<(Attachment, Picture), String>,
-    },
+    Saved { session: String, token: String, attachment_id: String, revision: String, result: Result<(Attachment, Picture), String> },
 }
 
 pub fn view(editor: &Editor) -> Element<'_, Message> {
     let control = |label: &'static str, event, enabled: bool| {
         keys::press_maybe(
             button(text(label).size(style::SMALL)).style(style::quiet),
-            enabled.then_some(Message::Annotation(Event::Scoped(
-                editor.revision.clone(),
-                Box::new(event),
-            ))),
+            enabled.then_some(Message::Annotation(Event::Scoped(editor.revision.clone(), Box::new(event)))),
         )
     };
     let toolbar = row![
-        control(
-            "Undo",
-            Event::Undo,
-            !editor.saving && !editor.drawing && !editor.strokes.is_empty()
-        ),
-        control(
-            "Clear",
-            Event::Clear,
-            !editor.saving && !editor.drawing && !editor.strokes.is_empty()
-        ),
+        control("Undo", Event::Undo, !editor.saving && !editor.drawing && !editor.strokes.is_empty()),
+        control("Clear", Event::Clear, !editor.saving && !editor.drawing && !editor.strokes.is_empty()),
         space().width(Fill),
         control("Cancel", Event::Cancel, !editor.saving),
-        control(
-            if editor.saving { "Saving…" } else { "Save" },
-            Event::Save,
-            !editor.saving && !editor.drawing
-        ),
+        control(if editor.saving { "Saving…" } else { "Save" }, Event::Save, !editor.saving && !editor.drawing),
     ]
     .spacing(8)
     .align_y(iced::Alignment::Center);
-    let mut content = column![
-        text("Mark image").size(style::SMALL),
-        toolbar,
-        surface(editor)
-    ]
-    .spacing(8);
+    let mut content = column![text("Mark image").size(style::SMALL), toolbar, surface(editor)].spacing(8);
     if let Some(error) = &editor.error {
         content = content.push(text(error).size(style::SMALL).color(style::P.error));
     }
-    container(content)
-        .padding(12)
-        .width(Fill)
-        .height(Fill)
-        .into()
+    container(content).padding(12).width(Fill).height(Fill).into()
 }
 
 /// Separate stack layers are essential: Iced batches images over canvas meshes.
 fn surface(editor: &Editor) -> Element<'_, Message> {
-    let image = iced::widget::image(editor.picture.handle.clone())
-        .width(Fill)
-        .height(Fill)
-        .content_fit(iced::ContentFit::Contain);
-    let background = container(image)
-        .width(Fill)
-        .height(Fill)
-        .style(|_| container::Style {
-            background: Some(style::P.code_bg.into()),
-            ..Default::default()
-        });
-    stack![background, canvas(editor).width(Fill).height(Fill)]
-        .width(Fill)
-        .height(Fill)
-        .clip(true)
-        .into()
+    let image = iced::widget::image(editor.picture.handle.clone()).width(Fill).height(Fill).content_fit(iced::ContentFit::Contain);
+    let background = container(image).width(Fill).height(Fill).style(|_| container::Style { background: Some(style::P.code_bg.into()), ..Default::default() });
+    stack![background, canvas(editor).width(Fill).height(Fill)].width(Fill).height(Fill).clip(true).into()
 }
 
 /// The fitted image rectangle in canvas-local coordinates, including letterboxing.
@@ -126,19 +83,11 @@ pub fn fit_rect(image: Size, bounds: Size) -> Rectangle {
     let scale = (bounds.width / image.width).min(bounds.height / image.height);
     let width = image.width * scale;
     let height = image.height * scale;
-    Rectangle {
-        x: (bounds.width - width) / 2.0,
-        y: (bounds.height - height) / 2.0,
-        width,
-        height,
-    }
+    Rectangle { x: (bounds.width - width) / 2.0, y: (bounds.height - height) / 2.0, width, height }
 }
 
 fn source_point(at: Point, fitted: Rectangle, image: Size) -> Point {
-    Point::new(
-        (at.x - fitted.x) * image.width / fitted.width,
-        (at.y - fitted.y) * image.height / fitted.height,
-    )
+    Point::new((at.x - fitted.x) * image.width / fitted.width, (at.y - fitted.y) * image.height / fitted.height)
 }
 
 /// End a segment at its first image boundary, rather than drawing along the border.
@@ -158,10 +107,7 @@ fn clipped_end(from: Point, to: Point, image: Size) -> Point {
     if to.y > image.height && dy > 0.0 {
         t = t.min((image.height - from.y) / dy);
     }
-    Point::new(
-        (from.x + t * dx).clamp(0.0, image.width),
-        (from.y + t * dy).clamp(0.0, image.height),
-    )
+    Point::new((from.x + t * dx).clamp(0.0, image.width), (from.y + t * dy).clamp(0.0, image.height))
 }
 
 #[derive(Default)]
@@ -174,26 +120,16 @@ pub struct Gesture {
 
 impl Gesture {
     fn finish(&mut self) -> Option<canvas::Action<Message>> {
-        self.active.take().map(|stroke| {
-            canvas::Action::publish(Message::Annotation(Event::Scoped(
-                self.owner.clone(),
-                Box::new(Event::Stroke(stroke)),
-            )))
-            .and_capture()
-        })
+        self.active
+            .take()
+            .map(|stroke| canvas::Action::publish(Message::Annotation(Event::Scoped(self.owner.clone(), Box::new(Event::Stroke(stroke))))).and_capture())
     }
 }
 
 impl canvas::Program<Message> for Editor {
     type State = Gesture;
 
-    fn update(
-        &self,
-        state: &mut Gesture,
-        event: &canvas::Event,
-        bounds: Rectangle,
-        cursor: mouse::Cursor,
-    ) -> Option<canvas::Action<Message>> {
+    fn update(&self, state: &mut Gesture, event: &canvas::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action<Message>> {
         if state.owner != self.revision {
             state.owner.clone_from(&self.revision);
             state.active = None;
@@ -207,10 +143,7 @@ impl canvas::Program<Message> for Editor {
         // Switching sessions can replace the widget tree while a button is held.
         // Its unfinished local gesture is gone, so release the editor's drawing guard.
         if self.drawing && state.active.is_none() {
-            return Some(canvas::Action::publish(Message::Annotation(Event::Scoped(
-                self.revision.clone(),
-                Box::new(Event::Drawing(false)),
-            ))));
+            return Some(canvas::Action::publish(Message::Annotation(Event::Scoped(self.revision.clone(), Box::new(Event::Drawing(false))))));
         }
         let image = Size::new(self.picture.width as f32, self.picture.height as f32);
         let fitted = fit_rect(image, bounds.size());
@@ -228,17 +161,8 @@ impl canvas::Program<Message> for Editor {
                 }
                 state.cursor_inside = true;
                 state.bounds = bounds.size();
-                state.active = Some(Stroke {
-                    points: vec![source_point(at, fitted, image)],
-                    width: 3.0 * image.width / fitted.width,
-                });
-                Some(
-                    canvas::Action::publish(Message::Annotation(Event::Scoped(
-                        self.revision.clone(),
-                        Box::new(Event::Drawing(true)),
-                    )))
-                    .and_capture(),
-                )
+                state.active = Some(Stroke { points: vec![source_point(at, fitted, image)], width: 3.0 * image.width / fitted.width });
+                Some(canvas::Action::publish(Message::Annotation(Event::Scoped(self.revision.clone(), Box::new(Event::Drawing(true))))).and_capture())
             }
             iced::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.active.is_some() => {
                 let Some(at) = cursor.position_from(bounds.position()) else {
@@ -261,25 +185,15 @@ impl canvas::Program<Message> for Editor {
                 }
             }
             iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
-                let inside = cursor
-                    .position_in(bounds)
-                    .is_some_and(|at| fitted.contains(at));
+                let inside = cursor.position_in(bounds).is_some_and(|at| fitted.contains(at));
                 let was_inside = std::mem::replace(&mut state.cursor_inside, inside);
-                if inside || was_inside {
-                    Some(canvas::Action::request_redraw())
-                } else {
-                    None
-                }
+                if inside || was_inside { Some(canvas::Action::request_redraw()) } else { None }
             }
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
             | iced::Event::Mouse(mouse::Event::CursorLeft)
             | iced::Event::Window(iced::window::Event::Unfocused) => {
                 if state.active.is_some() {
-                    if matches!(
-                        event,
-                        iced::Event::Mouse(mouse::Event::CursorLeft)
-                            | iced::Event::Window(iced::window::Event::Unfocused)
-                    ) {
+                    if matches!(event, iced::Event::Mouse(mouse::Event::CursorLeft) | iced::Event::Window(iced::window::Event::Unfocused)) {
                         state.cursor_inside = false;
                     }
                     state.finish()
@@ -293,14 +207,7 @@ impl canvas::Program<Message> for Editor {
         }
     }
 
-    fn draw(
-        &self,
-        state: &Gesture,
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        cursor: mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
+    fn draw(&self, state: &Gesture, renderer: &Renderer, _theme: &Theme, bounds: Rectangle, cursor: mouse::Cursor) -> Vec<canvas::Geometry> {
         let image = Size::new(self.picture.width as f32, self.picture.height as f32);
         let fitted = fit_rect(image, bounds.size());
         if fitted.width > 0.0 && fitted.height > 0.0 {
@@ -309,10 +216,7 @@ impl canvas::Program<Message> for Editor {
             let mut marks = canvas::Frame::with_bounds(renderer, fitted);
             marks.translate(iced::Vector::new(fitted.x, fitted.y));
             let scale = fitted.width / image.width;
-            let active = state
-                .active
-                .as_ref()
-                .filter(|_| state.owner == self.revision && !self.saving);
+            let active = state.active.as_ref().filter(|_| state.owner == self.revision && !self.saving);
             for stroke in self.strokes.iter().chain(active) {
                 draw_stroke(&mut marks, stroke, scale);
             }
@@ -329,21 +233,9 @@ impl canvas::Program<Message> for Editor {
         vec![]
     }
 
-    fn mouse_interaction(
-        &self,
-        _state: &Gesture,
-        bounds: Rectangle,
-        cursor: mouse::Cursor,
-    ) -> mouse::Interaction {
-        let fitted = fit_rect(
-            Size::new(self.picture.width as f32, self.picture.height as f32),
-            bounds.size(),
-        );
-        if !self.saving
-            && cursor
-                .position_in(bounds)
-                .is_some_and(|at| fitted.contains(at))
-        {
+    fn mouse_interaction(&self, _state: &Gesture, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
+        let fitted = fit_rect(Size::new(self.picture.width as f32, self.picture.height as f32), bounds.size());
+        if !self.saving && cursor.position_in(bounds).is_some_and(|at| fitted.contains(at)) {
             mouse::Interaction::Hidden
         } else {
             mouse::Interaction::default()
@@ -390,19 +282,9 @@ fn draw_pen_cursor(frame: &mut canvas::Frame, tip: Point) {
     frame.fill(&nib, RED);
     frame.stroke(
         &outline,
-        canvas::Stroke::default()
-            .with_color(dark)
-            .with_width(1.1)
-            .with_line_cap(canvas::LineCap::Round)
-            .with_line_join(canvas::LineJoin::Round),
+        canvas::Stroke::default().with_color(dark).with_width(1.1).with_line_cap(canvas::LineCap::Round).with_line_join(canvas::LineJoin::Round),
     );
-    frame.stroke(
-        &details,
-        canvas::Stroke::default()
-            .with_color(dark)
-            .with_width(1.1)
-            .with_line_cap(canvas::LineCap::Round),
-    );
+    frame.stroke(&details, canvas::Stroke::default().with_color(dark).with_width(1.1).with_line_cap(canvas::LineCap::Round));
 }
 
 fn draw_stroke(frame: &mut canvas::Frame, stroke: &Stroke, scale: f32) {
@@ -411,10 +293,7 @@ fn draw_stroke(frame: &mut canvas::Frame, stroke: &Stroke, scale: f32) {
     };
     let at = |point: Point| Point::new(point.x * scale, point.y * scale);
     if stroke.points.len() == 1 {
-        frame.fill(
-            &canvas::Path::circle(at(*first), stroke.width * scale / 2.0),
-            RED,
-        );
+        frame.fill(&canvas::Path::circle(at(*first), stroke.width * scale / 2.0), RED);
     } else {
         let path = canvas::Path::new(|path| {
             path.move_to(at(*first));
@@ -434,28 +313,17 @@ fn draw_stroke(frame: &mut canvas::Frame, stroke: &Stroke, scale: f32) {
 }
 
 /// Flatten onto a fresh buffer. Neither the source attachment nor its pixels are changed.
-pub fn render(
-    original: &Attachment,
-    picture: &Picture,
-    strokes: &[Stroke],
-) -> Result<(Attachment, Picture), String> {
+pub fn render(original: &Attachment, picture: &Picture, strokes: &[Stroke]) -> Result<(Attachment, Picture), String> {
     if strokes.is_empty() {
         return Ok((original.clone(), picture.clone()));
     }
     use resvg::tiny_skia as sk;
-    let mut marks = sk::Pixmap::new(picture.width, picture.height)
-        .ok_or("Could not allocate image markers.")?;
+    let mut marks = sk::Pixmap::new(picture.width, picture.height).ok_or("Could not allocate image markers.")?;
     let mut paint = sk::Paint::default();
     paint.set_color_rgba8(255, 0, 0, 255);
     paint.anti_alias = true;
     for stroke in strokes {
-        if !stroke.width.is_finite()
-            || stroke.width <= 0.0
-            || stroke
-                .points
-                .iter()
-                .any(|p| !p.x.is_finite() || !p.y.is_finite())
-        {
+        if !stroke.width.is_finite() || stroke.width <= 0.0 || stroke.points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
             return Err("Invalid image marker coordinates.".into());
         }
         let Some(first) = stroke.points.first() else {
@@ -463,13 +331,7 @@ pub fn render(
         };
         if stroke.points.len() == 1 {
             if let Some(path) = sk::PathBuilder::from_circle(first.x, first.y, stroke.width / 2.0) {
-                marks.fill_path(
-                    &path,
-                    &paint,
-                    sk::FillRule::Winding,
-                    sk::Transform::identity(),
-                    None,
-                );
+                marks.fill_path(&path, &paint, sk::FillRule::Winding, sk::Transform::identity(), None);
             }
         } else {
             let mut builder = sk::PathBuilder::new();
@@ -481,12 +343,7 @@ pub fn render(
                 marks.stroke_path(
                     &path,
                     &paint,
-                    &sk::Stroke {
-                        width: stroke.width,
-                        line_cap: sk::LineCap::Round,
-                        line_join: sk::LineJoin::Round,
-                        ..Default::default()
-                    },
+                    &sk::Stroke { width: stroke.width, line_cap: sk::LineCap::Round, line_join: sk::LineJoin::Round, ..Default::default() },
                     sk::Transform::identity(),
                     None,
                 );
@@ -510,29 +367,14 @@ pub fn render(
     use image::ImageEncoder;
     let mut bytes = Vec::new();
     image::codecs::png::PngEncoder::new(&mut bytes)
-        .write_image(
-            &rgba,
-            picture.width,
-            picture.height,
-            image::ExtendedColorType::Rgba8,
-        )
+        .write_image(&rgba, picture.width, picture.height, image::ExtendedColorType::Rgba8)
         .map_err(|e| e.to_string())?;
     if bytes.len() > sill_proto::initialize::MAX_INLINE_BYTES {
-        return Err(
-            "The marked image exceeds 10 MiB. Clear some markers or use a smaller image.".into(),
-        );
+        return Err("The marked image exceeds 10 MiB. Clear some markers or use a smaller image.".into());
     }
     let original_name = crate::media::name(original);
-    let stem = std::path::Path::new(original_name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("image");
-    let attachment = Attachment::Inline {
-        name: format!("{stem}.png"),
-        mime: "image/png".into(),
-        data_base64: admin::encode_bytes(&bytes),
-    };
+    let stem = std::path::Path::new(original_name).file_stem().and_then(|s| s.to_str()).filter(|s| !s.is_empty()).unwrap_or("image");
+    let attachment = Attachment::Inline { name: format!("{stem}.png"), mime: "image/png".into(), data_base64: admin::encode_bytes(&bytes) };
     let preview = Picture {
         handle: iced::widget::image::Handle::from_rgba(picture.width, picture.height, rgba.clone()),
         rgba: Arc::new(rgba),
@@ -549,20 +391,9 @@ mod tests {
     fn sample() -> (Attachment, Picture) {
         let mut bytes = Vec::new();
         use image::ImageEncoder;
-        image::codecs::png::PngEncoder::new(&mut bytes)
-            .write_image(
-                &[20, 40, 80, 100].repeat(400),
-                20,
-                20,
-                image::ExtendedColorType::Rgba8,
-            )
-            .unwrap();
+        image::codecs::png::PngEncoder::new(&mut bytes).write_image(&[20, 40, 80, 100].repeat(400), 20, 20, image::ExtendedColorType::Rgba8).unwrap();
         (
-            Attachment::Inline {
-                name: "screen.webp".into(),
-                mime: "image/png".into(),
-                data_base64: admin::encode_bytes(&bytes),
-            },
+            Attachment::Inline { name: "screen.webp".into(), mime: "image/png".into(), data_base64: admin::encode_bytes(&bytes) },
             crate::media::decode(&bytes).unwrap(),
         )
     }
@@ -573,179 +404,63 @@ mod tests {
             for bounds in [Size::new(300.0, 300.0), Size::new(800.0, 500.0)] {
                 let fitted = fit_rect(image, bounds);
                 assert!((fitted.width / fitted.height - image.width / image.height).abs() < 0.001);
-                let center = Point::new(
-                    fitted.x + fitted.width / 2.0,
-                    fitted.y + fitted.height / 2.0,
-                );
-                assert_eq!(
-                    source_point(center, fitted, image),
-                    Point::new(image.width / 2.0, image.height / 2.0)
-                );
-                assert_eq!(
-                    source_point(fitted.position(), fitted, image),
-                    Point::ORIGIN
-                );
+                let center = Point::new(fitted.x + fitted.width / 2.0, fitted.y + fitted.height / 2.0);
+                assert_eq!(source_point(center, fitted, image), Point::new(image.width / 2.0, image.height / 2.0));
+                assert_eq!(source_point(fitted.position(), fitted, image), Point::ORIGIN);
             }
         }
         let fitted = fit_rect(Size::new(400.0, 200.0), Size::new(300.0, 300.0));
-        assert!(
-            !fitted.contains(Point::new(20.0, 20.0)),
-            "letterbox space is not drawable"
-        );
+        assert!(!fitted.contains(Point::new(20.0, 20.0)), "letterbox space is not drawable");
     }
 
     #[test]
     fn crossing_boundary_ends_at_segment_intersection() {
-        assert_eq!(
-            clipped_end(
-                Point::new(50.0, 50.0),
-                Point::new(150.0, 75.0),
-                Size::new(100.0, 100.0)
-            ),
-            Point::new(100.0, 62.5)
-        );
-        assert_eq!(
-            clipped_end(
-                Point::new(50.0, 50.0),
-                Point::new(-50.0, -150.0),
-                Size::new(100.0, 100.0)
-            ),
-            Point::new(25.0, 0.0)
-        );
+        assert_eq!(clipped_end(Point::new(50.0, 50.0), Point::new(150.0, 75.0), Size::new(100.0, 100.0)), Point::new(100.0, 62.5));
+        assert_eq!(clipped_end(Point::new(50.0, 50.0), Point::new(-50.0, -150.0), Size::new(100.0, 100.0)), Point::new(25.0, 0.0));
     }
 
     #[test]
     fn gestures_finish_outside_image_and_on_focus_loss() {
         use canvas::Program;
         let (original, picture) = sample();
-        let editor = Editor {
-            attachment_id: "a".into(),
-            revision: "revision".into(),
-            original,
-            picture,
-            strokes: vec![],
-            saving: false,
-            drawing: false,
-            error: None,
-        };
-        let bounds = Rectangle {
-            x: 10.0,
-            y: 20.0,
-            width: 200.0,
-            height: 100.0,
-        };
+        let editor =
+            Editor { attachment_id: "a".into(), revision: "revision".into(), original, picture, strokes: vec![], saving: false, drawing: false, error: None };
+        let bounds = Rectangle { x: 10.0, y: 20.0, width: 200.0, height: 100.0 };
         let mut state = Gesture::default();
         let press = iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
-        assert!(
-            editor
-                .update(
-                    &mut state,
-                    &press,
-                    bounds,
-                    mouse::Cursor::Available(Point::new(15.0, 30.0))
-                )
-                .is_none()
-        );
-        assert!(
-            state.active.is_none(),
-            "press in letterbox must not start a stroke"
-        );
-        editor.update(
-            &mut state,
-            &press,
-            bounds,
-            mouse::Cursor::Available(Point::new(110.0, 70.0)),
-        );
+        assert!(editor.update(&mut state, &press, bounds, mouse::Cursor::Available(Point::new(15.0, 30.0))).is_none());
+        assert!(state.active.is_none(), "press in letterbox must not start a stroke");
+        editor.update(&mut state, &press, bounds, mouse::Cursor::Available(Point::new(110.0, 70.0)));
         assert!((state.active.as_ref().unwrap().width - 0.6).abs() < 0.001);
         let release = iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
-        let (message, _, _) = editor
-            .update(&mut state, &release, bounds, mouse::Cursor::Unavailable)
-            .unwrap()
-            .into_inner();
-        let Some(Message::Annotation(Event::Scoped(revision, event))) = message else {
-            panic!("scoped stroke")
-        };
+        let (message, _, _) = editor.update(&mut state, &release, bounds, mouse::Cursor::Unavailable).unwrap().into_inner();
+        let Some(Message::Annotation(Event::Scoped(revision, event))) = message else { panic!("scoped stroke") };
         assert_eq!(revision, "revision");
-        let Event::Stroke(stroke) = *event else {
-            panic!("stroke")
-        };
-        assert_eq!(
-            stroke.points,
-            vec![Point::new(10.0, 10.0)],
-            "click creates a dot"
-        );
+        let Event::Stroke(stroke) = *event else { panic!("stroke") };
+        assert_eq!(stroke.points, vec![Point::new(10.0, 10.0)], "click creates a dot");
         assert!(state.active.is_none());
-        editor.update(
-            &mut state,
-            &press,
-            bounds,
-            mouse::Cursor::Available(Point::new(110.0, 70.0)),
-        );
-        let event = iced::Event::Mouse(mouse::Event::CursorMoved {
-            position: Point::new(210.0, 95.0),
-        });
-        let (message, _, _) = editor
-            .update(
-                &mut state,
-                &event,
-                bounds,
-                mouse::Cursor::Available(Point::new(210.0, 95.0)),
-            )
-            .unwrap()
-            .into_inner();
-        let Some(Message::Annotation(Event::Scoped(_, event))) = message else {
-            panic!("scoped stroke")
-        };
-        let Event::Stroke(stroke) = *event else {
-            panic!("stroke")
-        };
+        editor.update(&mut state, &press, bounds, mouse::Cursor::Available(Point::new(110.0, 70.0)));
+        let event = iced::Event::Mouse(mouse::Event::CursorMoved { position: Point::new(210.0, 95.0) });
+        let (message, _, _) = editor.update(&mut state, &event, bounds, mouse::Cursor::Available(Point::new(210.0, 95.0))).unwrap().into_inner();
+        let Some(Message::Annotation(Event::Scoped(_, event))) = message else { panic!("scoped stroke") };
+        let Event::Stroke(stroke) = *event else { panic!("stroke") };
         assert_eq!(stroke.points.last(), Some(&Point::new(20.0, 12.5)));
         assert!(state.active.is_none(), "leaving image ends gesture");
-        editor.update(
-            &mut state,
-            &press,
-            bounds,
-            mouse::Cursor::Available(Point::new(110.0, 70.0)),
-        );
-        assert!(
-            editor
-                .update(
-                    &mut state,
-                    &iced::Event::Window(iced::window::Event::Unfocused),
-                    bounds,
-                    mouse::Cursor::Unavailable
-                )
-                .is_some()
-        );
+        editor.update(&mut state, &press, bounds, mouse::Cursor::Available(Point::new(110.0, 70.0)));
+        assert!(editor.update(&mut state, &iced::Event::Window(iced::window::Event::Unfocused), bounds, mouse::Cursor::Unavailable).is_some());
         assert!(state.active.is_none());
     }
 
     #[test]
     fn flatten_preserves_source_resolution_alpha_and_original() {
         let (original, picture) = sample();
-        let stroke = Stroke {
-            points: vec![Point::new(10.0, 10.0)],
-            width: 6.0,
-        };
+        let stroke = Stroke { points: vec![Point::new(10.0, 10.0)], width: 6.0 };
         let (attachment, edited) = render(&original, &picture, &[stroke]).unwrap();
         assert_eq!((edited.width, edited.height), (20, 20));
         assert_eq!(&edited.rgba[..4], &[20, 40, 80, 100]);
-        assert_eq!(
-            &picture.rgba[(10 * 20 + 10) * 4..(10 * 20 + 10) * 4 + 4],
-            &[20, 40, 80, 100]
-        );
-        assert_eq!(
-            &edited.rgba[(10 * 20 + 10) * 4..(10 * 20 + 10) * 4 + 4],
-            &[255, 0, 0, 255]
-        );
-        let Attachment::Inline {
-            name,
-            mime,
-            data_base64,
-        } = attachment
-        else {
-            panic!("inline image")
-        };
+        assert_eq!(&picture.rgba[(10 * 20 + 10) * 4..(10 * 20 + 10) * 4 + 4], &[20, 40, 80, 100]);
+        assert_eq!(&edited.rgba[(10 * 20 + 10) * 4..(10 * 20 + 10) * 4 + 4], &[255, 0, 0, 255]);
+        let Attachment::Inline { name, mime, data_base64 } = attachment else { panic!("inline image") };
         assert_eq!(name, "screen.png");
         assert_eq!(mime, "image/png");
         let decoded = crate::media::decode(&admin::decode_bytes(&data_base64).unwrap()).unwrap();
@@ -757,27 +472,11 @@ mod tests {
     #[test]
     fn freehand_is_clipped_and_rejects_invalid_coordinates() {
         let (original, picture) = sample();
-        let stroke = Stroke {
-            points: vec![Point::new(0.0, 0.0), Point::new(20.0, 20.0)],
-            width: 4.0,
-        };
+        let stroke = Stroke { points: vec![Point::new(0.0, 0.0), Point::new(20.0, 20.0)], width: 4.0 };
         let (_, edited) = render(&original, &picture, &[stroke]).unwrap();
         assert_eq!(&edited.rgba[..4], &[255, 0, 0, 255]);
-        assert_eq!(
-            &edited.rgba[(19 * 20) * 4..(19 * 20) * 4 + 4],
-            &[20, 40, 80, 100]
-        );
-        assert!(
-            render(
-                &original,
-                &picture,
-                &[Stroke {
-                    points: vec![Point::ORIGIN],
-                    width: f32::NAN
-                }]
-            )
-            .is_err()
-        );
+        assert_eq!(&edited.rgba[(19 * 20) * 4..(19 * 20) * 4 + 4], &[20, 40, 80, 100]);
+        assert!(render(&original, &picture, &[Stroke { points: vec![Point::ORIGIN], width: f32::NAN }]).is_err());
     }
 
     #[test]
@@ -788,102 +487,53 @@ mod tests {
             revision: "r".into(),
             original,
             picture,
-            strokes: vec![Stroke {
-                points: vec![Point::new(10.0, 10.0)],
-                width: 4.0,
-            }],
+            strokes: vec![Stroke { points: vec![Point::new(10.0, 10.0)], width: 4.0 }],
             saving: false,
             drawing: false,
             error: None,
         };
         // A square image in a wide canvas begins 50 logical pixels from its left edge.
-        let mut ui = iced_test::Simulator::with_size(
-            crate::snapshots::settings(),
-            (200.0, 100.0),
-            surface(&editor),
-        );
+        let mut ui = iced_test::Simulator::with_size(crate::snapshots::settings(), (200.0, 100.0), surface(&editor));
         let snapshot = ui.snapshot(&style::theme()).unwrap();
         let dir = std::env::temp_dir().join(sill_client::request_id("annotation-preview"));
         snapshot.matches_image(dir.join("preview")).unwrap();
-        let png = std::fs::read_dir(&dir)
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+        let png = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
         let preview = image::open(png).unwrap().to_rgba8();
         std::fs::remove_dir_all(dir).unwrap();
         // Simulator renders at scale 2: the red dot must be at (200, 100), not (100, 100).
         assert_eq!(preview.get_pixel(200, 100).0, [255, 0, 0, 255]);
         assert_ne!(preview.get_pixel(100, 100).0, [255, 0, 0, 255]);
         let (_, saved) = render(&editor.original, &editor.picture, &editor.strokes).unwrap();
-        assert_eq!(
-            &saved.rgba[(10 * 20 + 10) * 4..(10 * 20 + 10) * 4 + 4],
-            &[255, 0, 0, 255]
-        );
+        assert_eq!(&saved.rgba[(10 * 20 + 10) * 4..(10 * 20 + 10) * 4 + 4], &[255, 0, 0, 255]);
     }
 
     #[test]
     fn pen_cursor_hides_os_pointer_and_tracks_image_hover() {
         use canvas::Program;
         let (original, picture) = sample();
-        let mut editor = Editor {
-            attachment_id: "a".into(),
-            revision: "r".into(),
-            original,
-            picture,
-            strokes: vec![],
-            saving: false,
-            drawing: false,
-            error: None,
-        };
-        let bounds = Rectangle {
-            x: 0.0,
-            y: 0.0,
-            width: 200.0,
-            height: 100.0,
-        };
+        let mut editor =
+            Editor { attachment_id: "a".into(), revision: "r".into(), original, picture, strokes: vec![], saving: false, drawing: false, error: None };
+        let bounds = Rectangle { x: 0.0, y: 0.0, width: 200.0, height: 100.0 };
         let mut state = Gesture::default();
         assert_eq!(
-            editor.mouse_interaction(
-                &state,
-                bounds,
-                mouse::Cursor::Available(Point::new(10.0, 50.0))
-            ),
+            editor.mouse_interaction(&state, bounds, mouse::Cursor::Available(Point::new(10.0, 50.0))),
             mouse::Interaction::default(),
             "letterbox keeps default cursor"
         );
         assert_eq!(
-            editor.mouse_interaction(
-                &state,
-                bounds,
-                mouse::Cursor::Available(Point::new(100.0, 50.0))
-            ),
+            editor.mouse_interaction(&state, bounds, mouse::Cursor::Available(Point::new(100.0, 50.0))),
             mouse::Interaction::Hidden,
             "image area hides OS cursor for the drawn pen pointer"
         );
-        let moved = iced::Event::Mouse(mouse::Event::CursorMoved {
-            position: Point::new(100.0, 50.0),
-        });
-        assert!(
-            editor
-                .update(
-                    &mut state,
-                    &moved,
-                    bounds,
-                    mouse::Cursor::Available(Point::new(100.0, 50.0))
-                )
-                .is_some()
-        );
+        let moved = iced::Event::Mouse(mouse::Event::CursorMoved { position: Point::new(100.0, 50.0) });
+        assert!(editor.update(&mut state, &moved, bounds, mouse::Cursor::Available(Point::new(100.0, 50.0))).is_some());
         assert!(state.cursor_inside);
         // Leaving into letterbox requests one redraw so the pen disappears.
         assert!(
             editor
                 .update(
                     &mut state,
-                    &iced::Event::Mouse(mouse::Event::CursorMoved {
-                        position: Point::new(10.0, 50.0)
-                    }),
+                    &iced::Event::Mouse(mouse::Event::CursorMoved { position: Point::new(10.0, 50.0) }),
                     bounds,
                     mouse::Cursor::Available(Point::new(10.0, 50.0))
                 )
@@ -894,22 +544,13 @@ mod tests {
             editor
                 .update(
                     &mut state,
-                    &iced::Event::Mouse(mouse::Event::CursorMoved {
-                        position: Point::new(5.0, 50.0)
-                    }),
+                    &iced::Event::Mouse(mouse::Event::CursorMoved { position: Point::new(5.0, 50.0) }),
                     bounds,
                     mouse::Cursor::Available(Point::new(5.0, 50.0))
                 )
                 .is_none()
         );
         editor.saving = true;
-        assert_eq!(
-            editor.mouse_interaction(
-                &state,
-                bounds,
-                mouse::Cursor::Available(Point::new(100.0, 50.0))
-            ),
-            mouse::Interaction::default()
-        );
+        assert_eq!(editor.mouse_interaction(&state, bounds, mouse::Cursor::Available(Point::new(100.0, 50.0))), mouse::Interaction::default());
     }
 }

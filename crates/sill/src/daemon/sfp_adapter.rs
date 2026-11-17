@@ -2,12 +2,12 @@
 //!
 //! This state is saved with the runner cursor. Replaying a relay event must be deduplicated
 //! before calling `project`, and the result committed with this state before acknowledging it.
-use std::collections::BTreeMap;
+use super::relay;
 use serde::{Deserialize, Serialize};
 use sill_core::acp;
 use sill_proto::sfp;
-use super::relay;
-#[path="sfp_adapter_v2.rs"]
+use std::collections::BTreeMap;
+#[path = "sfp_adapter_v2.rs"]
 mod v2;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -38,7 +38,11 @@ pub(crate) struct AdapterState {
 
 /// Agent image bytes named by content, waiting to become a session upload.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct AgentMedia { pub upload_id: String, pub mime: String, pub bytes: Vec<u8> }
+pub(crate) struct AgentMedia {
+    pub upload_id: String,
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
 
 /// An agent image as an SFP `image` block: `mime` always, then `upload_id` (bytes fetched with
 /// `_sill/uploads.get`) or `omitted` with the reason it was not kept. Never the bytes themselves.
@@ -46,30 +50,43 @@ pub(crate) fn image_block(mime: &str, data_base64: &str, media: &mut Vec<AgentMe
     let mut extra = BTreeMap::new();
     let valid_mime = !mime.is_empty() && mime.len() <= 256 && !mime.chars().any(char::is_control);
     extra.insert("mime".into(), serde_json::json!(if valid_mime { mime } else { "application/octet-stream" }));
-    let omitted = if !valid_mime { Some("invalid") } else {
+    let omitted = if !valid_mime {
+        Some("invalid")
+    } else {
         match super::uploads::decode_limited(data_base64, super::uploads::AGENT_IMAGE_BYTES) {
             Ok(bytes) => {
                 let upload_id = format!("{}{}", super::uploads::AGENT_PREFIX, sill_core::sfp::create_fingerprint(&format!("{mime}\n{data_base64}")));
                 extra.insert("upload_id".into(), serde_json::json!(upload_id));
-                if !media.iter().any(|m| m.upload_id == upload_id) { media.push(AgentMedia { upload_id, mime: mime.into(), bytes }); }
+                if !media.iter().any(|m| m.upload_id == upload_id) {
+                    media.push(AgentMedia { upload_id, mime: mime.into(), bytes });
+                }
                 None
             }
-            Err(e) if e.downcast_ref::<sill_proto::rpc::Error>().is_some_and(|e| e.data.as_ref().is_some_and(|d| d["code"] == "limit_exceeded")) => Some("too_large"),
+            Err(e) if e.downcast_ref::<sill_proto::rpc::Error>().is_some_and(|e| e.data.as_ref().is_some_and(|d| d["code"] == "limit_exceeded")) => {
+                Some("too_large")
+            }
             Err(_) => Some("invalid"),
         }
     };
-    if let Some(reason) = omitted { extra.insert("omitted".into(), serde_json::json!(reason)); }
+    if let Some(reason) = omitted {
+        extra.insert("omitted".into(), serde_json::json!(reason));
+    }
     sfp::Content { block_id: id("block"), kind: "image".into(), text: None, extra }
 }
 
 /// Image blocks whose bytes the upload store refused (its agent budget is full) say so.
 pub(crate) fn mark_omitted(events: &mut [sfp::Event], refused: &std::collections::BTreeSet<String>) {
-    if refused.is_empty() { return; }
-    let blocks = events.iter_mut().flat_map(|event| match event {
-        sfp::Event::ItemCreated { item } => Some(&mut item.content),
-        sfp::Event::ItemPatched { set, .. } => set.content.as_mut(),
-        _ => None,
-    }).flatten();
+    if refused.is_empty() {
+        return;
+    }
+    let blocks = events
+        .iter_mut()
+        .flat_map(|event| match event {
+            sfp::Event::ItemCreated { item } => Some(&mut item.content),
+            sfp::Event::ItemPatched { set, .. } => set.content.as_mut(),
+            _ => None,
+        })
+        .flatten();
     for block in blocks {
         if block.kind == "image" && block.extra.get("upload_id").and_then(|v| v.as_str()).is_some_and(|id| refused.contains(id)) {
             block.extra.remove("upload_id");
@@ -83,17 +100,32 @@ fn id(prefix: &str) -> String {
 }
 
 impl AdapterState {
-    pub fn question_id(&self, request: u64) -> Option<&str> { self.questions.get(&request).map(String::as_str) }
+    pub fn question_id(&self, request: u64) -> Option<&str> {
+        self.questions.get(&request).map(String::as_str)
+    }
     pub fn request_for_question(&self, question: &str) -> Option<u64> {
         self.questions.iter().find_map(|(request, public)| (public == question).then_some(*request))
     }
-    pub fn turn_id(&self) -> Option<&str> { self.turn.as_ref().map(|t| t.turn_id.as_str()) }
-    pub fn take_media(&mut self) -> Vec<AgentMedia> { std::mem::take(&mut self.media) }
+    pub fn turn_id(&self) -> Option<&str> {
+        self.turn.as_ref().map(|t| t.turn_id.as_str())
+    }
+    pub fn take_media(&mut self) -> Vec<AgentMedia> {
+        std::mem::take(&mut self.media)
+    }
     /// The prompt being queued starts a turn for `purpose` (null: the person's own).
-    pub fn prompt_purpose(&mut self, purpose: Option<String>) { self.next_purpose = purpose; }
+    pub fn prompt_purpose(&mut self, purpose: Option<String>) {
+        self.next_purpose = purpose;
+    }
     /// A new pending turn, carrying the queued prompt's purpose.
     fn new_turn(&mut self, activity: &str) -> sfp::Turn {
-        sfp::Turn { turn_id: id("turn"), agent_generation_id: self.generation.clone(), activity: activity.into(), outcome: "pending".into(), reason: None, purpose: self.next_purpose.take() }
+        sfp::Turn {
+            turn_id: id("turn"),
+            agent_generation_id: self.generation.clone(),
+            activity: activity.into(),
+            outcome: "pending".into(),
+            reason: None,
+            purpose: self.next_purpose.take(),
+        }
     }
 
     /// `existing_question` is the durable current record for `Resolved`, preserving the winner.
@@ -116,16 +148,20 @@ impl AdapterState {
                 next.capabilities.insert("steering".into(), false);
             }
             relay::Event::V2Update { update } => self.project_v2(&mut next, update, &mut out),
-            relay::Event::V2PermissionsCancelled => {}, // Runner reconciles durable winning answers.
+            relay::Event::V2PermissionsCancelled => {} // Runner reconciles durable winning answers.
 
-            relay::Event::PromptAccepted { message_id } => { self.v2.accepted_message = Some(message_id.clone()); }
+            relay::Event::PromptAccepted { message_id } => {
+                self.v2.accepted_message = Some(message_id.clone());
+            }
             relay::Event::V2PromptFailed { code, message } => {
                 if let Some(mut turn) = self.turn.take() {
-                    turn.activity = "unknown".into(); turn.outcome = "unknown".into();
+                    turn.activity = "unknown".into();
+                    turn.outcome = "unknown".into();
                     turn.reason = Some(sfp::Reason { code: code.clone(), message: message.clone() });
                     out.push(sfp::Event::TurnUpdated { turn });
                 }
-                next.turn_id = None; next.activity = "unknown".into();
+                next.turn_id = None;
+                next.activity = "unknown".into();
             }
             relay::Event::V2PermissionRequest { request, tool_call_id, title, subject, options } => {
                 self.v2_permission(&mut next, *request, tool_call_id.as_deref(), title, subject.as_ref(), options, &mut out);
@@ -138,7 +174,9 @@ impl AdapterState {
                 next.lifecycle = "open".into();
                 next.capabilities.insert("steering".into(), false);
             }
-            relay::Event::Capabilities { images } => { next.capabilities.insert("images".into(), *images); }
+            relay::Event::Capabilities { images } => {
+                next.capabilities.insert("images".into(), *images);
+            }
             relay::Event::TurnStarted => {
                 self.replaying = false;
                 self.v2.active_seen = false;
@@ -152,15 +190,23 @@ impl AdapterState {
                 next.turn_id = Some(turn.turn_id.clone());
                 next.activity = turn.activity.clone();
                 self.turn = Some(turn.clone());
-                if self.is_v2() { self.v2.last_turn = Some(turn.turn_id.clone()); }
+                if self.is_v2() {
+                    self.v2.last_turn = Some(turn.turn_id.clone());
+                }
                 out.push(sfp::Event::TurnUpdated { turn });
             }
             relay::Event::UserText(_) => {
                 // ACP v1 echoes/replays user text without identities. The submit path creates
                 // user items; never guess an identity by comparing echoed text.
             }
-            relay::Event::Text(_) | relay::Event::Thought(_) | relay::Event::ToolCall { .. }
-                | relay::Event::ToolCallUpdate { .. } | relay::Event::SubagentText { .. } | relay::Event::Image { .. } if self.replaying => {
+            relay::Event::Text(_)
+            | relay::Event::Thought(_)
+            | relay::Event::ToolCall { .. }
+            | relay::Event::ToolCallUpdate { .. }
+            | relay::Event::SubagentText { .. }
+            | relay::Event::Image { .. }
+                if self.replaying =>
+            {
                 // ACP v1 session/load has no stable message identities. Existing stored items
                 // remain authoritative; replay cannot be merged by text or source call IDs.
             }
@@ -173,14 +219,24 @@ impl AdapterState {
                 let mut block = image_block(mime, data_base64, &mut self.media);
                 if let Some(parent) = parent {
                     self.subagent_items.remove(parent);
-                    if let Some((parent_id, _)) = self.tools.get(parent) { block.extra.insert("parent_item_id".into(), serde_json::json!(parent_id)); }
+                    if let Some((parent_id, _)) = self.tools.get(parent) {
+                        block.extra.insert("parent_item_id".into(), serde_json::json!(parent_id));
+                    }
                 }
                 out.push(sfp::Event::ItemCreated { item: self.item(id("item"), "agent", vec![block], None) });
             }
             relay::Event::ToolCall { id: source, title, kind, status, detail, diff, parent, command } => {
                 self.text_item = None;
                 self.thought_item = None;
-                let tool = sfp::Tool { title: title.clone(), kind: kind.clone(), status: status.clone(), detail: detail.clone().unwrap_or_default(), diff: diff.clone().unwrap_or_default(), parent_item_id: parent.as_ref().and_then(|p| self.tools.get(p)).map(|(id, _)| id.clone()), command: shell_command(kind, command.as_deref()) };
+                let tool = sfp::Tool {
+                    title: title.clone(),
+                    kind: kind.clone(),
+                    status: status.clone(),
+                    detail: detail.clone().unwrap_or_default(),
+                    diff: diff.clone().unwrap_or_default(),
+                    parent_item_id: parent.as_ref().and_then(|p| self.tools.get(p)).map(|(id, _)| id.clone()),
+                    command: shell_command(kind, command.as_deref()),
+                };
                 if let Some((item_id, current)) = self.tools.get_mut(source) {
                     *current = tool.clone();
                     out.push(sfp::Event::ItemPatched { item_id: item_id.clone(), set: sfp::ItemPatch { tool: Some(tool), ..Default::default() } });
@@ -192,17 +248,35 @@ impl AdapterState {
             }
             relay::Event::ToolCallUpdate { id: source, status, title, detail, diff, command } => {
                 if let Some((item_id, tool)) = self.tools.get_mut(source) {
-                    if let Some(v) = status { tool.status = v.clone(); }
-                    if let Some(v) = title { tool.title = v.clone(); }
-                    if let Some(v) = detail { tool.detail = v.clone(); }
-                    if let Some(v) = diff { tool.diff = v.clone(); }
+                    if let Some(v) = status {
+                        tool.status = v.clone();
+                    }
+                    if let Some(v) = title {
+                        tool.title = v.clone();
+                    }
+                    if let Some(v) = detail {
+                        tool.detail = v.clone();
+                    }
+                    if let Some(v) = diff {
+                        tool.diff = v.clone();
+                    }
                     // an update that declares no command leaves the one already known
-                    if let Some(v) = shell_command(&tool.kind, command.as_deref()) { tool.command = Some(v); }
+                    if let Some(v) = shell_command(&tool.kind, command.as_deref()) {
+                        tool.command = Some(v);
+                    }
                     out.push(sfp::Event::ItemPatched { item_id: item_id.clone(), set: sfp::ItemPatch { tool: Some(tool.clone()), ..Default::default() } });
                 } else {
                     // Some agents first mention a call through an update. Establish an item
                     // before any patch and preserve only fields the agent actually supplied.
-                    let tool = sfp::Tool { title: title.clone().unwrap_or_default(), kind: "unknown".into(), status: status.clone().unwrap_or_else(|| "unknown".into()), detail: detail.clone().unwrap_or_default(), diff: diff.clone().unwrap_or_default(), parent_item_id: None, command: None };
+                    let tool = sfp::Tool {
+                        title: title.clone().unwrap_or_default(),
+                        kind: "unknown".into(),
+                        status: status.clone().unwrap_or_else(|| "unknown".into()),
+                        detail: detail.clone().unwrap_or_default(),
+                        diff: diff.clone().unwrap_or_default(),
+                        parent_item_id: None,
+                        command: None,
+                    };
                     let item_id = id("item");
                     self.tools.insert(source.clone(), (item_id.clone(), tool.clone()));
                     out.push(sfp::Event::ItemCreated { item: self.item(item_id, "tool", vec![], Some(tool)) });
@@ -215,7 +289,9 @@ impl AdapterState {
                     let item_id = id("item");
                     self.subagent_items.insert(parent.clone(), item_id.clone());
                     let mut content = sfp::Content::text(text);
-                    if let Some((parent_id, _)) = self.tools.get(parent) { content.extra.insert("parent_item_id".into(), serde_json::json!(parent_id)); }
+                    if let Some((parent_id, _)) = self.tools.get(parent) {
+                        content.extra.insert("parent_item_id".into(), serde_json::json!(parent_id));
+                    }
                     out.push(sfp::Event::ItemCreated { item: self.item(item_id, "agent", vec![content], None) });
                 }
             }
@@ -223,9 +299,25 @@ impl AdapterState {
                 if !self.questions.contains_key(request) {
                     let question_id = id("question");
                     self.questions.insert(*request, question_id.clone());
-                    let question = sfp::Question { question_id: question_id.clone(), agent_generation_id: self.generation.clone(), kind: "permission".into(), title: title.clone(), description: None, subject: None,
-                        tool_item_id: self.tools.get(tool_call_id).map(|(id, _)| id.clone()), options: options.iter().map(|o| sfp::PermissionOption { option_id: o.id.clone(), title: o.name.clone(), kind: permission_kind(&o.kind) }).collect(), fields: vec![],
-                        state: "open".into(), answer_id: None, answer: None, delivery: None, reason: None };
+                    let question = sfp::Question {
+                        question_id: question_id.clone(),
+                        agent_generation_id: self.generation.clone(),
+                        kind: "permission".into(),
+                        title: title.clone(),
+                        description: None,
+                        subject: None,
+                        tool_item_id: self.tools.get(tool_call_id).map(|(id, _)| id.clone()),
+                        options: options
+                            .iter()
+                            .map(|o| sfp::PermissionOption { option_id: o.id.clone(), title: o.name.clone(), kind: permission_kind(&o.kind) })
+                            .collect(),
+                        fields: vec![],
+                        state: "open".into(),
+                        answer_id: None,
+                        answer: None,
+                        delivery: None,
+                        reason: None,
+                    };
                     out.push(sfp::Event::QuestionUpdated { question });
                     next.question_ids.push(question_id);
                     next.activity = "waiting".into();
@@ -235,7 +327,22 @@ impl AdapterState {
                 if !self.questions.contains_key(request) {
                     let question_id = id("question");
                     self.questions.insert(*request, question_id.clone());
-                    let question = sfp::Question { question_id: question_id.clone(), agent_generation_id: self.generation.clone(), kind: "form".into(), title: message.clone(), description: None, subject: None, tool_item_id: None, options: vec![], fields: fields.iter().map(form_field).collect(), state: "open".into(), answer_id: None, answer: None, delivery: None, reason: None };
+                    let question = sfp::Question {
+                        question_id: question_id.clone(),
+                        agent_generation_id: self.generation.clone(),
+                        kind: "form".into(),
+                        title: message.clone(),
+                        description: None,
+                        subject: None,
+                        tool_item_id: None,
+                        options: vec![],
+                        fields: fields.iter().map(form_field).collect(),
+                        state: "open".into(),
+                        answer_id: None,
+                        answer: None,
+                        delivery: None,
+                        reason: None,
+                    };
                     out.push(sfp::Event::QuestionUpdated { question });
                     next.question_ids.push(question_id);
                     next.activity = "waiting".into();
@@ -245,15 +352,28 @@ impl AdapterState {
                 if let Some(question_id) = self.questions.get(request) {
                     if let Some(current) = existing_question.filter(|q| &q.question_id == question_id) {
                         let mut question = current.clone();
-                        if question.state == "answered" { question.delivery = Some("confirmed".into()); }
-                        else if question.state == "open" {
+                        if question.state == "answered" {
+                            question.delivery = Some("confirmed".into());
+                        } else if question.state == "open" {
                             question.state = "cancelled".into();
-                            question.reason = Some(sfp::Reason { code: "resolved_without_recorded_answer".into(), message: "The agent question was resolved outside the recorded answer path".into() });
+                            question.reason = Some(sfp::Reason {
+                                code: "resolved_without_recorded_answer".into(),
+                                message: "The agent question was resolved outside the recorded answer path".into(),
+                            });
                         }
                         out.push(sfp::Event::QuestionUpdated { question });
                     }
                     next.question_ids.retain(|id| id != question_id);
-                    if next.question_ids.is_empty() { next.activity = if self.is_v2() { "unknown" } else if self.turn.is_some() { "working" } else { "idle" }.into(); }
+                    if next.question_ids.is_empty() {
+                        next.activity = if self.is_v2() {
+                            "unknown"
+                        } else if self.turn.is_some() {
+                            "working"
+                        } else {
+                            "idle"
+                        }
+                        .into();
+                    }
                 }
             }
             relay::Event::Stopped(reason) => {
@@ -263,9 +383,12 @@ impl AdapterState {
                 if let Some(mut turn) = self.turn.take() {
                     turn.activity = "idle".into();
                     turn.outcome = match reason {
-                        acp::StopReason::EndTurn => "completed", acp::StopReason::Cancelled => "cancelled",
-                        acp::StopReason::Refusal => "failed", _ => "unknown",
-                    }.into();
+                        acp::StopReason::EndTurn => "completed",
+                        acp::StopReason::Cancelled => "cancelled",
+                        acp::StopReason::Refusal => "failed",
+                        _ => "unknown",
+                    }
+                    .into();
                     turn.reason = Some(sfp::Reason { code: stop_reason(reason), message: "ACP v1 prompt returned this stop reason".into() });
                     out.push(sfp::Event::TurnUpdated { turn });
                 }
@@ -306,12 +429,20 @@ impl AdapterState {
                 }
             }
             relay::Event::Plan(entries) if !self.replaying => {
-                let content: Vec<sfp::Content> = entries.iter().enumerate().map(|(i, e)| sfp::Content {
-                    block_id: format!("entry-{i}"), kind: "plan_entry".into(), text: Some(e.content.clone()),
-                    extra: BTreeMap::from([("status".into(), serde_json::json!(e.status)), ("priority".into(), serde_json::json!(e.priority))]),
-                }).collect();
+                let content: Vec<sfp::Content> = entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| sfp::Content {
+                        block_id: format!("entry-{i}"),
+                        kind: "plan_entry".into(),
+                        text: Some(e.content.clone()),
+                        extra: BTreeMap::from([("status".into(), serde_json::json!(e.status)), ("priority".into(), serde_json::json!(e.priority))]),
+                    })
+                    .collect();
                 match &self.plan_item {
-                    Some(item_id) => out.push(sfp::Event::ItemPatched { item_id: item_id.clone(), set: sfp::ItemPatch { content: Some(content), ..Default::default() } }),
+                    Some(item_id) => {
+                        out.push(sfp::Event::ItemPatched { item_id: item_id.clone(), set: sfp::ItemPatch { content: Some(content), ..Default::default() } })
+                    }
                     None => {
                         let item_id = id("item");
                         self.plan_item = Some(item_id.clone());
@@ -322,34 +453,65 @@ impl AdapterState {
             relay::Event::Plan(_) => {}
             relay::Event::Notice { .. } if self.replaying => {}
             relay::Event::Notice { severity, title, description } => {
-                let mut content = sfp::Content::text(match description { Some(d) if !d.is_empty() => format!("{title}\n{d}"), _ => title.clone() });
+                let mut content = sfp::Content::text(match description {
+                    Some(d) if !d.is_empty() => format!("{title}\n{d}"),
+                    _ => title.clone(),
+                });
                 content.extra.insert("severity".into(), serde_json::json!(severity));
                 out.push(sfp::Event::ItemCreated { item: self.item(id("item"), "notice", vec![content], None) });
             }
             relay::Event::Commands(commands) => {
-                next.commands = commands.iter().map(|c| sfp::AgentCommand { name: c.name.clone(), description: c.description.clone(), hint: c.hint.clone() }).collect();
+                next.commands =
+                    commands.iter().map(|c| sfp::AgentCommand { name: c.name.clone(), description: c.description.clone(), hint: c.hint.clone() }).collect();
             }
-            relay::Event::AgentTitle(title) => { next.agent_title = Some(title.clone()); }
+            relay::Event::AgentTitle(title) => {
+                next.agent_title = Some(title.clone());
+            }
             relay::Event::Other(text) => out.push(sfp::Event::ItemCreated { item: self.item(id("item"), "note", vec![sfp::Content::text(text)], None) }),
-            relay::Event::AutoAnswered { title, allowed, .. } => out.push(sfp::Event::ItemCreated { item: self.item(id("item"), "note", vec![sfp::Content::text(format!("Policy {}: {title}", if *allowed { "allowed" } else { "denied" }))], None) }),
+            relay::Event::AutoAnswered { title, allowed, .. } => out.push(sfp::Event::ItemCreated {
+                item: self.item(id("item"), "note", vec![sfp::Content::text(format!("Policy {}: {title}", if *allowed { "allowed" } else { "denied" }))], None),
+            }),
             relay::Event::AuthRequired { message, methods } => {
                 next.activity = "waiting".into();
-                next.authentication = Some(sfp::Authentication { message: message.clone(), methods: methods.iter().map(|method| sfp::AuthMethod {
-                    method_id: method.id.clone(), title: method.name.clone(), description: method.description.clone(),
-                    terminal: method.terminal.as_ref().map(|(args, env)| sfp::AuthTerminal { args: args.clone(), env: env.clone() }),
-                    api_key: method.api_key.clone(),
-                }).collect() });
+                next.authentication = Some(sfp::Authentication {
+                    message: message.clone(),
+                    methods: methods
+                        .iter()
+                        .map(|method| sfp::AuthMethod {
+                            method_id: method.id.clone(),
+                            title: method.name.clone(),
+                            description: method.description.clone(),
+                            terminal: method.terminal.as_ref().map(|(args, env)| sfp::AuthTerminal { args: args.clone(), env: env.clone() }),
+                            api_key: method.api_key.clone(),
+                        })
+                        .collect(),
+                });
             }
             relay::Event::ControlFailed { .. } => {}
-            relay::Event::Controls(controls) => { next.controls = Some(session_controls(controls)); }
-            relay::Event::Usage { used, size } => { next.usage = Some(sfp::Usage { used: used.to_string(), size: size.to_string() }); }
+            relay::Event::Controls(controls) => {
+                next.controls = Some(session_controls(controls));
+            }
+            relay::Event::Usage { used, size } => {
+                next.usage = Some(sfp::Usage { used: used.to_string(), size: size.to_string() });
+            }
         }
-        if &next != session { out.push(sfp::Event::SessionUpdated { session: next }); }
+        if &next != session {
+            out.push(sfp::Event::SessionUpdated { session: next });
+        }
         out
     }
 
     fn item(&self, item_id: String, kind: &str, content: Vec<sfp::Content>, tool: Option<sfp::Tool>) -> sfp::Item {
-        sfp::Item { item_id, created_seq: String::new(), turn_id: self.turn.as_ref().map(|t| t.turn_id.clone()), submission_id: None, agent_generation_id: self.generation.clone(), kind: kind.into(), content, tool }
+        sfp::Item {
+            item_id,
+            created_seq: String::new(),
+            turn_id: self.turn.as_ref().map(|t| t.turn_id.clone()),
+            submission_id: None,
+            agent_generation_id: self.generation.clone(),
+            kind: kind.into(),
+            content,
+            tool,
+        }
     }
 
     fn append_text(&mut self, kind: &str, mut text: &str, out: &mut Vec<sfp::Event>) {
@@ -357,15 +519,19 @@ impl AdapterState {
         // expands text sixfold, so 256 KiB leaves room within a 4 MiB snapshot page.
         const ITEM_TEXT_BYTES: usize = 256 * 1024;
         while !text.is_empty() {
-            let (target, bytes) = if kind == "thought" {
-                (&mut self.thought_item, &mut self.thought_bytes)
-            } else {
-                (&mut self.text_item, &mut self.text_bytes)
-            };
-            if target.is_none() { *bytes = 0; }
-            if *bytes >= ITEM_TEXT_BYTES { *target = None; *bytes = 0; }
+            let (target, bytes) =
+                if kind == "thought" { (&mut self.thought_item, &mut self.thought_bytes) } else { (&mut self.text_item, &mut self.text_bytes) };
+            if target.is_none() {
+                *bytes = 0;
+            }
+            if *bytes >= ITEM_TEXT_BYTES {
+                *target = None;
+                *bytes = 0;
+            }
             let mut end = text.len().min(ITEM_TEXT_BYTES - *bytes);
-            while !text.is_char_boundary(end) { end -= 1; }
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
             if end == 0 {
                 // The next UTF-8 character does not fit; start a new item before it.
                 *target = None;
@@ -380,13 +546,14 @@ impl AdapterState {
                 let item_id = id("item");
                 *target = Some(item_id.clone());
                 let mut content = sfp::Content::text(chunk);
-                if kind == "thought" { content.kind = "thought".into(); }
+                if kind == "thought" {
+                    content.kind = "thought".into();
+                }
                 out.push(sfp::Event::ItemCreated { item: self.item(item_id, kind, vec![content], None) });
             }
             text = &text[end..];
         }
     }
-
 }
 
 /// A shell call's command (`sfp::Tool::command`): what the agent declared as the call's command
@@ -400,38 +567,60 @@ pub(crate) fn shell_command(kind: &str, declared: Option<&str>) -> Option<String
 
 fn permission_kind(kind: &acp::PermissionOptionKind) -> String {
     match kind {
-        acp::PermissionOptionKind::AllowOnce => "allow_once", acp::PermissionOptionKind::AllowAlways => "allow_always",
-        acp::PermissionOptionKind::RejectOnce => "reject_once", acp::PermissionOptionKind::RejectAlways => "reject_always",
+        acp::PermissionOptionKind::AllowOnce => "allow_once",
+        acp::PermissionOptionKind::AllowAlways => "allow_always",
+        acp::PermissionOptionKind::RejectOnce => "reject_once",
+        acp::PermissionOptionKind::RejectAlways => "reject_always",
         acp::PermissionOptionKind::Other(value) => value,
-    }.into()
+    }
+    .into()
 }
 fn stop_reason(reason: &acp::StopReason) -> String {
     match reason {
-        acp::StopReason::EndTurn => "end_turn", acp::StopReason::MaxTokens => "max_tokens", acp::StopReason::MaxTurnRequests => "max_turn_requests",
-        acp::StopReason::Refusal => "refusal", acp::StopReason::Cancelled => "cancelled", acp::StopReason::Other(value) => value,
-    }.into()
+        acp::StopReason::EndTurn => "end_turn",
+        acp::StopReason::MaxTokens => "max_tokens",
+        acp::StopReason::MaxTurnRequests => "max_turn_requests",
+        acp::StopReason::Refusal => "refusal",
+        acp::StopReason::Cancelled => "cancelled",
+        acp::StopReason::Other(value) => value,
+    }
+    .into()
 }
 fn form_field(field: &acp::FormField) -> sfp::FormField {
     let (kind, choices) = match &field.kind {
-        acp::FieldKind::Choice(choices) => ("choice", choices.clone()), acp::FieldKind::Choices(choices) => ("choices", choices.clone()),
-        acp::FieldKind::Text => ("text", vec![]), acp::FieldKind::Bool => ("boolean", vec![]), acp::FieldKind::Number => ("number", vec![]),
+        acp::FieldKind::Choice(choices) => ("choice", choices.clone()),
+        acp::FieldKind::Choices(choices) => ("choices", choices.clone()),
+        acp::FieldKind::Text => ("text", vec![]),
+        acp::FieldKind::Bool => ("boolean", vec![]),
+        acp::FieldKind::Number => ("number", vec![]),
     };
-    sfp::FormField { key: field.key.clone(), title: field.title.clone(), description: field.description.clone(), kind: kind.into(), choices: choices.into_iter().map(|(value, title, description)| sfp::Choice { value, title, description }).collect() }
+    sfp::FormField {
+        key: field.key.clone(),
+        title: field.title.clone(),
+        description: field.description.clone(),
+        kind: kind.into(),
+        choices: choices.into_iter().map(|(value, title, description)| sfp::Choice { value, title, description }).collect(),
+    }
 }
 
 pub(crate) fn session_controls(controls: &acp::Controls) -> sfp::SessionControls {
     let choice = |(value, title): &(String, String)| sfp::ControlChoice { value: value.clone(), title: title.clone() };
     sfp::SessionControls {
-        status: "ready".into(), error: None,
+        status: "ready".into(),
+        error: None,
         current_mode: controls.modes.as_ref().map(|(current, _)| current.clone()),
         modes: controls.modes.as_ref().map(|(_, modes)| modes.iter().map(choice).collect()).unwrap_or_default(),
-        options: controls.options.iter().map(|option| {
-            let (value, choices) = match &option.kind {
-                acp::ConfigKind::Select(value, choices) => (sfp::ControlValue::Id { value: value.clone() }, choices.iter().map(choice).collect()),
-                acp::ConfigKind::Boolean(value) => (sfp::ControlValue::Boolean { value: *value }, vec![]),
-            };
-            sfp::ControlOption { option_id: option.id.clone(), title: option.name.clone(), category: option.category.clone(), value, choices }
-        }).collect(),
+        options: controls
+            .options
+            .iter()
+            .map(|option| {
+                let (value, choices) = match &option.kind {
+                    acp::ConfigKind::Select(value, choices) => (sfp::ControlValue::Id { value: value.clone() }, choices.iter().map(choice).collect()),
+                    acp::ConfigKind::Boolean(value) => (sfp::ControlValue::Boolean { value: *value }, vec![]),
+                };
+                sfp::ControlOption { option_id: option.id.clone(), title: option.name.clone(), category: option.category.clone(), value, choices }
+            })
+            .collect(),
     }
 }
 
@@ -439,10 +628,37 @@ pub(crate) fn session_controls(controls: &acp::Controls) -> sfp::SessionControls
 mod tests {
     use super::*;
     fn session() -> sfp::SessionState {
-        sfp::SessionState { session_id: "s".into(), agent_generation_id: "generation-one".into(), lifecycle: "open".into(), title:None, summary:None, end_reason:None, deleted:false, activity: "idle".into(), turn_id: None, question_ids: vec![], background: None, capabilities: BTreeMap::new(), controls: None, authentication: None, usage: None, agent_title: None, commands: vec![], active_ms:0, active_since_ms:None, summarizing:None }
+        sfp::SessionState {
+            session_id: "s".into(),
+            agent_generation_id: "generation-one".into(),
+            lifecycle: "open".into(),
+            title: None,
+            summary: None,
+            end_reason: None,
+            deleted: false,
+            activity: "idle".into(),
+            turn_id: None,
+            question_ids: vec![],
+            background: None,
+            capabilities: BTreeMap::new(),
+            controls: None,
+            authentication: None,
+            usage: None,
+            agent_title: None,
+            commands: vec![],
+            active_ms: 0,
+            active_since_ms: None,
+            summarizing: None,
+        }
     }
     fn created(events: &[sfp::Event]) -> &sfp::Item {
-        events.iter().find_map(|e| match e { sfp::Event::ItemCreated { item } => Some(item), _ => None }).expect("an item")
+        events
+            .iter()
+            .find_map(|e| match e {
+                sfp::Event::ItemCreated { item } => Some(item),
+                _ => None,
+            })
+            .expect("an item")
     }
     #[test]
     fn agent_images_are_named_by_content_and_their_bytes_leave_the_record() {
@@ -473,9 +689,33 @@ mod tests {
         let session = session();
         let mut adapter = AdapterState::default();
         adapter.project(&session, &relay::Event::TurnStarted, None);
-        let call = |id: &str, kind: &str, title: &str, command: Option<&str>| relay::Event::ToolCall { id: id.into(), title: title.into(), kind: kind.into(), status: "Pending".into(), detail: None, diff: None, parent: None, command: command.map(Into::into) };
-        let update = |id: &str, status: Option<&str>, title: Option<&str>, command: Option<&str>| relay::Event::ToolCallUpdate { id: id.into(), status: status.map(Into::into), title: title.map(Into::into), detail: None, diff: None, command: command.map(Into::into) };
-        let patched = |events: &[sfp::Event]| events.iter().find_map(|e| match e { sfp::Event::ItemPatched { set, .. } => set.tool.clone(), _ => None }).expect("a patched tool");
+        let call = |id: &str, kind: &str, title: &str, command: Option<&str>| relay::Event::ToolCall {
+            id: id.into(),
+            title: title.into(),
+            kind: kind.into(),
+            status: "Pending".into(),
+            detail: None,
+            diff: None,
+            parent: None,
+            command: command.map(Into::into),
+        };
+        let update = |id: &str, status: Option<&str>, title: Option<&str>, command: Option<&str>| relay::Event::ToolCallUpdate {
+            id: id.into(),
+            status: status.map(Into::into),
+            title: title.map(Into::into),
+            detail: None,
+            diff: None,
+            command: command.map(Into::into),
+        };
+        let patched = |events: &[sfp::Event]| {
+            events
+                .iter()
+                .find_map(|e| match e {
+                    sfp::Event::ItemPatched { set, .. } => set.tool.clone(),
+                    _ => None,
+                })
+                .expect("a patched tool")
+        };
         // Claude: the call appears while its input streams, then the command arrives
         let started = adapter.project(&session, &call("bash", "Execute", "Terminal", None), None);
         assert_eq!(created(&started).tool.as_ref().unwrap().command, None);
@@ -501,7 +741,8 @@ mod tests {
         assert_eq!(big.extra["omitted"], "too_large");
         assert_eq!(image_block("image/png", "not base64!", &mut media).extra["omitted"], "invalid");
         assert!(media.is_empty() && !big.extra.contains_key("upload_id"));
-        let mut events = vec![sfp::Event::ItemCreated { item: AdapterState::default().item("i".into(), "agent", vec![image_block("image/png", "YQ==", &mut media)], None) }];
+        let mut events =
+            vec![sfp::Event::ItemCreated { item: AdapterState::default().item("i".into(), "agent", vec![image_block("image/png", "YQ==", &mut media)], None) }];
         mark_omitted(&mut events, &media.iter().map(|m| m.upload_id.clone()).collect());
         let block = &created(&events).content[0];
         assert_eq!(block.extra["omitted"], "capacity");
@@ -511,7 +752,8 @@ mod tests {
     fn native_image_content_becomes_an_image_block_without_bytes() {
         let session = session();
         let mut adapter = AdapterState::default();
-        let update = serde_json::json!({"sessionUpdate":"agent_message_chunk","messageId":"m","content":{"type":"image","mimeType":"image/webp","data":"YWJj"}});
+        let update =
+            serde_json::json!({"sessionUpdate":"agent_message_chunk","messageId":"m","content":{"type":"image","mimeType":"image/webp","data":"YWJj"}});
         let events = adapter.project(&session, &relay::Event::V2Update { update }, None);
         let block = &created(&events).content[0];
         assert_eq!(block.kind, "image");
@@ -544,7 +786,12 @@ mod tests {
     fn permission_resolution_preserves_the_durable_answer_and_confirms_delivery() {
         let mut adapter = AdapterState::default();
         let session = session();
-        let question = relay::Event::PermissionRequest { request: 1, tool_call_id: String::new(), title: "Unknown operation".into(), options: vec![acp::PermissionOption { id: "option".into(), name: "Custom".into(), kind: acp::PermissionOptionKind::Other("_future".into()) }] };
+        let question = relay::Event::PermissionRequest {
+            request: 1,
+            tool_call_id: String::new(),
+            title: "Unknown operation".into(),
+            options: vec![acp::PermissionOption { id: "option".into(), name: "Custom".into(), kind: acp::PermissionOptionKind::Other("_future".into()) }],
+        };
         let events = adapter.project(&session, &question, None);
         let sfp::Event::QuestionUpdated { mut question } = events[0].clone() else { panic!("expected question") };
         assert_eq!(question.options[0].kind, "_future");
@@ -572,20 +819,25 @@ mod tests {
         let mut order = Vec::new();
         for event in events {
             match event {
-                sfp::Event::ItemCreated { item } => { order.push(item.item_id.clone()); items.insert(item.item_id.clone(), item); }
-                sfp::Event::ItemTextAppended { item_id, text, .. } => { items.get_mut(&item_id).unwrap().content[0].text.as_mut().unwrap().push_str(&text); }
+                sfp::Event::ItemCreated { item } => {
+                    order.push(item.item_id.clone());
+                    items.insert(item.item_id.clone(), item);
+                }
+                sfp::Event::ItemTextAppended { item_id, text, .. } => {
+                    items.get_mut(&item_id).unwrap().content[0].text.as_mut().unwrap().push_str(&text);
+                }
                 _ => {}
             }
         }
         assert!(items.len() >= 3);
         for item in items.values() {
             assert!(item.content[0].text.as_ref().unwrap().len() <= 256 * 1024);
-            assert!(serde_json::to_vec(&sfp::Record::Item { item:item.clone() }).unwrap().len() < 4 * 1024 * 1024);
+            assert!(serde_json::to_vec(&sfp::Record::Item { item: item.clone() }).unwrap().len() < 4 * 1024 * 1024);
         }
-        let restored = order.iter().map(|id|items[id].content[0].text.as_deref().unwrap()).collect::<String>();
+        let restored = order.iter().map(|id| items[id].content[0].text.as_deref().unwrap()).collect::<String>();
         assert_eq!(restored, format!("prefix{huge}"));
         let thoughts = adapter.project(&session, &relay::Event::Thought("é".repeat(256 * 1024)), None);
-        assert_eq!(thoughts.iter().filter(|e|matches!(e,sfp::Event::ItemCreated { .. })).count(),2);
+        assert_eq!(thoughts.iter().filter(|e| matches!(e, sfp::Event::ItemCreated { .. })).count(), 2);
     }
 
     #[test]
@@ -600,17 +852,34 @@ mod tests {
         assert_eq!(item.content[1].text.as_deref(), Some("fix"));
         assert_eq!(item.content[0].extra["status"], "in_progress");
         let revised = adapter.project(&session, &relay::Event::Plan(vec![step("read", "completed"), step("fix", "in_progress")]), None);
-        assert!(matches!(&revised[0], sfp::Event::ItemPatched { item_id, set } if item_id == &item.item_id && set.content.as_ref().unwrap()[0].extra["status"] == "completed"));
+        assert!(
+            matches!(&revised[0], sfp::Event::ItemPatched { item_id, set } if item_id == &item.item_id && set.content.as_ref().unwrap()[0].extra["status"] == "completed")
+        );
         adapter.project(&session, &relay::Event::Stopped(acp::StopReason::EndTurn), None);
         adapter.project(&session, &relay::Event::TurnStarted, None);
-        assert!(matches!(adapter.project(&session, &relay::Event::Plan(vec![step("next", "pending")]), None)[0], sfp::Event::ItemCreated { .. }), "a new turn has its own plan");
+        assert!(
+            matches!(adapter.project(&session, &relay::Event::Plan(vec![step("next", "pending")]), None)[0], sfp::Event::ItemCreated { .. }),
+            "a new turn has its own plan"
+        );
 
-        let commands = adapter.project(&session, &relay::Event::Commands(vec![acp::AgentCommand { name: "review".into(), description: "Review".into(), hint: None }]), None);
+        let commands = adapter.project(
+            &session,
+            &relay::Event::Commands(vec![acp::AgentCommand { name: "review".into(), description: "Review".into(), hint: None }]),
+            None,
+        );
         assert!(matches!(&commands[..], [sfp::Event::SessionUpdated { session }] if session.commands[0].name == "review"));
         let titled = adapter.project(&session, &relay::Event::AgentTitle("Fix the window".into()), None);
-        assert!(matches!(&titled[..], [sfp::Event::SessionUpdated { session: s }] if s.agent_title.as_deref() == Some("Fix the window") && s.title == session.title));
-        let notice = adapter.project(&session, &relay::Event::Notice { severity: "warning".into(), title: "Rate limited".into(), description: Some("retrying".into()) }, None);
-        assert!(matches!(&notice[0], sfp::Event::ItemCreated { item } if item.kind == "notice" && item.content[0].text.as_deref() == Some("Rate limited\nretrying") && item.content[0].extra["severity"] == "warning"));
+        assert!(
+            matches!(&titled[..], [sfp::Event::SessionUpdated { session: s }] if s.agent_title.as_deref() == Some("Fix the window") && s.title == session.title)
+        );
+        let notice = adapter.project(
+            &session,
+            &relay::Event::Notice { severity: "warning".into(), title: "Rate limited".into(), description: Some("retrying".into()) },
+            None,
+        );
+        assert!(
+            matches!(&notice[0], sfp::Event::ItemCreated { item } if item.kind == "notice" && item.content[0].text.as_deref() == Some("Rate limited\nretrying") && item.content[0].extra["severity"] == "warning")
+        );
         // an agent that fails says so in the conversation, not only in the journal
         let ended = adapter.project(&session, &relay::Event::Ended(Some("connection closed".into())), None);
         assert!(ended.iter().any(|e| matches!(e, sfp::Event::ItemCreated { item } if item.kind == "notice"

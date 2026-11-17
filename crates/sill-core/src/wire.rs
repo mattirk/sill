@@ -8,7 +8,6 @@
 
 use std::collections::BTreeMap;
 
-
 pub use sill_proto::wire::*;
 
 use crate::acp;
@@ -29,7 +28,9 @@ impl From<acp::PermissionOptionKind> for PermissionOptionKind {
 }
 
 impl From<acp::PermissionOption> for PermissionOption {
-    fn from(o: acp::PermissionOption) -> Self { Self { id: o.id, name: o.name, kind: o.kind.into() } }
+    fn from(o: acp::PermissionOption) -> Self {
+        Self { id: o.id, name: o.name, kind: o.kind.into() }
+    }
 }
 
 impl From<acp::StopReason> for StopReason {
@@ -56,11 +57,15 @@ impl From<acp::ConfigKind> for ConfigKind {
 }
 
 impl From<acp::ConfigOption> for ConfigOption {
-    fn from(o: acp::ConfigOption) -> Self { Self { id: o.id, name: o.name, category: o.category, kind: o.kind.into() } }
+    fn from(o: acp::ConfigOption) -> Self {
+        Self { id: o.id, name: o.name, category: o.category, kind: o.kind.into() }
+    }
 }
 
 impl From<acp::Controls> for Controls {
-    fn from(c: acp::Controls) -> Self { Self { modes: c.modes, options: c.options.into_iter().map(Into::into).collect() } }
+    fn from(c: acp::Controls) -> Self {
+        Self { modes: c.modes, options: c.options.into_iter().map(Into::into).collect() }
+    }
 }
 
 impl From<acp::FieldKind> for FieldKind {
@@ -77,11 +82,15 @@ impl From<acp::FieldKind> for FieldKind {
 }
 
 impl From<acp::FormField> for FormField {
-    fn from(f: acp::FormField) -> Self { Self { key: f.key, title: f.title, description: f.description, kind: f.kind.into() } }
+    fn from(f: acp::FormField) -> Self {
+        Self { key: f.key, title: f.title, description: f.description, kind: f.kind.into() }
+    }
 }
 
 impl From<acp::AuthMethodInfo> for AuthMethodInfo {
-    fn from(m: acp::AuthMethodInfo) -> Self { Self { id: m.id, name: m.name, description: m.description, terminal: m.terminal, api_key: m.api_key } }
+    fn from(m: acp::AuthMethodInfo) -> Self {
+        Self { id: m.id, name: m.name, description: m.description, terminal: m.terminal, api_key: m.api_key }
+    }
 }
 
 // --- the frontends' side back to the agent's -----------------------------------------------------
@@ -100,7 +109,9 @@ impl From<PermissionOptionKind> for acp::PermissionOptionKind {
 }
 
 impl From<PermissionOption> for acp::PermissionOption {
-    fn from(o: PermissionOption) -> Self { Self { id: o.id, name: o.name, kind: o.kind.into() } }
+    fn from(o: PermissionOption) -> Self {
+        Self { id: o.id, name: o.name, kind: o.kind.into() }
+    }
 }
 
 impl From<StopReason> for acp::StopReason {
@@ -127,11 +138,15 @@ impl From<ConfigKind> for acp::ConfigKind {
 }
 
 impl From<ConfigOption> for acp::ConfigOption {
-    fn from(o: ConfigOption) -> Self { Self { id: o.id, name: o.name, category: o.category, kind: o.kind.into() } }
+    fn from(o: ConfigOption) -> Self {
+        Self { id: o.id, name: o.name, category: o.category, kind: o.kind.into() }
+    }
 }
 
 impl From<Controls> for acp::Controls {
-    fn from(c: Controls) -> Self { Self { modes: c.modes, options: c.options.into_iter().map(Into::into).collect() } }
+    fn from(c: Controls) -> Self {
+        Self { modes: c.modes, options: c.options.into_iter().map(Into::into).collect() }
+    }
 }
 
 impl From<ConfigValue> for acp::ConfigValue {
@@ -157,11 +172,15 @@ impl From<FieldKind> for acp::FieldKind {
 }
 
 impl From<FormField> for acp::FormField {
-    fn from(f: FormField) -> Self { Self { key: f.key, title: f.title, description: f.description, kind: f.kind.into() } }
+    fn from(f: FormField) -> Self {
+        Self { key: f.key, title: f.title, description: f.description, kind: f.kind.into() }
+    }
 }
 
 impl From<AuthMethodInfo> for acp::AuthMethodInfo {
-    fn from(m: AuthMethodInfo) -> Self { Self { id: m.id, name: m.name, description: m.description, terminal: m.terminal, api_key: m.api_key } }
+    fn from(m: AuthMethodInfo) -> Self {
+        Self { id: m.id, name: m.name, description: m.description, terminal: m.terminal, api_key: m.api_key }
+    }
 }
 
 impl From<AttachmentKind> for acp::AttachmentKind {
@@ -174,7 +193,9 @@ impl From<AttachmentKind> for acp::AttachmentKind {
 }
 
 impl From<Attachment> for acp::Attachment {
-    fn from(a: Attachment) -> Self { Self { name: a.name, mime: a.mime, kind: a.kind.into() } }
+    fn from(a: Attachment) -> Self {
+        Self { name: a.name, mime: a.mime, kind: a.kind.into() }
+    }
 }
 
 /// The frontend side: back into the `acp::Event` a view renders. A question gets a fresh reply
@@ -222,10 +243,22 @@ pub fn event_into_acp(ev: Event, answer: impl FnOnce(u64, futures::channel::ones
             Event::AuthRequired { message, methods } => A::AuthRequired { message, methods: methods.into_iter().map(Into::into).collect() },
             Event::Stopped(r) => A::Stopped(r.into()),
             Event::Ended(e) => A::Ended(e),
-            Event::AgentImages(images) => A::AgentImages(images.into_iter().map(|a| acp::UserAttachment { name: a.name, mime: a.mime, upload_id: a.upload_id, data_base64: a.data_base64 }).collect()),
-            Event::UserMessage { text, attachments } => A::UserMessage { text, attachments: attachments.into_iter().map(|a| acp::UserAttachment { name: a.name, mime: a.mime, upload_id: a.upload_id, data_base64: a.data_base64 }).collect() },
-            Event::Plan(entries) => A::Plan(entries.into_iter().map(|e| acp::PlanEntry { content: e.content, status: e.status, priority: e.priority }).collect()),
-            Event::Commands(commands) => A::Commands(commands.into_iter().map(|c| acp::AgentCommand { name: c.name, description: c.description, hint: c.hint }).collect()),
+            Event::AgentImages(images) => A::AgentImages(
+                images.into_iter().map(|a| acp::UserAttachment { name: a.name, mime: a.mime, upload_id: a.upload_id, data_base64: a.data_base64 }).collect(),
+            ),
+            Event::UserMessage { text, attachments } => A::UserMessage {
+                text,
+                attachments: attachments
+                    .into_iter()
+                    .map(|a| acp::UserAttachment { name: a.name, mime: a.mime, upload_id: a.upload_id, data_base64: a.data_base64 })
+                    .collect(),
+            },
+            Event::Plan(entries) => {
+                A::Plan(entries.into_iter().map(|e| acp::PlanEntry { content: e.content, status: e.status, priority: e.priority }).collect())
+            }
+            Event::Commands(commands) => {
+                A::Commands(commands.into_iter().map(|c| acp::AgentCommand { name: c.name, description: c.description, hint: c.hint }).collect())
+            }
         })
     }
 }
@@ -236,11 +269,7 @@ mod tests {
 
     #[test]
     fn events_and_commands_round_trip() {
-        let c = Command::Prompt {
-            text: "hi".into(),
-            attachments: vec![],
-            entry: Some(Entry::User { text: "hi".into(), names: vec!["a.png".into()] }),
-        };
+        let c = Command::Prompt { text: "hi".into(), attachments: vec![], entry: Some(Entry::User { text: "hi".into(), names: vec!["a.png".into()] }) };
         let back: Command = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert!(matches!(back, Command::Prompt { entry: Some(Entry::User { .. }), .. }));
         let set = Command::SetConfig("model".into(), ConfigValue::Id("fable".into()));
@@ -259,12 +288,12 @@ mod tests {
         let wire: Event = serde_json::from_str(&serde_json::to_string(&wire).unwrap()).unwrap();
         let (got_tx, got_rx) = std::sync::mpsc::channel();
         let ev = event_into_acp(wire, move |request, answer| {
-                std::thread::spawn(move || {
-                    let a = futures::executor::block_on(answer).unwrap();
-                    let _ = got_tx.send((request, a));
-                });
-            })
-            .unwrap();
+            std::thread::spawn(move || {
+                let a = futures::executor::block_on(answer).unwrap();
+                let _ = got_tx.send((request, a));
+            });
+        })
+        .unwrap();
         let acp::Event::PermissionRequest { reply: view_reply, options, .. } = ev else { panic!("not a permission request") };
         // an option kind sill does not know stays itself through the conversion
         assert!(matches!(&options[0].kind, acp::PermissionOptionKind::Other(k) if k == "_custom"));

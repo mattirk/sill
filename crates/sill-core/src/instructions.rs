@@ -37,7 +37,18 @@ pub fn tool_dirs(home: &Path) -> Vec<String> {
             add(stable);
         }
     }
-    for rel in ["go/bin", ".npm-global/bin", ".bun/bin", ".deno/bin", ".volta/bin", ".pyenv/bin", ".local/share/pnpm", ".nix-profile/bin", ".ghcup/bin", ".dotnet/tools"] {
+    for rel in [
+        "go/bin",
+        ".npm-global/bin",
+        ".bun/bin",
+        ".deno/bin",
+        ".volta/bin",
+        ".pyenv/bin",
+        ".local/share/pnpm",
+        ".nix-profile/bin",
+        ".ghcup/bin",
+        ".dotnet/tools",
+    ] {
         add(home.join(rel));
     }
     if let Ok(rd) = std::fs::read_dir(home.join(".nvm/versions/node")) {
@@ -67,11 +78,7 @@ fn apexes(patterns: &[String]) -> Vec<String> {
 
 /// A list for a sentence: the first `n`, then "and N more".
 fn some(items: &[String], n: usize) -> String {
-    if items.len() <= n {
-        items.join(", ")
-    } else {
-        format!("{} and {} more", items[..n].join(", "), items.len() - n)
-    }
+    if items.len() <= n { items.join(", ") } else { format!("{} and {} more", items[..n].join(", "), items.len() - n) }
 }
 
 /// What this session's jail is like, from its policy and the host (SPEC §3.1): the write model,
@@ -126,8 +133,13 @@ pub fn facts_block(policy: &Policy, home: &Path) -> String {
         lines.push(format!("Not on PATH but present: {}.", tools.join(", ")));
     }
     lines.push("What changes on the host outside pinned folders while this session runs (an install, a build done on the host) may not show here until the session restarts.".into());
-    format!("[{}]", lines.join("
-"))
+    format!(
+        "[{}]",
+        lines.join(
+            "
+"
+        )
+    )
 }
 
 /// What a ghost session's agent is told on top of the facts (docs/memory.md §3.2).

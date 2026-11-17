@@ -7,12 +7,7 @@ fn invalid(s: impl ToString) -> anyhow::Error {
     Error::invalid_params(s.to_string()).into()
 }
 fn domain(c: &'static str, s: &str) -> anyhow::Error {
-    sill_core::sfp::DomainError {
-        code: c,
-        message: s.into(),
-        details: None,
-    }
-    .into()
+    sill_core::sfp::DomainError { code: c, message: s.into(), details: None }.into()
 }
 fn args<T: serde::de::DeserializeOwned>(v: Value) -> Result<T> {
     serde_json::from_value(v).map_err(invalid)
@@ -68,42 +63,23 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 Ok(d)
             })?;
             let _ = sill_core::memory::refresh_snapshot();
-            bounded(api::Compacted {
-                compacted: done.compacted.to_string(),
-                trimmed: done.trimmed.to_string(),
-                deleted: done.deleted.to_string(),
-            })
+            bounded(api::Compacted { compacted: done.compacted.to_string(), trimmed: done.trimmed.to_string(), deleted: done.deleted.to_string() })
         }
         "_sill/memory.forget" => {
             let _: sill_proto::Empty = args(p)?;
-            let ids = hub.with_store(|s| {
-                Ok(s.sessions()?
-                    .into_iter()
-                    .filter(|s| s.ended_at.is_some())
-                    .map(|s| s.id)
-                    .collect::<Vec<_>>())
-            })?;
+            let ids = hub.with_store(|s| Ok(s.sessions()?.into_iter().filter(|s| s.ended_at.is_some()).map(|s| s.id).collect::<Vec<_>>()))?;
             for id in &ids {
                 hub.delete_session(id)?;
             }
-            bounded(api::Forgotten {
-                deleted: ids.len().to_string(),
-            })
+            bounded(api::Forgotten { deleted: ids.len().to_string() })
         }
         "_sill/memory.list" => {
             let a: api::List = args(p)?;
             let n = limit(a.limit)?;
-            let store =
-                sill_core::store::Store::open_read_only(&sill_core::store::default_path()?)?;
+            let store = sill_core::store::Store::open_read_only(&sill_core::store::default_path()?)?;
             let mut q=store.conn().prepare("SELECT id,agent,title,ended_at,CASE WHEN instr(summary,char(10))>0 THEN substr(summary,1,instr(summary,char(10))-1) ELSE summary END FROM sessions WHERE ghost=0 AND ended_at IS NOT NULL AND (?1 IS NULL OR id>?1) ORDER BY id LIMIT ?2")?;
             let rows = q.query_map(rusqlite::params![a.after, (n + 1) as i64], |r| {
-                Ok(api::Session {
-                    session_id: r.get(0)?,
-                    agent: r.get(1)?,
-                    title: r.get(2)?,
-                    ended_at: r.get::<_, i64>(3)?.to_string(),
-                    summary: r.get(4)?,
-                })
+                Ok(api::Session { session_id: r.get(0)?, agent: r.get(1)?, title: r.get(2)?, ended_at: r.get::<_, i64>(3)?.to_string(), summary: r.get(4)? })
             })?;
             let mut sessions = Vec::new();
             let mut bytes = 0;
@@ -121,11 +97,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 bytes += size;
                 sessions.push(row);
             }
-            let next = if more {
-                sessions.last().map(|s| s.session_id.clone())
-            } else {
-                None
-            };
+            let next = if more { sessions.last().map(|s| s.session_id.clone()) } else { None };
             bounded(api::Page { sessions, next })
         }
         "_sill/memory.text" => bounded(text_page(hub, conn, args(p)?)?),
@@ -142,26 +114,19 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let n = limit(a.limit)?;
             let start = a.after.unwrap_or(0) as usize;
             if start > 500 || a.query.len() > 4096 {
-                return Err(invalid(
-                    "search cursor exceeds 500 or query exceeds 4096 bytes",
-                ));
+                return Err(invalid("search cursor exceeds 500 or query exceeds 4096 bytes"));
             }
             let q = sill_memory::Query::parse(&a.query, &hub.home);
             if q.is_empty() {
                 return Err(invalid("empty search"));
             }
-            let store =
-                sill_core::store::Store::open_read_only(&sill_core::store::default_path()?)?;
+            let store = sill_core::store::Store::open_read_only(&sill_core::store::default_path()?)?;
             let mut hits = Vec::new();
             let mut accepted = 0;
             let mut bytes = 0;
             let mut more = false;
             sill_memory::search_visit(store.conn(), &q, sill_core::store::now(), 500, |h| {
-                let ghost: bool = store.conn().query_row(
-                    "SELECT ghost FROM sessions WHERE id=?1",
-                    [&h.session.id],
-                    |r| r.get(0),
-                )?;
+                let ghost: bool = store.conn().query_row("SELECT ghost FROM sessions WHERE id=?1", [&h.session.id], |r| r.get(0))?;
                 if ghost {
                     return Ok(true);
                 }
@@ -169,10 +134,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                     accepted += 1;
                     return Ok(true);
                 }
-                let hit = api::Hit {
-                    text: sill_memory::hit_lines(&h, &hub.home),
-                    session_id: h.session.id,
-                };
+                let hit = api::Hit { text: sill_memory::hit_lines(&h, &hub.home), session_id: h.session.id };
                 let size = serde_json::to_vec(&hit)?.len();
                 if size > 4 * 1024 * 1024 {
                     return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(4194304), "memory hit exceeds 4 MiB"));
@@ -192,33 +154,32 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
         "_sill/memory.notes.list" => {
             let a: api::NotesList = args(p)?;
             let n = limit(a.limit)?;
-            let after = a
-                .after
-                .as_deref()
-                .unwrap_or("0")
-                .parse::<i64>()
-                .map_err(invalid)?;
-            let store =
-                sill_core::store::Store::open_read_only(&sill_core::store::default_path()?)?;
+            let after = a.after.as_deref().unwrap_or("0").parse::<i64>().map_err(invalid)?;
+            let store = sill_core::store::Store::open_read_only(&sill_core::store::default_path()?)?;
             exact(&store, &a.session_id)?;
-            let mut q=store.conn().prepare("SELECT rowid,ts,kind,text,length(CAST(text AS BLOB)) FROM memories WHERE session_id=?1 AND rowid>?2 ORDER BY rowid LIMIT ?3")?;
+            let mut q = store
+                .conn()
+                .prepare("SELECT rowid,ts,kind,text,length(CAST(text AS BLOB)) FROM memories WHERE session_id=?1 AND rowid>?2 ORDER BY rowid LIMIT ?3")?;
             let mut rows = q.query(rusqlite::params![a.session_id, after, (n + 1) as i64])?;
             let mut notes = Vec::new();
             let mut bytes = 0;
             let mut more = false;
             while let Some(r) = rows.next()? {
                 if r.get::<_, i64>(4)? > 4 * 1024 * 1024 {
-                    return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(4194304), "memory note exceeds 4 MiB; use memory.text instead"));
+                    return Err(sill_core::sfp::DomainError::limit(
+                        sill_proto::rpc::LimitScope::Record,
+                        Some(4194304),
+                        "memory note exceeds 4 MiB; use memory.text instead",
+                    ));
                 }
-                let note = api::Note {
-                    cursor: r.get::<_, i64>(0)?.to_string(),
-                    timestamp: r.get::<_, i64>(1)?.to_string(),
-                    kind: r.get(2)?,
-                    text: r.get(3)?,
-                };
+                let note = api::Note { cursor: r.get::<_, i64>(0)?.to_string(), timestamp: r.get::<_, i64>(1)?.to_string(), kind: r.get(2)?, text: r.get(3)? };
                 let size = serde_json::to_vec(&note)?.len();
                 if size > 4 * 1024 * 1024 {
-                    return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(4194304), "encoded memory note exceeds 4 MiB; use memory.text instead"));
+                    return Err(sill_core::sfp::DomainError::limit(
+                        sill_proto::rpc::LimitScope::Record,
+                        Some(4194304),
+                        "encoded memory note exceeds 4 MiB; use memory.text instead",
+                    ));
                 }
                 if notes.len() == n || bytes + size > 4 * 1024 * 1024 {
                     more = true;
@@ -227,11 +188,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 bytes += size;
                 notes.push(note);
             }
-            let next = if more {
-                notes.last().map(|n| n.cursor.clone())
-            } else {
-                None
-            };
+            let next = if more { notes.last().map(|n| n.cursor.clone()) } else { None };
             bounded(api::Notes { notes, next })
         }
         "_sill/memory.notes.add" => {
@@ -292,10 +249,7 @@ fn leases() -> &'static Mutex<HashMap<String, TextLease>> {
     LEASES.get_or_init(Default::default)
 }
 pub(super) fn sweep() {
-    leases()
-        .lock()
-        .unwrap()
-        .retain(|_, l| l.expires > Instant::now());
+    leases().lock().unwrap().retain(|_, l| l.expires > Instant::now());
 }
 pub(super) fn disconnect(conn: u64) {
     leases().lock().unwrap().retain(|_, l| l.conn != conn);
@@ -325,7 +279,8 @@ impl std::fmt::Write for TextWriter {
             return Err(std::fmt::Error);
         }
         if Instant::now() > self.deadline {
-            self.failed = Some(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, None, "memory snapshot exceeded its 30-second build budget"));
+            self.failed =
+                Some(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, None, "memory snapshot exceeded its 30-second build budget"));
             return Err(std::fmt::Error);
         }
         if let Err(e) = self.file.write_all(s.as_bytes()) {
@@ -337,26 +292,19 @@ impl std::fmt::Write for TextWriter {
     }
 }
 fn create_text(hub: &Hub, conn: u64, a: &api::TextRead, identity: &str) -> Result<String> {
-    let id = format!(
-        "{}{}{}{}",
-        sill_core::store::new_id(),
-        sill_core::store::new_id(),
-        sill_core::store::new_id(),
-        sill_core::store::new_id()
-    );
+    let id = format!("{}{}{}{}", sill_core::store::new_id(), sill_core::store::new_id(), sill_core::store::new_id(), sill_core::store::new_id());
     {
         let mut leases = leases().lock().unwrap();
         leases.retain(|_, l| l.expires > Instant::now());
         if leases.len() >= 32
             || leases.values().filter(|l| l.conn == conn).count() >= 4
-            || leases
-                .values()
-                .map(|l| l.bytes)
-                .sum::<usize>()
-                .saturating_add(MAX_TEXT_BYTES)
-                > MAX_TEXT_TOTAL
+            || leases.values().map(|l| l.bytes).sum::<usize>().saturating_add(MAX_TEXT_BYTES) > MAX_TEXT_TOTAL
         {
-            return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Capacity, None, "memory snapshot lease or disk budget exhausted; close old snapshots"));
+            return Err(sill_core::sfp::DomainError::limit(
+                sill_proto::rpc::LimitScope::Capacity,
+                None,
+                "memory snapshot lease or disk budget exhausted; close old snapshots",
+            ));
         }
         leases.insert(
             id.clone(),
@@ -376,31 +324,14 @@ fn create_text(hub: &Hub, conn: u64, a: &api::TextRead, identity: &str) -> Resul
     let file = {
         use std::os::unix::fs::OpenOptionsExt;
         let path = sill_proto::runtime_dir()?.join(format!(".memory-{id}"));
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)?;
+        let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&path)?;
         // Unlink immediately: crash, disconnect, expiry and all errors cannot leave exports behind.
         std::fs::remove_file(&path)?;
         file
     };
-    let mut writer = TextWriter {
-        file,
-        bytes: 0,
-        failed: None,
-        deadline: Instant::now() + Duration::from_secs(30),
-    };
+    let mut writer = TextWriter { file, bytes: 0, failed: None, deadline: Instant::now() + Duration::from_secs(30) };
     let store = sill_core::store::Store::open_read_only(&sill_core::store::default_path()?)?;
-    let ghost: Option<bool> = store
-        .conn()
-        .query_row(
-            "SELECT ghost FROM sessions WHERE id=?1",
-            [&a.session_id],
-            |r| r.get(0),
-        )
-        .optional()?;
+    let ghost: Option<bool> = store.conn().query_row("SELECT ghost FROM sessions WHERE id=?1", [&a.session_id], |r| r.get(0)).optional()?;
     if ghost != Some(false) {
         return Err(domain("not_found", "memory session not found"));
     }
@@ -409,37 +340,14 @@ fn create_text(hub: &Hub, conn: u64, a: &api::TextRead, identity: &str) -> Resul
     if largest > 64 * 1024 * 1024 {
         return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(67108864), "memory record exceeds 64 MiB"));
     }
-    let info = sill_memory::find_session(store.conn(), &a.session_id)?
-        .ok_or_else(|| domain("not_found", "session not found"))?;
+    let info = sill_memory::find_session(store.conn(), &a.session_id)?.ok_or_else(|| domain("not_found", "session not found"))?;
     let rendered = match a.format {
-        api::Format::Show => sill_memory::show_to(
-            store.conn(),
-            &info,
-            &sill_core::memory::kept_of(&a.session_id),
-            &hub.home,
-            &mut writer,
-        ),
-        api::Format::Transcript => {
-            sill_memory::transcript_to(store.conn(), &info, a.grep.as_deref(), &mut writer)
-        }
-        api::Format::Export => sill_memory::export_markdown_to(
-            store.conn(),
-            &info,
-            &sill_core::memory::kept_of(&a.session_id),
-            &hub.home,
-            &mut writer,
-        ),
+        api::Format::Show => sill_memory::show_to(store.conn(), &info, &sill_core::memory::kept_of(&a.session_id), &hub.home, &mut writer),
+        api::Format::Transcript => sill_memory::transcript_to(store.conn(), &info, a.grep.as_deref(), &mut writer),
+        api::Format::Export => sill_memory::export_markdown_to(store.conn(), &info, &sill_core::memory::kept_of(&a.session_id), &hub.home, &mut writer),
         api::Format::Recall => {
-            let row = store
-                .session_exact(&a.session_id)?
-                .ok_or_else(|| domain("not_found", "session not found"))?;
-            let text = sill_core::memory::recall(
-                &store,
-                &row,
-                &info.pins,
-                &hub.home,
-                sill_core::config::load().memory_recall(),
-            );
+            let row = store.session_exact(&a.session_id)?.ok_or_else(|| domain("not_found", "session not found"))?;
+            let text = sill_core::memory::recall(&store, &row, &info.pins, &hub.home, sill_core::config::load().memory_recall());
             std::fmt::Write::write_str(&mut writer, &text).map_err(Into::into)
         }
     };
@@ -451,12 +359,7 @@ fn create_text(hub: &Hub, conn: u64, a: &api::TextRead, identity: &str) -> Resul
     writer.file.seek(SeekFrom::Start(0))?;
     let fingerprint = sill_core::keep::sha256_reader(&mut writer.file)?;
     let mut leases = leases().lock().unwrap();
-    let lease = leases.get_mut(&id).ok_or_else(|| {
-        domain(
-            "snapshot_expired",
-            "connection closed while building memory snapshot",
-        )
-    })?;
+    let lease = leases.get_mut(&id).ok_or_else(|| domain("snapshot_expired", "connection closed while building memory snapshot"))?;
     lease.file = Some(writer.file);
     lease.bytes = writer.bytes;
     lease.fingerprint = fingerprint;
@@ -474,57 +377,30 @@ fn text_page(hub: &Hub, conn: u64, a: api::TextRead) -> Result<api::TextPage> {
     if n == 0 || n > 1024 * 1024 {
         return Err(invalid("length must be 1–1048576"));
     }
-    let offset = a
-        .offset
-        .as_deref()
-        .unwrap_or("0")
-        .parse::<usize>()
-        .map_err(invalid)?;
-    let identity = sill_core::sfp::create_fingerprint(&serde_json::to_string(&(
-        &a.session_id,
-        &a.format,
-        &a.grep,
-    ))?);
+    let offset = a.offset.as_deref().unwrap_or("0").parse::<usize>().map_err(invalid)?;
+    let identity = sill_core::sfp::create_fingerprint(&serde_json::to_string(&(&a.session_id, &a.format, &a.grep))?);
     let id = match &a.snapshot_id {
         Some(id) => id.clone(),
         None => {
             if offset != 0 || a.fingerprint.is_some() {
-                return Err(domain(
-                    "invalid_cursor",
-                    "start a new memory snapshot at offset zero without a fingerprint",
-                ));
+                return Err(domain("invalid_cursor", "start a new memory snapshot at offset zero without a fingerprint"));
             }
             create_text(hub, conn, &a, &identity)?
         }
     };
     let mut leases = leases().lock().unwrap();
     leases.retain(|_, l| l.expires > Instant::now());
-    let lease = leases
-        .get_mut(&id)
-        .filter(|l| l.conn == conn)
-        .ok_or_else(|| {
-            domain(
-                "snapshot_expired",
-                "memory snapshot expired or belongs to another connection",
-            )
-        })?;
+    let lease =
+        leases.get_mut(&id).filter(|l| l.conn == conn).ok_or_else(|| domain("snapshot_expired", "memory snapshot expired or belongs to another connection"))?;
     if lease.session != a.session_id
         || lease.identity != identity
         || offset > lease.bytes
-        || a.fingerprint
-            .as_ref()
-            .is_some_and(|f| f != &lease.fingerprint)
+        || a.fingerprint.as_ref().is_some_and(|f| f != &lease.fingerprint)
         || (offset > 0 && a.fingerprint.is_none())
     {
-        return Err(domain(
-            "invalid_cursor",
-            "memory snapshot parameters or fingerprint do not match",
-        ));
+        return Err(domain("invalid_cursor", "memory snapshot parameters or fingerprint do not match"));
     }
-    let file = lease
-        .file
-        .as_mut()
-        .ok_or_else(|| domain("busy", "memory snapshot is still building"))?;
+    let file = lease.file.as_mut().ok_or_else(|| domain("busy", "memory snapshot is still building"))?;
     file.seek(SeekFrom::Start(offset as u64))?;
     let mut bytes = vec![0; n.min(lease.bytes - offset)];
     file.read_exact(&mut bytes)?;
@@ -563,11 +439,7 @@ mod lease_tests {
             file: None,
             bytes: 0,
             fingerprint: String::new(),
-            expires: if expired {
-                Instant::now() - Duration::from_secs(1)
-            } else {
-                Instant::now() + TEXT_TTL
-            },
+            expires: if expired { Instant::now() - Duration::from_secs(1) } else { Instant::now() + TEXT_TTL },
             deadline: Instant::now() + Duration::from_secs(1800),
         };
         {

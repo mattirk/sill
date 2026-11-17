@@ -104,10 +104,7 @@ fn config_file(path: &Path) -> Vec<(String, String)> {
     let mut c = std::process::Command::new("git");
     c.arg("config").arg("--file").arg(path).args(["--list", "-z"]).env("GIT_CONFIG_NOSYSTEM", "1");
     let Ok(out) = run(c) else { return vec![] };
-    String::from_utf8_lossy(&out.stdout)
-        .split('\0')
-        .filter_map(|e| e.split_once('\n').map(|(k, v)| (k.to_ascii_lowercase(), v.to_string())))
-        .collect()
+    String::from_utf8_lossy(&out.stdout).split('\0').filter_map(|e| e.split_once('\n').map(|(k, v)| (k.to_ascii_lowercase(), v.to_string()))).collect()
 }
 
 /// Filter names `.gitattributes` files at HEAD and `info/attributes` ask for.
@@ -155,8 +152,7 @@ pub fn inspect(path: &Path) -> Result<std::result::Result<Source, Refusal>> {
     }
     if get("extensions.partialclone").is_some()
         || config.iter().any(|(k, v)| {
-            (k.starts_with("remote.") && k.ends_with(".promisor") && v == "true")
-                || (k.starts_with("remote.") && k.ends_with(".partialclonefilter"))
+            (k.starts_with("remote.") && k.ends_with(".promisor") && v == "true") || (k.starts_with("remote.") && k.ends_with(".partialclonefilter"))
         })
     {
         return Ok(Err(Refusal::PartialClone));
@@ -187,9 +183,7 @@ pub fn inspect(path: &Path) -> Result<std::result::Result<Source, Refusal>> {
     let global: Vec<(String, String)> = git.config().into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
     let defined = |name: &str| {
         let prefix = format!("filter.{}.", name.to_ascii_lowercase());
-        config.iter().chain(global.iter()).any(|(k, _)| {
-            k.starts_with(&prefix) && [".clean", ".smudge", ".process"].iter().any(|s| k.ends_with(s))
-        })
+        config.iter().chain(global.iter()).any(|(k, _)| k.starts_with(&prefix) && [".clean", ".smudge", ".process"].iter().any(|s| k.ends_with(s)))
     };
     if filters.iter().any(|f| defined(f)) {
         return Ok(Err(Refusal::FilterDrivers));
@@ -311,10 +305,7 @@ fn create_as(source: &Source, id: &str, name: &str, path: &Path, operation: &str
         std::fs::write(path.join(".git").join(MARKER), operation)?;
     }
     let mut c = std::process::Command::new("git");
-    c.args(["init", "-q", "--template="])
-        .arg(format!("--object-format={}", source.object_format))
-        .arg(path)
-        .env("GIT_CONFIG_NOSYSTEM", "1");
+    c.args(["init", "-q", "--template="]).arg(format!("--object-format={}", source.object_format)).arg(path).env("GIT_CONFIG_NOSYSTEM", "1");
     ok(c, "init")?;
     std::fs::create_dir_all(path.join(".git/objects/info"))?;
     std::fs::write(path.join(".git/objects/info/alternates"), format!("{}\n", objects.display()))?;
@@ -330,7 +321,8 @@ fn create_as(source: &Source, id: &str, name: &str, path: &Path, operation: &str
     if !warm {
         // a fresh repository with sill's own config: check out on it directly, hooks and fsmonitor off
         let mut c = std::process::Command::new("git");
-        c.arg("-C").arg(path)
+        c.arg("-C")
+            .arg(path)
             .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "advice.detachedHead=false"])
             .args(["checkout", "-q", "-b", &branch, &source.head])
             .env("GIT_CONFIG_NOSYSTEM", "1");
@@ -587,12 +579,7 @@ pub fn set_destination(source: &Path, clone: &Path, id: &str, branch: &str, work
 /// None when HEAD is detached otherwise, or unreadable.
 pub fn clone_branch(clone: &Path) -> Option<String> {
     // the agent writes this folder: only a regular file is read, never through a link or a FIFO
-    let text = |rel: &str| {
-        crate::safe_fs::read_file_beneath(clone, Path::new(rel), 64 * 1024)
-            .ok()
-            .flatten()
-            .and_then(|b| String::from_utf8(b).ok())
-    };
+    let text = |rel: &str| crate::safe_fs::read_file_beneath(clone, Path::new(rel), 64 * 1024).ok().flatten().and_then(|b| String::from_utf8(b).ok());
     let named = |t: String| t.trim().strip_prefix("refs/heads/").filter(|b| !b.is_empty()).map(str::to_string);
     if let Some(b) = text(".git/HEAD").and_then(|t| named(t.trim().strip_prefix("ref: ").unwrap_or("").to_string())) {
         return Some(b);
@@ -711,9 +698,9 @@ fn read_tree_stop(stderr: &str) -> Stop {
     if overlap.is_empty() && !untracked.is_empty() { Stop::Untracked(untracked) } else { Stop::Overlap(overlap) }
 }
 
+mod carry;
 pub mod flow;
 pub mod records;
-mod carry;
 mod seed;
 
 #[cfg(test)]

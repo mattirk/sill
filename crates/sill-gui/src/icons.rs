@@ -22,10 +22,7 @@ const STOP: &str = "M5 5H19V19H5Z";
 /// 24×24 path data). Looked up by name with [`line`].
 const LINES: &[(&str, &str)] = &[
     // The + menu modes: an upright shelf, a divided drawer, and a wide full window.
-    (
-        "panel-right",
-        "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM15 3v18",
-    ),
+    ("panel-right", "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM15 3v18"),
     (
         // Shelf mode: a narrow upright panel, as the window stands at the screen's edge
         "panel",
@@ -33,60 +30,30 @@ const LINES: &[(&str, &str)] = &[
     ),
     ("window-full", "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"),
     // managed processes (lucide server): the composer bar's indicator
-    (
-        "processes",
-        "M2 2h20v8h-20zM2 14h20v8h-20zM6 6L6.01 6M6 18L6.01 18",
-    ),
+    ("processes", "M2 2h20v8h-20zM2 14h20v8h-20zM6 6L6.01 6M6 18L6.01 18"),
     // commands the agent has running in the jail (lucide activity), beside `processes`
-    (
-        "running",
-        "M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2",
-    ),
-    (
-        "sessions",
-        "M3 5h.01M3 12h.01M3 19h.01M8 5h13M8 12h13M8 19h13",
-    ),
+    ("running", "M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"),
+    ("sessions", "M3 5h.01M3 12h.01M3 19h.01M8 5h13M8 12h13M8 19h13"),
     ("changes", "M12 3v14M5 10h14M5 21h14"),
-    (
-        "files",
-        "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z",
-    ),
-    (
-        "processes",
-        "M2 2h20v8h-20zM2 14h20v8h-20zM6 6L6.01 6M6 18L6.01 18",
-    ),
-    (
-        "list-tree",
-        "M21 12h-8M21 6H8M21 18h-8M3 6v4c0 1.1.9 2 2 2h3M3 10v6c0 1.1.9 2 2 2h3",
-    ),
-    (
-        "git-compare",
-        "M15 18a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M3 6a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M13 6h3a2 2 0 0 1 2 2v7M11 18H8a2 2 0 0 1-2-2V9",
-    ),
+    ("files", "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"),
+    ("processes", "M2 2h20v8h-20zM2 14h20v8h-20zM6 6L6.01 6M6 18L6.01 18"),
+    ("list-tree", "M21 12h-8M21 6H8M21 18h-8M3 6v4c0 1.1.9 2 2 2h3M3 10v6c0 1.1.9 2 2 2h3"),
+    ("git-compare", "M15 18a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M3 6a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M13 6h3a2 2 0 0 1 2 2v7M11 18H8a2 2 0 0 1-2-2V9"),
     (
         "folder-open",
         "m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2",
     ),
-    (
-        "folder-plus",
-        "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2ZM12 10v6M9 13h6",
-    ),
+    ("folder-plus", "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2ZM12 10v6M9 13h6"),
     ("x", "M18 6 6 18M0 0m6 6 12 12"),
     ("pen", "m16 3 5 5M3 21l5-1L21 7a2.12 2.12 0 0 0-5-3L3 17z"),
     // a session's test desktop, shown in the conversation's place (lucide monitor)
-    (
-        "monitor",
-        "M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM8 21h8M12 17v4",
-    ),
+    ("monitor", "M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM8 21h8M12 17v4"),
     // a session's Permissions (lucide shield)
     (
         "shield",
         "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
     ),
-    (
-        "search",
-        "M11 3a8 8 0 1 0 0 16 8 8 0 0 0 0-16M21 21l-4.3-4.3",
-    ),
+    ("search", "M11 3a8 8 0 1 0 0 16 8 8 0 0 0 0-16M21 21l-4.3-4.3"),
     // the reader's bar: history, pin, and the rendered view (`code`, below, is source)
     ("arrow-left", "m12 19-7-7 7-7M19 12H5"),
     ("arrow-right", "M5 12h14M12 5l7 7-7 7"),
@@ -94,47 +61,26 @@ const LINES: &[(&str, &str)] = &[
         "pin",
         "M12 17v5M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z",
     ),
-    (
-        "eye",
-        "M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0",
-    ),
-    (
-        "refresh",
-        "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8M21 3v5h-5M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16M8 16H3v5",
-    ),
-    (
-        "trash",
-        "M10 11v6M14 11v6M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2",
-    ),
+    ("eye", "M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"),
+    ("refresh", "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8M21 3v5h-5M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16M8 16H3v5"),
+    ("trash", "M10 11v6M14 11v6M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"),
     (
         "brain",
         "M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18ZM12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18ZM15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4M17.599 6.5a3 3 0 0 0 .399-1.375M6.003 5.125A3 3 0 0 0 6.401 6.5M3.477 10.896a4 4 0 0 1 .585-.396M19.938 10.5a4 4 0 0 1 .585.396M6 18a4 4 0 0 1-1.967-.516M19.967 17.484A4 4 0 0 1 18 18",
     ),
-    (
-        "ghost",
-        "M9 10h.01M15 10h.01M12 2a8 8 0 0 0-8 8v12l3-3 2.5 2.5L12 19l2.5 2.5L17 19l3 3V10a8 8 0 0 0-8-8z",
-    ),
+    ("ghost", "M9 10h.01M15 10h.01M12 2a8 8 0 0 0-8 8v12l3-3 2.5 2.5L12 19l2.5 2.5L17 19l3 3V10a8 8 0 0 0-8-8z"),
     ("chevron-right", "m9 18 6-6-6-6"),
     ("chevron-left", "m15 18-6-6 6-6"),
     ("chevron-down", "m6 9 6 6 6-6"),
     ("chevron-up", "m18 15-6-6-6 6"),
     ("check", "M20 6 9 17l-5-5"),
-    (
-        "copy",
-        "M10 8h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2zM4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2",
-    ),
-    (
-        "file",
-        "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2zM14 2v5a1 1 0 0 0 1 1h5",
-    ),
+    ("copy", "M10 8h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2zM4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"),
+    ("file", "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2zM14 2v5a1 1 0 0 0 1 1h5"),
     (
         "file-text",
         "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2zM14 2v5a1 1 0 0 0 1 1h5M10 9H8M16 13H8M16 17H8",
     ),
-    (
-        "image",
-        "M3 3h18v18h-18zM7 9a2 2 0 1 0 4 0a2 2 0 1 0 -4 0M0 0m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21",
-    ),
+    ("image", "M3 3h18v18h-18zM7 9a2 2 0 1 0 4 0a2 2 0 1 0 -4 0M0 0m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"),
     (
         "file-archive",
         "M13.659 22H18a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v11.5M14 2v5a1 1 0 0 0 1 1h5M8 12v-1M8 18v-2M8 7V6M6 20a2 2 0 1 0 4 0a2 2 0 1 0 -4 0",
@@ -151,45 +97,26 @@ const LINES: &[(&str, &str)] = &[
         "file-terminal",
         "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2zM14 2v5a1 1 0 0 0 1 1h5M0 0m8 16 2-2-2-2M12 18h4",
     ),
-    (
-        "settings",
-        "M10 5H3M12 19H3M14 3v4M16 17v4M21 12h-9M21 19h-5M21 5h-7M8 10v4M8 12H3",
-    ),
+    ("settings", "M10 5H3M12 19H3M14 3v4M16 17v4M21 12h-9M21 19h-5M21 5h-7M8 10v4M8 12H3"),
     ("terminal", "M3 19l7-7-7-7M12 20h9"),
     (
         "agents",
         "M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2M14 2h6a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z",
     ),
     ("code", "m16 18 6-6-6-6M8 6l-6 6 6 6"),
-    (
-        "link",
-        "M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6",
-    ),
+    ("link", "M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"),
     ("plus", "M5 12h14M12 5v14"),
     // a workspace (docs/parallel-coding.md §12) and a repository kept live with a reason
-    (
-        "git-branch",
-        "M6 3v12M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a9 9 0 0 1-9 9",
-    ),
-    (
-        "alert",
-        "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3ZM12 9v4M12 17h.01",
-    ),
+    ("git-branch", "M6 3v12M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a9 9 0 0 1-9 9"),
+    ("alert", "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3ZM12 9v4M12 17h.01"),
     ("minus", "M5 12h14"),
-    (
-        "lock",
-        "M7 11V7a5 5 0 0 1 10 0v4M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z",
-    ),
-    (
-        "lock-open",
-        "M7 11V7a5 5 0 0 1 9.9-1M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z",
-    ),
+    ("lock", "M7 11V7a5 5 0 0 1 10 0v4M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z"),
+    ("lock-open", "M7 11V7a5 5 0 0 1 9.9-1M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z"),
 ];
 
 /// A line glyph by name; an unknown name is the agent ring.
 pub fn line(name: &str) -> Handle {
-    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<String, Handle>>> =
-        OnceLock::new();
+    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<String, Handle>>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     let mut cache = cache.lock().expect("the icon cache");
     if let Some(handle) = cache.get(name) {
@@ -210,10 +137,7 @@ pub fn line(name: &str) -> Handle {
 
 /// A line glyph `size` square in `color`.
 pub fn glyph<'a>(name: &str, size: f32, color: iced::Color) -> iced::widget::Svg<'a> {
-    iced::widget::svg(line(name))
-        .width(size)
-        .height(size)
-        .style(crate::style::icon(color))
+    iced::widget::svg(line(name)).width(size).height(size).style(crate::style::icon(color))
 }
 
 /// The tree's glyph for a path: a folder, open or closed,
@@ -222,33 +146,22 @@ pub fn for_path(name: &str, directory: bool, expanded: bool) -> &'static str {
     if directory {
         return if expanded { "folder-open" } else { "files" };
     }
-    let ext = name
-        .rsplit_once('.')
-        .map(|(_, e)| e.to_ascii_lowercase())
-        .unwrap_or_default();
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
     match ext.as_str() {
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "avif" | "tiff" => {
-            "image"
-        }
-        "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "7z" | "rar" | "deb" | "rpm"
-        | "jar" => "file-archive",
-        "toml" | "yaml" | "yml" | "json" | "ini" | "cfg" | "conf" | "lock" | "env"
-        | "properties" => "file-cog",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "avif" | "tiff" => "image",
+        "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "7z" | "rar" | "deb" | "rpm" | "jar" => "file-archive",
+        "toml" | "yaml" | "yml" | "json" | "ini" | "cfg" | "conf" | "lock" | "env" | "properties" => "file-cog",
         "sh" | "bash" | "zsh" | "fish" | "ps1" | "bat" => "file-terminal",
         "md" | "txt" | "rst" | "org" | "adoc" | "log" | "csv" => "file-text",
-        "rs" | "c" | "h" | "cc" | "cpp" | "hpp" | "go" | "py" | "js" | "ts" | "tsx" | "jsx"
-        | "java" | "kt" | "rb" | "php" | "cs" | "swift" | "lua" | "zig" | "hs" | "ml" | "css"
-        | "scss" | "html" | "xml" | "sql" | "proto" | "cmake" | "mk" | "nix" => "file-code",
+        "rs" | "c" | "h" | "cc" | "cpp" | "hpp" | "go" | "py" | "js" | "ts" | "tsx" | "jsx" | "java" | "kt" | "rb" | "php" | "cs" | "swift" | "lua" | "zig"
+        | "hs" | "ml" | "css" | "scss" | "html" | "xml" | "sql" | "proto" | "cmake" | "mk" | "nix" => "file-code",
         _ => "file",
     }
 }
 
 fn handle(path: &str) -> Handle {
     Handle::from_memory(
-        format!(
-            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#fff" fill-rule="evenodd" d="{path}"/></svg>"##
-        )
-        .into_bytes(),
+        format!(r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#fff" fill-rule="evenodd" d="{path}"/></svg>"##).into_bytes(),
     )
 }
 
@@ -287,16 +200,8 @@ pub fn is_builtin_agent(id: &str) -> bool {
 }
 
 /// The working-tab glyph: only the icon scales, inside a fixed slot.
-pub fn tab_agent<'a>(
-    id: &str,
-    custom: Option<&[u8]>,
-    color: iced::Color,
-    working: bool,
-) -> iced::Element<'a, crate::Message> {
-    iced::Element::new(TabAgent {
-        handle: tab_texture(id, custom, color),
-        working,
-    })
+pub fn tab_agent<'a>(id: &str, custom: Option<&[u8]>, color: iced::Color, working: bool) -> iced::Element<'a, crate::Message> {
+    iced::Element::new(TabAgent { handle: tab_texture(id, custom, color), working })
 }
 
 // Rasterize once at 8× the display size. Iced's SVG renderer uses nearest-neighbour
@@ -304,38 +209,31 @@ pub fn tab_agent<'a>(
 fn tab_texture(id: &str, custom: Option<&[u8]>, color: iced::Color) -> iced::advanced::image::Handle {
     use iced::advanced::image::Handle as Image;
     type Key = (String, bool, [u32; 4]);
-    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<Key, Image>>> =
-        OnceLock::new();
-    let key = (
-        id.to_owned(),
-        custom.is_some(),
-        [
-            color.r.to_bits(),
-            color.g.to_bits(),
-            color.b.to_bits(),
-            color.a.to_bits(),
-        ],
-    );
-    let mut cache = CACHE
-        .get_or_init(Default::default)
-        .lock()
-        .expect("tab icon cache");
-    cache.entry(key).or_insert_with(|| {
-        let [r, g, b, a] = color.into_rgba8();
-        // a registry icon: drawn as the others are, a silhouette in the tab's colour
-        if let Some(pixels) = custom.and_then(|bytes| std::str::from_utf8(bytes).ok()).and_then(|svg| crate::tray::rgba(svg, 104)) {
-            let tinted: Vec<u8> = pixels.chunks_exact(4).flat_map(|px| [r, g, b, (u16::from(px[3]) * u16::from(a) / 255) as u8]).collect();
-            return Image::from_rgba(104, 104, tinted);
-        }
-        let path = match id {
-            "claude" => CLAUDE,
-            "codex" => OPENAI,
-            "gemini" => GEMINI,
-            _ => AGENT,
-        };
-        let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="rgb({r},{g},{b})" fill-opacity="{}" d="{path}"/></svg>"#, f32::from(a) / 255.0);
-        Image::from_rgba(104, 104, crate::tray::rgba(&svg, 104).expect("built-in agent SVG"))
-    }).clone()
+    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<Key, Image>>> = OnceLock::new();
+    let key = (id.to_owned(), custom.is_some(), [color.r.to_bits(), color.g.to_bits(), color.b.to_bits(), color.a.to_bits()]);
+    let mut cache = CACHE.get_or_init(Default::default).lock().expect("tab icon cache");
+    cache
+        .entry(key)
+        .or_insert_with(|| {
+            let [r, g, b, a] = color.into_rgba8();
+            // a registry icon: drawn as the others are, a silhouette in the tab's colour
+            if let Some(pixels) = custom.and_then(|bytes| std::str::from_utf8(bytes).ok()).and_then(|svg| crate::tray::rgba(svg, 104)) {
+                let tinted: Vec<u8> = pixels.chunks_exact(4).flat_map(|px| [r, g, b, (u16::from(px[3]) * u16::from(a) / 255) as u8]).collect();
+                return Image::from_rgba(104, 104, tinted);
+            }
+            let path = match id {
+                "claude" => CLAUDE,
+                "codex" => OPENAI,
+                "gemini" => GEMINI,
+                _ => AGENT,
+            };
+            let svg = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="rgb({r},{g},{b})" fill-opacity="{}" d="{path}"/></svg>"#,
+                f32::from(a) / 255.0
+            );
+            Image::from_rgba(104, 104, crate::tray::rgba(&svg, 104).expect("built-in agent SVG"))
+        })
+        .clone()
 }
 
 struct TabAgent {
@@ -368,12 +266,7 @@ impl iced::advanced::Widget<crate::Message, iced::Theme, iced::Renderer> for Tab
         shell: &mut iced::advanced::Shell<'_, crate::Message>,
         _viewport: &iced::Rectangle,
     ) {
-        if self.working
-            && matches!(
-                event,
-                iced::Event::Window(iced::window::Event::RedrawRequested(_))
-            )
-        {
+        if self.working && matches!(event, iced::Event::Window(iced::window::Event::RedrawRequested(_))) {
             shell.request_redraw();
         }
     }
@@ -391,29 +284,14 @@ impl iced::advanced::Widget<crate::Message, iced::Theme, iced::Renderer> for Tab
         use iced::advanced::image::Renderer as _;
         static EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
         let scale = if self.working {
-            let phase = EPOCH
-                .get_or_init(std::time::Instant::now)
-                .elapsed()
-                .as_secs_f64()
-                / 2.2;
+            let phase = EPOCH.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() / 2.2;
             0.9 + 0.1 * (phase * std::f64::consts::TAU).cos() as f32
         } else {
             1.0
         };
         let bounds = layout.bounds();
         let size = bounds.size() * scale;
-        let drawing = iced::Rectangle::new(
-            iced::Point::new(
-                bounds.center_x() - size.width / 2.0,
-                bounds.center_y() - size.height / 2.0,
-            ),
-            size,
-        );
-        renderer.draw_image(
-            iced::advanced::image::Image::new(self.handle.clone())
-                .filter_method(iced::advanced::image::FilterMethod::Linear),
-            drawing,
-            bounds,
-        );
+        let drawing = iced::Rectangle::new(iced::Point::new(bounds.center_x() - size.width / 2.0, bounds.center_y() - size.height / 2.0), size);
+        renderer.draw_image(iced::advanced::image::Image::new(self.handle.clone()).filter_method(iced::advanced::image::FilterMethod::Linear), drawing, bounds);
     }
 }

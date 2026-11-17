@@ -61,12 +61,10 @@ impl App {
                 if let Some(crosscheck) = self.crosscheck_button(d) {
                     line = line.push(crosscheck);
                 }
-                let onto = ws::other_branch(d)
-                    .map(|(_, now)| now)
-                    .filter(|now| {
-                        state.apply_armed.get().is_some_and(|(w, seen)| *w == id && *seen == d.revision)
-                            || state.apply_onto.as_ref().is_some_and(|(w, b)| *w == id && b == now)
-                    });
+                let onto = ws::other_branch(d).map(|(_, now)| now).filter(|now| {
+                    state.apply_armed.get().is_some_and(|(w, seen)| *w == id && *seen == d.revision)
+                        || state.apply_onto.as_ref().is_some_and(|(w, b)| *w == id && b == now)
+                });
                 let label = onto.map_or("Apply".to_string(), |now| format!("Apply onto {now}?"));
                 let apply = keys::press_maybe(
                     button(text(label).size(style::SMALL)).padding([3, 10]).style(style::solid(P.accent)),
@@ -82,7 +80,9 @@ impl App {
                     };
                     line = line.push(tooltip(
                         apply,
-                        container(text(format!("{n} uncommitted file{}: {who}", if n == 1 { "" } else { "s" })).size(style::TINY)).padding(6).style(style::fill(P.surface)),
+                        container(text(format!("{n} uncommitted file{}: {who}", if n == 1 { "" } else { "s" })).size(style::TINY))
+                            .padding(6)
+                            .style(style::fill(P.surface)),
                         tooltip::Position::Top,
                     ));
                 } else {
@@ -101,7 +101,10 @@ impl App {
                 ));
             }
             let discard = if state.armed.get().is_some_and(|(w, seen)| *w == id && *seen == d.revision) {
-                format!("Discard {}?", if d.summary.files > 0 { format!("{} file{}", d.summary.files, if d.summary.files == 1 { "" } else { "s" }) } else { "it".into() })
+                format!(
+                    "Discard {}?",
+                    if d.summary.files > 0 { format!("{} file{}", d.summary.files, if d.summary.files == 1 { "" } else { "s" }) } else { "it".into() }
+                )
             } else {
                 "Discard".into()
             };
@@ -122,7 +125,10 @@ impl App {
                     .align_y(Alignment::Center),
                 );
             }
-            let notice = state.notices.get(&id).map(|(said, bad)| (said.as_str(), if *bad { P.error } else { P.fg_dim }))
+            let notice = state
+                .notices
+                .get(&id)
+                .map(|(said, bad)| (said.as_str(), if *bad { P.error } else { P.fg_dim }))
                 .or_else(|| d.workspace.operation.as_ref().map(|op| (op.detail.as_str(), P.warning)));
             if let Some((said, color)) = notice {
                 shelf = shelf.push(text(said).size(style::TINY).color(color).width(Fill).wrapping(text::Wrapping::WordOrGlyph));
@@ -136,18 +142,17 @@ impl App {
                     Err(e) => text(e.clone()).size(style::TINY).color(P.error).into(),
                 };
                 shelf = shelf.push(
-                    container(scrollable(body).direction(scrollable::Direction::Both { vertical: style::bar(), horizontal: style::bar() }).style(style::feed_scroll))
-                        .max_height(260)
-                        .width(Fill)
-                        .padding([4, 6])
-                        .style(style::fill(alpha(P.fg, 0.04))),
+                    container(
+                        scrollable(body).direction(scrollable::Direction::Both { vertical: style::bar(), horizontal: style::bar() }).style(style::feed_scroll),
+                    )
+                    .max_height(260)
+                    .width(Fill)
+                    .padding([4, 6])
+                    .style(style::fill(alpha(P.fg, 0.04))),
                 );
             }
         }
-        Some(
-            column![container(shelf).padding([4, 12]).width(Fill).style(style::fill(alpha(P.accent, 0.05)))]
-                .into(),
-        )
+        Some(column![container(shelf).padding([4, 12]).width(Fill).style(style::fill(alpha(P.accent, 0.05)))].into())
     }
 
     /// Refresh the Changes page when it is open (an Apply changed a checkout it shows).
@@ -167,7 +172,10 @@ pub(crate) fn chip_mark<'a>(view: &SessionView, path: &sill_proto::sessions::Hos
     }
     if let Some(live) = view.workspaces.live_reason(path) {
         return (
-            row![crate::icons::glyph(glyph, 14.0, alpha(P.fg, 0.6)), crate::icons::glyph("alert", 11.0, P.warning)].spacing(2).align_y(Alignment::Center).into(),
+            row![crate::icons::glyph(glyph, 14.0, alpha(P.fg, 0.6)), crate::icons::glyph("alert", 11.0, P.warning)]
+                .spacing(2)
+                .align_y(Alignment::Center)
+                .into(),
             Some(live.message.clone()),
         );
     }

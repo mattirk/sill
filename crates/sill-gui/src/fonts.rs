@@ -29,15 +29,8 @@ pub fn install() {
             system.load_font(Cow::Borrowed(bytes));
         }
         let db = system.raw().db_mut();
-        let variable: Vec<fontdb::FaceInfo> = db
-            .faces()
-            .filter(|face| {
-                face.families
-                    .iter()
-                    .any(|(name, _)| name == SANS_FAMILY || name == MONO_FAMILY)
-            })
-            .cloned()
-            .collect();
+        let variable: Vec<fontdb::FaceInfo> =
+            db.faces().filter(|face| face.families.iter().any(|(name, _)| name == SANS_FAMILY || name == MONO_FAMILY)).cloned().collect();
         for face in variable {
             for weight in [fontdb::Weight::NORMAL, fontdb::Weight::BOLD] {
                 if face.weight != weight {

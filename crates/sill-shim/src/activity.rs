@@ -146,10 +146,13 @@ pub fn read_procs() -> Vec<Proc> {
             continue;
         }
         p.argv = cmdline.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
-        if !listening.is_empty() && let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) {
+        if !listening.is_empty()
+            && let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd"))
+        {
             for fd in fds.flatten() {
                 if let Ok(target) = std::fs::read_link(fd.path())
-                    && let Some(inode) = target.to_str().and_then(|t| t.strip_prefix("socket:[")).and_then(|t| t.strip_suffix(']')).and_then(|t| t.parse::<u64>().ok())
+                    && let Some(inode) =
+                        target.to_str().and_then(|t| t.strip_prefix("socket:[")).and_then(|t| t.strip_suffix(']')).and_then(|t| t.parse::<u64>().ok())
                     && let Some(port) = listening.get(&inode)
                     && !p.ports.contains(port)
                 {
@@ -169,13 +172,7 @@ pub fn parse_stat(stat: &str) -> Option<Proc> {
     let f: Vec<&str> = rest.split_whitespace().collect();
     // rest[0] is field 3 (state): ppid is field 4, session 6, starttime 22
     let num = |field: usize| f.get(field - 3).and_then(|v| v.parse::<u64>().ok());
-    Some(Proc {
-        pid,
-        ppid: num(4)? as u32,
-        session: num(6)? as u32,
-        start_ticks: num(22)?,
-        ..Proc::default()
-    })
+    Some(Proc { pid, ppid: num(4)? as u32, session: num(6)? as u32, start_ticks: num(22)?, ..Proc::default() })
 }
 
 /// Listening TCP sockets of this network namespace: inode → port.
@@ -186,7 +183,8 @@ fn listening_inodes() -> HashMap<u64, u16> {
         for line in text.lines().skip(1) {
             let f: Vec<&str> = line.split_whitespace().collect();
             // local address, state 0A (listen), inode
-            if f.len() > 9 && f[3] == "0A"
+            if f.len() > 9
+                && f[3] == "0A"
                 && let Some(port) = f[1].rsplit_once(':').and_then(|(_, p)| u16::from_str_radix(p, 16).ok())
                 && let Ok(inode) = f[9].parse::<u64>()
             {
@@ -252,14 +250,7 @@ mod tests {
     use super::*;
 
     fn proc(pid: u32, ppid: u32, session: u32, argv: &str) -> Proc {
-        Proc {
-            pid,
-            ppid,
-            session,
-            argv: argv.split(' ').map(str::to_owned).collect(),
-            start_ticks: pid as u64 * 100,
-            ports: vec![],
-        }
+        Proc { pid, ppid, session, argv: argv.split(' ').map(str::to_owned).collect(), start_ticks: pid as u64 * 100, ports: vec![] }
     }
 
     #[test]
@@ -290,8 +281,7 @@ mod tests {
         let report = classify(&procs, &known);
         let commands: Vec<(u32, u32)> = report.commands.iter().map(|t| (t.pid, t.count)).collect();
         assert_eq!(commands, [(10, 3), (20, 1)]);
-        let services: Vec<(u32, Option<&str>, Option<u16>)> =
-            report.services.iter().map(|t| (t.pid, t.name.as_deref(), t.port)).collect();
+        let services: Vec<(u32, Option<&str>, Option<u16>)> = report.services.iter().map(|t| (t.pid, t.name.as_deref(), t.port)).collect();
         assert_eq!(services, [(30, None, Some(5173)), (40, Some("web"), None)]);
         assert_eq!(report.commands[0].started_ms, 1_000_000 + 10 * 100 * 1000 / 100);
     }

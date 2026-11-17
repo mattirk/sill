@@ -1,8 +1,8 @@
 //! Explicitly selected experimental native ACP v2 client. Acceptance and foreground completion
 //! are separate; native update identities/patches cross the relay without a v1 translation.
 use crate::acp::{
-    Attachment, AttachmentKind, AuthMethodInfo, Command, ConfigKind, ConfigOption, ConfigValue,
-    Controls, Event, PermissionOption, PermissionOptionKind, SessionOptions,
+    Attachment, AttachmentKind, AuthMethodInfo, Command, ConfigKind, ConfigOption, ConfigValue, Controls, Event, PermissionOption, PermissionOptionKind,
+    SessionOptions,
 };
 use agent_client_protocol::schema::{ProtocolVersion, v2};
 use agent_client_protocol::{Agent, ByteStreams, Client, Error, ErrorCode, V2ConnectionTo};
@@ -23,13 +23,7 @@ fn auth_methods(methods: &[v2::AuthMethod]) -> Vec<AuthMethodInfo> {
         .filter_map(|m| {
             let terminal = match m {
                 v2::AuthMethod::Agent(_) => None,
-                v2::AuthMethod::Terminal(t) => Some((
-                    t.args.clone(),
-                    t.env
-                        .iter()
-                        .map(|v| (v.name.clone(), v.value.clone()))
-                        .collect(),
-                )),
+                v2::AuthMethod::Terminal(t) => Some((t.args.clone(), t.env.iter().map(|v| (v.name.clone(), v.value.clone())).collect())),
                 _ => return None,
             };
             Some(AuthMethodInfo {
@@ -37,11 +31,7 @@ fn auth_methods(methods: &[v2::AuthMethod]) -> Vec<AuthMethodInfo> {
                 name: m.name().into(),
                 description: m.description().map(str::to_string),
                 terminal,
-                api_key: m
-                    .meta()
-                    .and_then(|m| m.get("api-key"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                api_key: m.meta().and_then(|m| m.get("api-key")).and_then(Value::as_str).map(str::to_string),
             })
         })
         .collect()
@@ -49,11 +39,7 @@ fn auth_methods(methods: &[v2::AuthMethod]) -> Vec<AuthMethodInfo> {
 fn controls(value: &Value) -> Controls {
     let mut out = Controls::default();
     for o in value.as_array().into_iter().flatten() {
-        let (Some(id), Some(name), Some(kind)) = (
-            o["configId"].as_str(),
-            o["name"].as_str(),
-            o["type"].as_str(),
-        ) else {
+        let (Some(id), Some(name), Some(kind)) = (o["configId"].as_str(), o["name"].as_str(), o["type"].as_str()) else {
             continue;
         };
         let kind = match kind {
@@ -67,11 +53,7 @@ fn controls(value: &Value) -> Controls {
                 };
                 let mut options = Vec::new();
                 for entry in o["options"].as_array().into_iter().flatten() {
-                    let entries = entry
-                        .get("options")
-                        .and_then(Value::as_array)
-                        .map(|v| v.as_slice())
-                        .unwrap_or_else(|| std::slice::from_ref(entry));
+                    let entries = entry.get("options").and_then(Value::as_array).map(|v| v.as_slice()).unwrap_or_else(|| std::slice::from_ref(entry));
                     for e in entries {
                         if let (Some(v), Some(name)) = (e["value"].as_str(), e["name"].as_str()) {
                             options.push((v.into(), name.into()));
@@ -82,49 +64,32 @@ fn controls(value: &Value) -> Controls {
             }
             _ => continue,
         };
-        out.options.push(ConfigOption {
-            id: id.into(),
-            name: name.into(),
-            category: o["category"].as_str().unwrap_or("").into(),
-            kind,
-        });
+        out.options.push(ConfigOption { id: id.into(), name: name.into(), category: o["category"].as_str().unwrap_or("").into(), kind });
     }
     out
 }
-async fn login(
-    cx: &V2ConnectionTo<Agent>,
-    methods: &[v2::AuthMethod],
-    id: &str,
-    key_file: Option<&std::path::Path>,
-) -> std::result::Result<(), Error> {
-    if !methods
-        .iter()
-        .any(|m| matches!(m,v2::AuthMethod::Agent(a) if a.method_id.to_string()==id))
-    {
+async fn login(cx: &V2ConnectionTo<Agent>, methods: &[v2::AuthMethod], id: &str, key_file: Option<&std::path::Path>) -> std::result::Result<(), Error> {
+    if !methods.iter().any(|m| matches!(m,v2::AuthMethod::Agent(a) if a.method_id.to_string()==id)) {
         return Err(Error::invalid_params().data("method is not an advertised agent login"));
     }
     let mut req = v2::LoginAuthRequest::new(id.to_string());
     if let Some(file) = key_file {
         let secret = std::fs::read_to_string(file).map_err(Error::into_internal_error)?;
-        req.meta = Some(serde_json::Map::from_iter([(
-            "api-key".into(),
-            json!(secret.trim()),
-        )]));
+        req.meta = Some(serde_json::Map::from_iter([("api-key".into(), json!(secret.trim()))]));
     }
     cx.send_request(req).block_task().await?;
     Ok(())
 }
-fn prompt(
-    id: &str,
-    text: String,
-    attachments: Vec<Attachment>,
-) -> std::result::Result<v2::PromptRequest, Error> {
+fn prompt(id: &str, text: String, attachments: Vec<Attachment>) -> std::result::Result<v2::PromptRequest, Error> {
     let mut blocks = vec![json!({"type":"text","text":text})];
     for a in attachments {
-        blocks.push(match a.kind{
-        AttachmentKind::Image{data_base64}=>json!({"type":"image","data":data_base64,"mimeType":a.mime}),
-        AttachmentKind::File{jail_path}=>{let path=jail_path.to_str().ok_or_else(||Error::invalid_params().data("ACP resource paths require UTF-8"))?;json!({"type":"resource_link","uri":format!("file://{path}"),"name":a.name,"mimeType":a.mime})},
-    });
+        blocks.push(match a.kind {
+            AttachmentKind::Image { data_base64 } => json!({"type":"image","data":data_base64,"mimeType":a.mime}),
+            AttachmentKind::File { jail_path } => {
+                let path = jail_path.to_str().ok_or_else(|| Error::invalid_params().data("ACP resource paths require UTF-8"))?;
+                json!({"type":"resource_link","uri":format!("file://{path}"),"name":a.name,"mimeType":a.mime})
+            }
+        });
     }
     protocol(json!({"sessionId":id,"prompt":blocks}))
 }
@@ -134,63 +99,39 @@ enum Inbound {
     Event { session_id: String, event: Event },
 }
 
-pub fn run_session(
-    stream: UnixStream,
-    opts: SessionOptions,
-    commands: async_channel::Receiver<Command>,
-    events: async_channel::Sender<Event>,
-) -> Result<()> {
+pub fn run_session(stream: UnixStream, opts: SessionOptions, commands: async_channel::Receiver<Command>, events: async_channel::Sender<Event>) -> Result<()> {
     stream.set_nonblocking(true)?;
     let stream = async_io::Async::new(stream).context("async v2 socket")?;
     let (reader, writer) = stream.split();
     let (updates, update_rx) = async_channel::bounded::<Inbound>(256);
     let permission_updates = updates.clone();
-    let cancellations =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::<oneshot::Sender<()>>::new()));
+    let cancellations = std::sync::Arc::new(std::sync::Mutex::new(Vec::<oneshot::Sender<()>>::new()));
     let permission_cancellations = cancellations.clone();
     let result = futures::executor::block_on(async {
         Client
             .v2()
             .name("sill")
             .on_receive_notification(
-                async move |notification: v2::UpdateSessionNotification,
-                            _cx: V2ConnectionTo<Agent>| {
-                    updates
-                        .try_send(Inbound::Update(notification))
-                        .map_err(Error::into_internal_error)
+                async move |notification: v2::UpdateSessionNotification, _cx: V2ConnectionTo<Agent>| {
+                    updates.try_send(Inbound::Update(notification)).map_err(Error::into_internal_error)
                 },
                 agent_client_protocol::on_receive_notification!(),
             )
             .on_receive_request(
-                async move |req: v2::RequestPermissionRequest,
-                            responder,
-                            cx: V2ConnectionTo<Agent>| {
+                async move |req: v2::RequestPermissionRequest, responder, cx: V2ConnectionTo<Agent>| {
                     let options = req
                         .options
                         .iter()
                         .map(|o| PermissionOption {
                             id: o.option_id.to_string(),
                             name: o.name.clone(),
-                            kind: serde_json::from_value(
-                                serde_json::to_value(&o.kind).unwrap_or(Value::Null),
-                            )
-                            .unwrap_or_else(|_| PermissionOptionKind::Other("unknown".into())),
+                            kind: serde_json::from_value(serde_json::to_value(&o.kind).unwrap_or(Value::Null))
+                                .unwrap_or_else(|_| PermissionOptionKind::Other("unknown".into())),
                         })
                         .collect::<Vec<_>>();
-                    let subject = req
-                        .subject
-                        .as_ref()
-                        .map(serde_json::to_value)
-                        .transpose()
-                        .map_err(Error::into_internal_error)?;
-                    let tool_call_id = subject
-                        .as_ref()
-                        .and_then(|s| {
-                            s["toolCall"]["toolCallId"]
-                                .as_str()
-                                .or_else(|| s["toolCallId"].as_str())
-                        })
-                        .map(str::to_string);
+                    let subject = req.subject.as_ref().map(serde_json::to_value).transpose().map_err(Error::into_internal_error)?;
+                    let tool_call_id =
+                        subject.as_ref().and_then(|s| s["toolCall"]["toolCallId"].as_str().or_else(|| s["toolCallId"].as_str())).map(str::to_string);
                     let (tx, rx) = oneshot::channel();
                     let title = match req.description {
                         Some(d) => format!("{}\n{}", req.title, d),
@@ -202,22 +143,14 @@ pub fn run_session(
                         pending.retain(|s| !s.is_canceled());
                         // Bound suspended SDK handlers independently from the event queue.
                         if pending.len() >= 128 {
-                            return responder.respond(protocol::<v2::RequestPermissionResponse>(
-                                json!({"outcome":{"outcome":"cancelled"}}),
-                            )?);
+                            return responder.respond(protocol::<v2::RequestPermissionResponse>(json!({"outcome":{"outcome":"cancelled"}}))?);
                         }
                         pending.push(cancel);
                     }
                     permission_updates
                         .try_send(Inbound::Event {
                             session_id: req.session_id.to_string(),
-                            event: Event::V2PermissionRequest {
-                                tool_call_id,
-                                title,
-                                subject,
-                                options: options.clone(),
-                                reply: tx,
-                            },
+                            event: Event::V2PermissionRequest { tool_call_id, title, subject, options: options.clone(), reply: tx },
                         })
                         .map_err(Error::into_internal_error)?;
                     cx.spawn(async move {
@@ -237,30 +170,16 @@ pub fn run_session(
             )
             .connect_with(ByteStreams::new(writer, reader), async |cx| {
                 let init = cx
-                    .send_request(v2::InitializeRequest::new(
-                        ProtocolVersion::V2,
-                        v2::Implementation::new("sill", env!("CARGO_PKG_VERSION")),
-                    ))
+                    .send_request(v2::InitializeRequest::new(ProtocolVersion::V2, v2::Implementation::new("sill", env!("CARGO_PKG_VERSION"))))
                     .block_task()
                     .await?;
-                if init.protocol_version != ProtocolVersion::V2
-                    || init.capabilities.session.is_none()
-                {
-                    return Err(Error::invalid_params()
-                        .data("experimental adapter requires ACP v2 session capability"));
+                if init.protocol_version != ProtocolVersion::V2 || init.capabilities.session.is_none() {
+                    return Err(Error::invalid_params().data("experimental adapter requires ACP v2 session capability"));
                 }
                 let methods = auth_methods(&init.auth_methods);
-                let images = init
-                    .capabilities
-                    .session
-                    .as_ref()
-                    .and_then(|s| s.prompt.as_ref())
-                    .is_some_and(|p| p.image.is_some());
+                let images = init.capabilities.session.as_ref().and_then(|s| s.prompt.as_ref()).is_some_and(|p| p.image.is_some());
                 let _ = events.send(Event::Capabilities { images }).await;
-                let cwd = opts
-                    .cwd
-                    .to_str()
-                    .ok_or_else(|| Error::invalid_params().data("ACP cwd requires UTF-8"))?;
+                let cwd = opts.cwd.to_str().ok_or_else(|| Error::invalid_params().data("ACP cwd requires UTF-8"))?;
                 // the pinned folders, for an agent that advertises `additionalDirectories`
                 let roots: Vec<&str> = if init.capabilities.session.as_ref().is_some_and(|s| s.additional_directories.is_some()) {
                     opts.roots.iter().filter_map(|p| p.to_str()).collect()
@@ -269,63 +188,30 @@ pub fn run_session(
                 };
                 let (session_id, resumed, config) = loop {
                     let opened = if let Some(id) = &opts.resume {
-                        let req: v2::ResumeSessionRequest =
-                            protocol(json!({"sessionId":id,"cwd":cwd,"additionalDirectories":roots}))?;
-                        cx.send_request(req)
-                            .block_task()
-                            .await
-                            .and_then(|r| Ok((id.clone(), true, json(r)?)))
+                        let req: v2::ResumeSessionRequest = protocol(json!({"sessionId":id,"cwd":cwd,"additionalDirectories":roots}))?;
+                        cx.send_request(req).block_task().await.and_then(|r| Ok((id.clone(), true, json(r)?)))
                     } else {
                         let req: v2::NewSessionRequest = protocol(json!({"cwd":cwd,"additionalDirectories":roots}))?;
-                        cx.send_request(req)
-                            .block_task()
-                            .await
-                            .and_then(|r| Ok((r.session_id.to_string(), false, json(r)?)))
+                        cx.send_request(req).block_task().await.and_then(|r| Ok((r.session_id.to_string(), false, json(r)?)))
                     };
                     match opened {
                         Ok(v) => break v,
                         Err(e) if e.code == ErrorCode::AuthRequired => {
-                            let _ = events
-                                .send(Event::AuthRequired {
-                                    message: e.message,
-                                    methods: methods.clone(),
-                                })
-                                .await;
+                            let _ = events.send(Event::AuthRequired { message: e.message, methods: methods.clone() }).await;
                             loop {
                                 match commands.recv().await {
-                                    Ok(Command::Authenticate(id)) => {
-                                        match login(&cx, &init.auth_methods, &id, None).await {
-                                            Ok(()) => break,
-                                            Err(e) => {
-                                                let _ = events
-                                                    .send(Event::AuthRequired {
-                                                        message: e.message,
-                                                        methods: methods.clone(),
-                                                    })
-                                                    .await;
-                                            }
+                                    Ok(Command::Authenticate(id)) => match login(&cx, &init.auth_methods, &id, None).await {
+                                        Ok(()) => break,
+                                        Err(e) => {
+                                            let _ = events.send(Event::AuthRequired { message: e.message, methods: methods.clone() }).await;
                                         }
-                                    }
-                                    Ok(Command::AuthenticateKey { method, key_file }) => {
-                                        match login(
-                                            &cx,
-                                            &init.auth_methods,
-                                            &method,
-                                            Some(&key_file),
-                                        )
-                                        .await
-                                        {
-                                            Ok(()) => break,
-                                            Err(e) => {
-                                                let _ = events
-                                                    .send(Event::AuthRequired {
-                                                        message: e.message,
-                                                        methods: methods.clone(),
-                                                    })
-                                                    .await;
-                                            }
+                                    },
+                                    Ok(Command::AuthenticateKey { method, key_file }) => match login(&cx, &init.auth_methods, &method, Some(&key_file)).await {
+                                        Ok(()) => break,
+                                        Err(e) => {
+                                            let _ = events.send(Event::AuthRequired { message: e.message, methods: methods.clone() }).await;
                                         }
-                                    }
+                                    },
                                     Ok(Command::RetrySession) => break,
                                     Ok(Command::Quit) | Err(_) => return Ok(()),
                                     _ => {}
@@ -335,23 +221,8 @@ pub fn run_session(
                         Err(e) => return Err(e),
                     }
                 };
-                let _ = events
-                    .send(Event::V2Ready {
-                        session_id: session_id.clone(),
-                        resumed,
-                        controls: controls(&config["configOptions"]),
-                    })
-                    .await;
-                drive(
-                    &cx,
-                    &session_id,
-                    &init.auth_methods,
-                    &commands,
-                    &update_rx,
-                    &events,
-                    &cancellations,
-                )
-                .await
+                let _ = events.send(Event::V2Ready { session_id: session_id.clone(), resumed, controls: controls(&config["configOptions"]) }).await;
+                drive(&cx, &session_id, &init.auth_methods, &commands, &update_rx, &events, &cancellations).await
             })
             .await
     });
@@ -369,9 +240,7 @@ async fn drive(
     events: &async_channel::Sender<Event>,
     cancellations: &std::sync::Mutex<Vec<oneshot::Sender<()>>>,
 ) -> std::result::Result<(), Error> {
-    type Pending = std::pin::Pin<
-        Box<dyn std::future::Future<Output = std::result::Result<v2::PromptResponse, Error>>>,
-    >;
+    type Pending = std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<v2::PromptResponse, Error>>>>;
     let mut pending: Option<Pending> = None;
     let mut active = false;
     let mut observed_active = false;
@@ -383,17 +252,12 @@ async fn drive(
             Accepted(std::result::Result<v2::PromptResponse, Error>),
         }
         let next = {
-            let input =
-                futures::future::select(Box::pin(updates.recv()), Box::pin(commands.recv()));
+            let input = futures::future::select(Box::pin(updates.recv()), Box::pin(commands.recv()));
             match pending.as_mut() {
                 Some(p) => match futures::future::select(input, p).await {
                     futures::future::Either::Right((r, _)) => Next::Accepted(r),
-                    futures::future::Either::Left((futures::future::Either::Left((v, _)), _)) => {
-                        Next::Update(v.ok())
-                    }
-                    futures::future::Either::Left((futures::future::Either::Right((v, _)), _)) => {
-                        Next::Command(v.ok())
-                    }
+                    futures::future::Either::Left((futures::future::Either::Left((v, _)), _)) => Next::Update(v.ok()),
+                    futures::future::Either::Left((futures::future::Either::Right((v, _)), _)) => Next::Command(v.ok()),
                 },
                 None => match input.await {
                     futures::future::Either::Left((v, _)) => Next::Update(v.ok()),
@@ -406,11 +270,7 @@ async fn drive(
                 pending = None;
                 match result {
                     Ok(response) => {
-                        let _ = events
-                            .send(Event::PromptAccepted {
-                                message_id: response.message_id.to_string(),
-                            })
-                            .await;
+                        let _ = events.send(Event::PromptAccepted { message_id: response.message_id.to_string() }).await;
                         if let Some(update) = deferred_idle.take() {
                             let _ = events.send(Event::V2Update { update }).await;
                             active = false;
@@ -418,19 +278,9 @@ async fn drive(
                         }
                     }
                     Err(e) => {
-                        let _ = events
-                            .send(Event::V2PromptFailed {
-                                code: format!("{:?}", e.code),
-                                message: e.message.clone(),
-                            })
-                            .await;
+                        let _ = events.send(Event::V2PromptFailed { code: format!("{:?}", e.code), message: e.message.clone() }).await;
                         if e.code == ErrorCode::AuthRequired {
-                            let _ = events
-                                .send(Event::AuthRequired {
-                                    message: e.message,
-                                    methods: auth_methods(methods),
-                                })
-                                .await;
+                            let _ = events.send(Event::AuthRequired { message: e.message, methods: auth_methods(methods) }).await;
                         }
                         active = false;
                         observed_active = false;
@@ -449,16 +299,12 @@ async fn drive(
                 }
                 let update = json(notification.update)?;
                 if update["sessionUpdate"] == "usage_update" {
-                    if let (Some(used), Some(size)) =
-                        (update["used"].as_u64(), update["size"].as_u64())
-                    {
+                    if let (Some(used), Some(size)) = (update["used"].as_u64(), update["size"].as_u64()) {
                         let _ = events.send(Event::Usage { used, size }).await;
                     }
                 }
                 if update["sessionUpdate"] == "config_option_update" {
-                    let _ = events
-                        .send(Event::Controls(controls(&update["configOptions"])))
-                        .await;
+                    let _ = events.send(Event::Controls(controls(&update["configOptions"]))).await;
                 }
                 if update["sessionUpdate"] == "state_update" {
                     match update["state"].as_str() {
@@ -490,8 +336,7 @@ async fn drive(
                     let _ = events
                         .send(Event::V2PromptFailed {
                             code: "not_dispatched".into(),
-                            message: "ACP v2 became active before this prompt could be dispatched"
-                                .into(),
+                            message: "ACP v2 became active before this prompt could be dispatched".into(),
                         })
                         .await;
                     continue;
@@ -501,9 +346,7 @@ async fn drive(
                 let _ = events.send(Event::TurnStarted).await;
                 active = true;
                 observed_active = false;
-                pending = Some(Box::pin(async move {
-                    connection.send_request(request).block_task().await
-                }));
+                pending = Some(Box::pin(async move { connection.send_request(request).block_task().await }));
             }
             Next::Command(Some(Command::Cancel)) => {
                 for pending in cancellations.lock().unwrap().drain(..) {
@@ -514,44 +357,24 @@ async fn drive(
                     cx.send_notification(v2::CancelSessionNotification::new(id.to_string()))?;
                 }
             }
-            Next::Command(Some(Command::Authenticate(method))) => {
-                match login(cx, methods, &method, None).await {
-                    Ok(()) => {
-                        let _ = events
-                            .send(Event::Other("_sill_authenticated".into()))
-                            .await;
-                    }
-                    Err(e) => {
-                        let _ = events
-                            .send(Event::AuthRequired {
-                                message: e.message,
-                                methods: auth_methods(methods),
-                            })
-                            .await;
-                    }
+            Next::Command(Some(Command::Authenticate(method))) => match login(cx, methods, &method, None).await {
+                Ok(()) => {
+                    let _ = events.send(Event::Other("_sill_authenticated".into())).await;
                 }
-            }
-            Next::Command(Some(Command::AuthenticateKey { method, key_file })) => {
-                match login(cx, methods, &method, Some(&key_file)).await {
-                    Ok(()) => {
-                        let _ = events
-                            .send(Event::Other("_sill_authenticated".into()))
-                            .await;
-                    }
-                    Err(e) => {
-                        let _ = events
-                            .send(Event::AuthRequired {
-                                message: e.message,
-                                methods: auth_methods(methods),
-                            })
-                            .await;
-                    }
+                Err(e) => {
+                    let _ = events.send(Event::AuthRequired { message: e.message, methods: auth_methods(methods) }).await;
                 }
-            }
+            },
+            Next::Command(Some(Command::AuthenticateKey { method, key_file })) => match login(cx, methods, &method, Some(&key_file)).await {
+                Ok(()) => {
+                    let _ = events.send(Event::Other("_sill_authenticated".into())).await;
+                }
+                Err(e) => {
+                    let _ = events.send(Event::AuthRequired { message: e.message, methods: auth_methods(methods) }).await;
+                }
+            },
             Next::Command(Some(Command::RetrySession)) => {
-                let _ = events
-                    .send(Event::Other("_sill_authenticated".into()))
-                    .await;
+                let _ = events.send(Event::Other("_sill_authenticated".into())).await;
             }
             Next::Command(Some(Command::SetConfig(config_id, value))) => {
                 let value = match value {
@@ -565,32 +388,22 @@ async fn drive(
                 let request: v2::SetSessionConfigOptionRequest = protocol(request)?;
                 match cx.send_request(request).block_task().await {
                     Ok(response) => {
-                        let _ = events
-                            .send(Event::Controls(controls(&json(response)?["configOptions"])))
-                            .await;
+                        let _ = events.send(Event::Controls(controls(&json(response)?["configOptions"]))).await;
                     }
                     Err(e) => {
-                        let _ = events
-                            .send(Event::ControlFailed { setting, reason: format!("set option failed: {e}") })
-                            .await;
+                        let _ = events.send(Event::ControlFailed { setting, reason: format!("set option failed: {e}") }).await;
                     }
                 }
             }
             Next::Command(Some(Command::SetMode(_))) => {
-                let _ = events
-                    .send(Event::Other(
-                        "ACP v2 uses configuration options instead of session modes".into(),
-                    ))
-                    .await;
+                let _ = events.send(Event::Other("ACP v2 uses configuration options instead of session modes".into())).await;
             }
             Next::Command(Some(Command::Quit)) | Next::Command(None) => {
                 for pending in cancellations.lock().unwrap().drain(..) {
                     let _ = pending.send(());
                 }
                 let _ = events.send(Event::V2PermissionsCancelled).await;
-                cx.send_request(v2::CloseSessionRequest::new(id.to_string()))
-                    .block_task()
-                    .await?;
+                cx.send_request(v2::CloseSessionRequest::new(id.to_string())).block_task().await?;
                 return Ok(());
             }
             Next::Update(None) => {
@@ -609,18 +422,11 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     fn update(cx: &V2ConnectionTo<Client>, body: Value) -> std::result::Result<(), Error> {
-        cx.send_notification(protocol::<v2::UpdateSessionNotification>(
-            json!({"sessionId":"native","update":body}),
-        )?)
+        cx.send_notification(protocol::<v2::UpdateSessionNotification>(json!({"sessionId":"native","update":body}))?)
     }
     fn recv(events: &async_channel::Receiver<Event>) -> Event {
         futures::executor::block_on(async {
-            match futures::future::select(
-                Box::pin(events.recv()),
-                Box::pin(async_io::Timer::after(std::time::Duration::from_secs(5))),
-            )
-            .await
-            {
+            match futures::future::select(Box::pin(events.recv()), Box::pin(async_io::Timer::after(std::time::Duration::from_secs(5)))).await {
                 futures::future::Either::Left((event, _)) => event.unwrap(),
                 _ => panic!("native v2 event deadline"),
             }
@@ -686,12 +492,7 @@ mod tests {
         let client = std::thread::spawn(move || {
             run_session(
                 ours,
-                SessionOptions {
-                    cwd: "/tmp".into(),
-                    roots: vec![],
-                    auto: crate::acp::AutoPermission::Ask,
-                    resume: resume.then(|| "native".into()),
-                },
+                SessionOptions { cwd: "/tmp".into(), roots: vec![], auto: crate::acp::AutoPermission::Ask, resume: resume.then(|| "native".into()) },
                 cmd_rx,
                 events,
             )
@@ -706,9 +507,7 @@ mod tests {
                 _ => {}
             }
         }
-        commands
-            .send_blocking(Command::Prompt("hello".into(), vec![]))
-            .unwrap();
+        commands.send_blocking(Command::Prompt("hello".into(), vec![])).unwrap();
         let mut turn = false;
         let mut accepted = false;
         let mut message_updates = 0;
@@ -721,12 +520,7 @@ mod tests {
                     assert_eq!(message_id, "user-1");
                     accepted = true;
                 }
-                Event::V2PermissionRequest {
-                    tool_call_id,
-                    subject,
-                    reply,
-                    ..
-                } => {
+                Event::V2PermissionRequest { tool_call_id, subject, reply, .. } => {
                     assert!(tool_call_id.is_none());
                     assert_eq!(subject.unwrap()["type"], "command");
                     permission = true;

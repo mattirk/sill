@@ -207,15 +207,26 @@ pub fn query(conn: &Connection, f: &Filter) -> Result<Vec<Event>> {
          ORDER BY ts DESC, id DESC",
     )?;
     let limit = if f.limit == 0 { 500 } else { f.limit };
-    let rows = st.query_map(params![f.since, f.agent, f.kind.map(|k| k.id()), f.session, f.before.map(|x|x.0), f.before.map(|x|x.1)], |r| {
+    let rows = st.query_map(params![f.since, f.agent, f.kind.map(|k| k.id()), f.session, f.before.map(|x| x.0), f.before.map(|x| x.1)], |r| {
         Ok(Event {
-            id: r.get(0)?, ts: r.get(1)?,
+            id: r.get(0)?,
+            ts: r.get(1)?,
             kind: Kind::parse(&r.get::<_, String>(2)?).unwrap_or(Kind::Folded),
-            session_id: r.get(3)?, session_title: r.get(4)?, agent: r.get(5)?,
-            ghost: r.get::<_, i32>(6)? != 0, path: read_path(r, 7)?,
-            what: r.get(8)?, hash_new: r.get(9)?, hash_old: r.get(10)?, count: r.get(11)?,
-            paths: read_paths(r, 12)?, kept_id: r.get(13)?, head_start: r.get(14)?,
-            head_end: r.get(15)?, commits: r.get(16)?, files: r.get(17)?,
+            session_id: r.get(3)?,
+            session_title: r.get(4)?,
+            agent: r.get(5)?,
+            ghost: r.get::<_, i32>(6)? != 0,
+            path: read_path(r, 7)?,
+            what: r.get(8)?,
+            hash_new: r.get(9)?,
+            hash_old: r.get(10)?,
+            count: r.get(11)?,
+            paths: read_paths(r, 12)?,
+            kept_id: r.get(13)?,
+            head_start: r.get(14)?,
+            head_end: r.get(15)?,
+            commits: r.get(16)?,
+            files: r.get(17)?,
         })
     })?;
     // Match decoded paths component-wise, never a lossy string or a newline substring.
@@ -227,10 +238,14 @@ pub fn query(conn: &Connection, f: &Filter) -> Result<Vec<Event>> {
             let matches = event.path.starts_with(path)
                 || (event.kind == Kind::Pinned && path.starts_with(&event.path))
                 || event.paths.iter().any(|p| p.starts_with(path));
-            if !matches { continue; }
+            if !matches {
+                continue;
+            }
         }
         out.push(event);
-        if out.len() == limit { break; }
+        if out.len() == limit {
+            break;
+        }
     }
     Ok(out)
 }

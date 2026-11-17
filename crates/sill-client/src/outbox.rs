@@ -60,34 +60,14 @@ impl Outbox {
         self.send_with_attachments(session_id, text, vec![])
     }
 
-    pub fn send_with_attachments(
-        &mut self,
-        session_id: &str,
-        text: String,
-        attachments: Vec<sill_proto::sfp::Attachment>,
-    ) -> Submit {
+    pub fn send_with_attachments(&mut self, session_id: &str, text: String, attachments: Vec<sill_proto::sfp::Attachment>) -> Submit {
         self.send_for(session_id, text, attachments, None)
     }
 
     /// A submission with a `purpose` (`Submit::purpose`): a prompt written for the person.
-    pub fn send_for(
-        &mut self,
-        session_id: &str,
-        text: String,
-        attachments: Vec<sill_proto::sfp::Attachment>,
-        purpose: Option<String>,
-    ) -> Submit {
-        let submit = Submit {
-            session_id: session_id.into(),
-            submission_id: crate::request_id("prompt"),
-            text,
-            attachments,
-            purpose,
-        };
-        self.pending.push(Pending {
-            submit: submit.clone(),
-            state: State::Sending,
-        });
+    pub fn send_for(&mut self, session_id: &str, text: String, attachments: Vec<sill_proto::sfp::Attachment>, purpose: Option<String>) -> Submit {
+        let submit = Submit { session_id: session_id.into(), submission_id: crate::request_id("prompt"), text, attachments, purpose };
+        self.pending.push(Pending { submit: submit.clone(), state: State::Sending });
         submit
     }
 
@@ -131,10 +111,7 @@ impl Outbox {
             return None;
         }
         pending.state = State::Checking;
-        Some(SubmissionKey {
-            session_id: pending.submit.session_id.clone(),
-            submission_id: pending.submit.submission_id.clone(),
-        })
+        Some(SubmissionKey { session_id: pending.submit.session_id.clone(), submission_id: pending.submit.submission_id.clone() })
     }
 
     /// The check's outcome: the record means it arrived; `not_found` means it never did.
@@ -148,17 +125,11 @@ impl Outbox {
                 Settled::Accepted
             }
             Outcome::Refused { code, .. } if code.as_deref() == Some("not_found") => {
-                pending.state =
-                    State::Failed("The daemon never received it: nothing was sent.".into());
+                pending.state = State::Failed("The daemon never received it: nothing was sent.".into());
                 Settled::Kept
             }
             other => {
-                pending.state = State::Uncertain(
-                    other
-                        .problem()
-                        .unwrap_or("the daemon's answer was unexpected")
-                        .to_string(),
-                );
+                pending.state = State::Uncertain(other.problem().unwrap_or("the daemon's answer was unexpected").to_string());
                 Settled::Uncertain
             }
         }
@@ -183,18 +154,13 @@ impl Outbox {
     /// Prompts the conversation now shows as the daemon's are done with, whatever their state.
     pub fn reconcile(&mut self, conversation: &Conversation) -> bool {
         let before = self.pending.len();
-        self.pending
-            .retain(|p| !conversation.submissions.contains_key(p.id()));
+        self.pending.retain(|p| !conversation.submissions.contains_key(p.id()));
         self.pending.len() != before
     }
 
     /// Uncertain prompts, for checking once the session is current again.
     pub fn uncertain(&self) -> Vec<String> {
-        self.pending
-            .iter()
-            .filter(|p| matches!(p.state, State::Uncertain(_)))
-            .map(|p| p.id().to_string())
-            .collect()
+        self.pending.iter().filter(|p| matches!(p.state, State::Uncertain(_))).map(|p| p.id().to_string()).collect()
     }
 }
 
@@ -209,16 +175,9 @@ mod tests {
         let original = outbox.send_with_attachments(
             "s",
             String::new(),
-            vec![sill_proto::sfp::Attachment::Inline {
-                name: "screenshot.png".into(),
-                mime: "image/png".into(),
-                data_base64: "YWJj".into(),
-            }],
+            vec![sill_proto::sfp::Attachment::Inline { name: "screenshot.png".into(), mime: "image/png".into(), data_base64: "YWJj".into() }],
         );
-        assert_eq!(
-            outbox.settle(&original.submission_id, &Outcome::Uncertain("lost".into())),
-            Settled::Uncertain
-        );
+        assert_eq!(outbox.settle(&original.submission_id, &Outcome::Uncertain("lost".into())), Settled::Uncertain);
         assert_eq!(outbox.retry(&original.submission_id).unwrap(), original);
     }
 
@@ -226,45 +185,24 @@ mod tests {
     fn a_refused_prompt_keeps_its_text_and_a_lost_one_is_checked_not_resent() {
         let mut outbox = Outbox::default();
         let first = outbox.send("s", "hello".into());
-        let refused = Outcome::Refused {
-            code: Some("invalid_state".into()),
-            message: "the session has ended".into(),
-        };
+        let refused = Outcome::Refused { code: Some("invalid_state".into()), message: "the session has ended".into() };
         assert_eq!(outbox.settle(&first.submission_id, &refused), Settled::Kept);
         let kept = outbox.get(&first.submission_id).unwrap();
         assert_eq!(kept.text(), "hello");
         assert!(matches!(&kept.state, State::Failed(m) if m.contains("ended")));
         let again = outbox.retry(&first.submission_id).unwrap();
-        assert_eq!(
-            again.submission_id, first.submission_id,
-            "a retry keeps its identity"
-        );
+        assert_eq!(again.submission_id, first.submission_id, "a retry keeps its identity");
 
         let second = outbox.send("s", "world".into());
         let lost = Outcome::Uncertain("the daemon closed the connection".into());
-        assert_eq!(
-            outbox.settle(&second.submission_id, &lost),
-            Settled::Uncertain
-        );
-        assert_eq!(
-            outbox.uncertain(),
-            std::slice::from_ref(&second.submission_id)
-        );
+        assert_eq!(outbox.settle(&second.submission_id, &lost), Settled::Uncertain);
+        assert_eq!(outbox.uncertain(), std::slice::from_ref(&second.submission_id));
         let key = outbox.check(&second.submission_id).unwrap();
         assert_eq!(key.submission_id, second.submission_id);
-        assert!(
-            outbox.check(&second.submission_id).is_none(),
-            "one check at a time"
-        );
-        let never = Outcome::Refused {
-            code: Some("not_found".into()),
-            message: "not found".into(),
-        };
+        assert!(outbox.check(&second.submission_id).is_none(), "one check at a time");
+        let never = Outcome::Refused { code: Some("not_found".into()), message: "not found".into() };
         assert_eq!(outbox.checked(&second.submission_id, &never), Settled::Kept);
-        assert!(matches!(
-            outbox.get(&second.submission_id).unwrap().state,
-            State::Failed(_)
-        ));
+        assert!(matches!(outbox.get(&second.submission_id).unwrap().state, State::Failed(_)));
 
         let third = outbox.send("s", "arrived".into());
         outbox.settle(&third.submission_id, &lost);
@@ -273,10 +211,7 @@ mod tests {
             "accepted_seq":"9", "agent_generation_id":"g", "text":"arrived", "attachments":[],
             "acceptance":"accepted", "delivery":"sent", "held":false, "insertion":"inserted",
             "outcome":"pending"});
-        assert_eq!(
-            outbox.checked(&third.submission_id, &Outcome::Done(record)),
-            Settled::Accepted
-        );
+        assert_eq!(outbox.checked(&third.submission_id, &Outcome::Done(record)), Settled::Accepted);
         assert!(outbox.get(&third.submission_id).is_none());
     }
 }

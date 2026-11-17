@@ -3,8 +3,8 @@
 //! The private relay owns its serialized types independently of the frontend contract. Keep
 //! frontend adapters here so public protocol changes never reach the worker's transport.
 
-use sill_core::wire;
 use super::relay::Command;
+use sill_core::wire;
 
 /// A frontend's command, once the daemon took what is the daemon's (a prompt's transcript entry).
 impl From<wire::Command> for Command {

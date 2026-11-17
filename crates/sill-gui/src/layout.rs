@@ -83,14 +83,7 @@ pub struct Layout {
 
 impl Default for Layout {
     fn default() -> Self {
-        Self {
-            mode: Mode::Shelf,
-            plain: false,
-            before_full: Mode::Drawer,
-            drawer: None,
-            dragging: false,
-            drag_from: None,
-        }
+        Self { mode: Mode::Shelf, plain: false, before_full: Mode::Drawer, drawer: None, dragging: false, drag_from: None }
     }
 }
 
@@ -194,11 +187,8 @@ impl Layout {
             return Subscription::none();
         }
         iced::event::listen_with(|event, _status, _window| match event {
-            Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                Some(Message::Layout(Action::DragTo(position.x)))
-            }
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-            | Event::Mouse(mouse::Event::CursorLeft) => Some(Message::Layout(Action::DragEnd)),
+            Event::Mouse(mouse::Event::CursorMoved { position }) => Some(Message::Layout(Action::DragTo(position.x))),
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) | Event::Mouse(mouse::Event::CursorLeft) => Some(Message::Layout(Action::DragEnd)),
             _ => None,
         })
     }
@@ -220,10 +210,7 @@ mod tests {
 
     #[test]
     fn the_rows_width_follows_the_drawer_only_where_it_narrows_them_and_not_while_dragged() {
-        let mut layout = Layout {
-            mode: Mode::Drawer,
-            ..Layout::default()
-        };
+        let mut layout = Layout { mode: Mode::Drawer, ..Layout::default() };
         // wider than the measure: the drawer takes nothing from the rows
         assert_eq!(layout.row_width(true, 1400.0), MEASURE);
         layout.drawer = Some(300.0);
@@ -237,10 +224,7 @@ mod tests {
         assert_ne!(layout.drawer, Some(300.0));
         assert_eq!(layout.row_width(true, 900.0), 900.0 - 300.0 - HANDLE);
         layout.drag_from = None;
-        assert_eq!(
-            layout.row_width(true, 900.0),
-            900.0 - layout.drawer_width() - HANDLE
-        );
+        assert_eq!(layout.row_width(true, 900.0), 900.0 - layout.drawer_width() - HANDLE);
         // Full mode: no measure, the whole window
         layout.mode = Mode::Full;
         assert_eq!(layout.row_width(true, 1400.0), 1400.0);
@@ -248,10 +232,7 @@ mod tests {
 
     #[test]
     fn the_drawer_is_beside_in_drawer_mode_and_a_look_over_the_conversation_elsewhere() {
-        let mut layout = Layout {
-            mode: Mode::Drawer,
-            ..Layout::default()
-        };
+        let mut layout = Layout { mode: Mode::Drawer, ..Layout::default() };
         assert_eq!(layout.drawer(false, 1200.0), Drawer::Hidden);
         assert_eq!(layout.drawer(true, 1200.0), Drawer::Beside(DRAWER_DEFAULT));
         // a narrow tile: the same drawer, over the conversation
@@ -279,10 +260,7 @@ mod tests {
 
     #[test]
     fn dragging_keeps_the_drawer_in_its_place() {
-        let mut layout = Layout {
-            mode: Mode::Drawer,
-            ..Layout::default()
-        };
+        let mut layout = Layout { mode: Mode::Drawer, ..Layout::default() };
         layout.drag_to(600.0, true, 1000.0);
         assert_eq!(layout.drawer, Some(1000.0 - 600.0 - HANDLE / 2.0));
         // dragged far left: the conversation keeps its minimum

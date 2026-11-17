@@ -39,7 +39,15 @@ pub fn head(repo: &Path) -> Option<String> {
 fn range(repo: &Path, a: &str, b: &str) -> (i64, i64) {
     let Ok(git) = crate::changes::Git::open(repo) else { return (0, 0) };
     let count = |args: &[&str]| -> i64 {
-        git.cmd().args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default().parse().unwrap_or(0)
+        git.cmd()
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+            .parse()
+            .unwrap_or(0)
     };
     let commits = count(&["rev-list", "--count", &format!("{a}..{b}")]);
     let files = git

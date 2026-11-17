@@ -40,8 +40,7 @@ impl Daemon {
         loop {
             let mut line = String::new();
             self.reader.read_line(&mut line).unwrap();
-            let request: Value = serde_json::from_str(&line)
-                .unwrap_or_else(|_| panic!("no request; expected {method}"));
+            let request: Value = serde_json::from_str(&line).unwrap_or_else(|_| panic!("no request; expected {method}"));
             // reads that go out beside the one under test (the panel reads Host control's state
             // with its policy views, concurrently; a session's workspaces are read with its files
             // and the Changes page)
@@ -56,12 +55,7 @@ impl Daemon {
     }
 
     pub fn reply(&mut self, request: &Value, result: impl serde::Serialize) {
-        writeln!(
-            self.writer,
-            "{}",
-            json!({"jsonrpc":"2.0","id":request["id"],"result":result})
-        )
-        .unwrap();
+        writeln!(self.writer, "{}", json!({"jsonrpc":"2.0","id":request["id"],"result":result})).unwrap();
     }
 
     /// An `invalid_state` refusal with its reason, as the workspace methods refuse.
@@ -90,20 +84,12 @@ pub fn daemon() -> (Client, Daemon) {
     let (socket, peer) = UnixStream::pair().unwrap();
     peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let reader = BufReader::new(peer.try_clone().unwrap());
-    (
-        Client::over(socket).unwrap(),
-        Daemon {
-            reader,
-            writer: peer,
-        },
-    )
+    (Client::over(socket).unwrap(), Daemon { reader, writer: peer })
 }
 
 /// A connector handing out these clients one connection at a time, then refusing.
 pub fn connector(clients: Vec<Client>) -> sill_client::Connector {
-    let clients = Arc::new(Mutex::new(
-        clients.into_iter().map(Some).collect::<Vec<_>>(),
-    ));
+    let clients = Arc::new(Mutex::new(clients.into_iter().map(Some).collect::<Vec<_>>()));
     Arc::new(move || {
         let mut all = clients.lock().unwrap();
         match all.iter_mut().find_map(Option::take) {
@@ -137,10 +123,7 @@ pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
         if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut context) {
             return value;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "a task never finished"
-        );
+        assert!(std::time::Instant::now() < deadline, "a task never finished");
         std::thread::park_timeout(Duration::from_millis(20));
     }
 }
@@ -169,9 +152,7 @@ pub(crate) fn settle_task(app: &mut App, task: Task<Message>) {
 
 fn type_text(app: &mut App, text: &str) {
     use iced::widget::text_editor::{Action, Edit};
-    let _ = app.update(in_session(&app, session::Event::Prompt(Action::Edit(Edit::Paste(Arc::new(
-        text.to_string(),
-    ))))));
+    let _ = app.update(in_session(&app, session::Event::Prompt(Action::Edit(Edit::Paste(Arc::new(text.to_string()))))));
 }
 
 fn demo_view(app: &App) -> &SessionView {
@@ -179,22 +160,12 @@ fn demo_view(app: &App) -> &SessionView {
 }
 
 pub(crate) fn event(view: &sill_client::Conversation, payload: Event) -> SessionEvent {
-    SessionEvent {
-        session_id: view.session_id.clone(),
-        subscription_id: view.subscription_id.clone(),
-        seq: (view.seq + 1).to_string(),
-        event: payload,
-    }
+    SessionEvent { session_id: view.session_id.clone(), subscription_id: view.subscription_id.clone(), seq: (view.seq + 1).to_string(), event: payload }
 }
 
 /// A second open session beside the demo's, with a conversation of its own.
 fn add_session(app: &mut App, id: &str) {
-    app.tabs.push(Tab {
-        id: id.into(),
-        title: format!("{id}-title"),
-        agent: "codex".into(),
-        running: true,
-    });
+    app.tabs.push(Tab { id: id.into(), title: format!("{id}-title"), agent: "codex".into(), running: true });
     let mut view = SessionView::new(id);
     view.conversation = sill_client::Conversation::new(id, "sub", 0);
     view.conversation.session = demo::conversation().session.map(|mut s| {
@@ -226,11 +197,7 @@ fn duplicate_foreign_and_missing_events_do_not_corrupt_history() {
     assert!(view.accept(demo::append(6, "gap")).is_err());
     assert_eq!(view.seq, 4);
     assert_eq!(view.transcript(), before);
-    assert!(
-        view.accept(demo::append(5, " contiguous"))
-            .unwrap()
-            .is_some()
-    );
+    assert!(view.accept(demo::append(5, " contiguous")).unwrap().is_some());
 }
 
 #[test]
@@ -239,18 +206,10 @@ fn older_item_appends_stay_in_place_and_unknown_blocks_have_text_fallback() {
     let mut later = view.item("agent").unwrap().clone();
     later.item_id = "later".into();
     later.created_seq = "10".into();
-    later.content = vec![Content {
-        kind: "future_extension".into(),
-        ..Content::text("fallback")
-    }];
-    view.accept(event(&view, Event::ItemCreated { item: later }))
-        .unwrap();
+    later.content = vec![Content { kind: "future_extension".into(), ..Content::text("fallback") }];
+    view.accept(event(&view, Event::ItemCreated { item: later })).unwrap();
     view.accept(demo::append(5, "arrived later")).unwrap();
-    let ids: Vec<_> = view
-        .visible_items()
-        .into_iter()
-        .map(|i| i.item_id.as_str())
-        .collect();
+    let ids: Vec<_> = view.visible_items().into_iter().map(|i| i.item_id.as_str()).collect();
     assert_eq!(ids, ["user", "tool", "agent", "later"]);
     assert!(item_text(view.item("agent").unwrap()).ends_with("arrived later"));
     assert_eq!(item_text(view.item("later").unwrap()), "fallback");
@@ -267,17 +226,10 @@ fn queued_prompt_becomes_visible_on_dispatch_and_question_resolves() {
         "insertion":"pending", "outcome":"pending"
     }))
     .unwrap();
-    view.accept(event(
-        &view,
-        Event::SubmissionUpdated {
-            submission: submission.clone(),
-        },
-    ))
-    .unwrap();
+    view.accept(event(&view, Event::SubmissionUpdated { submission: submission.clone() })).unwrap();
     assert!(!view.visible_items().iter().any(|i| i.kind == "user"));
     submission.delivery = "sent".into();
-    view.accept(event(&view, Event::SubmissionUpdated { submission }))
-        .unwrap();
+    view.accept(event(&view, Event::SubmissionUpdated { submission })).unwrap();
     assert!(view.visible_items().iter().any(|i| i.kind == "user"));
     for event in demo::waiting(view.seq + 1) {
         view.accept(event).unwrap();
@@ -285,8 +237,7 @@ fn queued_prompt_becomes_visible_on_dispatch_and_question_resolves() {
     assert!(view.open_questions().next().is_some());
     let mut question = view.questions["demo-question"].clone();
     question.state = "answered".into();
-    view.accept(event(&view, Event::QuestionUpdated { question }))
-        .unwrap();
+    view.accept(event(&view, Event::QuestionUpdated { question })).unwrap();
     assert!(view.open_questions().next().is_none());
 }
 
@@ -299,12 +250,7 @@ fn read_request(reader: &mut BufReader<UnixStream>, method: &str) -> Value {
 }
 
 fn reply(writer: &mut UnixStream, request: &Value, result: impl serde::Serialize) {
-    writeln!(
-        writer,
-        "{}",
-        json!({"jsonrpc":"2.0","id":request["id"],"result":result})
-    )
-    .unwrap();
+    writeln!(writer, "{}", json!({"jsonrpc":"2.0","id":request["id"],"result":result})).unwrap();
 }
 
 #[test]
@@ -317,30 +263,18 @@ fn fragmented_snapshot_and_live_handoff_over_real_protocol_transport() {
         let request = read_request(&mut reader, "_sill/sessions.attach");
         assert_eq!(request["params"]["session_id"], "demo");
         assert!(request["params"]["since"].is_null());
-        let cursor = Cursor {
-            session_id: "demo".into(),
-            seq: "3".into(),
-        };
+        let cursor = Cursor { session_id: "demo".into(), seq: "3".into() };
         reply(
             &mut peer,
             &request,
             Attached::Snapshot {
                 subscription_id: "demo-subscription".into(),
-                snapshot: SnapshotLease {
-                    token: "lease".into(),
-                    at: cursor.clone(),
-                    expires_at: "9999999999999".into(),
-                },
+                snapshot: SnapshotLease { token: "lease".into(), at: cursor.clone(), expires_at: "9999999999999".into() },
             },
         );
         // Both arrive while the immutable snapshot is still loading.
         for notification in [demo::append(3, "duplicate"), demo::append(4, " live 🦀")] {
-            writeln!(
-                peer,
-                "{}",
-                json!({"jsonrpc":"2.0","method":"_sill/session.event","params":notification})
-            )
-            .unwrap();
+            writeln!(peer, "{}", json!({"jsonrpc":"2.0","method":"_sill/session.event","params":notification})).unwrap();
         }
         let request = read_request(&mut reader, "_sill/sessions.snapshot");
         assert_eq!(request["params"]["token"], "lease");
@@ -349,27 +283,15 @@ fn fragmented_snapshot_and_live_handoff_over_real_protocol_transport() {
             &request,
             SnapshotPage {
                 at: cursor.clone(),
-                records: vec![Record::Session {
-                    session: source.session.clone().unwrap(),
-                }],
+                records: vec![Record::Session { session: source.session.clone().unwrap() }],
                 next_page: Some("first-fragment".into()),
                 fragment: None,
                 expires_at: None,
             },
         );
-        let record = serde_json::to_string(&Record::Item {
-            item: source.item("agent").unwrap().clone(),
-        })
-        .unwrap();
-        let cut = record
-            .char_indices()
-            .nth(record.chars().count() / 2)
-            .unwrap()
-            .0;
-        for (page, offset, fragment, last) in [
-            ("first-fragment", 0, &record[..cut], false),
-            ("last-fragment", cut, &record[cut..], true),
-        ] {
+        let record = serde_json::to_string(&Record::Item { item: source.item("agent").unwrap().clone() }).unwrap();
+        let cut = record.char_indices().nth(record.chars().count() / 2).unwrap().0;
+        for (page, offset, fragment, last) in [("first-fragment", 0, &record[..cut], false), ("last-fragment", cut, &record[cut..], true)] {
             let request = read_request(&mut reader, "_sill/sessions.snapshot");
             assert_eq!(request["params"]["page"], page);
             reply(
@@ -379,12 +301,7 @@ fn fragmented_snapshot_and_live_handoff_over_real_protocol_transport() {
                     at: cursor.clone(),
                     records: vec![],
                     next_page: (!last).then(|| "last-fragment".into()),
-                    fragment: Some(RecordFragment {
-                        record: "agent-record".into(),
-                        offset: offset.to_string(),
-                        json: fragment.into(),
-                        last,
-                    }),
+                    fragment: Some(RecordFragment { record: "agent-record".into(), offset: offset.to_string(), json: fragment.into(), last }),
                     expires_at: None,
                 },
             );
@@ -394,18 +311,8 @@ fn fragmented_snapshot_and_live_handoff_over_real_protocol_transport() {
     let mut view = sill_client::Conversation::attach(&client, "demo").unwrap();
     assert_eq!(view.seq, 3);
     for expected in [false, true] {
-        let (_, params) = client
-            .notifications
-            .lock()
-            .unwrap()
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap();
-        assert_eq!(
-            view.accept(serde_json::from_value(params).unwrap())
-                .unwrap()
-                .is_some(),
-            expected
-        );
+        let (_, params) = client.notifications.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(view.accept(serde_json::from_value(params).unwrap()).unwrap().is_some(), expected);
     }
     assert!(item_text(view.item("agent").unwrap()).ends_with(" live 🦀"));
     assert!(!view.transcript().contains("duplicate"));
@@ -420,16 +327,8 @@ fn updates_from_a_replaced_lane_are_ignored() {
     let current = app.views["other"].lane_epoch;
     let mut stale = demo::conversation();
     stale.session_id = "other".into();
-    let _ = app.update(Message::Lane(
-        "other".into(),
-        current + 7,
-        sill_client::lane::Update::Snapshot(Box::new(stale)),
-    ));
-    let _ = app.update(Message::Lane(
-        "other".into(),
-        current + 7,
-        sill_client::lane::Update::Gone("old lane".into()),
-    ));
+    let _ = app.update(Message::Lane("other".into(), current + 7, sill_client::lane::Update::Snapshot(Box::new(stale))));
+    let _ = app.update(Message::Lane("other".into(), current + 7, sill_client::lane::Update::Gone("old lane".into())));
     assert!(app.views["other"].conversation.items().is_empty());
     assert_eq!(app.views["other"].status, sill_client::lane::Status::Live);
 }
@@ -447,21 +346,13 @@ fn actions_send_the_protocol_requests() {
     settle_task(&mut app, task);
     type_text(&mut app, "hello agent\nsecond line");
     let task = app.update(in_session(&app, session::Event::Send));
-    assert!(
-        demo_view(&app).draft.text().trim().is_empty(),
-        "the composer clears on send"
-    );
+    assert!(demo_view(&app).draft.text().trim().is_empty(), "the composer clears on send");
     let request = daemon.expect("_sill/sessions.submit");
     let params = &request["params"];
     assert_eq!(params["session_id"], "demo");
     assert_eq!(params["text"], "hello agent\nsecond line");
     assert_eq!(params["attachments"], json!([]));
-    assert!(
-        params["submission_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("gui-prompt-")
-    );
+    assert!(params["submission_id"].as_str().unwrap().starts_with("gui-prompt-"));
     serde_json::from_value::<Submit>(params.clone()).unwrap();
     daemon.reply(&request, json!({}));
     settle_task(&mut app, task);
@@ -469,66 +360,35 @@ fn actions_send_the_protocol_requests() {
 
     let task = app.update(in_session(&app, session::Event::Stop));
     let request = daemon.expect("_sill/sessions.cancel");
-    assert_eq!(
-        request["params"],
-        json!({"session_id":"demo", "turn_id":"demo-turn"})
-    );
+    assert_eq!(request["params"], json!({"session_id":"demo", "turn_id":"demo-turn"}));
     daemon.reply(&request, json!({"requested": true}));
     settle_task(&mut app, task);
 
-    let task = app.update(in_session(&app, session::Event::Answer {
-        question_id: "q1".into(),
-        option_id: "allow".into(),
-    }));
-    let again = app.update(in_session(&app, session::Event::Answer {
-        question_id: "q1".into(),
-        option_id: "allow".into(),
-    }));
+    let task = app.update(in_session(&app, session::Event::Answer { question_id: "q1".into(), option_id: "allow".into() }));
+    let again = app.update(in_session(&app, session::Event::Answer { question_id: "q1".into(), option_id: "allow".into() }));
     let request = daemon.expect("_sill/questions.answer");
-    assert_eq!(
-        request["params"]["answer"],
-        json!({"type":"permission", "option_id":"allow"})
-    );
-    assert!(
-        request["params"]["answer_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("gui-answer-")
-    );
+    assert_eq!(request["params"]["answer"], json!({"type":"permission", "option_id":"allow"}));
+    assert!(request["params"]["answer_id"].as_str().unwrap().starts_with("gui-answer-"));
     serde_json::from_value::<AnswerQuestion>(request["params"].clone()).unwrap();
     daemon.reply(&request, json!({}));
     settle_task(&mut app, task);
     settle_task(&mut app, again);
 
-    let pick = |value: &str, boolean| crate::Pick {
-        value: value.into(),
-        title: value.into(),
-        boolean,
-    };
+    let pick = |value: &str, boolean| crate::Pick { value: value.into(), title: value.into(), boolean };
     let task = app.update(in_session(&app, session::Event::SetMode(pick("plan", None))));
     let request = daemon.expect("_sill/sessions.control");
-    assert_eq!(
-        request["params"]["control"],
-        json!({"type":"set_mode", "mode_id":"plan"}),
-        "a second press on an answer in flight sent nothing"
-    );
+    assert_eq!(request["params"]["control"], json!({"type":"set_mode", "mode_id":"plan"}), "a second press on an answer in flight sent nothing");
     daemon.reply(&request, json!({}));
     settle_task(&mut app, task);
     let task = app.update(in_session(&app, session::Event::SetOption("web".into(), pick("true", Some(true)))));
     let request = daemon.expect("_sill/sessions.control");
-    assert_eq!(
-        request["params"]["control"],
-        json!({"type":"set_config", "option_id":"web", "value":{"type":"bool", "value":true}})
-    );
+    assert_eq!(request["params"]["control"], json!({"type":"set_config", "option_id":"web", "value":{"type":"bool", "value":true}}));
     daemon.reply(&request, json!({}));
     settle_task(&mut app, task);
 
     let task = app.update(in_session(&app, session::Event::Unqueue("s1".into())));
     let request = daemon.expect("_sill/submissions.cancel");
-    assert_eq!(
-        request["params"],
-        json!({"session_id":"demo", "submission_id":"s1"})
-    );
+    assert_eq!(request["params"], json!({"session_id":"demo", "submission_id":"s1"}));
     daemon.reply(&request, json!({}));
     settle_task(&mut app, task);
     assert!(demo_view(&app).failed.is_none());
@@ -551,16 +411,10 @@ fn send_now_needs_the_capability() {
         client
     });
     let request = daemon.expect("_sill/initialize");
-    assert_eq!(
-        request["params"]["capabilities"]["sill.send_now"], 1,
-        "offered"
-    );
+    assert_eq!(request["params"]["capabilities"]["sill.send_now"], 1, "offered");
     let answer = sill_proto::initialize::Initialized {
         protocol: sill_proto::initialize::PROTOCOL_ID.into(),
-        daemon: sill_proto::initialize::Peer {
-            name: "sill".into(),
-            version: "test".into(),
-        },
+        daemon: sill_proto::initialize::Peer { name: "sill".into(), version: "test".into() },
         capabilities: [("sill.send_now".to_string(), 1)].into(),
         limits: Default::default(),
     };
@@ -569,10 +423,7 @@ fn send_now_needs_the_capability() {
     let mut app = live_app(vec![client]);
     let task = app.update(in_session(&app, session::Event::SendNow("s1".into())));
     let request = daemon.expect("_sill/submissions.send_now");
-    assert_eq!(
-        request["params"],
-        json!({"session_id":"demo", "submission_id":"s1"})
-    );
+    assert_eq!(request["params"], json!({"session_id":"demo", "submission_id":"s1"}));
     daemon.reply(&request, json!({}));
     settle_task(&mut app, task);
     assert!(demo_view(&app).failed.is_none());
@@ -618,41 +469,26 @@ fn a_refused_send_gives_the_prompt_back_and_an_uncertain_one_is_checked() {
     settle_task(&mut app, task);
     let view = demo_view(&app);
     assert_eq!(view.draft.text().trim_end(), "keep me");
-    assert!(
-        view.failed
-            .as_ref()
-            .unwrap()
-            .contains("the session has ended")
-    );
+    assert!(view.failed.as_ref().unwrap().contains("the session has ended"));
     assert!(view.outbox.pending().is_empty());
 
     // typed again before the refusal came back: the new text stays, the old prompt waits
     let task = app.update(in_session(&app, session::Event::Send));
     let request = daemon.expect("_sill/sessions.submit");
     assert_eq!(request["params"]["text"], "keep me");
-    let id = request["params"]["submission_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = request["params"]["submission_id"].as_str().unwrap().to_string();
     type_text(&mut app, "newer");
     daemon.refuse(&request, "invalid_state", "the session has ended");
     settle_task(&mut app, task);
     let view = demo_view(&app);
     assert_eq!(view.draft.text().trim_end(), "newer");
-    assert!(matches!(
-        view.outbox.get(&id).unwrap().state,
-        State::Failed(_)
-    ));
+    assert!(matches!(view.outbox.get(&id).unwrap().state, State::Failed(_)));
     let _ = app.update(in_session(&app, session::Event::EditSend(id)));
     assert_eq!(demo_view(&app).draft.text().trim_end(), "newer\n\nkeep me");
 
     // the connection goes with the request in hand: uncertain, not resent
-    let _ = app.update(in_session(&app, session::Event::Prompt(
-        iced::widget::text_editor::Action::SelectAll,
-    )));
-    let _ = app.update(in_session(&app, session::Event::Prompt(iced::widget::text_editor::Action::Edit(
-        iced::widget::text_editor::Edit::Delete,
-    ))));
+    let _ = app.update(in_session(&app, session::Event::Prompt(iced::widget::text_editor::Action::SelectAll)));
+    let _ = app.update(in_session(&app, session::Event::Prompt(iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Delete))));
     type_text(&mut app, "did it arrive?");
     let task = app.update(in_session(&app, session::Event::Send));
     // Read on the existing connection before closing it. Dropping it before Send raced
@@ -660,14 +496,8 @@ fn a_refused_send_gives_the_prompt_back_and_an_uncertain_one_is_checked() {
     let request = daemon.expect("_sill/sessions.submit");
     drop(daemon);
     settle_task(&mut app, task);
-    let id = request["params"]["submission_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert!(matches!(
-        demo_view(&app).outbox.get(&id).unwrap().state,
-        State::Uncertain(_)
-    ));
+    let id = request["params"]["submission_id"].as_str().unwrap().to_string();
+    assert!(matches!(demo_view(&app).outbox.get(&id).unwrap().state, State::Uncertain(_)));
     assert!(demo_view(&app).draft.text().trim().is_empty());
     // checking asks for it by identity; never received, it comes back to the composer
     let task = app.update(in_session(&app, session::Event::CheckSend(id.clone())));
@@ -690,21 +520,12 @@ fn a_draft_stays_with_its_session() {
     assert_eq!(app.selected.as_deref(), Some("other"));
     assert!(app.views["other"].draft.text().trim().is_empty());
     let mut ui = simulator(&app, (720.0, 860.0));
-    assert!(
-        ui.find("for the demo agent only").is_err(),
-        "not drawn in the other tab"
-    );
+    assert!(ui.find("for the demo agent only").is_err(), "not drawn in the other tab");
     drop(ui);
     let _ = app.update(in_session(&app, session::Event::Send));
-    assert!(
-        app.views["other"].outbox.pending().is_empty(),
-        "nothing to send there"
-    );
+    assert!(app.views["other"].outbox.pending().is_empty(), "nothing to send there");
     let _ = app.update(Message::Choose("demo".into()));
-    assert_eq!(
-        demo_view(&app).draft.text().trim_end(),
-        "for the demo agent only"
-    );
+    assert_eq!(demo_view(&app).draft.text().trim_end(), "for the demo agent only");
 }
 
 // --- supervision --------------------------------------------------------------------------------
@@ -725,10 +546,7 @@ fn a_file_has_no_bottom_status_panel_and_can_be_closed() {
     }
     assert!(!demo_view(&app).conversation_shown());
     let mut ui = simulator(&app, (1000.0, 860.0));
-    assert!(
-        ui.find("Waiting for your answer: Edit conversation.rs")
-            .is_err()
-    );
+    assert!(ui.find("Waiting for your answer: Edit conversation.rs").is_err());
     assert!(ui.find("‹ Conversation").is_err());
     drop(ui);
     // the file's own close is the way back
@@ -760,18 +578,13 @@ fn other_sessions_waiting_on_the_person_are_marked() {
     ui.find("?").unwrap();
     drop(ui);
     let _ = app.update(Message::Files(Action::Open {
-        path: sill_proto::sessions::HostPath::from_path(std::path::Path::new(
-            "/home/demo/project/README.md",
-        )),
+        path: sill_proto::sessions::HostPath::from_path(std::path::Path::new("/home/demo/project/README.md")),
         repo: None,
     }));
     let mut ui = simulator(&app, (1000.0, 860.0));
     ui.click("other-title").unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
-    assert!(
-        matches!(&messages[..], [Message::Choose(id)] if id == "other"),
-        "{messages:?}"
-    );
+    assert!(matches!(&messages[..], [Message::Choose(id)] if id == "other"), "{messages:?}");
 }
 
 // --- rendering and input ------------------------------------------------------------------------
@@ -783,11 +596,7 @@ fn bundled_faces_resolve_at_normal_and_bold_weights() {
     let mut system = font_system().write().unwrap();
     for family in [crate::fonts::SANS_FAMILY, crate::fonts::MONO_FAMILY] {
         for weight in [fontdb::Weight::NORMAL, fontdb::Weight::BOLD] {
-            let query = fontdb::Query {
-                families: &[fontdb::Family::Name(family)],
-                weight,
-                ..fontdb::Query::default()
-            };
+            let query = fontdb::Query { families: &[fontdb::Family::Name(family)], weight, ..fontdb::Query::default() };
             let id = system.raw().db().query(&query).expect("a face");
             let face = system.raw().db().face(id).unwrap();
             assert!(face.families.iter().any(|(name, _)| name == family));
@@ -809,14 +618,8 @@ fn enter_sends_and_shift_enter_is_a_new_line() {
         text: Some("\n".into()),
         status: Status::Focused { is_hovered: false },
     };
-    assert!(matches!(
-        crate::ui::enter_sends("demo", press(Modifiers::empty())),
-        Some(Binding::Custom(Message::Session(_, session::Event::Send)))
-    ));
-    assert!(matches!(
-        crate::ui::enter_sends("demo", press(Modifiers::SHIFT)),
-        Some(Binding::Custom(Message::Session(_, session::Event::PromptNewline)))
-    ));
+    assert!(matches!(crate::ui::enter_sends("demo", press(Modifiers::empty())), Some(Binding::Custom(Message::Session(_, session::Event::Send)))));
+    assert!(matches!(crate::ui::enter_sends("demo", press(Modifiers::SHIFT)), Some(Binding::Custom(Message::Session(_, session::Event::PromptNewline)))));
 }
 
 /// The question card's buttons answer it: a click on "Yes" in the rendered view is the answer.
@@ -845,13 +648,11 @@ fn a_stopped_turn_says_so() {
         "outcome":"cancelled", "reason":{"code":"cancelled", "message":"stopped by the person"}
     }))
     .unwrap();
-    view.accept(event(&view, Event::TurnUpdated { turn: turn.clone() }))
-        .unwrap();
+    view.accept(event(&view, Event::TurnUpdated { turn: turn.clone() })).unwrap();
     assert_eq!(view.turn_end("demo-turn").as_deref(), Some("stopped"));
     let mut done = turn;
     done.outcome = "completed".into();
-    view.accept(event(&view, Event::TurnUpdated { turn: done }))
-        .unwrap();
+    view.accept(event(&view, Event::TurnUpdated { turn: done })).unwrap();
     assert_eq!(view.turn_end("demo-turn"), None);
 }
 
@@ -865,19 +666,9 @@ fn the_top_bar_moves_the_window_and_tabs_keep_their_clicks() {
     let _ = ui.simulate(iced_test::simulator::click());
     ui.click("witty-willow").unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
-    assert!(
-        matches!(messages.first(), Some(Message::DragWindow)),
-        "{messages:?}"
-    );
-    assert!(
-        matches!(messages.get(1), Some(Message::Choose(id)) if id == "demo"),
-        "{messages:?}"
-    );
-    assert_eq!(
-        messages.len(),
-        2,
-        "a tab click must not also move the window: {messages:?}"
-    );
+    assert!(matches!(messages.first(), Some(Message::DragWindow)), "{messages:?}");
+    assert!(matches!(messages.get(1), Some(Message::Choose(id)) if id == "demo"), "{messages:?}");
+    assert_eq!(messages.len(), 2, "a tab click must not also move the window: {messages:?}");
 }
 
 /// Shelf mode is locked to its edge: the top bar does not move it and only the right edge,
@@ -905,10 +696,7 @@ fn shelf_mode_is_locked_to_its_edge_and_free_windows_have_corners() {
     assert!(resized(&press(&app, 400.0, 2.0)).is_none(), "no top edge");
     assert!(resized(&press(&app, 400.0, 858.0)).is_none(), "no bottom edge");
     for y in [2.0, 400.0, 858.0] {
-        assert!(
-            matches!(resized(&press(&app, 718.0, y)), Some(Direction::East)),
-            "the right edge, its corners included, changes the width only ({y})"
-        );
+        assert!(matches!(resized(&press(&app, 718.0, y)), Some(Direction::East)), "the right edge, its corners included, changes the width only ({y})");
     }
     app.layout.mode = crate::layout::Mode::Drawer;
     let at = |x, y| resized(&press(&app, x, y));
@@ -934,10 +722,7 @@ fn ctrl_q_quits() {
         text: None,
         repeat: false,
     };
-    assert!(matches!(
-        crate::keys::shortcut(press(Modifiers::COMMAND)),
-        Some(Message::Quit)
-    ));
+    assert!(matches!(crate::keys::shortcut(press(Modifiers::COMMAND)), Some(Message::Quit)));
     assert!(crate::keys::shortcut(press(Modifiers::empty())).is_none());
 }
 
@@ -947,20 +732,13 @@ fn ctrl_q_quits() {
 pub fn settle(pane: &crate::terminal::Pane, text: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !pane.screen().contains(text) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "{text:?} never appeared:\n{}",
-            pane.screen()
-        );
+        assert!(std::time::Instant::now() < deadline, "{text:?} never appeared:\n{}", pane.screen());
         std::thread::sleep(Duration::from_millis(10));
     }
 }
 
 /// A connection over `socket`, its controls recorded in `seen`.
-fn connection(
-    socket: UnixStream,
-    seen: Arc<Mutex<Vec<String>>>,
-) -> sill_client::terminal::Connection {
+fn connection(socket: UnixStream, seen: Arc<Mutex<Vec<String>>>) -> sill_client::terminal::Connection {
     use sill_client::terminal::{Connection, Control};
     let close = socket.try_clone().unwrap();
     Connection {
@@ -992,9 +770,7 @@ fn a_terminal_shows_its_stream_and_sends_keys_back() {
     use crate::terminal::{Event, Pane, Status};
     use std::io::Read;
     let (ours, mut remote) = UnixStream::pair().unwrap();
-    remote
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    remote.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let controls = Arc::new(Mutex::new(Vec::new()));
     let seen = controls.clone();
     let (mut pane, events) = Pane::open(40, 10, move |cols, rows| {
@@ -1007,10 +783,7 @@ fn a_terminal_shows_its_stream_and_sends_keys_back() {
     remote.write_all(b"hi \x1b[31mred\x1b[0m\r\n$ ").unwrap();
     settle(&pane, "hi red");
     let screen = pane.screen();
-    assert!(
-        screen.starts_with("[earlier output was not kept]\nhi red\n$"),
-        "{screen}"
-    );
+    assert!(screen.starts_with("[earlier output was not kept]\nhi red\n$"), "{screen}");
     assert_eq!(pane.fg_at(1, 3), crate::style::P.error);
     assert_eq!(pane.fg_at(1, 0), crate::style::P.fg);
 
@@ -1054,9 +827,7 @@ fn dropping_a_pane_detaches_its_stream_even_after_the_emulator_answered() {
     use crate::terminal::{Pane, Status};
     use std::io::Read;
     let (ours, mut remote) = UnixStream::pair().unwrap();
-    remote
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    remote.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let (mut pane, events) = Pane::open(40, 10, move |_, _| Ok(connection(ours, Arc::default())));
     pane.accept(events.recv_blocking().unwrap());
     assert_eq!(pane.status, Status::Running);
@@ -1069,11 +840,7 @@ fn dropping_a_pane_detaches_its_stream_even_after_the_emulator_answered() {
     let _ = remote.read(&mut rest).unwrap();
     drop(pane);
     let mut more = [0u8; 16];
-    assert_eq!(
-        remote.read(&mut more).unwrap(),
-        0,
-        "the stream must close when its pane goes"
-    );
+    assert_eq!(remote.read(&mut more).unwrap(), 0, "the stream must close when its pane goes");
 }
 
 /// Keys as xterm sends them, which shells and full-screen programs expect.
@@ -1088,47 +855,17 @@ fn terminal_keys_are_encoded_as_xterm_sends_them() {
     let named = |n| Key::Named(n);
     let ch = |c: &str| Key::Character(c.into());
     assert_eq!(key(ch("a"), none, Some("a"), plain).unwrap(), b"a");
-    assert_eq!(
-        key(ch("ä"), none, Some("ä"), plain).unwrap(),
-        "ä".as_bytes()
-    );
+    assert_eq!(key(ch("ä"), none, Some("ä"), plain).unwrap(), "ä".as_bytes());
     assert_eq!(key(ch("c"), Modifiers::CTRL, None, plain).unwrap(), [3]);
-    assert_eq!(
-        key(ch("x"), Modifiers::ALT, Some("x"), plain).unwrap(),
-        b"\x1bx"
-    );
-    assert_eq!(
-        key(named(Named::Enter), none, Some("\r"), plain).unwrap(),
-        b"\r"
-    );
-    assert_eq!(
-        key(named(Named::Backspace), none, None, plain).unwrap(),
-        [0x7f]
-    );
-    assert_eq!(
-        key(named(Named::Tab), Modifiers::SHIFT, None, plain).unwrap(),
-        b"\x1b[Z"
-    );
-    assert_eq!(
-        key(named(Named::ArrowUp), none, None, plain).unwrap(),
-        b"\x1b[A"
-    );
-    assert_eq!(
-        key(named(Named::ArrowUp), none, None, TermMode::APP_CURSOR).unwrap(),
-        b"\x1bOA"
-    );
-    assert_eq!(
-        key(named(Named::ArrowLeft), Modifiers::CTRL, None, plain).unwrap(),
-        b"\x1b[1;5D"
-    );
-    assert_eq!(
-        key(named(Named::Delete), none, None, plain).unwrap(),
-        b"\x1b[3~"
-    );
-    assert_eq!(
-        key(named(Named::F5), none, None, plain).unwrap(),
-        b"\x1b[15~"
-    );
+    assert_eq!(key(ch("x"), Modifiers::ALT, Some("x"), plain).unwrap(), b"\x1bx");
+    assert_eq!(key(named(Named::Enter), none, Some("\r"), plain).unwrap(), b"\r");
+    assert_eq!(key(named(Named::Backspace), none, None, plain).unwrap(), [0x7f]);
+    assert_eq!(key(named(Named::Tab), Modifiers::SHIFT, None, plain).unwrap(), b"\x1b[Z");
+    assert_eq!(key(named(Named::ArrowUp), none, None, plain).unwrap(), b"\x1b[A");
+    assert_eq!(key(named(Named::ArrowUp), none, None, TermMode::APP_CURSOR).unwrap(), b"\x1bOA");
+    assert_eq!(key(named(Named::ArrowLeft), Modifiers::CTRL, None, plain).unwrap(), b"\x1b[1;5D");
+    assert_eq!(key(named(Named::Delete), none, None, plain).unwrap(), b"\x1b[3~");
+    assert_eq!(key(named(Named::F5), none, None, plain).unwrap(), b"\x1b[15~");
     assert!(key(named(Named::Shift), Modifiers::SHIFT, None, plain).is_none());
 }
 
@@ -1139,19 +876,10 @@ fn the_terminal_button_opens_the_shell_and_takes_the_keys() {
     let mut ui = simulator(&app, (720.0, 860.0));
     ui.click(iced::widget::Id::new("terminal-button")).unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
-    assert!(
-        matches!(messages.as_slice(), [Message::Session(id, session::Event::ToggleTerminal)] if id == "demo"),
-        "{messages:?}"
-    );
+    assert!(matches!(messages.as_slice(), [Message::Session(id, session::Event::ToggleTerminal)] if id == "demo"), "{messages:?}");
     // the task carries the pane's events; dropping it would hang the shell up
     let _events = app.update(Message::ToggleTerminal);
-    let pane = app
-        .views
-        .get_mut("demo")
-        .unwrap()
-        .terminal
-        .as_mut()
-        .unwrap();
+    let pane = app.views.get_mut("demo").unwrap().terminal.as_mut().unwrap();
     pane.accept(crate::terminal::Event::Opened);
     settle(pane, "project$");
     let mut ui = simulator(&app, (720.0, 860.0));
@@ -1166,10 +894,7 @@ fn the_terminal_button_opens_the_shell_and_takes_the_keys() {
         .collect();
     assert_eq!(typed, b"ls");
     let _ = app.update(Message::ToggleTerminal);
-    assert!(
-        !demo_view(&app).terminal_shown && demo_view(&app).terminal.is_some(),
-        "hiding only detaches the view"
-    );
+    assert!(!demo_view(&app).terminal_shown && demo_view(&app).terminal.is_some(), "hiding only detaches the view");
 }
 
 // --- files --------------------------------------------------------------------------------------
@@ -1178,17 +903,11 @@ fn the_terminal_button_opens_the_shell_and_takes_the_keys() {
 fn file_drawer_buttons_open_the_viewer_and_return_to_conversation() {
     use crate::files::Action;
     let (mut app, _) = App::new(true, None);
-    let _ = app.update(Message::Layout(crate::layout::Action::Mode(
-        crate::layout::Mode::Drawer,
-    )));
+    let _ = app.update(Message::Layout(crate::layout::Action::Mode(crate::layout::Mode::Drawer)));
     let mut ui = simulator(&app, (1000.0, 860.0));
     ui.click("README.md").unwrap();
     let messages: Vec<_> = ui.into_messages().collect();
-    assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::Files(Action::Open { .. })))
-    );
+    assert!(messages.iter().any(|m| matches!(m, Message::Files(Action::Open { .. }))));
     for message in messages {
         let _ = app.update(message);
     }
@@ -1206,19 +925,9 @@ fn diff_numbers_distinguish_context_changes_and_untracked_markdown() {
     use crate::diff_ui::numbered_diff;
     assert_eq!(
         numbered_diff("@@ -3,2 +5,3 @@\n keep\n-old\n+new\n+extra"),
-        vec![
-            (None, None, "@@ -3,2 +5,3 @@"),
-            (Some(3), Some(5), " keep"),
-            (Some(4), None, "-old"),
-            (None, Some(6), "+new"),
-            (None, Some(7), "+extra")
-        ]
+        vec![(None, None, "@@ -3,2 +5,3 @@"), (Some(3), Some(5), " keep"), (Some(4), None, "-old"), (None, Some(6), "+new"), (None, Some(7), "+extra")]
     );
-    assert!(
-        numbered_diff("(untracked)\n- list item\n+ another item")
-            .iter()
-            .all(|(old, new, _)| old.is_none() && new.is_none())
-    );
+    assert!(numbered_diff("(untracked)\n- list item\n+ another item").iter().all(|(old, new, _)| old.is_none() && new.is_none()));
 }
 
 #[test]
@@ -1246,9 +955,7 @@ fn the_agents_controls_use_the_whole_composer_bar() {
         let mut ui = simulator(&app, (width, 700.0));
         let controls = ui
             .select(|candidate| match candidate {
-                Candidate::Scrollable { id: Some(id), bounds, content_bounds, .. }
-                    if id == &iced::widget::Id::new("agent-controls") =>
-                {
+                Candidate::Scrollable { id: Some(id), bounds, content_bounds, .. } if id == &iced::widget::Id::new("agent-controls") => {
                     Some((bounds, content_bounds))
                 }
                 _ => None,
@@ -1256,11 +963,7 @@ fn the_agents_controls_use_the_whole_composer_bar() {
             .expect("the agent's controls");
         let shell = ui
             .select(|candidate| match candidate {
-                Candidate::Container { id: Some(id), bounds, .. }
-                    if id == &iced::widget::Id::new("terminal-button") =>
-                {
-                    Some(bounds)
-                }
+                Candidate::Container { id: Some(id), bounds, .. } if id == &iced::widget::Id::new("terminal-button") => Some(bounds),
                 _ => None,
             })
             .expect("the shell's button");
@@ -1291,20 +994,14 @@ fn a_drawer_over_the_conversation_keeps_its_place() {
     let mut before = None;
     live.frame(&app, |ui| before = scrolled(ui, "conversation"));
     app.width = 520.0;
-    live.apply(
-        &mut app,
-        Message::Files(crate::files::Action::ToggleDrawer),
-    );
+    live.apply(&mut app, Message::Files(crate::files::Action::ToggleDrawer));
     assert!(app.narrow(), "520 px does not fit the drawer beside");
     let mut after = None;
     live.frame(&app, |ui| after = scrolled(ui, "conversation"));
     let (before, after) = (before.unwrap(), after.unwrap());
     assert!(before > 100.0, "the conversation is longer than the window");
     // Opening the drawer keeps the conversation at its tail.
-    assert!(
-        after >= before - 1.0,
-        "back towards the top: {before} → {after}"
-    );
+    assert!(after >= before - 1.0, "back towards the top: {before} → {after}");
     assert!(app.current().unwrap().follow_tail);
 }
 
@@ -1313,17 +1010,15 @@ fn a_drawer_over_the_conversation_keeps_its_place() {
 /// Shelf mode a chip or the drawer's toggle is a quick look over the conversation.
 #[test]
 fn the_keys_go_between_shelf_drawer_and_full() {
-    use crate::layout::Mode;
     use crate::files::Action as Files;
+    use crate::layout::Mode;
     let (mut app, _) = App::new(true, None);
     assert_eq!(app.layout.mode, Mode::Shelf);
     let press = |c: &str| {
         crate::keys::shortcut(iced::keyboard::Event::KeyPressed {
             key: iced::keyboard::Key::Character(c.into()),
             modified_key: iced::keyboard::Key::Character(c.into()),
-            physical_key: iced::keyboard::key::Physical::Unidentified(
-                iced::keyboard::key::NativeCode::Unidentified,
-            ),
+            physical_key: iced::keyboard::key::Physical::Unidentified(iced::keyboard::key::NativeCode::Unidentified),
             location: iced::keyboard::Location::Standard,
             modifiers: iced::keyboard::Modifiers::COMMAND | iced::keyboard::Modifiers::SHIFT,
             text: None,
@@ -1333,10 +1028,7 @@ fn the_keys_go_between_shelf_drawer_and_full() {
     assert!(press("E").is_none(), "Ctrl+Shift+E is free again");
     let _ = app.update(Message::Files(Files::ToggleDrawer));
     assert!(app.drawer.shown, "a quick look in Shelf mode");
-    assert!(matches!(
-        app.layout.drawer(true, 1200.0),
-        crate::layout::Drawer::Over(_)
-    ));
+    assert!(matches!(app.layout.drawer(true, 1200.0), crate::layout::Drawer::Over(_)));
     // Shelf → Full → back to Shelf
     let _ = app.update(press("F").unwrap());
     assert_eq!(app.layout.mode, Mode::Full);
@@ -1387,10 +1079,7 @@ fn dragging_the_drawer_keeps_a_long_conversation_s_far_rows_as_gaps() {
     let built = |ui: &mut Frame<'_, '_>, needle: &'static str| -> bool {
         ui.select(move |candidate| match candidate {
             Candidate::Text { content, .. } if content.contains(needle) => Some(()),
-            Candidate::Custom { state, .. } => state
-                .downcast_ref::<crate::selection::Selectable>()
-                .filter(|t| t.text().contains(needle))
-                .map(|_| ()),
+            Candidate::Custom { state, .. } => state.downcast_ref::<crate::selection::Selectable>().filter(|t| t.text().contains(needle)).map(|_| ()),
             _ => None,
         })
         .is_some()
@@ -1432,21 +1121,14 @@ fn a_long_conversation_builds_only_what_is_near_the_view() {
     let built = |ui: &mut Frame<'_, '_>, needle: &'static str| -> bool {
         ui.select(move |candidate| match candidate {
             Candidate::Text { content, .. } if content.contains(needle) => Some(()),
-            Candidate::Custom { state, .. } => state
-                .downcast_ref::<crate::selection::Selectable>()
-                .filter(|t| t.text().contains(needle))
-                .map(|_| ()),
+            Candidate::Custom { state, .. } => state.downcast_ref::<crate::selection::Selectable>().filter(|t| t.text().contains(needle)).map(|_| ()),
             _ => None,
         })
         .is_some()
     };
     let height = |ui: &mut Frame<'_, '_>| -> Option<f32> {
         ui.select(|candidate| match candidate {
-            Candidate::Scrollable {
-                id: Some(found),
-                content_bounds,
-                ..
-            } if *found == iced::widget::Id::new("conversation") => Some(content_bounds.height),
+            Candidate::Scrollable { id: Some(found), content_bounds, .. } if *found == iced::widget::Id::new("conversation") => Some(content_bounds.height),
             _ => None,
         })
     };
@@ -1469,10 +1151,7 @@ fn a_long_conversation_builds_only_what_is_near_the_view() {
     assert!(last && !first, "only the tail is built");
     let (full, tail) = (full.unwrap(), tail.unwrap());
     assert!(full > 20_000.0, "a long conversation: {full}");
-    assert!(
-        (full - tail).abs() < 1.0,
-        "as tall with gaps: {full} vs {tail}"
-    );
+    assert!((full - tail).abs() < 1.0, "as tall with gaps: {full} vs {tail}");
     // scrolled to the top: the first rows are built, the last are a gap
     {
         let view = app.views.get_mut("demo").unwrap();
@@ -1503,15 +1182,10 @@ fn the_herring_opens_changes_and_settings() {
     settle_task(&mut app, task);
     assert!(app.changes.is_none());
     let page = app.settings_page.as_ref().unwrap();
-    assert!(
-        matches!(page.snapshot, Some(Ok(_))),
-        "read at once in the demo"
-    );
-    for (category, labels) in [
-        ("Interface", vec!["Keyboard shortcuts"]),
-        ("Sessions", vec!["Timer autoshow", "Remember pins"]),
-        ("Memory & history", vec!["Compact after"]),
-    ] {
+    assert!(matches!(page.snapshot, Some(Ok(_))), "read at once in the demo");
+    for (category, labels) in
+        [("Interface", vec!["Keyboard shortcuts"]), ("Sessions", vec!["Timer autoshow", "Remember pins"]), ("Memory & history", vec!["Compact after"])]
+    {
         let mut ui = simulator(&app, (720.0, 860.0));
         ui.click(category).unwrap();
         let messages: Vec<_> = ui.into_messages().collect();
@@ -1527,24 +1201,14 @@ fn the_herring_opens_changes_and_settings() {
     let flicked = app.herring_flick;
     assert!(flicked.is_some(), "the herring swims when the view changes");
     let _ = app.update(Message::Escape);
-    assert!(
-        app.settings_page.is_none(),
-        "Escape: back to the conversation"
-    );
+    assert!(app.settings_page.is_none(), "Escape: back to the conversation");
     assert_ne!(app.herring_flick, flicked, "and again on the way back");
     let task = app.update(Message::ToggleChanges);
     settle_task(&mut app, task);
-    assert!(
-        app.settings_page.is_some(),
-        "the herring opens the page last shown"
-    );
+    assert!(app.settings_page.is_some(), "the herring opens the page last shown");
     // the theme shows before the daemon answers
     let before = crate::style::theme_id();
-    let _ = app.update(Message::Settings(crate::settings_ui::Event::Change(
-        sill_proto::admin::SettingChange::Theme {
-            value: "dracula".into(),
-        },
-    )));
+    let _ = app.update(Message::Settings(crate::settings_ui::Event::Change(sill_proto::admin::SettingChange::Theme { value: "dracula".into() })));
     assert_eq!(crate::style::theme_id(), "dracula");
     crate::style::set_theme(before);
 }
@@ -1601,12 +1265,7 @@ impl Live {
     fn new(size: (f32, f32)) -> Self {
         use iced::advanced::renderer::Headless;
         let settings = crate::snapshots::settings();
-        let renderer = block_on(<iced::Renderer as Headless>::new(
-            settings.default_font,
-            settings.default_text_size,
-            None,
-        ))
-        .expect("a headless renderer");
+        let renderer = block_on(<iced::Renderer as Headless>::new(settings.default_font, settings.default_text_size, None)).expect("a headless renderer");
         Self {
             renderer,
             cache: Some(iced_runtime::user_interface::Cache::default()),
@@ -1619,39 +1278,21 @@ impl Live {
     /// One frame of `app`: queued operations, then `drive`, then drawing. Returns the messages
     /// the frame produced, not yet applied.
     fn frame(&mut self, app: &App, drive: impl FnOnce(&mut Frame<'_, '_>)) -> Vec<Message> {
-        let mut ui = iced_runtime::UserInterface::build(
-            app.view(),
-            self.size,
-            self.cache.take().unwrap_or_default(),
-            &mut self.renderer,
-        );
+        let mut ui = iced_runtime::UserInterface::build(app.view(), self.size, self.cache.take().unwrap_or_default(), &mut self.renderer);
         // as the runtime does: an operation may chain the next (focus traversal counts first)
         for operation in self.operations.drain(..) {
             let mut current = Some(operation);
             while let Some(mut operation) = current.take() {
                 ui.operate(&self.renderer, operation.as_mut());
-                if let iced::advanced::widget::operation::Outcome::Chain(next) = operation.finish()
-                {
+                if let iced::advanced::widget::operation::Outcome::Chain(next) = operation.finish() {
                     current = Some(next);
                 }
             }
         }
-        let mut frame = Frame {
-            ui: &mut ui,
-            renderer: &mut self.renderer,
-            cursor: &mut self.cursor,
-            messages: Vec::new(),
-        };
+        let mut frame = Frame { ui: &mut ui, renderer: &mut self.renderer, cursor: &mut self.cursor, messages: Vec::new() };
         drive(&mut frame);
         let messages = frame.messages;
-        ui.draw(
-            &mut self.renderer,
-            &crate::style::theme(),
-            &iced::advanced::renderer::Style {
-                text_color: crate::style::P.fg,
-            },
-            self.cursor,
-        );
+        ui.draw(&mut self.renderer, &crate::style::theme(), &iced::advanced::renderer::Style { text_color: crate::style::P.fg }, self.cursor);
         self.cache = Some(ui.into_cache());
         messages
     }
@@ -1684,13 +1325,7 @@ impl Drive for Frame<'_, '_> {
     }
 
     fn send(&mut self, events: Vec<iced::Event>) {
-        let _ = self.ui.update(
-            &events,
-            *self.cursor,
-            self.renderer,
-            &mut iced::advanced::clipboard::Null,
-            &mut self.messages,
-        );
+        let _ = self.ui.update(&events, *self.cursor, self.renderer, &mut iced::advanced::clipboard::Null, &mut self.messages);
     }
 
     fn select<T, F>(&mut self, selector: F) -> Option<T>
@@ -1701,10 +1336,7 @@ impl Drive for Frame<'_, '_> {
         use iced::advanced::widget::Operation;
         use iced_test::selector::Selector;
         let mut operation = selector.find();
-        self.ui.operate(
-            self.renderer,
-            &mut iced::advanced::widget::operation::black_box(&mut operation),
-        );
+        self.ui.operate(self.renderer, &mut iced::advanced::widget::operation::black_box(&mut operation));
         match operation.finish() {
             iced::advanced::widget::operation::Outcome::Some(found) => found,
             _ => None,
@@ -1715,11 +1347,7 @@ impl Drive for Frame<'_, '_> {
 /// How far the scrollable `id` is scrolled down.
 fn scrolled(ui: &mut impl Drive, id: &'static str) -> Option<f32> {
     ui.select(move |candidate| match candidate {
-        iced_test::selector::Candidate::Scrollable {
-            id: Some(found),
-            translation,
-            ..
-        } if *found == iced::widget::Id::new(id) => Some(translation.y),
+        iced_test::selector::Candidate::Scrollable { id: Some(found), translation, .. } if *found == iced::widget::Id::new(id) => Some(translation.y),
         _ => None,
     })
 }
@@ -1731,24 +1359,14 @@ fn aim_at(ui: &mut impl Drive, leaf: &str, needle: &str) -> iced::Point {
     let (leaf, needle) = (leaf.to_string(), needle.to_string());
     let what = format!("{needle:?} in a text starting {leaf:?}");
     ui.select(move |candidate| {
-        let Candidate::Custom {
-            bounds,
-            visible_bounds: Some(visible),
-            state,
-            ..
-        } = candidate
-        else {
+        let Candidate::Custom { bounds, visible_bounds: Some(visible), state, .. } = candidate else {
             return None;
         };
         let text = state.downcast_ref::<crate::selection::Selectable>()?;
         if !text.text().starts_with(leaf.as_str()) {
             return None;
         }
-        assert!(
-            (visible.width - bounds.width).abs() < 0.5
-                && (visible.height - bounds.height).abs() < 0.5,
-            "{leaf:?} is not all on screen"
-        );
+        assert!((visible.width - bounds.width).abs() < 0.5 && (visible.height - bounds.height).abs() < 0.5, "{leaf:?} is not all on screen");
         let offset = text.text().find(needle.as_str())?;
         let local = text.layout().caret_point(offset)?;
         let translation = visible.position() - bounds.position();
@@ -1776,26 +1394,18 @@ fn highlighted(ui: &mut impl Drive) -> Vec<String> {
 fn press_at(ui: &mut impl Drive, at: iced::Point) {
     use iced::mouse::{Button, Event};
     ui.aim(at);
-    ui.send(vec![
-        iced::Event::Mouse(Event::CursorMoved { position: at }),
-        iced::Event::Mouse(Event::ButtonPressed(Button::Left)),
-    ]);
+    ui.send(vec![iced::Event::Mouse(Event::CursorMoved { position: at }), iced::Event::Mouse(Event::ButtonPressed(Button::Left))]);
 }
 
 fn move_to(ui: &mut impl Drive, at: iced::Point) {
     ui.aim(at);
-    ui.send(vec![iced::Event::Mouse(iced::mouse::Event::CursorMoved {
-        position: at,
-    })]);
+    ui.send(vec![iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: at })]);
 }
 
 fn release_at(ui: &mut impl Drive, at: iced::Point) {
     use iced::mouse::{Button, Event};
     ui.aim(at);
-    ui.send(vec![
-        iced::Event::Mouse(Event::CursorMoved { position: at }),
-        iced::Event::Mouse(Event::ButtonReleased(Button::Left)),
-    ]);
+    ui.send(vec![iced::Event::Mouse(Event::CursorMoved { position: at }), iced::Event::Mouse(Event::ButtonReleased(Button::Left))]);
 }
 
 fn drag(ui: &mut impl Drive, from: iced::Point, to: iced::Point) {
@@ -1823,9 +1433,7 @@ fn ctrl_c() -> Vec<iced::Event> {
 }
 
 fn wheel(lines: f32) -> iced::Event {
-    iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
-        delta: iced::mouse::ScrollDelta::Lines { x: 0.0, y: lines },
-    })
+    iced::Event::Mouse(iced::mouse::Event::WheelScrolled { delta: iced::mouse::ScrollDelta::Lines { x: 0.0, y: lines } })
 }
 
 /// What was copied, in order.
@@ -1842,11 +1450,8 @@ fn copies(messages: impl IntoIterator<Item = Message>) -> Vec<String> {
 /// Whether `task` scrolls a widget (the only widget operation tail-follow issues).
 fn snaps(task: Task<Message>) -> bool {
     use iced::futures::StreamExt;
-    iced_runtime::task::into_stream(task).is_some_and(|stream| {
-        block_on(stream.collect::<Vec<_>>())
-            .iter()
-            .any(|action| matches!(action, iced_runtime::Action::Widget(_)))
-    })
+    iced_runtime::task::into_stream(task)
+        .is_some_and(|stream| block_on(stream.collect::<Vec<_>>()).iter().any(|action| matches!(action, iced_runtime::Action::Widget(_))))
 }
 
 /// The demo's turn with all of its text streamed: the prompt, the shell call, and the agent's
@@ -1870,10 +1475,7 @@ fn a_drag_across_two_messages_copies_both_in_reading_order() {
     let to = aim_at(&mut ui, "Code blocks have", "blocks");
     drag(&mut ui, from, to);
     let lit = highlighted(&mut ui);
-    assert_eq!(
-        lit.first().map(String::as_str),
-        Some("smaller and show me the change.")
-    );
+    assert_eq!(lit.first().map(String::as_str), Some("smaller and show me the change."));
     assert_eq!(lit.last().map(String::as_str), Some("Code "));
     assert_eq!(lit.len(), 16, "every text between is highlighted: {lit:?}");
     ui.send(ctrl_c());
@@ -1901,12 +1503,7 @@ fn tail_follow_waits_while_a_selection_is_dragged() {
         let from = aim_at(ui, "Make the send arrow", "send");
         press_at(ui, from);
     });
-    assert!(
-        pressed
-            .iter()
-            .any(|m| matches!(m, Message::Selecting(true))),
-        "{pressed:?}"
-    );
+    assert!(pressed.iter().any(|m| matches!(m, Message::Selecting(true))), "{pressed:?}");
     for message in pressed {
         live.apply(&mut app, message);
     }
@@ -1914,10 +1511,7 @@ fn tail_follow_waits_while_a_selection_is_dragged() {
     assert!(!snaps(app.update(Message::DemoTick)), "a streamed chunk");
     let seq = demo_view(&app).conversation.seq + 1;
     let event = sill_client::lane::Update::Event(Box::new(demo::append(seq, " More.")));
-    assert!(
-        !snaps(app.update(Message::Lane("demo".into(), 0, event))),
-        "an event from the lane"
-    );
+    assert!(!snaps(app.update(Message::Lane("demo".into(), 0, event))), "an event from the lane");
     assert!(demo_view(&app).follow_tail);
     let released = live.frame(&app, |ui| {
         let to = aim_at(ui, "A streamed paragraph", "streamed");
@@ -1925,12 +1519,7 @@ fn tail_follow_waits_while_a_selection_is_dragged() {
         release_at(ui, to);
         ui.send(ctrl_c());
     });
-    assert!(
-        released
-            .iter()
-            .any(|m| matches!(m, Message::Selecting(false))),
-        "{released:?}"
-    );
+    assert!(released.iter().any(|m| matches!(m, Message::Selecting(false))), "{released:?}");
     assert_eq!(
         copies(released.clone()),
         ["send arrow a little smaller and show me the change.\n\
@@ -1957,10 +1546,7 @@ fn streamed_text_keeps_a_selection_in_earlier_messages() {
         ui.send(ctrl_c());
     });
     let copied = copies(made.clone());
-    assert_eq!(
-        copied,
-        ["send arrow a little smaller and show me the change.\nThe arrow's size is one "]
-    );
+    assert_eq!(copied, ["send arrow a little smaller and show me the change.\nThe arrow's size is one "]);
     for message in made {
         live.apply(&mut app, message);
     }
@@ -2009,9 +1595,7 @@ fn new_text_does_not_undo_a_scroll_away_from_the_tail() {
     let scrolled_up = live.frame(&app, |ui| {
         at_end = scrolled(ui, "conversation");
         ui.aim(iced::Point::new(360.0, 200.0));
-        ui.send(vec![iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
-            delta: iced::mouse::ScrollDelta::Pixels { x: 0.0, y: 12.0 },
-        })]);
+        ui.send(vec![iced::Event::Mouse(iced::mouse::Event::WheelScrolled { delta: iced::mouse::ScrollDelta::Pixels { x: 0.0, y: 12.0 } })]);
     });
     // new text is handled before the scroll's own message
     let seq = demo_view(&app).conversation.seq + 1;
@@ -2071,10 +1655,7 @@ fn scrolling_up_from_the_tail_keeps_the_place() {
     live.frame(&app, |ui| now = scrolled(ui, "conversation"));
     let (at_end, now) = (at_end.unwrap(), now.unwrap());
     assert!(at_end > 100.0, "the conversation is longer than the window");
-    assert!(
-        (at_end - 60.0 - now).abs() < 1.0,
-        "one notch above the end: {now}"
-    );
+    assert!((at_end - 60.0 - now).abs() < 1.0, "one notch above the end: {now}");
 }
 
 /// Regression (found 2026-11-04): opening the Files drawer moved the conversation to another
@@ -2089,19 +1670,13 @@ fn opening_the_drawer_keeps_the_conversation_s_place() {
     live.apply(&mut app, Message::Latest);
     let mut before = None;
     live.frame(&app, |ui| before = scrolled(ui, "conversation"));
-    live.apply(
-        &mut app,
-        Message::Layout(crate::layout::Action::Mode(crate::layout::Mode::Drawer)),
-    );
+    live.apply(&mut app, Message::Layout(crate::layout::Action::Mode(crate::layout::Mode::Drawer)));
     assert!(app.drawer.shown);
     let mut after = None;
     live.frame(&app, |ui| after = scrolled(ui, "conversation"));
     let (before, after) = (before.unwrap(), after.unwrap());
     assert!(before > 100.0, "the conversation is longer than the window");
-    assert!(
-        (before - after).abs() < 1.0,
-        "the place moved when the drawer opened: {before} → {after}"
-    );
+    assert!((before - after).abs() < 1.0, "the place moved when the drawer opened: {before} → {after}");
 }
 
 /// A press on a button (a tool's line) is the button's and leaves the selection alone; a click
@@ -2121,12 +1696,7 @@ fn a_button_keeps_its_press_and_a_click_clears_the_selection() {
     assert!(highlighted(&mut ui).is_empty());
     ui.send(ctrl_c());
     let messages: Vec<Message> = ui.into_messages().collect();
-    assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::Session(_, session::Event::ToggleTool(id)) if id == "tool")),
-        "{messages:?}"
-    );
+    assert!(messages.iter().any(|m| matches!(m, Message::Session(_, session::Event::ToggleTool(id)) if id == "tool")), "{messages:?}");
     assert!(copies(messages).is_empty());
 }
 
@@ -2138,10 +1708,7 @@ fn the_reader_selects_across_markdown_blocks_and_diff_lines() {
     use sill_proto::sessions::HostPath;
     let path = |s: &str| HostPath::from_path(std::path::Path::new(s));
     let (mut app, _) = App::new(true, None);
-    let _ = app.update(Message::Files(Action::Open {
-        path: path("/home/demo/project/README.md"),
-        repo: None,
-    }));
+    let _ = app.update(Message::Files(Action::Open { path: path("/home/demo/project/README.md"), repo: None }));
     let mut ui = simulator(&app, (1000.0, 860.0));
     let from = aim_at(&mut ui, "Browse pinned folders", "review");
     let to = aim_at(&mut ui, "    println!", "Hello");
@@ -2157,19 +1724,13 @@ fn the_reader_selects_across_markdown_blocks_and_diff_lines() {
           fn main() {\n    println!(\""]
     );
     let _ = app.update(Message::Files(Action::DiffMode(true)));
-    let _ = app.update(Message::Files(Action::Open {
-        path: path("/home/demo/project/README.md"),
-        repo: Some(path("/home/demo/project")),
-    }));
+    let _ = app.update(Message::Files(Action::Open { path: path("/home/demo/project/README.md"), repo: Some(path("/home/demo/project")) }));
     let mut ui = simulator(&app, (1000.0, 860.0));
     let from = aim_at(&mut ui, "-A conversation preview.", "-A");
     let to = aim_at(&mut ui, "+Files and diffs", "Files");
     drag(&mut ui, from, to);
     ui.send(ctrl_c());
-    assert_eq!(
-        copies(ui.into_messages()),
-        ["-A conversation preview.\n+A place to work with your agents.\n+"]
-    );
+    assert_eq!(copies(ui.into_messages()), ["-A conversation preview.\n+A place to work with your agents.\n+"]);
 }
 
 // --- keyboard -----------------------------------------------------------------------------------
@@ -2190,20 +1751,13 @@ fn key(named: iced::keyboard::key::Named) -> iced::Event {
 
 /// Tab `steps` times through `app`, pressing `press` at each stop: what each press asks for
 /// (not applied, so the window stays as it is).
-fn at_each_stop(
-    app: &mut App,
-    size: (f32, f32),
-    steps: usize,
-    press: iced::keyboard::key::Named,
-) -> Vec<Option<Message>> {
+fn at_each_stop(app: &mut App, size: (f32, f32), steps: usize, press: iced::keyboard::key::Named) -> Vec<Option<Message>> {
     let mut live = Live::new(size);
     live.frame(app, |_| {});
     (0..steps)
         .map(|_| {
             live.apply(app, Message::Focus(true));
-            live.frame(app, |ui| ui.send(vec![key(press)]))
-                .into_iter()
-                .next()
+            live.frame(app, |ui| ui.send(vec![key(press)])).into_iter().next()
         })
         .collect()
 }
@@ -2221,37 +1775,19 @@ fn tab_reaches_every_control_in_reading_order_and_enter_presses_it() {
         .iter()
         .map(|m| match m {
             Some(Message::Choose(id)) => format!("choose {id}"),
-            Some(Message::Files(action)) => {
-                format!("files {action:?}").chars().take(24).collect()
-            }
+            Some(Message::Files(action)) => format!("files {action:?}").chars().take(24).collect(),
             Some(Message::Session(_, session::Event::Answer { option_id, .. })) => format!("answer {option_id}"),
             Some(Message::Session(_, event)) => format!("{event:?}").chars().take(24).collect(),
             Some(other) => format!("{other:?}").chars().take(24).collect(),
             None => "-".into(),
         })
         .collect();
-    let at = |what: &str| {
-        names
-            .iter()
-            .position(|n| n.starts_with(what))
-            .unwrap_or_else(|| panic!("{what} not reached: {names:?}"))
-    };
+    let at = |what: &str| names.iter().position(|n| n.starts_with(what)).unwrap_or_else(|| panic!("{what} not reached: {names:?}"));
     assert_eq!(names[0], "ToggleChanges", "{names:?}");
     assert_eq!(names[1], "Details(Open(\"demo\"))", "{names:?}");
     assert_eq!(names[2], "choose demo", "{names:?}");
-    let order = [
-        at("files Toggle("),
-        at("ToggleTool(\"tool\")"),
-        at("answer allow"),
-        at("answer reject"),
-        at("Send"),
-        at("ToggleTerminal"),
-        at("Stop"),
-    ];
-    assert!(
-        order.windows(2).all(|w| w[0] < w[1]),
-        "{order:?} in {names:?}"
-    );
+    let order = [at("files Toggle("), at("ToggleTool(\"tool\")"), at("answer allow"), at("answer reject"), at("Send"), at("ToggleTerminal"), at("Stop")];
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?} in {names:?}");
 }
 
 /// Space presses too, and a dropdown steps through its choices with Up and Down.
@@ -2260,15 +1796,10 @@ fn space_presses_and_arrows_step_a_dropdown() {
     use iced::keyboard::key::Named;
     let mut app = streamed();
     let spaced = at_each_stop(&mut app, (720.0, 860.0), 3, Named::Space);
-    assert!(
-        matches!(&spaced[2], Some(Message::Choose(id)) if id == "demo"),
-        "{spaced:?}"
-    );
+    assert!(matches!(&spaced[2], Some(Message::Choose(id)) if id == "demo"), "{spaced:?}");
     let stepped = at_each_stop(&mut app, (720.0, 860.0), 40, Named::ArrowDown);
     assert!(
-        stepped
-            .iter()
-            .any(|m| matches!(m, Some(Message::Session(_, session::Event::SetMode(pick))) if pick.value == "plan")),
+        stepped.iter().any(|m| matches!(m, Some(Message::Session(_, session::Event::SetMode(pick))) if pick.value == "plan")),
         "the mode dropdown takes Down: {stepped:?}"
     );
     assert!(
@@ -2291,10 +1822,7 @@ fn focus_scrolls_the_control_into_sight() {
         live.frame(&app, |ui| offset = scrolled(ui, "conversation"));
         offsets.push(offset.unwrap_or_default());
     }
-    assert!(
-        offsets.iter().any(|y| *y > 50.0),
-        "tabbing into the conversation scrolled it: {offsets:?}"
-    );
+    assert!(offsets.iter().any(|y| *y > 50.0), "tabbing into the conversation scrolled it: {offsets:?}");
 }
 
 /// Session shortcuts replace the old bindings without taking word selection from editors.
@@ -2314,73 +1842,29 @@ fn session_shortcuts_work_from_the_prompt() {
     let named = |n| Key::Named(n);
     let ch = |c: &str| Key::Character(c.into());
     let both = Modifiers::COMMAND | Modifiers::SHIFT;
-    assert!(matches!(
-        shortcut(press(named(Named::Tab), Modifiers::empty())),
-        Some(Message::Focus(true))
-    ));
-    assert!(matches!(
-        shortcut(press(named(Named::Tab), Modifiers::SHIFT)),
-        Some(Message::Focus(false))
-    ));
-    assert!(matches!(
-        shortcut(press(ch("."), Modifiers::COMMAND)),
-        Some(Message::StepTab(1))
-    ));
-    assert!(matches!(
-        shortcut(press(ch(","), Modifiers::COMMAND)),
-        Some(Message::StepTab(-1))
-    ));
-    assert!(matches!(
-        shortcut(press(ch("F"), both)),
-        Some(Message::Layout(crate::layout::Action::ToggleFull))
-    ));
-    assert!(matches!(
-        shortcut(press(ch("t"), Modifiers::COMMAND)),
-        Some(Message::NewSession)
-    ));
-    assert!(matches!(
-        shortcut(press(named(Named::Escape), Modifiers::empty())),
-        Some(Message::Escape)
-    ));
-    assert!(matches!(
-        shortcut(press(named(Named::PageDown), Modifiers::empty())),
-        Some(Message::Page(true))
-    ));
-    assert!(matches!(
-        shortcut(press(named(Named::End), Modifiers::COMMAND)),
-        Some(Message::Latest)
-    ));
-    assert!(matches!(
-        shortcut(press(ch("q"), Modifiers::COMMAND)),
-        Some(Message::Quit)
-    ));
+    assert!(matches!(shortcut(press(named(Named::Tab), Modifiers::empty())), Some(Message::Focus(true))));
+    assert!(matches!(shortcut(press(named(Named::Tab), Modifiers::SHIFT)), Some(Message::Focus(false))));
+    assert!(matches!(shortcut(press(ch("."), Modifiers::COMMAND)), Some(Message::StepTab(1))));
+    assert!(matches!(shortcut(press(ch(","), Modifiers::COMMAND)), Some(Message::StepTab(-1))));
+    assert!(matches!(shortcut(press(ch("F"), both)), Some(Message::Layout(crate::layout::Action::ToggleFull))));
+    assert!(matches!(shortcut(press(ch("t"), Modifiers::COMMAND)), Some(Message::NewSession)));
+    assert!(matches!(shortcut(press(named(Named::Escape), Modifiers::empty())), Some(Message::Escape)));
+    assert!(matches!(shortcut(press(named(Named::PageDown), Modifiers::empty())), Some(Message::Page(true))));
+    assert!(matches!(shortcut(press(named(Named::End), Modifiers::COMMAND)), Some(Message::Latest)));
+    assert!(matches!(shortcut(press(ch("q"), Modifiers::COMMAND)), Some(Message::Quit)));
     assert!(shortcut(press(ch("a"), Modifiers::empty())).is_none());
 
-    assert!(matches!(
-        shortcut(press(ch("w"), Modifiers::COMMAND)),
-        Some(Message::CloseCurrent)
-    ));
+    assert!(matches!(shortcut(press(ch("w"), Modifiers::COMMAND)), Some(Message::CloseCurrent)));
     for digit in 1..=9 {
-        assert!(
-            matches!(shortcut(press(ch(&digit.to_string()), Modifiers::COMMAND)),
-            Some(Message::SelectTab(at)) if at == digit - 1)
-        );
+        assert!(matches!(shortcut(press(ch(&digit.to_string()), Modifiers::COMMAND)),
+            Some(Message::SelectTab(at)) if at == digit - 1));
     }
     // Ctrl+0 is no tab: it puts Interface scale back to 100 %, as + and - step it
     for (key, step) in [("0", 0), ("+", 1), ("=", 1), ("-", -1)] {
-        assert!(
-            matches!(shortcut(press(ch(key), Modifiers::COMMAND)), Some(Message::ScaleStep(s)) if s == step),
-            "Ctrl+{key}"
-        );
+        assert!(matches!(shortcut(press(ch(key), Modifiers::COMMAND)), Some(Message::ScaleStep(s)) if s == step), "Ctrl+{key}");
     }
-    assert!(matches!(
-        shortcut(press(ch("t"), both)),
-        Some(Message::ToggleTerminal)
-    ));
-    assert!(matches!(
-        shortcut(press(ch("T"), both)),
-        Some(Message::ToggleTerminal)
-    ));
+    assert!(matches!(shortcut(press(ch("t"), both)), Some(Message::ToggleTerminal)));
+    assert!(matches!(shortcut(press(ch("T"), both)), Some(Message::ToggleTerminal)));
     assert!(shortcut(press(ch("t"), Modifiers::COMMAND | Modifiers::ALT)).is_none());
     assert!(shortcut(press(named(Named::ArrowLeft), both)).is_none());
     assert!(shortcut(press(named(Named::ArrowRight), both)).is_none());
@@ -2399,10 +1883,7 @@ fn session_shortcuts_work_from_the_prompt() {
         crate::ui::enter_sends("demo", typed(named(Named::ArrowLeft), JUMP | Modifiers::SHIFT)),
         Some(Binding::Select(iced::widget::text_editor::Motion::WordLeft))
     ));
-    assert!(matches!(
-        crate::ui::enter_sends("demo", typed(named(Named::PageUp), Modifiers::empty())),
-        Some(Binding::Custom(Message::Page(false)))
-    ));
+    assert!(matches!(crate::ui::enter_sends("demo", typed(named(Named::PageUp), Modifiers::empty())), Some(Binding::Custom(Message::Page(false)))));
     // Tab is the prompt's: it indents in a list and moves the keyboard on anywhere else
     assert!(matches!(
         crate::ui::enter_sends("demo", typed(named(Named::Tab), Modifiers::empty())),
@@ -2427,22 +1908,17 @@ fn stepping_tabs_wraps_round() {
 /// drawer and the mode stay as they are; the shell keeps Escape.
 #[test]
 fn escape_toggles_session_and_backend() {
-    use crate::layout::Mode;
     use crate::files::Action;
+    use crate::layout::Mode;
     let (mut app, _) = App::new(true, None);
     let _ = app.update(Message::Layout(crate::layout::Action::Mode(Mode::Full)));
     let _ = app.update(Message::Files(Action::ToggleDrawer));
     let _ = app.update(Message::Files(Action::Open {
-        path: sill_proto::sessions::HostPath::from_path(std::path::Path::new(
-            "/home/demo/project/README.md",
-        )),
+        path: sill_proto::sessions::HostPath::from_path(std::path::Path::new("/home/demo/project/README.md")),
         repo: None,
     }));
     let _ = app.update(Message::Escape);
-    assert!(
-        demo_view(&app).files.reader.is_none(),
-        "an open file closes first"
-    );
+    assert!(demo_view(&app).files.reader.is_none(), "an open file closes first");
     assert!(app.changes.is_none());
     let task = app.update(Message::Escape);
     settle_task(&mut app, task);
@@ -2463,12 +1939,7 @@ fn escape_toggles_session_and_backend() {
 
 // --- sessions, forms, held prompts ---------------------------------------------------------------
 
-pub(crate) fn session_record(
-    id: &str,
-    title: &str,
-    ended: bool,
-    ghost: bool,
-) -> sill_proto::sessions::Session {
+pub(crate) fn session_record(id: &str, title: &str, ended: bool, ghost: bool) -> sill_proto::sessions::Session {
     serde_json::from_value(json!({
         "session_id": id, "agent": "claude", "title": title, "title_kind": "",
         "created_at": "1", "last_used": "1", "ended_at": ended.then_some("1793806135"),
@@ -2523,7 +1994,10 @@ fn an_agent_without_directory_setup_is_dimmed_in_the_menu_and_opens_the_agents_p
     let (mut app, _) = App::new(true, None);
     let _ = app.update(Message::Menu(Event::Toggle));
     let agents = vec![
-        serde_json::from_value(serde_json::json!({"id": "claude", "name": "Claude Code", "command": ["claude-acp"], "home_paths": [{"path": "~/.claude", "kind": "directory"}]})).unwrap(),
+        serde_json::from_value(
+            serde_json::json!({"id": "claude", "name": "Claude Code", "command": ["claude-acp"], "home_paths": [{"path": "~/.claude", "kind": "directory"}]}),
+        )
+        .unwrap(),
         serde_json::from_value(serde_json::json!({"id": "antigravity-acp", "name": "Antigravity", "command": ["antigravity-acp"]})).unwrap(),
     ];
     app.menu.as_mut().unwrap().agents = Some(Ok(agents));
@@ -2544,16 +2018,7 @@ fn the_menu_lists_agents_and_sessions_to_reopen() {
     use crate::menu::Event;
     let (mut app, _) = App::new(true, None);
     let _ = app.update(Message::Menu(Event::Toggle));
-    app.all_sessions = (0..7)
-        .map(|i| {
-            session_record(
-                &format!("old{i}"),
-                &format!("Ended session {i}"),
-                true,
-                false,
-            )
-        })
-        .collect();
+    app.all_sessions = (0..7).map(|i| session_record(&format!("old{i}"), &format!("Ended session {i}"), true, false)).collect();
     let mut ui = simulator(&app, (720.0, 860.0));
     ui.find("Claude Code").unwrap();
     ui.find("Codex").unwrap();
@@ -2582,17 +2047,9 @@ fn the_menu_starts_a_session_and_opens_it() {
     let server = std::thread::spawn(move || {
         let create = daemon.expect("_sill/sessions.create");
         let params = &create["params"];
-        assert_eq!(
-            (params["agent"].as_str(), params["ghost"].as_bool()),
-            (Some("codex"), Some(true))
-        );
+        assert_eq!((params["agent"].as_str(), params["ghost"].as_bool()), (Some("codex"), Some(true)));
         assert_eq!(params["policy"], "default");
-        assert!(
-            params["create_id"]
-                .as_str()
-                .unwrap()
-                .starts_with("gui-create-")
-        );
+        assert!(params["create_id"].as_str().unwrap().starts_with("gui-create-"));
         daemon.reply(&create, json!({"session_id": "fresh"}));
         let list = daemon.expect("_sill/sessions.list");
         daemon.reply(
@@ -2607,11 +2064,7 @@ fn the_menu_starts_a_session_and_opens_it() {
         let list = daemon.expect("_sill/sessions.list");
         daemon.reply(&list, json!({"sessions": [], "next": null}));
     });
-    let task = app.update(Message::Menu(Event::New {
-        agent: "codex".into(),
-        ghost: true,
-        workspaces: None,
-    }));
+    let task = app.update(Message::Menu(Event::New { agent: "codex".into(), ghost: true, workspaces: None }));
     settle_task(&mut app, task);
     assert_eq!(app.selected.as_deref(), Some("fresh"), "opened once listed");
     app.menu = Some(crate::menu::Menu::default());
@@ -2632,10 +2085,7 @@ fn closing_a_tab_ends_its_session_and_a_ghost_asks_first() {
     let mut ui = simulator(&app, (720.0, 860.0));
     ui.click(iced::widget::Id::new("close-tab")).unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
-    assert!(
-        matches!(&messages[..], [Message::CloseTab(id)] if id == "demo"),
-        "{messages:?}"
-    );
+    assert!(matches!(&messages[..], [Message::CloseTab(id)] if id == "demo"), "{messages:?}");
     let _ = app.update(Message::CloseTab("demo".into()));
     assert!(app.armed_close.is(&"demo".to_string()));
     let mut ui = simulator(&app, (720.0, 860.0));
@@ -2644,20 +2094,14 @@ fn closing_a_tab_ends_its_session_and_a_ghost_asks_first() {
     assert!(matches!(&messages[..], [Message::CloseTab(id)] if id == "demo"));
     let server = std::thread::spawn(move || {
         let end = daemon.expect("_sill/sessions.end");
-        assert_eq!(
-            end["params"],
-            json!({"session_id": "demo", "reason": "close"})
-        );
+        assert_eq!(end["params"], json!({"session_id": "demo", "reason": "close"}));
         daemon.reply(&end, json!({"pending": false, "deleted": true}));
         let list = daemon.expect("_sill/sessions.list");
         daemon.reply(&list, json!({"sessions": [], "next": null}));
     });
     let task = app.update(Message::CloseTab("demo".into()));
     settle_task(&mut app, task);
-    assert!(
-        app.tabs.is_empty() && app.selected.is_none(),
-        "the ended session's tab went"
-    );
+    assert!(app.tabs.is_empty() && app.selected.is_none(), "the ended session's tab went");
     server.join().unwrap();
 }
 
@@ -2687,26 +2131,14 @@ fn a_form_question_is_answered_with_its_values() {
     for message in ui.into_messages().collect::<Vec<_>>() {
         let _ = app.update(message);
     }
-    let _ = app.update(in_session(&app, session::Event::FormEdit(
-        "form".into(),
-        crate::forms::Edit::Text {
-            key: "why".into(),
-            text: "release day".into(),
-        },
-    )));
+    let _ = app.update(in_session(&app, session::Event::FormEdit("form".into(), crate::forms::Edit::Text { key: "why".into(), text: "release day".into() })));
     let mut ui = simulator(&app, (720.0, 860.0));
     ui.click("Submit").unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
-    assert!(
-        matches!(&messages[..], [Message::Session(_, session::Event::SubmitForm(q))] if q == "form"),
-        "{messages:?}"
-    );
+    assert!(matches!(&messages[..], [Message::Session(_, session::Event::SubmitForm(q))] if q == "form"), "{messages:?}");
     let task = app.update(in_session(&app, session::Event::SubmitForm("form".into())));
     let answer = daemon.expect("_sill/questions.answer");
-    assert_eq!(
-        answer["params"]["answer"],
-        json!({"type":"form", "values":{"env":"prod", "why":"release day"}})
-    );
+    assert_eq!(answer["params"]["answer"], json!({"type":"form", "values":{"env":"prod", "why":"release day"}}));
     serde_json::from_value::<AnswerQuestion>(answer["params"].clone()).unwrap();
     daemon.reply(&answer, json!({}));
     settle_task(&mut app, task);
@@ -2739,10 +2171,7 @@ fn a_held_prompt_can_be_sent_or_discarded() {
     );
     let task = app.update(in_session(&app, session::Event::ResumeHeld("held1".into())));
     let resume = daemon.expect("_sill/submissions.resume");
-    assert_eq!(
-        resume["params"],
-        json!({"session_id":"demo", "submission_id":"held1"})
-    );
+    assert_eq!(resume["params"], json!({"session_id":"demo", "submission_id":"held1"}));
     daemon.reply(&resume, json!({}));
     settle_task(&mut app, task);
 }
@@ -2751,11 +2180,7 @@ fn a_held_prompt_can_be_sent_or_discarded() {
 
 fn changes_key(app: &App, file: &str) -> String {
     let entries = app.changes_listing.entries.as_ref().unwrap().as_ref().unwrap();
-    entries
-        .iter()
-        .find(|e| sill_client::changes::path(e).display.ends_with(file))
-        .map(sill_client::changes::entry_key)
-        .unwrap()
+    entries.iter().find(|e| sill_client::changes::path(e).display.ends_with(file)).map(sill_client::changes::entry_key).unwrap()
 }
 
 /// The herring opens the Changes page: the session's section with its writes (one changed on the
@@ -2782,8 +2207,7 @@ fn the_changes_page_groups_what_sessions_wrote() {
         "/home/demo/project",
         "your checkout",
     ] {
-        ui.find(shown)
-            .unwrap_or_else(|_| panic!("{shown} is not shown"));
+        ui.find(shown).unwrap_or_else(|_| panic!("{shown} is not shown"));
     }
     ui.click("settings.toml").unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
@@ -2801,18 +2225,13 @@ fn the_changes_page_groups_what_sessions_wrote() {
     ui.find("Revert?").unwrap();
     drop(ui);
     let _ = app.update(Message::Escape);
-    assert!(
-        app.changes.is_none(),
-        "Escape goes back to the conversation"
-    );
+    assert!(app.changes.is_none(), "Escape goes back to the conversation");
 }
 
 fn page_workspace(id: &str, session: &str, files: &[&str]) -> sill_proto::workspaces::Detail {
     let host = |p: &str| sill_proto::sessions::HostPath::from_path(std::path::Path::new(p));
-    let listed: Vec<serde_json::Value> = files
-        .iter()
-        .map(|f| json!({"path": host(&format!("/home/demo/project/{f}")), "status": "M", "added": "2", "removed": "1"}))
-        .collect();
+    let listed: Vec<serde_json::Value> =
+        files.iter().map(|f| json!({"path": host(&format!("/home/demo/project/{f}")), "status": "M", "added": "2", "removed": "1"})).collect();
     serde_json::from_value(json!({
         "workspace": {"workspace_id": id, "name": "project", "session_id": session, "source": host("/home/demo/project"),
             "source_branch": "main", "base": "b0", "branch": format!("sill/{id}"), "path": host(&format!("/ws/{id}")),
@@ -2843,7 +2262,8 @@ fn the_changes_page_is_by_session_with_each_workspaces_files() {
     let all = page_workspaces(vec![page_workspace("w1", "demo", &["src/a.rs", "src/b.rs"])]);
     let _ = app.update(Message::Workspaces(W::PageLoaded(Ok(all))));
     let mut ui = simulator(&app, (720.0, 860.0));
-    for shown in ["1 workspace to apply · 3 writes to keep or revert", "workspace", "2 files +2 −1 · 1 commit", "Apply", "Discard", "a.rs", "b.rs", "+2 −1"] {
+    for shown in ["1 workspace to apply · 3 writes to keep or revert", "workspace", "2 files +2 −1 · 1 commit", "Apply", "Discard", "a.rs", "b.rs", "+2 −1"]
+    {
         ui.find(shown).unwrap_or_else(|_| panic!("{shown} is not shown"));
     }
     assert!(ui.find("Workspaces").is_err(), "no list of workspaces apart from their sessions");
@@ -2996,9 +2416,7 @@ fn revert_all_of_a_group_that_changed_is_asked_about_again() {
     let mut ui = simulator(&app, (720.0, 860.0));
     ui.click("Revert all").unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
-    let [Message::Changes(Event::RevertAll(all))] = &messages[..] else {
-        panic!("{messages:?}")
-    };
+    let [Message::Changes(Event::RevertAll(all))] = &messages[..] else { panic!("{messages:?}") };
     assert_eq!(all.len(), 3);
     // the group as it was with one entry fewer, then as it is shown now
     let fewer = all[..2].to_vec();
@@ -3023,10 +2441,7 @@ fn changes_actions_are_the_public_requests() {
     use crate::changes_ui::{ChangesPage, Event};
     let (client, mut daemon) = daemon();
     let mut app = live_app(vec![client]);
-    app.changes = Some(ChangesPage {
-        fresh_entries: true,
-        ..ChangesPage::default()
-    });
+    app.changes = Some(ChangesPage { fresh_entries: true, ..ChangesPage::default() });
     app.changes_listing.entries = Some(Ok(demo::changes()));
     let keep = changes_key(&app, "settings.toml");
     let live = changes_key(&app, "README.md");
@@ -3037,16 +2452,9 @@ fn changes_actions_are_the_public_requests() {
             for _ in 0..3 {
                 let request = daemon.next();
                 match request["method"].as_str() {
-                    Some("_sill/changes.list") => {
-                        daemon.reply(&request, json!({"entries": [], "next": null}))
-                    }
-                    Some("_sill/workspaces.list") => {
-                        daemon.reply(&request, json!({"workspaces": [], "discarded": [], "next": null}))
-                    }
-                    Some("_sill/settings.get") => daemon.reply(
-                        &request,
-                        json!({"theme": "dracula", "auto_revert_minutes": 1440}),
-                    ),
+                    Some("_sill/changes.list") => daemon.reply(&request, json!({"entries": [], "next": null})),
+                    Some("_sill/workspaces.list") => daemon.reply(&request, json!({"workspaces": [], "discarded": [], "next": null})),
+                    Some("_sill/settings.get") => daemon.reply(&request, json!({"theme": "dracula", "auto_revert_minutes": 1440})),
                     other => panic!("unexpected {other:?}"),
                 }
             }
@@ -3055,29 +2463,18 @@ fn changes_actions_are_the_public_requests() {
         assert_eq!(request["params"]["session_id"], "demo");
         assert_eq!(request["params"]["items"][0]["expected_hash"], "demo-hash");
         let path = request["params"]["items"][0]["path"].clone();
-        daemon.reply(
-            &request,
-            json!({"done": [{"path": path, "message": ""}], "failed": []}),
-        );
+        daemon.reply(&request, json!({"done": [{"path": path, "message": ""}], "failed": []}));
         reload(&mut daemon);
         let request = daemon.expect("_sill/changes.revert");
         assert_eq!(request["params"]["paths"].as_array().unwrap().len(), 3);
         daemon.reply(&request, json!({"done": [], "failed": []}));
         reload(&mut daemon);
         let request = daemon.expect("_sill/changes.git-revert");
-        assert!(
-            request["params"]["path"]["display"]
-                .as_str()
-                .unwrap()
-                .ends_with("README.md")
-        );
+        assert!(request["params"]["path"]["display"].as_str().unwrap().ends_with("README.md"));
         daemon.reply(&request, json!({"text": "reverted"}));
         reload(&mut daemon);
         let request = daemon.expect("_sill/changes.undo");
-        assert_eq!(
-            request["params"],
-            json!({"session_id":"demo", "keep_ids":["k1"], "force": false})
-        );
+        assert_eq!(request["params"], json!({"session_id":"demo", "keep_ids":["k1"], "force": false}));
         daemon.reply(&request, json!({"done": [], "failed": []}));
         reload(&mut daemon);
     });
@@ -3088,10 +2485,7 @@ fn changes_actions_are_the_public_requests() {
     assert_eq!(app.changes_listing.auto_revert, 1440);
     // the page read again (empty now); the rest act on the demo's entries
     app.changes_listing.entries = Some(Ok(demo::changes()));
-    let all: Vec<String> = ["settings.toml", "plan.md", ".profile"]
-        .iter()
-        .map(|f| changes_key(&app, f))
-        .collect();
+    let all: Vec<String> = ["settings.toml", "plan.md", ".profile"].iter().map(|f| changes_key(&app, f)).collect();
     for _ in 0..2 {
         let task = app.update(Message::Changes(Event::RevertAll(all.clone())));
         settle_task(&mut app, task);
@@ -3144,11 +2538,7 @@ fn cancelled_queued_prompts_disappear_from_the_composer() {
         "insertion":"pending", "outcome":"pending"
     }))
     .unwrap();
-    app.current_mut()
-        .unwrap()
-        .conversation
-        .submissions
-        .insert("queued".into(), submission.clone());
+    app.current_mut().unwrap().conversation.submissions.insert("queued".into(), submission.clone());
     let mut ui = simulator(&app, (720.0, 860.0));
     ui.find("unique queued prompt").unwrap();
     ui.find("Queued 1").unwrap();
@@ -3156,12 +2546,7 @@ fn cancelled_queued_prompts_disappear_from_the_composer() {
     let mut cancelled = submission;
     cancelled.outcome = "cancelled".into();
     let view = app.current_mut().unwrap();
-    let update = event(
-        &view.conversation,
-        Event::SubmissionUpdated {
-            submission: cancelled,
-        },
-    );
+    let update = event(&view.conversation, Event::SubmissionUpdated { submission: cancelled });
     assert!(view.accept(update));
     let mut ui = simulator(&app, (720.0, 860.0));
     assert!(ui.find("unique queued prompt").is_err());
@@ -3175,24 +2560,19 @@ fn workspace_shelf_preserves_prompt_focus_between_turns() {
     app.current_mut().unwrap().workspaces.loaded = Some(sill_client::workspaces::Loaded {
         view: serde_json::from_value(json!({
             "workspaces_mode": true, "workspaces": [detail.workspace.clone()], "live": []
-        })).unwrap(),
+        }))
+        .unwrap(),
         details: vec![detail],
     });
     type_text(&mut app, "next prompt");
     let mut live = Live::new((720.0, 860.0));
-    live.operations.push(Box::new(
-        iced::advanced::widget::operation::focusable::focus(iced::widget::Id::new("prompt")),
-    ));
+    live.operations.push(Box::new(iced::advanced::widget::operation::focusable::focus(iced::widget::Id::new("prompt"))));
     live.frame(&app, |_| {});
     for activity in ["idle", "working", "idle"] {
         app.current_mut().unwrap().conversation.session.as_mut().unwrap().activity = activity.into();
         assert_eq!(app.workspace_shelf(app.current().unwrap()).is_some(), activity == "idle");
-        let messages = live.frame(&app, |ui| {
-            ui.send(vec![key(iced::keyboard::key::Named::Enter)])
-        });
-        assert!(messages.iter().any(|m| matches!(m,
-            Message::Session(_, session::Event::Send)
-        )), "prompt lost focus with activity {activity}: {messages:?}");
+        let messages = live.frame(&app, |ui| ui.send(vec![key(iced::keyboard::key::Named::Enter)]));
+        assert!(messages.iter().any(|m| matches!(m, Message::Session(_, session::Event::Send))), "prompt lost focus with activity {activity}: {messages:?}");
     }
 }
 
@@ -3205,13 +2585,8 @@ fn sending_restores_keyboard_focus_to_the_prompt() {
     let send = in_session(&app, session::Event::Send);
     live.apply(&mut app, send);
     type_text(&mut app, "next prompt");
-    let messages = live.frame(&app, |ui| {
-        ui.send(vec![key(iced::keyboard::key::Named::Enter)])
-    });
-    assert!(
-        messages.iter().any(|m| matches!(m, Message::Session(_, session::Event::Send))),
-        "{messages:?}"
-    );
+    let messages = live.frame(&app, |ui| ui.send(vec![key(iced::keyboard::key::Named::Enter)]));
+    assert!(messages.iter().any(|m| matches!(m, Message::Session(_, session::Event::Send))), "{messages:?}");
 }
 
 /// Rebuilding the session after a backend page must put the keyboard in its prompt.
@@ -3228,13 +2603,8 @@ fn returning_from_backend_restores_keyboard_focus_to_the_prompt() {
             live.apply(&mut app, back);
             assert!(!app.backend_shown());
             type_text(&mut app, "next prompt");
-            let messages = live.frame(&app, |ui| {
-                ui.send(vec![key(iced::keyboard::key::Named::Enter)])
-            });
-            assert!(
-                messages.iter().any(|m| matches!(m, Message::Session(_, session::Event::Send))),
-                "returning from {page:?}: {messages:?}"
-            );
+            let messages = live.frame(&app, |ui| ui.send(vec![key(iced::keyboard::key::Named::Enter)]));
+            assert!(messages.iter().any(|m| matches!(m, Message::Session(_, session::Event::Send))), "returning from {page:?}: {messages:?}");
         }
     }
 }
@@ -3244,10 +2614,7 @@ fn returning_from_backend_restores_keyboard_focus_to_the_prompt() {
 fn the_timer_stays_open_when_moving_towards_the_plus_button() {
     let (mut app, _) = App::new(true, None);
     let mut live = Live::new((720.0, 860.0));
-    app.daemon_settings = Some(sill_proto::admin::Settings {
-        timer_auto: Some(false),
-        ..Default::default()
-    });
+    app.daemon_settings = Some(sill_proto::admin::Settings { timer_auto: Some(false), ..Default::default() });
     // Approach + directly, without passing over the indicator: it must stay put.
     let messages = live.frame(&app, |ui| move_to(ui, iced::Point::new(670.0, 18.0)));
     for message in messages {
@@ -3265,10 +2632,7 @@ fn the_timer_stays_open_when_moving_towards_the_plus_button() {
     for message in messages {
         let _ = app.update(message);
     }
-    assert!(
-        !app.activity_hovered,
-        "timer closes after leaving the controls"
-    );
+    assert!(!app.activity_hovered, "timer closes after leaving the controls");
 }
 
 /// Opening and closing + must retain both the tail and a manually scrolled position.
@@ -3298,10 +2662,7 @@ fn the_plus_menu_keeps_the_conversation_position() {
             assert_eq!(app.menu.is_some(), open);
             let mut after = None;
             live.frame(&app, |ui| after = scrolled(ui, "conversation"));
-            assert!(
-                (before - after.unwrap()).abs() < 1.0,
-                "menu open={open}, at tail={at_tail}: {before} → {after:?}"
-            );
+            assert!((before - after.unwrap()).abs() < 1.0, "menu open={open}, at tail={at_tail}: {before} → {after:?}");
         }
     }
 }
@@ -3313,36 +2674,17 @@ fn folder_chips_show_tracked_lines_and_untracked_files_independently() {
     let (mut app, _) = App::new(true, None);
     let path = HostPath::from_path(std::path::Path::new("/project"));
     let view = app.views.get_mut("demo").unwrap();
-    view.files.roots = vec![Root {
-        path: path.clone(),
-        global: false,
-        metadata: None,
-        error: None,
-    }];
-    view.files.repos.insert(
-        key(&path).into(),
-        Repo {
-            root: Some(path.clone()),
-            lines: Some(("0".into(), "0".into())),
-            summary: "+0 −0  ?3".into(),
-            ..Repo::default()
-        },
-    );
+    view.files.roots = vec![Root { path: path.clone(), global: false, metadata: None, error: None }];
+    view.files
+        .repos
+        .insert(key(&path).into(), Repo { root: Some(path.clone()), lines: Some(("0".into(), "0".into())), summary: "+0 −0  ?3".into(), ..Repo::default() });
     {
         let mut ui = simulator(&app, (720.0, 860.0));
-        ui.find("?3")
-            .expect("new files remain visible with no tracked line changes");
+        ui.find("?3").expect("new files remain visible with no tracked line changes");
         assert!(ui.find("+0").is_err());
         assert!(ui.find("−0").is_err());
     }
-    let repo = app
-        .views
-        .get_mut("demo")
-        .unwrap()
-        .files
-        .repos
-        .get_mut(key(&path))
-        .unwrap();
+    let repo = app.views.get_mut("demo").unwrap().files.repos.get_mut(key(&path)).unwrap();
     repo.lines = Some(("12".into(), "7".into()));
     repo.summary = "+12 −7  ?0".into();
     let mut ui = simulator(&app, (720.0, 860.0));
@@ -3370,12 +2712,9 @@ fn hotkey(key: iced::keyboard::Key, modifiers: iced::keyboard::Modifiers) -> Vec
 #[test]
 fn session_shortcuts_precede_text_inputs_and_do_not_insert_characters() {
     use iced::keyboard::{Key, Modifiers};
-    let input = iced::widget::text_input("", "alpha beta gamma")
-        .id("edit")
-        .on_input(Message::Copy);
+    let input = iced::widget::text_input("", "alpha beta gamma").id("edit").on_input(Message::Copy);
     let view = crate::keys::intercept_shortcuts(input);
-    let mut ui =
-        iced_test::Simulator::with_size(crate::snapshots::settings(), (600.0, 100.0), view);
+    let mut ui = iced_test::Simulator::with_size(crate::snapshots::settings(), (600.0, 100.0), view);
     ui.click(iced::widget::Id::new("edit")).unwrap();
     let mut events = hotkey(Key::Character("2".into()), Modifiers::COMMAND);
     if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { text, .. }) = &mut events[1] {
@@ -3383,10 +2722,7 @@ fn session_shortcuts_precede_text_inputs_and_do_not_insert_characters() {
     }
     ui.send(events);
     ui.send(hotkey(Key::Character("t".into()), Modifiers::COMMAND));
-    ui.send(hotkey(
-        Key::Character("T".into()),
-        Modifiers::COMMAND | Modifiers::SHIFT,
-    ));
+    ui.send(hotkey(Key::Character("T".into()), Modifiers::COMMAND | Modifiers::SHIFT));
     ui.send(hotkey(Key::Character("w".into()), Modifiers::COMMAND));
     ui.send(hotkey(Key::Character(",".into()), Modifiers::COMMAND));
     ui.send(hotkey(Key::Character(".".into()), Modifiers::COMMAND));
@@ -3394,14 +2730,7 @@ fn session_shortcuts_precede_text_inputs_and_do_not_insert_characters() {
     assert!(
         matches!(
             messages.as_slice(),
-            [
-                Message::SelectTab(1),
-                Message::NewSession,
-                Message::ToggleTerminal,
-                Message::CloseCurrent,
-                Message::StepTab(-1),
-                Message::StepTab(1)
-            ]
+            [Message::SelectTab(1), Message::NewSession, Message::ToggleTerminal, Message::CloseCurrent, Message::StepTab(-1), Message::StepTab(1)]
         ),
         "{messages:?}"
     );
@@ -3413,60 +2742,36 @@ fn word_selection_works_in_prompt_and_source_bindings() {
         keyboard::{Key, Modifiers, key::Named},
         widget::text_editor::{Binding, KeyPress, Motion, Status},
     };
-    for binding in [
-        |press| crate::ui::enter_sends("demo", press),
-        crate::ui::reading_keys,
-        Binding::<Message>::from_key_press,
-    ] {
-        for (key, motion) in [
-            (Named::ArrowLeft, Motion::WordLeft),
-            (Named::ArrowRight, Motion::WordRight),
-        ] {
+    for binding in [|press| crate::ui::enter_sends("demo", press), crate::ui::reading_keys, Binding::<Message>::from_key_press] {
+        for (key, motion) in [(Named::ArrowLeft, Motion::WordLeft), (Named::ArrowRight, Motion::WordRight)] {
             let event = |modifiers| KeyPress {
                 key: Key::Named(key),
                 modified_key: Key::Named(key),
-                physical_key: iced::keyboard::key::Physical::Unidentified(
-                    iced::keyboard::key::NativeCode::Unidentified,
-                ),
+                physical_key: iced::keyboard::key::Physical::Unidentified(iced::keyboard::key::NativeCode::Unidentified),
                 modifiers,
                 text: None,
                 status: Status::Focused { is_hovered: false },
             };
-            assert!(
-                matches!(binding(event(JUMP | Modifiers::SHIFT)), Some(Binding::Select(m)) if m == motion)
-            );
-            assert!(
-                matches!(binding(event(JUMP)), Some(Binding::Move(m)) if m == motion)
-            );
+            assert!(matches!(binding(event(JUMP | Modifiers::SHIFT)), Some(Binding::Select(m)) if m == motion));
+            assert!(matches!(binding(event(JUMP)), Some(Binding::Move(m)) if m == motion));
         }
     }
     let (mut app, _) = App::new(true, None);
     type_text(&mut app, "alpha beta gamma");
     let mut live = Live::new((720.0, 860.0));
-    live.operations.push(Box::new(
-        iced::advanced::widget::operation::focusable::focus(iced::widget::Id::new("prompt")),
-    ));
+    live.operations.push(Box::new(iced::advanced::widget::operation::focusable::focus(iced::widget::Id::new("prompt"))));
     let messages = live.frame(&app, |ui| {
         ui.send(hotkey(Key::Named(Named::Home), Modifiers::empty()));
-        ui.send(hotkey(
-            Key::Named(Named::ArrowRight),
-            JUMP | Modifiers::SHIFT,
-        ));
+        ui.send(hotkey(Key::Named(Named::ArrowRight), JUMP | Modifiers::SHIFT));
     });
     for message in messages {
         let _ = app.update(message);
     }
     assert_eq!(demo_view(&app).draft.selection().as_deref(), Some("alpha"));
     assert_eq!(app.selected.as_deref(), Some("demo"));
-    for (direction, expected) in [
-        (Named::ArrowRight, "alpha beta"),
-        (Named::ArrowLeft, "alpha "),
-    ] {
+    for (direction, expected) in [(Named::ArrowRight, "alpha beta"), (Named::ArrowLeft, "alpha ")] {
         let messages = live.frame(&app, |ui| {
-            ui.send(hotkey(
-                Key::Named(direction),
-                JUMP | Modifiers::SHIFT,
-            ));
+            ui.send(hotkey(Key::Named(direction), JUMP | Modifiers::SHIFT));
         });
         for message in messages {
             let _ = app.update(message);
@@ -3479,30 +2784,18 @@ fn word_selection_works_in_prompt_and_source_bindings() {
 #[test]
 fn word_selection_works_in_single_line_inputs() {
     use iced::keyboard::{Key, Modifiers, key::Named};
-    let input = iced::widget::text_input("", "alpha beta gamma")
-        .id("edit")
-        .on_input(Message::Copy);
-    let mut ui = iced_test::Simulator::with_size(
-        crate::snapshots::settings(),
-        (600.0, 100.0),
-        crate::keys::intercept_shortcuts(input),
-    );
+    let input = iced::widget::text_input("", "alpha beta gamma").id("edit").on_input(Message::Copy);
+    let mut ui = iced_test::Simulator::with_size(crate::snapshots::settings(), (600.0, 100.0), crate::keys::intercept_shortcuts(input));
     ui.click(iced::widget::Id::new("edit")).unwrap();
     ui.send(hotkey(Key::Named(Named::Home), Modifiers::empty()));
-    ui.send(hotkey(
-        Key::Named(Named::ArrowRight),
-        JUMP | Modifiers::SHIFT,
-    ));
+    ui.send(hotkey(Key::Named(Named::ArrowRight), JUMP | Modifiers::SHIFT));
     let mut insert = hotkey(Key::Character("X".into()), Modifiers::empty());
     if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { text, .. }) = &mut insert[1] {
         *text = Some("X".into());
     }
     ui.send(insert);
     let messages: Vec<_> = ui.into_messages().collect();
-    assert!(
-        matches!(messages.as_slice(), [Message::Copy(text)] if text == "X beta gamma"),
-        "{messages:?}"
-    );
+    assert!(matches!(messages.as_slice(), [Message::Copy(text)] if text == "X beta gamma"), "{messages:?}");
 }
 
 #[test]
@@ -3535,10 +2828,7 @@ fn session_hotkeys_create_with_current_agent_and_close_current_session() {
         assert_eq!(req["params"]["remember_pins"], true);
         daemon.reply(&req, json!({"session_id":"fresh"}));
         let req = daemon.expect("_sill/sessions.list");
-        daemon.reply(
-            &req,
-            json!({"sessions":[session_record("fresh", "Fresh", false, false)], "next":null}),
-        );
+        daemon.reply(&req, json!({"sessions":[session_record("fresh", "Fresh", false, false)], "next":null}));
         let req = daemon.expect("_sill/sessions.end");
         assert_eq!(req["params"]["session_id"], "fresh");
         daemon.reply(&req, json!({}));
@@ -3564,25 +2854,15 @@ fn interface_scale_keeps_the_window_and_what_the_displays_keep() {
     app.width = 500.0;
     app.height = 800.0;
     app.monitor = Some(iced::Size::new(1440.0, 900.0));
-    let kept = crate::settings::DisplayPrefs {
-        shelf_width: Some(0.3),
-        work_width: Some(0.6),
-        ..Default::default()
-    };
+    let kept = crate::settings::DisplayPrefs { shelf_width: Some(0.3), work_width: Some(0.6), ..Default::default() };
     app.settings.displays.insert("DP-1".into(), kept.clone());
     let _ = app.update(Message::ScaleStep(1));
     assert_eq!(app.settings.scale(), 1.1);
     let _ = app.update(Message::ScaleStep(1));
     assert_eq!(app.settings.scale(), 1.25);
-    assert!(
-        near(app.width, 400.0) && near(app.height, 640.0),
-        "500 × 800 at 100 % in 125 % units"
-    );
+    assert!(near(app.width, 400.0) && near(app.height, 640.0), "500 × 800 at 100 % in 125 % units");
     let monitor = app.monitor.unwrap();
-    assert!(
-        near(monitor.width, 1152.0) && near(monitor.height, 720.0),
-        "{monitor:?}"
-    );
+    assert!(near(monitor.width, 1152.0) && near(monitor.height, 720.0), "{monitor:?}");
     assert_eq!(app.settings.displays["DP-1"], kept);
     let _ = app.update(Message::ScaleStep(0));
     assert!(near(app.width, 500.0) && near(app.height, 800.0));
@@ -3592,28 +2872,16 @@ fn interface_scale_keeps_the_window_and_what_the_displays_keep() {
 #[test]
 fn configured_shortcuts_intercept_inputs_and_release_old_bindings() {
     use iced::keyboard::{Key, Modifiers};
-    let bindings = crate::shortcuts::Bindings::from([
-        ("new_session".into(), "Alt+N".into()),
-        ("close_session".into(), String::new()),
-    ]);
-    let input = iced::widget::text_input("", "")
-        .id("custom-edit")
-        .on_input(Message::Copy);
+    let bindings = crate::shortcuts::Bindings::from([("new_session".into(), "Alt+N".into()), ("close_session".into(), String::new())]);
+    let input = iced::widget::text_input("", "").id("custom-edit").on_input(Message::Copy);
     let view = crate::keys::configured_shortcuts(input, &bindings);
-    let mut ui =
-        iced_test::Simulator::with_size(crate::snapshots::settings(), (600.0, 100.0), view);
+    let mut ui = iced_test::Simulator::with_size(crate::snapshots::settings(), (600.0, 100.0), view);
     ui.click(iced::widget::Id::new("custom-edit")).unwrap();
     ui.send(hotkey(Key::Character("n".into()), Modifiers::ALT));
     ui.send(hotkey(Key::Character("t".into()), Modifiers::COMMAND));
     ui.send(hotkey(Key::Character("w".into()), Modifiers::COMMAND));
     let messages: Vec<_> = ui.into_messages().collect();
-    assert_eq!(
-        messages
-            .iter()
-            .filter(|m| matches!(m, Message::NewSession))
-            .count(),
-        1
-    );
+    assert_eq!(messages.iter().filter(|m| matches!(m, Message::NewSession)).count(), 1);
     assert!(!messages.iter().any(|m| matches!(m, Message::CloseCurrent)));
     assert!(crate::keys::from_text(&Key::Character("t".into()), Modifiers::COMMAND, true).is_none());
 }
@@ -3626,8 +2894,7 @@ fn policy_errors_remain_visible_with_the_group_collapsed() {
     page.category = crate::settings_ui::Category::AgentBehaviour;
     page.policies.status = "Policy validation failed: invalid TOML".into();
     let view = app.settings_view(&page);
-    let mut ui =
-        iced_test::Simulator::with_size(crate::snapshots::settings(), (720.0, 5000.0), view);
+    let mut ui = iced_test::Simulator::with_size(crate::snapshots::settings(), (720.0, 5000.0), view);
     ui.find("Policies").unwrap();
     ui.find("Policy validation failed: invalid TOML").unwrap();
     assert!(ui.find("Import policy").is_err());
@@ -3635,8 +2902,7 @@ fn policy_errors_remain_visible_with_the_group_collapsed() {
     page.collapsed.remove("Policies");
     app.settings_page = Some(page);
     let view = app.settings_view(app.settings_page.as_ref().unwrap());
-    let mut ui =
-        iced_test::Simulator::with_size(crate::snapshots::settings(), (720.0, 5000.0), view);
+    let mut ui = iced_test::Simulator::with_size(crate::snapshots::settings(), (720.0, 5000.0), view);
     ui.find("Import policy").unwrap();
     ui.find("Check").unwrap();
 }
@@ -3653,31 +2919,15 @@ fn host_and_jail_shells_keep_separate_panes_and_route_hidden_events() {
     assert!(host_generation > jail_generation);
     assert!(app.current().unwrap().terminal_host);
     assert!(app.current().unwrap().parked_terminal.is_some());
-    let _ = app.update(Message::Terminal(
-        id,
-        jail_generation,
-        crate::terminal::Event::Ended,
-    ));
-    assert_eq!(
-        app.current()
-            .unwrap()
-            .parked_terminal
-            .as_ref()
-            .unwrap()
-            .0
-            .status,
-        crate::terminal::Status::Ended
-    );
+    let _ = app.update(Message::Terminal(id, jail_generation, crate::terminal::Event::Ended));
+    assert_eq!(app.current().unwrap().parked_terminal.as_ref().unwrap().0.status, crate::terminal::Status::Ended);
     let _ = app.update(Message::ToggleHostTerminal);
     assert!(!app.current().unwrap().terminal_shown);
     let _ = app.update(Message::ToggleHostTerminal);
     assert_eq!(app.current().unwrap().terminal_generation, host_generation);
     let _ = app.update(Message::ToggleTerminal);
     assert!(!app.current().unwrap().terminal_host);
-    assert!(
-        app.current().unwrap().terminal_generation > host_generation,
-        "ended jail shell is reopened without reusing host generation"
-    );
+    assert!(app.current().unwrap().terminal_generation > host_generation, "ended jail shell is reopened without reusing host generation");
     let _ = app.update(Message::ToggleHostTerminal);
     assert_eq!(app.current().unwrap().terminal_generation, host_generation);
 }
@@ -3687,32 +2937,18 @@ fn host_shell_shortcut_is_configurable() {
     use iced::keyboard::{Key, Modifiers};
     let mut bindings = crate::shortcuts::Bindings::new();
     let modifiers = Modifiers::COMMAND | Modifiers::SHIFT;
-    assert!(matches!(
-        crate::shortcuts::message(&bindings, &Key::Character("h".into()), modifiers),
-        Some(Message::ToggleHostTerminal)
-    ));
+    assert!(matches!(crate::shortcuts::message(&bindings, &Key::Character("h".into()), modifiers), Some(Message::ToggleHostTerminal)));
     bindings.insert("host_shell".into(), "Alt+H".into());
     assert!(crate::shortcuts::message(&bindings, &Key::Character("h".into()), modifiers).is_none());
-    assert!(matches!(
-        crate::shortcuts::message(&bindings, &Key::Character("h".into()), Modifiers::ALT),
-        Some(Message::ToggleHostTerminal)
-    ));
+    assert!(matches!(crate::shortcuts::message(&bindings, &Key::Character("h".into()), Modifiers::ALT), Some(Message::ToggleHostTerminal)));
 }
 
 #[test]
 fn attachment_only_send_keeps_files_on_refusal() {
     let (client, mut daemon) = daemon();
     let mut app = live_app(vec![client]);
-    let attachment = sill_proto::sfp::Attachment::Uploaded {
-        upload_id: "document".into(),
-        name: "report.pdf".into(),
-        mime: "application/pdf".into(),
-    };
-    app.views
-        .get_mut("demo")
-        .unwrap()
-        .attachments
-        .push(attachment.clone().into());
+    let attachment = sill_proto::sfp::Attachment::Uploaded { upload_id: "document".into(), name: "report.pdf".into(), mime: "application/pdf".into() };
+    app.views.get_mut("demo").unwrap().attachments.push(attachment.clone().into());
     let task = app.update(in_session(&app, session::Event::Send));
     let request = daemon.expect("_sill/sessions.submit");
     let submit: Submit = serde_json::from_value(request["params"].clone()).unwrap();
@@ -3722,14 +2958,8 @@ fn attachment_only_send_keeps_files_on_refusal() {
     settle_task(&mut app, task);
     assert!(demo_view(&app).attachments.is_empty());
     let view = app.views.get_mut("demo").unwrap();
-    let submit = view
-        .outbox
-        .send_with_attachments("demo", String::new(), vec![attachment.clone()]);
-    let _ = app.update(Message::Done(
-        "demo".into(),
-        crate::Act::Send(submit.submission_id),
-        sill_client::actions::Outcome::NotSent("offline".into()),
-    ));
+    let submit = view.outbox.send_with_attachments("demo", String::new(), vec![attachment.clone()]);
+    let _ = app.update(Message::Done("demo".into(), crate::Act::Send(submit.submission_id), sill_client::actions::Outcome::NotSent("offline".into())));
     assert_eq!(demo_view(&app).attachments.iter().map(|a| a.attachment.clone()).collect::<Vec<_>>(), vec![attachment]);
 }
 
@@ -3738,15 +2968,8 @@ fn attachment_completion_stays_with_originating_session() {
     let (mut app, _) = App::new(true, None);
     add_session(&mut app, "other");
     app.selected = Some("other".into());
-    let a = sill_proto::sfp::Attachment::Uploaded {
-        upload_id: "file".into(),
-        name: "notes.txt".into(),
-        mime: "text/plain".into(),
-    };
-    let _ = app.update(Message::Media(crate::media::Event::Attached(
-        "demo".into(),
-        Ok(vec![(a.clone(), None)]),
-    )));
+    let a = sill_proto::sfp::Attachment::Uploaded { upload_id: "file".into(), name: "notes.txt".into(), mime: "text/plain".into() };
+    let _ = app.update(Message::Media(crate::media::Event::Attached("demo".into(), Ok(vec![(a.clone(), None)]))));
     assert_eq!(app.views["demo"].attachments.iter().map(|a| a.attachment.clone()).collect::<Vec<_>>(), vec![a]);
     assert!(app.views["other"].attachments.is_empty());
 }
@@ -3755,26 +2978,17 @@ fn attachment_completion_stays_with_originating_session() {
 fn generic_attachment_upload_uses_session_and_preserves_file_bytes() {
     let (client, mut daemon) = daemon();
     let mut app = live_app(vec![client]);
-    let path = std::env::temp_dir().join(format!(
-        "sill-attachment-{}.txt",
-        sill_client::request_id("test")
-    ));
+    let path = std::env::temp_dir().join(format!("sill-attachment-{}.txt", sill_client::request_id("test")));
     let bytes = b"notes\n\0binary-safe";
     std::fs::write(&path, bytes).unwrap();
     let task = app.attachment_paths("demo".into(), Some(vec![path.clone()]));
     let request = daemon.expect("_sill/uploads.create");
-    let params: sill_proto::sfp::UploadCreate =
-        serde_json::from_value(request["params"].clone()).unwrap();
+    let params: sill_proto::sfp::UploadCreate = serde_json::from_value(request["params"].clone()).unwrap();
     assert_eq!(params.session_id, "demo");
-    assert_eq!(
-        sill_proto::admin::decode_bytes(&params.data_base64).unwrap(),
-        bytes
-    );
+    assert_eq!(sill_proto::admin::decode_bytes(&params.data_base64).unwrap(), bytes);
     daemon.reply(&request, json!({"upload_id":params.upload_id}));
     settle_task(&mut app, task);
-    assert!(
-        matches!(&demo_view(&app).attachments[0].attachment, sill_proto::sfp::Attachment::Uploaded { upload_id, .. } if upload_id == &params.upload_id)
-    );
+    assert!(matches!(&demo_view(&app).attachments[0].attachment, sill_proto::sfp::Attachment::Uploaded { upload_id, .. } if upload_id == &params.upload_id));
     std::fs::remove_file(path).unwrap();
 }
 
@@ -3785,33 +2999,21 @@ fn markdown_image_is_read_from_session_host_and_decoded() {
     let source = "![result](/tmp/image%20one.png)";
     app.views.get_mut("demo").unwrap().rendered.insert(
         "test-image".into(),
-        crate::Rendered {
-            source: source.into(),
-            markdown: iced::widget::markdown::Content::parse(source),
-            leaves: std::sync::OnceLock::new(),
-        },
+        crate::Rendered { source: source.into(), markdown: iced::widget::markdown::Content::parse(source), leaves: std::sync::OnceLock::new() },
     );
     let task = app.load_media("demo");
     let request = daemon.expect("_sill/files.image");
-    let params: sill_proto::admin::SessionImage =
-        serde_json::from_value(request["params"].clone()).unwrap();
+    let params: sill_proto::admin::SessionImage = serde_json::from_value(request["params"].clone()).unwrap();
     assert_eq!(params.session_id, "demo");
-    assert_eq!(
-        params.path.to_path().unwrap(),
-        std::path::PathBuf::from("/tmp/image one.png")
-    );
+    assert_eq!(params.path.to_path().unwrap(), std::path::PathBuf::from("/tmp/image one.png"));
     let mut png = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::new_rgba8(2, 2)
-        .write_to(&mut png, image::ImageFormat::Png)
-        .unwrap();
-    daemon.reply(&request, json!({"bytes_base64":sill_proto::admin::encode_bytes(png.get_ref()),"next_offset":png.get_ref().len().to_string(),"eof":true,"revision":"one"}));
-    settle_task(&mut app, task);
-    assert!(
-        demo_view(&app)
-            .media
-            .values()
-            .any(|v| matches!(v, Some(Ok(_))))
+    image::DynamicImage::new_rgba8(2, 2).write_to(&mut png, image::ImageFormat::Png).unwrap();
+    daemon.reply(
+        &request,
+        json!({"bytes_base64":sill_proto::admin::encode_bytes(png.get_ref()),"next_offset":png.get_ref().len().to_string(),"eof":true,"revision":"one"}),
     );
+    settle_task(&mut app, task);
+    assert!(demo_view(&app).media.values().any(|v| matches!(v, Some(Ok(_)))));
 }
 
 #[test]
@@ -3822,41 +3024,20 @@ fn new_tabs_append_and_refreshes_preserve_existing_positions() {
     older.created_at = "9".into();
     let mut newer = session_record("newer", "Newer", false, false);
     newer.created_at = "10".into();
-    let ids = |app: &App| {
-        app.tabs
-            .iter()
-            .map(|t| t.id.as_str().to_owned())
-            .collect::<Vec<_>>()
-    };
+    let ids = |app: &App| app.tabs.iter().map(|t| t.id.as_str().to_owned()).collect::<Vec<_>>();
     let _ = app.update(Message::Listed(Ok(vec![newer.clone(), older.clone()])));
     assert_eq!(ids(&app), ["older", "newer"]);
     let mut newest = session_record("newest", "Newest", false, false);
     newest.created_at = "11".into();
-    let _ = app.update(Message::Listed(Ok(vec![
-        newest.clone(),
-        newer.clone(),
-        older.clone(),
-    ])));
+    let _ = app.update(Message::Listed(Ok(vec![newest.clone(), newer.clone(), older.clone()])));
     assert_eq!(ids(&app), ["older", "newer", "newest"]);
-    let _ = app.update(Message::Listed(Ok(vec![
-        older.clone(),
-        newest.clone(),
-        newer.clone(),
-    ])));
+    let _ = app.update(Message::Listed(Ok(vec![older.clone(), newest.clone(), newer.clone()])));
     assert_eq!(ids(&app), ["older", "newer", "newest"]);
     older.ended_at = Some("12".into());
-    let _ = app.update(Message::Listed(Ok(vec![
-        older.clone(),
-        newest.clone(),
-        newer.clone(),
-    ])));
+    let _ = app.update(Message::Listed(Ok(vec![older.clone(), newest.clone(), newer.clone()])));
     older.ended_at = None;
     let _ = app.update(Message::Listed(Ok(vec![older, newest, newer])));
-    assert_eq!(
-        ids(&app),
-        ["newer", "newest", "older"],
-        "reopened tabs append too"
-    );
+    assert_eq!(ids(&app), ["newer", "newest", "older"], "reopened tabs append too");
 }
 
 #[test]
@@ -3866,16 +3047,8 @@ fn double_clicking_a_tab_title_starts_name_editing_without_dragging_window() {
     ui.click("witty-willow").unwrap();
     ui.click("witty-willow").unwrap();
     let messages: Vec<_> = ui.into_messages().collect();
-    assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::Name(crate::names::Event::Begin(id)) if id == "demo")),
-        "{messages:?}"
-    );
-    assert!(
-        !messages.iter().any(|m| matches!(m, Message::DragWindow)),
-        "{messages:?}"
-    );
+    assert!(messages.iter().any(|m| matches!(m, Message::Name(crate::names::Event::Begin(id)) if id == "demo")), "{messages:?}");
+    assert!(!messages.iter().any(|m| matches!(m, Message::DragWindow)), "{messages:?}");
 }
 
 #[test]
@@ -3890,12 +3063,7 @@ fn renaming_edits_the_session_name_and_summary_title_stays_independent() {
     assert_eq!(editor.text, "velvet-comet");
     let token = editor.token.clone();
     let _ = app.name_event(Event::Input("my-session".into()));
-    let _ = app.name_event(Event::Done(
-        token,
-        "demo".into(),
-        "my-session".into(),
-        Ok(()),
-    ));
+    let _ = app.name_event(Event::Done(token, "demo".into(), "my-session".into(), Ok(())));
     assert!(app.name_editor.is_none());
     assert_eq!(app.all_sessions[0].name.as_deref(), Some("my-session"));
     assert_eq!(app.all_sessions[0].title, "A descriptive summary title");
@@ -3929,12 +3097,8 @@ fn slow_periodic_refreshes_do_not_accumulate_reads() {
         held.recv_timeout(Duration::from_secs(5)).unwrap();
         for request in requests {
             match request["method"].as_str().unwrap() {
-                "_sill/sessions.list" => {
-                    daemon.reply(&request, json!({"sessions": [session], "next": null}))
-                }
-                "_sill/settings.get" => {
-                    daemon.reply(&request, sill_proto::admin::Settings::default())
-                }
+                "_sill/sessions.list" => daemon.reply(&request, json!({"sessions": [session], "next": null})),
+                "_sill/settings.get" => daemon.reply(&request, sill_proto::admin::Settings::default()),
                 other => panic!("unexpected refresh request {other}"),
             }
         }
@@ -3945,10 +3109,7 @@ fn slow_periodic_refreshes_do_not_accumulate_reads() {
         let duplicate = app.update(Message::Refresh);
         settle_task(&mut app, duplicate);
     }
-    assert!(
-        !app.list_again,
-        "timer ticks must not perpetually invalidate slow reads"
-    );
+    assert!(!app.list_again, "timer ticks must not perpetually invalidate slow reads");
     release.send(()).unwrap();
     settle_task(&mut app, task);
     fake.join().unwrap();
@@ -3956,14 +3117,8 @@ fn slow_periodic_refreshes_do_not_accumulate_reads() {
     assert_eq!(app.tabs.len(), 1);
     let _ = app.update(Message::Listed(Err("offline".into())));
     app.settings_pending = true;
-    let _ = app.update(Message::DaemonSettings(
-        app.settings_revision,
-        Err("offline".into()),
-    ));
-    assert!(
-        !app.list_pending && !app.settings_pending,
-        "failed reads release their guards too"
-    );
+    let _ = app.update(Message::DaemonSettings(app.settings_revision, Err("offline".into())));
+    assert!(!app.list_pending && !app.settings_pending, "failed reads release their guards too");
 }
 
 #[test]
@@ -3995,24 +3150,13 @@ fn failed_instructions_save_keeps_text_and_retry_enabled() {
     let (mut app, _) = App::new(true, None);
     let task = app.show_page(crate::Page::Settings);
     settle_task(&mut app, task);
-    let _ = app.settings_event(Event::Instructions(
-        iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Paste(Arc::new(
-            "new instructions".into(),
-        ))),
-    ));
+    let _ = app.settings_event(Event::Instructions(iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Paste(Arc::new(
+        "new instructions".into(),
+    )))));
     let before = app.settings_page.as_ref().unwrap().instructions.text();
     let task = app.settings_event(Event::SaveInstructions);
-    assert!(
-        app.settings_page.as_ref().unwrap().edited,
-        "no success before the reply"
-    );
-    assert!(
-        app.settings_page
-            .as_ref()
-            .unwrap()
-            .instructions_saving
-            .is_some()
-    );
+    assert!(app.settings_page.as_ref().unwrap().edited, "no success before the reply");
+    assert!(app.settings_page.as_ref().unwrap().instructions_saving.is_some());
     settle_task(&mut app, task);
     let page = app.settings_page.as_ref().unwrap();
     assert_eq!(page.instructions.text(), before);
@@ -4029,14 +3173,8 @@ fn settings_replies_cannot_overwrite_a_reopened_page() {
     let _ = app.show_page(crate::Page::Settings);
     let new = app.settings_page.as_ref().unwrap().token.clone();
     assert_ne!(old, new);
-    let stale = sill_client::settings::Snapshot {
-        instructions: "old page's text".into(),
-        ..Default::default()
-    };
-    let _ = app.update(Message::SettingsReply(
-        old,
-        Event::Loaded(String::new(), Box::new(Ok(stale))),
-    ));
+    let stale = sill_client::settings::Snapshot { instructions: "old page's text".into(), ..Default::default() };
+    let _ = app.update(Message::SettingsReply(old, Event::Loaded(String::new(), Box::new(Ok(stale)))));
     assert!(app.settings_page.as_ref().unwrap().snapshot.is_none());
 }
 
@@ -4049,26 +3187,17 @@ fn instructions_edits_during_save_survive_older_snapshots() {
     page.instructions = iced::widget::text_editor::Content::with_text("newer text");
     page.edited = true;
     page.instructions_saving = Some("saved text".into());
-    let _ = app.settings_event(Event::InstructionsSaved(
-        "saved text".into(),
-        sill_client::actions::Outcome::Done(json!({})),
-    ));
+    let _ = app.settings_event(Event::InstructionsSaved("saved text".into(), sill_client::actions::Outcome::Done(json!({}))));
     let _ = app.settings_event(Event::Loaded(
         app.settings_page.as_ref().unwrap().load_token.clone(),
-        Box::new(Ok(sill_client::settings::Snapshot {
-            instructions: "saved text".into(),
-            ..Default::default()
-        })),
+        Box::new(Ok(sill_client::settings::Snapshot { instructions: "saved text".into(), ..Default::default() })),
     ));
     let page = app.settings_page.as_ref().unwrap();
     assert_eq!(page.instructions.text(), "newer text");
     assert!(page.edited);
     let _ = app.settings_event(Event::Loaded(
         app.settings_page.as_ref().unwrap().load_token.clone(),
-        Box::new(Ok(sill_client::settings::Snapshot {
-            instructions: "newer text".into(),
-            ..Default::default()
-        })),
+        Box::new(Ok(sill_client::settings::Snapshot { instructions: "newer text".into(), ..Default::default() })),
     ));
     assert!(!app.settings_page.as_ref().unwrap().edited);
 }
@@ -4085,18 +3214,9 @@ fn an_old_settings_load_cannot_replace_a_post_save_refresh() {
     let before = app.settings_page.as_ref().unwrap().instructions.text();
     let _ = app.update(Message::SettingsReply(
         page,
-        Event::Loaded(
-            old_load,
-            Box::new(Ok(sill_client::settings::Snapshot {
-                instructions: "stale server value".into(),
-                ..Default::default()
-            })),
-        ),
+        Event::Loaded(old_load, Box::new(Ok(sill_client::settings::Snapshot { instructions: "stale server value".into(), ..Default::default() }))),
     ));
-    assert_eq!(
-        app.settings_page.as_ref().unwrap().instructions.text(),
-        before
-    );
+    assert_eq!(app.settings_page.as_ref().unwrap().instructions.text(), before);
 }
 
 #[test]
@@ -4106,13 +3226,7 @@ fn background_settings_cannot_undo_a_newer_page_snapshot() {
     let task = app.show_page(crate::Page::Settings);
     settle_task(&mut app, task);
     let before = app.daemon_settings.clone().unwrap();
-    let _ = app.update(Message::DaemonSettings(
-        old_revision,
-        Ok(sill_proto::admin::Settings {
-            theme: "stale-theme".into(),
-            ..Default::default()
-        }),
-    ));
+    let _ = app.update(Message::DaemonSettings(old_revision, Ok(sill_proto::admin::Settings { theme: "stale-theme".into(), ..Default::default() })));
     assert_eq!(app.daemon_settings.as_ref().unwrap().theme, before.theme);
 }
 
@@ -4120,11 +3234,8 @@ fn background_settings_cannot_undo_a_newer_page_snapshot() {
 fn prompt_undo_and_redo_shortcuts() {
     use iced::keyboard::{Key, Modifiers, key};
     use iced::widget::text_editor::{Binding, KeyPress, Status};
-    for (character, modifiers, redo) in [
-        ("z", Modifiers::COMMAND, false),
-        ("z", Modifiers::COMMAND | Modifiers::SHIFT, true),
-        ("y", Modifiers::COMMAND, true),
-    ] {
+    for (character, modifiers, redo) in [("z", Modifiers::COMMAND, false), ("z", Modifiers::COMMAND | Modifiers::SHIFT, true), ("y", Modifiers::COMMAND, true)]
+    {
         let press = KeyPress {
             key: Key::Character(character.into()),
             modified_key: Key::Character(character.into()),
@@ -4154,14 +3265,10 @@ fn prompt_list_keys() {
     };
     let (plain, shift) = (Modifiers::empty(), Modifiers::SHIFT);
     use key::Named::{Enter, Tab};
-    assert!(matches!(crate::ui::enter_sends("demo", press(Enter, plain, true)),
-        Some(Binding::Custom(Message::Session(_, session::Event::Send)))));
-    assert!(matches!(crate::ui::enter_sends("demo", press(Enter, shift, true)),
-        Some(Binding::Custom(Message::Session(_, session::Event::PromptNewline)))));
-    assert!(matches!(crate::ui::enter_sends("demo", press(Tab, plain, true)),
-        Some(Binding::Custom(Message::Session(_, session::Event::PromptIndent(false))))));
-    assert!(matches!(crate::ui::enter_sends("demo", press(Tab, shift, true)),
-        Some(Binding::Custom(Message::Session(_, session::Event::PromptIndent(true))))));
+    assert!(matches!(crate::ui::enter_sends("demo", press(Enter, plain, true)), Some(Binding::Custom(Message::Session(_, session::Event::Send)))));
+    assert!(matches!(crate::ui::enter_sends("demo", press(Enter, shift, true)), Some(Binding::Custom(Message::Session(_, session::Event::PromptNewline)))));
+    assert!(matches!(crate::ui::enter_sends("demo", press(Tab, plain, true)), Some(Binding::Custom(Message::Session(_, session::Event::PromptIndent(false))))));
+    assert!(matches!(crate::ui::enter_sends("demo", press(Tab, shift, true)), Some(Binding::Custom(Message::Session(_, session::Event::PromptIndent(true))))));
     // an unfocused prompt and Ctrl+Tab leave Tab to the window
     assert!(crate::ui::enter_sends("demo", press(Tab, plain, false)).is_none());
     assert!(crate::ui::enter_sends("demo", press(Tab, Modifiers::COMMAND, true)).is_none());
@@ -4178,8 +3285,7 @@ fn prompt_list_keys() {
         assert_eq!(app.current().unwrap().draft.text(), indented);
     }
     // where Enter does not send, it is the list's line break
-    assert!(matches!(crate::ui::list_keys(&press(Enter, plain, true), false),
-        Some(crate::ui::ListKey::Newline)));
+    assert!(matches!(crate::ui::list_keys(&press(Enter, plain, true), false), Some(crate::ui::ListKey::Newline)));
     assert!(crate::ui::list_keys(&press(Enter, shift, true), false).is_none());
 }
 
@@ -4191,24 +3297,9 @@ fn prompt_list_keys() {
 fn the_window_keeps_what_the_person_made_of_it_per_display() {
     use crate::geometry::{Controller, Display, Rect, target};
     use crate::layout::Mode;
-    let rect = |x, y, width, height| Rect {
-        x,
-        y,
-        width,
-        height,
-    };
-    let laptop = Display {
-        name: "eDP-1".into(),
-        primary: true,
-        bounds: rect(0, 0, 1920, 1080),
-        work: rect(0, 0, 1920, 1040),
-    };
-    let external = Display {
-        name: "DP-1".into(),
-        primary: false,
-        bounds: rect(1920, 0, 2560, 1440),
-        work: rect(1920, 0, 2560, 1440),
-    };
+    let rect = |x, y, width, height| Rect { x, y, width, height };
+    let laptop = Display { name: "eDP-1".into(), primary: true, bounds: rect(0, 0, 1920, 1080), work: rect(0, 0, 1920, 1040) };
+    let external = Display { name: "DP-1".into(), primary: false, bounds: rect(1920, 0, 2560, 1440), work: rect(1920, 0, 2560, 1440) };
     let both = vec![laptop.clone(), external];
     let poll = |app: &mut App, displays: &[Display], window: Rect| {
         let read = Some((displays.to_vec(), Some(window)));
@@ -4230,10 +3321,7 @@ fn the_window_keeps_what_the_person_made_of_it_per_display() {
     poll(&mut app, &both, dragged);
     poll(&mut app, &both, dragged);
     let kept = &app.settings.displays["DP-1"];
-    assert_eq!(
-        (kept.work_width, kept.work_height, kept.work_x, kept.work_y),
-        (Some(0.5), Some(0.5), Some(0.25), Some(0.25))
-    );
+    assert_eq!((kept.work_width, kept.work_height, kept.work_x, kept.work_y), (Some(0.5), Some(0.5), Some(0.25), Some(0.25)));
     assert_eq!(app.settings.display.as_deref(), Some("DP-1"));
     // the external display unplugged: the window manager's move is not kept, and the external
     // display's preferences stay for when it is back
@@ -4246,10 +3334,7 @@ fn the_window_keeps_what_the_person_made_of_it_per_display() {
     assert_eq!(shelf.rect, rect(0, 0, 672, 1040));
     let _ = app.update(Message::Placed(Some((both.clone(), Some(shelf.clone())))));
     poll(&mut app, &both, shelf.rect);
-    let narrower = Rect {
-        width: 576,
-        ..shelf.rect
-    };
+    let narrower = Rect { width: 576, ..shelf.rect };
     poll(&mut app, &both, narrower);
     poll(&mut app, &both, narrower);
     assert_eq!(app.settings.displays["eDP-1"].shelf_width, Some(0.3));
@@ -4262,7 +3347,7 @@ fn the_window_keeps_what_the_person_made_of_it_per_display() {
 /// at once kept the Shelf's geometry as the Drawer's (2026-11-08).
 #[test]
 fn mode_changes_in_flight_are_serialized() {
-    use crate::geometry::{target, Controller, Display, Rect};
+    use crate::geometry::{Controller, Display, Rect, target};
     use crate::layout::{Action, Mode};
     let display = Display {
         name: "eDP-1".into(),
@@ -4310,13 +3395,8 @@ fn mode_changes_in_flight_are_serialized() {
 #[test]
 fn markdown_link_click_navigates_and_secondary_click_copies() {
     let (mut app, _) = App::new(true, None);
-    let source = sill_proto::sessions::HostPath::from_path(std::path::Path::new(
-        "/home/demo/project/README.md",
-    ));
-    let _ = app.update(Message::Files(crate::files::Action::Open {
-        path: source.clone(),
-        repo: None,
-    }));
+    let source = sill_proto::sessions::HostPath::from_path(std::path::Path::new("/home/demo/project/README.md"));
+    let _ = app.update(Message::Files(crate::files::Action::Open { path: source.clone(), repo: None }));
     let view = app.views.get_mut("demo").unwrap();
     let file = view.files.reader.as_mut().unwrap();
     file.text = "A [document link](docs/next.md#heading).".into();
@@ -4325,18 +3405,14 @@ fn markdown_link_click_navigates_and_secondary_click_copies() {
     let mut ui = simulator(&app, (1000.0, 860.0));
     let at = aim_at(&mut ui, "A document link", "document");
     ui.aim(at);
-    ui.send(vec![iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
-        iced::mouse::Button::Right,
-    ))]);
+    ui.send(vec![iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Right))]);
     assert_eq!(copies(ui.into_messages()), ["docs/next.md#heading"]);
     let mut ui = simulator(&app, (1000.0, 860.0));
     let at = aim_at(&mut ui, "A document link", "document");
     ui.aim(at);
     ui.send(vec![
         iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
-        iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
-            iced::mouse::Button::Left,
-        )),
+        iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)),
     ]);
     assert!(ui.into_messages().any(|m| matches!(m, Message::Files(crate::files::Action::Link { session, source: from, target })
         if session == "demo" && from.display == source.display && target == "docs/next.md#heading")));
@@ -4345,11 +3421,8 @@ fn markdown_link_click_navigates_and_secondary_click_copies() {
 #[test]
 fn closing_tabs_returns_to_the_most_recent_open_tab() {
     let (mut app, _) = App::new(true, None);
-    let records = || vec![
-        session_record("demo", "Demo", false, false),
-        session_record("middle", "Middle", false, false),
-        session_record("last", "Last", false, false),
-    ];
+    let records =
+        || vec![session_record("demo", "Demo", false, false), session_record("middle", "Middle", false, false), session_record("last", "Last", false, false)];
     let _ = app.update(Message::Listed(Ok(records())));
     let _ = app.choose("last".into());
     let _ = app.choose("middle".into());
@@ -4395,11 +3468,7 @@ fn summary_update(app: &App, id: &str, kind: Option<&str>) -> Message {
         seq: (view.conversation.seq + 1).to_string(),
         event: Event::SessionUpdated { session },
     };
-    Message::Lane(
-        id.into(),
-        view.lane_epoch,
-        sill_client::lane::Update::Event(Box::new(event)),
-    )
+    Message::Lane(id.into(), view.lane_epoch, sill_client::lane::Update::Event(Box::new(event)))
 }
 
 #[test]
@@ -4500,15 +3569,23 @@ fn acp_controls_distinguish_loading_restoring_empty_and_failed() {
     view.status = sill_client::lane::Status::Live;
     view.conversation.session.as_mut().unwrap().controls = None;
     simulator(&app, (1200.0, 860.0)).find("Loading controls…").unwrap();
-    let controls = SessionControls { status: "restoring".into(), error: None,
-        current_mode: Some("saved".into()), modes: vec![ControlChoice { value: "saved".into(), title: "Saved selection".into() }], options: vec![] };
+    let controls = SessionControls {
+        status: "restoring".into(),
+        error: None,
+        current_mode: Some("saved".into()),
+        modes: vec![ControlChoice { value: "saved".into(), title: "Saved selection".into() }],
+        options: vec![],
+    };
     app.views.get_mut("demo").unwrap().conversation.session.as_mut().unwrap().controls = Some(controls);
     {
         let mut ui = simulator(&app, (1200.0, 860.0));
         ui.find("Refreshing controls…").unwrap();
         ui.find("Saved selection").unwrap();
         ui.click("Saved selection").unwrap();
-        assert!(!ui.into_messages().any(|message| matches!(message, Message::Session(_, session::Event::SetMode(_)) | Message::Session(_, session::Event::SetOption(..)))));
+        assert!(
+            !ui.into_messages()
+                .any(|message| matches!(message, Message::Session(_, session::Event::SetMode(_)) | Message::Session(_, session::Event::SetOption(..))))
+        );
     }
     app.views.get_mut("demo").unwrap().conversation.session.as_mut().unwrap().controls.as_mut().unwrap().status = "ready".into();
     app.views.get_mut("demo").unwrap().status = sill_client::lane::Status::Reconnecting("offline".into());
@@ -4520,24 +3597,23 @@ fn acp_controls_distinguish_loading_restoring_empty_and_failed() {
     }
     app.views.get_mut("demo").unwrap().status = sill_client::lane::Status::Live;
     let controls = app.views.get_mut("demo").unwrap().conversation.session.as_mut().unwrap().controls.as_mut().unwrap();
-    controls.status = "ready".into(); controls.current_mode = None; controls.modes.clear();
+    controls.status = "ready".into();
+    controls.current_mode = None;
+    controls.modes.clear();
     {
         let mut ui = simulator(&app, (1200.0, 860.0));
         assert!(ui.find("Loading controls…").is_err());
         assert!(ui.find("Refreshing controls…").is_err());
     }
     let controls = app.views.get_mut("demo").unwrap().conversation.session.as_mut().unwrap().controls.as_mut().unwrap();
-    controls.status = "failed".into(); controls.error = Some("Agent did not confirm effort".into());
+    controls.status = "failed".into();
+    controls.error = Some("Agent did not confirm effort".into());
     assert!(simulator(&app, (1200.0, 860.0)).find("Settings warning").is_err());
 }
 
 /// The modifier that moves by words, as iced's editors take it (`Modifiers::jump`): Alt (Option)
 /// on macOS, Ctrl elsewhere.
-const JUMP: iced::keyboard::Modifiers = if cfg!(target_os = "macos") {
-    iced::keyboard::Modifiers::ALT
-} else {
-    iced::keyboard::Modifiers::CTRL
-};
+const JUMP: iced::keyboard::Modifiers = if cfg!(target_os = "macos") { iced::keyboard::Modifiers::ALT } else { iced::keyboard::Modifiers::CTRL };
 
 /// A model's raw reasoning is folded to one line that opens to it; a short thought (Codex's
 /// summary titles) is shown as it is.
@@ -4661,12 +3737,7 @@ fn find_opens_from_ctrl_f_prepopulates_selection_and_steps_matches() {
         drag(ui, from, to);
         ui.send(ctrl_f());
     });
-    assert!(
-        events
-            .iter()
-            .any(|m| matches!(m, Message::Find(FindEvent::Open))),
-        "{events:?}"
-    );
+    assert!(events.iter().any(|m| matches!(m, Message::Find(FindEvent::Open))), "{events:?}");
     for m in events {
         live.apply(&mut app, m);
     }
@@ -4674,10 +3745,7 @@ fn find_opens_from_ctrl_f_prepopulates_selection_and_steps_matches() {
     assert_eq!(app.find.query, "arrow");
     assert_eq!(app.find.matches.len(), 4);
     assert_eq!(app.find.current, Some(0));
-    assert_eq!(
-        app.find.count_label(),
-        Some(("1 of 4".to_string(), true))
-    );
+    assert_eq!(app.find.count_label(), Some(("1 of 4".to_string(), true)));
 
     let mut matched = Vec::new();
     let mut current = Vec::new();
@@ -4720,16 +3788,10 @@ fn find_opens_from_ctrl_f_prepopulates_selection_and_steps_matches() {
     assert_eq!(app.find.matches.len(), 3);
 
     // Non-matching query reports "No matches".
-    live.apply(
-        &mut app,
-        Message::Find(FindEvent::Input("nonexistent-token".into())),
-    );
+    live.apply(&mut app, Message::Find(FindEvent::Input("nonexistent-token".into())));
     assert!(app.find.matches.is_empty());
     assert_eq!(app.find.current, None);
-    assert_eq!(
-        app.find.count_label(),
-        Some(("No matches".to_string(), false))
-    );
+    assert_eq!(app.find.count_label(), Some(("No matches".to_string(), false)));
 }
 
 #[test]
@@ -4889,88 +3951,49 @@ fn find_searches_and_unfolds_folded_content_in_conversation() {
     live.apply(&mut app, Message::Find(FindEvent::Open));
 
     // 1. Search folded turn
-    live.apply(
-        &mut app,
-        Message::Find(FindEvent::Input("folded-turn-needle".into())),
-    );
-    assert!(
-        demo_view(&app).open_groups.contains("fold fold-u"),
-        "folded turn unfolded"
-    );
+    live.apply(&mut app, Message::Find(FindEvent::Input("folded-turn-needle".into())));
+    assert!(demo_view(&app).open_groups.contains("fold fold-u"), "folded turn unfolded");
     let mut current = Vec::new();
     live.frame(&app, |ui| current = current_matched(ui));
     assert_eq!(current.len(), 1);
     assert_eq!(current[0].0, "folded-turn-needle");
 
     // 2. Search grouped tool call line (.find_only() leaf)
-    live.apply(
-        &mut app,
-        Message::Find(FindEvent::Input("grouped-call-needle".into())),
-    );
-    assert!(
-        demo_view(&app).open_groups.contains("tool-1"),
-        "tool group unfolded"
-    );
+    live.apply(&mut app, Message::Find(FindEvent::Input("grouped-call-needle".into())));
+    assert!(demo_view(&app).open_groups.contains("tool-1"), "tool group unfolded");
     live.frame(&app, |ui| current = current_matched(ui));
     assert_eq!(current.len(), 1);
     assert_eq!(current[0].0, "grouped-call-needle");
 
     // 3. Search closed tool call output and diff
-    live.apply(
-        &mut app,
-        Message::Find(FindEvent::Input("closed-output-needle".into())),
-    );
-    assert!(
-        demo_view(&app).open_tools.contains("tool-2"),
-        "tool output unfolded"
-    );
+    live.apply(&mut app, Message::Find(FindEvent::Input("closed-output-needle".into())));
+    assert!(demo_view(&app).open_tools.contains("tool-2"), "tool output unfolded");
     live.frame(&app, |ui| current = current_matched(ui));
     assert_eq!(current.len(), 1);
     assert_eq!(current[0].0, "closed-output-needle");
 
-    live.apply(
-        &mut app,
-        Message::Find(FindEvent::Input("diff-line-needle".into())),
-    );
+    live.apply(&mut app, Message::Find(FindEvent::Input("diff-line-needle".into())));
     live.frame(&app, |ui| current = current_matched(ui));
     assert_eq!(current.len(), 1);
     assert_eq!(current[0].0, "diff-line-needle");
 
     // 4. Search long thought
-    live.apply(
-        &mut app,
-        Message::Find(FindEvent::Input("deep-thought-needle".into())),
-    );
-    assert!(
-        demo_view(&app).open_tools.contains("thought-1"),
-        "long thought unfolded"
-    );
+    live.apply(&mut app, Message::Find(FindEvent::Input("deep-thought-needle".into())));
+    assert!(demo_view(&app).open_tools.contains("thought-1"), "long thought unfolded");
     live.frame(&app, |ui| current = current_matched(ui));
     assert_eq!(current.len(), 1);
     assert_eq!(current[0].0, "deep-thought-needle");
 
     // 5. Search long notice
-    live.apply(
-        &mut app,
-        Message::Find(FindEvent::Input("long-notice-needle".into())),
-    );
-    assert!(
-        demo_view(&app).open_tools.contains("notice-1"),
-        "long notice unfolded"
-    );
+    live.apply(&mut app, Message::Find(FindEvent::Input("long-notice-needle".into())));
+    assert!(demo_view(&app).open_tools.contains("notice-1"), "long notice unfolded");
     live.frame(&app, |ui| current = current_matched(ui));
     assert_eq!(current.len(), 1);
     assert_eq!(current[0].0, "long-notice-needle");
 
     // 6. Search answered question details
-    live.apply(
-        &mut app,
-        Message::Find(FindEvent::Input("answered-question-needle".into())),
-    );
-    assert!(
-        demo_view(&app).open_answers.contains("q-1"),
-        "answered question unfolded"
-    );
+    live.apply(&mut app, Message::Find(FindEvent::Input("answered-question-needle".into())));
+    assert!(demo_view(&app).open_answers.contains("q-1"), "answered question unfolded");
     live.frame(&app, |ui| current = current_matched(ui));
     assert_eq!(current.len(), 1);
     assert_eq!(current[0].0, "answered-question-needle");
@@ -4978,10 +4001,7 @@ fn find_searches_and_unfolds_folded_content_in_conversation() {
     // 7. A query with no initial matches that later arrives via streaming inside a collapsed tool output
     // activates the newly arrived match: unfolding the tool output and disabling follow_tail.
     app.views.get_mut("demo").unwrap().follow_tail = true;
-    live.apply(
-        &mut app,
-        Message::Find(FindEvent::Input("streamed-tool-needle".into())),
-    );
+    live.apply(&mut app, Message::Find(FindEvent::Input("streamed-tool-needle".into())));
     assert!(app.find.matches.is_empty());
     assert_eq!(app.find.current, None);
     assert!(demo_view(&app).follow_tail);
@@ -5015,22 +4035,14 @@ fn find_searches_and_unfolds_folded_content_in_conversation() {
                 session_id: "demo".into(),
                 subscription_id: "sub".into(),
                 seq: next_seq.to_string(),
-                event: Event::ItemCreated {
-                    item: streamed_tool,
-                },
+                event: Event::ItemCreated { item: streamed_tool },
             })),
         ),
     );
     assert_eq!(app.find.matches.len(), 1);
     assert_eq!(app.find.current, Some(0));
-    assert!(
-        demo_view(&app).open_tools.contains("tool-streamed"),
-        "streamed first match unfolds its collapsed tool output"
-    );
-    assert!(
-        !demo_view(&app).follow_tail,
-        "streamed first match disables follow_tail"
-    );
+    assert!(demo_view(&app).open_tools.contains("tool-streamed"), "streamed first match unfolds its collapsed tool output");
+    assert!(!demo_view(&app).follow_tail, "streamed first match disables follow_tail");
     live.frame(&app, |ui| current = current_matched(ui));
     assert_eq!(current.len(), 1);
     assert_eq!(current[0].0, "streamed-tool-needle");
@@ -5059,27 +4071,17 @@ fn find_scrolls_to_offscreen_match_in_virtualized_long_conversation() {
     let mut live = Live::new((720.0, 500.0));
     // Measure rows and snap to the tail of the 160-item conversation.
     live.apply(&mut app, Message::Latest);
-    let redraw = || {
-        iced::Event::Window(iced::window::Event::RedrawRequested(
-            std::time::Instant::now(),
-        ))
-    };
+    let redraw = || iced::Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now()));
     for m in live.frame(&app, |ui| ui.send(vec![redraw()])) {
         live.apply(&mut app, m);
     }
     let mut tail_scroll = None;
     live.frame(&app, |ui| tail_scroll = scrolled(ui, "conversation"));
-    assert!(
-        tail_scroll.unwrap_or_default() > 1000.0,
-        "at tail: {tail_scroll:?}"
-    );
+    assert!(tail_scroll.unwrap_or_default() > 1000.0, "at tail: {tail_scroll:?}");
 
     // Search for "ancient-needle" near the top of the conversation.
     live.apply(&mut app, Message::Find(FindEvent::Open));
-    live.apply(
-        &mut app,
-        Message::Find(FindEvent::Input("ancient-needle".into())),
-    );
+    live.apply(&mut app, Message::Find(FindEvent::Input("ancient-needle".into())));
     assert_eq!(app.find.matches.len(), 1);
     assert_eq!(app.find.pinned_row(), Some(app.find.matches[0].row));
     assert!(!demo_view(&app).follow_tail);
@@ -5094,10 +4096,7 @@ fn find_scrolls_to_offscreen_match_in_virtualized_long_conversation() {
         after_scroll = scrolled(ui, "conversation");
         current = current_matched(ui);
     });
-    assert!(
-        after_scroll.unwrap_or(f32::MAX) < 400.0,
-        "scrolled to reveal early row: {after_scroll:?}"
-    );
+    assert!(after_scroll.unwrap_or(f32::MAX) < 400.0, "scrolled to reveal early row: {after_scroll:?}");
     assert_eq!(current.len(), 1);
     assert_eq!(current[0].0, "ancient-needle");
 
@@ -5128,16 +4127,9 @@ fn find_scrolls_to_offscreen_match_in_virtualized_long_conversation() {
     }
     live.frame(&app, |_| {});
     live.apply(&mut app, Message::Find(FindEvent::Open));
-    live.apply(
-        &mut app,
-        Message::Find(FindEvent::Input("repeat-needle".into())),
-    );
+    live.apply(&mut app, Message::Find(FindEvent::Input("repeat-needle".into())));
     assert_eq!(app.find.matches.len(), 2);
-    assert_eq!(
-        app.find.current,
-        Some(1),
-        "selected the second occurrence at or below top of viewport instead of jumping back to occurrence 0"
-    );
+    assert_eq!(app.find.current, Some(1), "selected the second occurrence at or below top of viewport instead of jumping back to occurrence 0");
 }
 
 #[test]
@@ -5176,37 +4168,22 @@ fn find_escape_terminal_focus_and_navigation_close() {
     // Opening a file in the reader closes Find.
     let _ = app.update(Message::Find(FindEvent::Open));
     assert!(app.find.shown);
-    let _ = app.update(Message::Files(Action::Open {
-        path: HostPath::from_path(std::path::Path::new("/home/demo/project/README.md")),
-        repo: None,
-    }));
+    let _ = app.update(Message::Files(Action::Open { path: HostPath::from_path(std::path::Path::new("/home/demo/project/README.md")), repo: None }));
     assert!(!app.find.shown);
     let _ = app.update(Message::Files(Action::CloseViewer));
 
     // When the session terminal is open and focused, Ctrl+F passes through to the terminal.
     let _events = app.update(Message::ToggleTerminal);
     {
-        let pane = app
-            .views
-            .get_mut("demo")
-            .unwrap()
-            .terminal
-            .as_mut()
-            .unwrap();
+        let pane = app.views.get_mut("demo").unwrap().terminal.as_mut().unwrap();
         pane.accept(crate::terminal::Event::Opened);
     }
     assert!(app.terminal_focused());
     let mut ui = simulator(&app, (720.0, 860.0));
     ui.send(ctrl_f());
     let messages: Vec<Message> = ui.into_messages().collect();
-    assert!(
-        !messages
-            .iter()
-            .any(|m| matches!(m, Message::Find(FindEvent::Open))),
-        "Ctrl+F must not open Find while terminal is focused: {messages:?}"
-    );
+    assert!(!messages.iter().any(|m| matches!(m, Message::Find(FindEvent::Open))), "Ctrl+F must not open Find while terminal is focused: {messages:?}");
 }
-
 
 #[test]
 fn find_searches_the_reader_preview_source_and_diff() {
@@ -5220,13 +4197,7 @@ fn find_searches_the_reader_preview_source_and_diff() {
     };
     let (mut app, _) = App::new(true, None);
     let mut live = Live::new((720.0, 860.0));
-    live.apply(
-        &mut app,
-        Message::Files(Action::Open {
-            path: path("/home/demo/project/README.md"),
-            repo: None,
-        }),
-    );
+    live.apply(&mut app, Message::Files(Action::Open { path: path("/home/demo/project/README.md"), repo: None }));
     live.frame(&app, |_| {});
 
     // the preview: a word selected in it is the query
@@ -5289,12 +4260,8 @@ fn find_searches_the_reader_preview_source_and_diff() {
     assert_eq!(selection(&app), (Some("session".into()), 7));
 
     // an edit before the match: it is looked for again and stays the current one
-    live.apply(&mut app, Message::Files(Action::Text(iced::widget::text_editor::Action::Move(
-        iced::widget::text_editor::Motion::DocumentStart,
-    ))));
-    live.apply(&mut app, Message::Files(Action::Text(iced::widget::text_editor::Action::Edit(
-        iced::widget::text_editor::Edit::Insert('X'),
-    ))));
+    live.apply(&mut app, Message::Files(Action::Text(iced::widget::text_editor::Action::Move(iced::widget::text_editor::Motion::DocumentStart))));
+    live.apply(&mut app, Message::Files(Action::Text(iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert('X')))));
     assert_eq!(app.find.matches.len(), 2);
 
     // Escape: the bar closes, the cursor is left where the match was
@@ -5305,22 +4272,10 @@ fn find_searches_the_reader_preview_source_and_diff() {
     live.apply(&mut app, Message::Files(Action::DiscardEdits));
 
     // the diff rows; another file closes the bar
-    live.apply(
-        &mut app,
-        Message::Files(Action::Open {
-            path: path("/home/demo/project/README.md"),
-            repo: None,
-        }),
-    );
+    live.apply(&mut app, Message::Files(Action::Open { path: path("/home/demo/project/README.md"), repo: None }));
     live.apply(&mut app, Message::Find(FindEvent::Open));
     assert!(app.find.shown);
-    live.apply(
-        &mut app,
-        Message::Files(Action::Open {
-            path: path("/home/demo/project/src/main.rs"),
-            repo: Some(path("/home/demo/project")),
-        }),
-    );
+    live.apply(&mut app, Message::Files(Action::Open { path: path("/home/demo/project/src/main.rs"), repo: Some(path("/home/demo/project")) }));
     assert!(!app.find.shown);
     live.frame(&app, |_| {});
     live.apply(&mut app, Message::Find(FindEvent::Open));
@@ -5340,10 +4295,7 @@ fn find_searches_the_reader_preview_source_and_diff() {
     {
         let view = app.views.get_mut("demo").unwrap();
         let file = view.files.reader.as_mut().unwrap();
-        file.text = format!(
-            "diff --git a/x b/x\n@@ -1,1 +1,1 @@\n+{} far-needle\n",
-            "word ".repeat(80)
-        );
+        file.text = format!("diff --git a/x b/x\n@@ -1,1 +1,1 @@\n+{} far-needle\n", "word ".repeat(80));
         file.revision += 1;
         view.sync_reader();
     }
@@ -5357,11 +4309,9 @@ fn find_searches_the_reader_preview_source_and_diff() {
     let mut sideways = None;
     live.frame(&app, |ui| {
         sideways = ui.select(|candidate| match candidate {
-            iced_test::selector::Candidate::Scrollable {
-                id: Some(found),
-                translation,
-                ..
-            } if *found == iced::widget::Id::new("diff-reader") => Some(translation.x),
+            iced_test::selector::Candidate::Scrollable { id: Some(found), translation, .. } if *found == iced::widget::Id::new("diff-reader") => {
+                Some(translation.x)
+            }
             _ => None,
         });
     });
@@ -5376,9 +4326,7 @@ fn find_searches_the_settings_page_and_focuses_the_agents_search() {
     let task = app.show_page(crate::Page::Settings);
     settle_task(&mut app, task);
     let mut live = Live::new((900.0, 860.0));
-    let redraw = || {
-        iced::Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now()))
-    };
+    let redraw = || iced::Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now()));
     live.frame(&app, |_| {});
 
     // Ctrl+F on the page opens the bar over it; the matches are those the page laid out
@@ -5450,8 +4398,5 @@ fn find_searches_the_settings_page_and_focuses_the_agents_search() {
             repeat: false,
         })]);
     });
-    assert!(
-        typed.iter().any(|m| format!("{m:?}").contains("Search(\"x\")")),
-        "{typed:?}"
-    );
+    assert!(typed.iter().any(|m| format!("{m:?}").contains("Search(\"x\")")), "{typed:?}");
 }

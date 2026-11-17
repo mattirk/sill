@@ -29,11 +29,7 @@ const NOTICE: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// What a capability is called here, and what it means, in the panel's order.
 const ROWS: &[(&str, &str, &str)] = &[
-    (
-        "public_web",
-        "Public web access",
-        "Every public HTTP(S) host through the session's proxy. Local and LAN addresses stay blocked.",
-    ),
+    ("public_web", "Public web access", "Every public HTTP(S) host through the session's proxy. Local and LAN addresses stay blocked."),
     (
         "test_desktop",
         "Test desktop",
@@ -148,12 +144,7 @@ impl Perms {
             _ => &views.preview,
         };
         let mut out = vec![];
-        for (capability, short) in [
-            ("test_desktop", "Test desktop"),
-            ("private_bus", "Private D-Bus"),
-            ("gpu", "GPU"),
-            ("public_web", "Public web"),
-        ] {
+        for (capability, short) in [("test_desktop", "Test desktop"), ("private_bus", "Private D-Bus"), ("gpu", "GPU"), ("public_web", "Public web")] {
             if state(current, capability).is_some_and(|s| s.effective) {
                 out.push(short.to_string());
             }
@@ -190,19 +181,13 @@ impl Perms {
         if self.restart_required {
             return true;
         }
-        let Some(Views {
-            preview,
-            launch: Some(launch),
-            ..
-        }) = &self.views
-        else {
+        let Some(Views { preview, launch: Some(launch), .. }) = &self.views else {
             return false;
         };
-        if launch.filesystem.as_ref().map(|f| &f.rules) != preview.filesystem.as_ref().map(|f| &f.rules) || launch.filesystem.is_none() { return true; }
-        let differs = ROWS.iter().any(|(capability, _, _)| {
-            state(launch, capability).map(|s| s.effective)
-                != state(preview, capability).map(|s| s.effective)
-        });
+        if launch.filesystem.as_ref().map(|f| &f.rules) != preview.filesystem.as_ref().map(|f| &f.rules) || launch.filesystem.is_none() {
+            return true;
+        }
+        let differs = ROWS.iter().any(|(capability, _, _)| state(launch, capability).map(|s| s.effective) != state(preview, capability).map(|s| s.effective));
         let now: Vec<&str> = applied_hosts(preview).collect();
         differs || applied_hosts(launch).any(|h| !now.contains(&h))
     }
@@ -210,9 +195,7 @@ impl Perms {
     /// The Basic Development switch is on: the test desktop and private D-Bus are both on for
     /// the next build.
     pub fn development_on(&self) -> bool {
-        self.views.as_ref().is_some_and(|views| {
-            DEVELOPMENT.iter().all(|c| state(&views.preview, c).is_some_and(|s| s.effective))
-        })
+        self.views.as_ref().is_some_and(|views| DEVELOPMENT.iter().all(|c| state(&views.preview, c).is_some_and(|s| s.effective)))
     }
 
     fn note(&mut self, serial: u64, text: String, failed: bool) {
@@ -226,8 +209,7 @@ impl App {
     }
 
     fn running(&self, id: &str) -> bool {
-        self.session(id)
-            .is_some_and(|s| s.running && s.ended_at.is_none())
+        self.session(id).is_some_and(|s| s.running && s.ended_at.is_none())
     }
 
     pub(crate) fn permissions_event(&mut self, event: Event) -> Task<Message> {
@@ -243,7 +225,9 @@ impl App {
         }
         match event {
             Event::Filesystem(id) => {
-                if let Some(view) = self.views.get_mut(&id) { view.permissions.filesystem_open = !view.permissions.filesystem_open; }
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.permissions.filesystem_open = !view.permissions.filesystem_open;
+                }
             }
             Event::Toggle(id) => {
                 let Some(view) = self.views.get_mut(&id) else {
@@ -265,12 +249,7 @@ impl App {
             }
             Event::DevelopmentRestarting(id) => {
                 let params = json!({"session_id": id});
-                return self.permission_change(
-                    id,
-                    Change::DevelopmentRestarting,
-                    "_sill/permissions.apply_development",
-                    params,
-                );
+                return self.permission_change(id, Change::DevelopmentRestarting, "_sill/permissions.apply_development", params);
             }
             Event::SetDevelopment(id, true) => return self.permissions_event(Event::DevelopmentRestarting(id)),
             Event::SetDevelopment(id, false) => {
@@ -329,53 +308,27 @@ impl App {
             }
             Event::Set(id, capability, enabled) => {
                 let params = json!({"session_id": id, "capability": capability, "enabled": enabled});
-                return self.permission_change(
-                    id,
-                    Change::Choice(capability, enabled),
-                    "_sill/permissions.set",
-                    params,
-                );
+                return self.permission_change(id, Change::Choice(capability, enabled), "_sill/permissions.set", params);
             }
             Event::Restore(id) => {
                 let params = json!({"session_id": id});
-                return self.permission_change(
-                    id,
-                    Change::Restore,
-                    "_sill/permissions.restore_defaults",
-                    params,
-                );
+                return self.permission_change(id, Change::Restore, "_sill/permissions.restore_defaults", params);
             }
             Event::ApplyDevelopment(id) => {
                 let params = json!({"session_id": id});
-                return self.permission_change(
-                    id,
-                    Change::Development,
-                    "_sill/permissions.apply_development",
-                    params,
-                );
+                return self.permission_change(id, Change::Development, "_sill/permissions.apply_development", params);
             }
             Event::SaveHost(id, host) => {
                 let params = json!({"session_id": id, "host": host});
-                return self.permission_change(
-                    id,
-                    Change::SaveHost(host),
-                    "_sill/policy.save_host",
-                    params,
-                );
+                return self.permission_change(id, Change::SaveHost(host), "_sill/policy.save_host", params);
             }
             Event::AutoAllow(id, enabled) => {
                 let params = json!({"session_id": id,
                     "change": {"type": "auto_allow", "enabled": enabled}});
-                return self.permission_change(
-                    id,
-                    Change::AutoAllow(enabled),
-                    "_sill/sessions.update",
-                    params,
-                );
+                return self.permission_change(id, Change::AutoAllow(enabled), "_sill/sessions.update", params);
             }
             Event::Restart(id, change) => {
-                let (Some(actions), Some(view)) = (self.actions.clone(), self.views.get_mut(&id))
-                else {
+                let (Some(actions), Some(view)) = (self.actions.clone(), self.views.get_mut(&id)) else {
                     return Task::none();
                 };
                 if view.permissions.busy {
@@ -398,11 +351,7 @@ impl App {
             Event::Done(id, change, outcome) => return self.permission_done(id, change, outcome),
             Event::NoticeExpired(id, serial) => {
                 if let Some(view) = self.views.get_mut(&id)
-                    && view
-                        .permissions
-                        .notice
-                        .as_ref()
-                        .is_some_and(|(n, _, _)| *n == serial)
+                    && view.permissions.notice.as_ref().is_some_and(|(n, _, _)| *n == serial)
                 {
                     view.permissions.notice = None;
                 }
@@ -434,13 +383,9 @@ impl App {
         blocking(
             move || {
                 let key = json!({"session_id": session});
-                let preview: PolicyView = actions
-                    .read("_sill/policy.preview", key.clone())
-                    .map_err(|e| format!("{e:#}"))?;
+                let preview: PolicyView = actions.read("_sill/policy.preview", key.clone()).map_err(|e| format!("{e:#}"))?;
                 let (launch, warnings) = if running {
-                    let read = actions
-                        .read::<PolicySnapshot>("_sill/policy.snapshot", key)
-                        .map_err(|e| format!("{e:#}"))?;
+                    let read = actions.read::<PolicySnapshot>("_sill/policy.snapshot", key).map_err(|e| format!("{e:#}"))?;
                     (read.snapshot, read.warnings)
                 } else {
                     (None, vec![])
@@ -452,24 +397,13 @@ impl App {
                         .and_then(|a| a["name"].as_str().map(str::to_string)),
                     None => None,
                 };
-                Ok(Views {
-                    preview,
-                    launch,
-                    agent_name,
-                    warnings,
-                })
+                Ok(Views { preview, launch, agent_name, warnings })
             },
             move |result| Message::Perms(Event::Read(id, serial, result)),
         )
     }
 
-    fn permission_change(
-        &mut self,
-        id: String,
-        change: Change,
-        method: &'static str,
-        params: serde_json::Value,
-    ) -> Task<Message> {
+    fn permission_change(&mut self, id: String, change: Change, method: &'static str, params: serde_json::Value) -> Task<Message> {
         let (Some(actions), Some(view)) = (self.actions.clone(), self.views.get_mut(&id)) else {
             return Task::none();
         };
@@ -480,11 +414,7 @@ impl App {
         let needs = !matches!(change, Change::AutoAllow(_));
         blocking(
             move || {
-                if needs {
-                    actions.call_needing(CAPABILITY, method, params)
-                } else {
-                    actions.call(method, params)
-                }
+                if needs { actions.call_needing(CAPABILITY, method, params) } else { actions.call(method, params) }
             },
             move |outcome| Message::Perms(Event::Done(id, change, outcome)),
         )
@@ -497,11 +427,7 @@ impl App {
         {
             session.auto_allow = enabled;
         }
-        let agent = self
-            .views
-            .get(&id)
-            .and_then(|v| v.permissions.agent_name.clone())
-            .unwrap_or_else(|| "the agent".into());
+        let agent = self.views.get(&id).and_then(|v| v.permissions.agent_name.clone()).unwrap_or_else(|| "the agent".into());
         let Some(view) = self.views.get_mut(&id) else {
             return Task::none();
         };
@@ -525,10 +451,7 @@ impl App {
             None => (
                 match &change {
                     Change::Choice(capability, enabled) => {
-                        let name = ROWS
-                            .iter()
-                            .find(|(c, _, _)| c == capability)
-                            .map_or(capability.as_str(), |(_, name, _)| name);
+                        let name = ROWS.iter().find(|(c, _, _)| c == capability).map_or(capability.as_str(), |(_, name, _)| name);
                         match enabled {
                             Some(true) => format!("{name} on{later}."),
                             Some(false) => format!("{name} off{later}."),
@@ -571,11 +494,7 @@ impl App {
         if matches!(change, Change::DevelopmentRestarting | Change::DevelopmentOff) && outcome.is_done() && restart_required {
             // a restart ends Host control (the daemon revokes it when the jail stops): what the
             // person had switched on comes back after it
-            let active: Vec<String> = self
-                .session(&id)
-                .and_then(|s| s.host_control.as_ref())
-                .map(|brief| brief.operations.clone())
-                .unwrap_or_default();
+            let active: Vec<String> = self.session(&id).and_then(|s| s.host_control.as_ref()).map(|brief| brief.operations.clone()).unwrap_or_default();
             if let Some(view) = self.views.get_mut(&id) {
                 view.permissions.reactivate = active;
             }
@@ -586,10 +505,7 @@ impl App {
         let expire = if cfg!(test) {
             Task::none()
         } else {
-            blocking(
-                move || std::thread::sleep(NOTICE),
-                move |()| Message::Perms(Event::NoticeExpired(session, serial)),
-            )
+            blocking(move || std::thread::sleep(NOTICE), move |()| Message::Perms(Event::NoticeExpired(session, serial)))
         };
         // nothing changed when it was refused or never sent: no need to read again
         if matches!(outcome, Outcome::Refused { .. } | Outcome::NotSent(_)) {
@@ -619,11 +535,7 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
         P.fg_dim
     };
     let pending = view.permissions.restart_pending(running) || session.is_some_and(|s| s.policy_changed);
-    let mut tip = if expanded.is_empty() {
-        "Permissions".to_string()
-    } else {
-        format!("Permissions · expanded access: {}", expanded.join(" · "))
-    };
+    let mut tip = if expanded.is_empty() { "Permissions".to_string() } else { format!("Permissions · expanded access: {}", expanded.join(" · ")) };
     for (group, label, _) in &crate::host_control::groups() {
         if on.contains(group) {
             tip.push_str(&format!(" · {label} control active"));
@@ -643,11 +555,8 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
         session.map(|_| Message::Perms(Event::ShieldMenu(view.id.clone()))),
     );
     // a right press opens the panel of granular toggles
-    let shield: Element<'a, Message> = if session.is_some() {
-        iced::widget::mouse_area(shield).on_right_press(Message::Perms(Event::Toggle(view.id.clone()))).into()
-    } else {
-        shield
-    };
+    let shield: Element<'a, Message> =
+        if session.is_some() { iced::widget::mouse_area(shield).on_right_press(Message::Perms(Event::Toggle(view.id.clone()))).into() } else { shield };
     // no tooltip while the menu is open: both sit above the button and the tooltip is drawn
     // over the menu's rows
     let shield = container(shield).id("permissions-button");
@@ -668,9 +577,8 @@ pub fn dropdown<'a>(view: &'a SessionView, session: &'a Session) -> Element<'a, 
     // desktop and private D-Bus; VM and Host are Host control's operations in two groups (Host
     // alone where the daemon's host is this machine). Advanced holds the granular toggles.
     let development_on = perms.development_on();
-    let development_usable = perms.views.as_ref().is_some_and(|views| {
-        DEVELOPMENT.iter().all(|c| state(&views.preview, c).is_some_and(|s| s.available && s.allowed))
-    });
+    let development_usable =
+        perms.views.as_ref().is_some_and(|views| DEVELOPMENT.iter().all(|c| state(&views.preview, c).is_some_and(|s| s.available && s.allowed)));
     let mut basic = Column::new();
     basic = basic.push(basic_switch(
         DEVELOPMENT_SWITCH,
@@ -688,15 +596,24 @@ pub fn dropdown<'a>(view: &'a SessionView, session: &'a Session) -> Element<'a, 
         let names: Vec<String> = operations.iter().map(|op| crate::host_control::operation_label(op)).collect();
         let (said, color) = match (group, cfg!(target_os = "macos")) {
             (crate::host_control::Group::Vm, _) => (
-                format!("The agent may act in Sill's virtual machine, outside its jail: {}. Until you switch it off, the window stops showing the session, or the session stops.", names.join(", ")),
+                format!(
+                    "The agent may act in Sill's virtual machine, outside its jail: {}. Until you switch it off, the window stops showing the session, or the session stops.",
+                    names.join(", ")
+                ),
                 style::yellow(),
             ),
             (crate::host_control::Group::Host, true) => (
-                format!("The agent may act on your Mac, as you: {}. Programs run unrestricted from shared folders. Until you switch it off or Sill quits.", names.join(", ")),
+                format!(
+                    "The agent may act on your Mac, as you: {}. Programs run unrestricted from shared folders. Until you switch it off or Sill quits.",
+                    names.join(", ")
+                ),
                 P.warning,
             ),
             (crate::host_control::Group::Host, false) => (
-                format!("The agent may act on this machine outside its jail, as you: {}. Until you switch it off, the window stops showing the session, or the session stops.", names.join(", ")),
+                format!(
+                    "The agent may act on this machine outside its jail, as you: {}. Until you switch it off, the window stops showing the session, or the session stops.",
+                    names.join(", ")
+                ),
                 P.warning,
             ),
         };
@@ -724,12 +641,7 @@ pub fn dropdown<'a>(view: &'a SessionView, session: &'a Session) -> Element<'a, 
         .padding([4, 4])
         .style(|theme| {
             let menu = style::control_menu(theme);
-            container::Style {
-                background: Some(menu.background),
-                border: menu.border,
-                shadow: menu.shadow,
-                ..container::Style::default()
-            }
+            container::Style { background: Some(menu.background), border: menu.border, shadow: menu.shadow, ..container::Style::default() }
         })
         .into()
 }
@@ -743,12 +655,7 @@ const DROPDOWN: f32 = 170.0;
 pub const DEVELOPMENT_SWITCH: &str = "Development";
 
 pub(crate) fn small<'a>(label: &'a str, message: Option<Message>) -> Element<'a, Message> {
-    keys::press_maybe(
-        button(text(label).size(style::TINY))
-            .padding([2, 0])
-            .style(style::quiet),
-        message,
-    )
+    keys::press_maybe(button(text(label).size(style::TINY)).padding([2, 0]).style(style::quiet), message)
 }
 
 /// What Apply development permissions turns on together (sill-core's DEVELOPMENT_CAPABILITIES).
@@ -771,10 +678,7 @@ const HEADING_ROW: f32 = 22.0;
 
 /// A column's heading: the only words in the panel that are not a row.
 fn heading<'a>(label: &'static str, color: iced::Color) -> Element<'a, Message> {
-    container(text(label).size(style::TINY).color(color))
-        .height(HEADING_ROW)
-        .align_y(Alignment::Center)
-        .into()
+    container(text(label).size(style::TINY).color(color)).height(HEADING_ROW).align_y(Alignment::Center).into()
 }
 
 /// One row of a column, at the rows' fixed height.
@@ -786,36 +690,20 @@ const RESTART_SLOT: f32 = 92.0;
 /// An on/off switch in a fixed slot: the warning colour when on (expanded access), dimmed when it
 /// cannot be changed.
 pub(crate) fn switch<'a>(on: bool, set: Option<impl Fn(bool) -> Message + 'a>) -> Element<'a, Message> {
-    container(crate::settings_ui::switch_styled(on, P.warning, 16.0, set))
-        .width(SWITCH_SLOT)
-        .into()
+    container(crate::settings_ui::switch_styled(on, P.warning, 16.0, set)).width(SWITCH_SLOT).into()
 }
 
 /// A Basic switch: its name with the switch at the row's right, yellow for development and
 /// the VM, the warning colour for the host. The whole row flips it (the person, 2026-11-13).
-fn basic_switch<'a>(
-    label: &'a str,
-    said: String,
-    on: bool,
-    color: iced::Color,
-    set: Option<impl Fn(bool) -> Message + Clone + 'a>,
-) -> Element<'a, Message> {
+fn basic_switch<'a>(label: &'a str, said: String, on: bool, color: iced::Color, set: Option<impl Fn(bool) -> Message + Clone + 'a>) -> Element<'a, Message> {
     let flip = set.clone().map(|set| set(!on));
-    let line = row![
-        text(label).size(style::SMALL).width(Fill),
-        crate::settings_ui::switch_styled(on, color, 16.0, set),
-    ]
-    .spacing(12)
-    .align_y(Alignment::Center);
+    let line =
+        row![text(label).size(style::SMALL).width(Fill), crate::settings_ui::switch_styled(on, color, 16.0, set),].spacing(12).align_y(Alignment::Center);
     tip(
         // the hover's highlight is the row: the name and the switch inset in it alike, the line
         // centred in its height
         keys::press_maybe(
-            button(container(line).height(Fill).align_y(Alignment::Center))
-                .width(Fill)
-                .height(ROW + 4.0)
-                .padding([0.0, ROW_INSET])
-                .style(style::quiet),
+            button(container(line).height(Fill).align_y(Alignment::Center)).width(Fill).height(ROW + 4.0).padding([0.0, ROW_INSET]).style(style::quiet),
             flip,
         ),
         said,
@@ -824,15 +712,7 @@ fn basic_switch<'a>(
 
 /// `content` with its explanation in a tooltip: the panel shows names and states only.
 pub(crate) fn tip<'a>(content: impl Into<Element<'a, Message>>, said: String) -> Element<'a, Message> {
-    tooltip(
-        content,
-        container(text(said).size(style::SMALL))
-            .padding([4, 8])
-            .max_width(380)
-            .style(style::fill(P.code_bg)),
-        tooltip::Position::Top,
-    )
-    .into()
+    tooltip(content, container(text(said).size(style::SMALL)).padding([4, 8]).max_width(380).style(style::fill(P.code_bg)), tooltip::Position::Top).into()
 }
 
 /// A row's name, explained on hover.
@@ -884,11 +764,7 @@ fn capability_row<'a>(
     };
     let mut said = meaning.to_string();
     if s.effective {
-        said.push_str(if s.source == "session" {
-            " On by this session's choice."
-        } else {
-            " On by the policy."
-        });
+        said.push_str(if s.source == "session" { " On by this session's choice." } else { " On by the policy." });
     } else if !s.allowed || !s.available || s.blocked {
         said.push_str(&format!(" {}.", capitalised(&s.reason)));
     }
@@ -897,36 +773,20 @@ fn capability_row<'a>(
         let (id, capability) = (id.to_string(), capability.to_string());
         move |on: bool| Message::Perms(Event::Set(id.clone(), capability.clone(), Some(on)))
     });
-    row![
-        name(label, said),
-        switch(s.effective, set),
-        text(status)
-            .size(style::SMALL)
-            .color(color)
-            .wrapping(text::Wrapping::None)
-            .width(Fill),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center)
-    .into()
+    row![name(label, said), switch(s.effective, set), text(status).size(style::SMALL).color(color).wrapping(text::Wrapping::None).width(Fill),]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
 }
 
 /// A named policy as it is; a policy file by its name, without the directories.
 fn policy_name(name: &str) -> &str {
-    std::path::Path::new(name)
-        .file_stem()
-        .and_then(|n| n.to_str())
-        .filter(|_| name.contains('/'))
-        .unwrap_or(name)
+    std::path::Path::new(name).file_stem().and_then(|n| n.to_str()).filter(|_| name.contains('/')).unwrap_or(name)
 }
 
 fn capitalised(reason: &str) -> String {
     let mut chars = reason.chars();
-    chars
-        .next()
-        .map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect())
-        .trim_end_matches('.')
-        .to_string()
+    chars.next().map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect()).trim_end_matches('.').to_string()
 }
 
 /// A capability that cannot be had and nobody asks for: folded into one quiet line.
@@ -949,9 +809,7 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
             (Some(launch), true) => launch,
             _ => &v.preview,
         };
-        ["test_desktop", "private_bus"]
-            .iter()
-            .any(|c| state(current, c).is_some_and(|s| s.effective))
+        ["test_desktop", "private_bus"].iter().any(|c| state(current, c).is_some_and(|s| s.effective))
     });
     let mode = match (ghost, desktop, expanded.is_empty()) {
         (true, _, _) => "Ghost · Default only",
@@ -970,23 +828,14 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
     content = content.push(
         row![
             tip(
-                text("Permissions").size(style::SMALL).font(iced::Font {
-                    weight: iced::font::Weight::Bold,
-                    ..iced::Font::with_name(crate::fonts::SANS_FAMILY)
-                }),
+                text("Permissions")
+                    .size(style::SMALL)
+                    .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::with_name(crate::fonts::SANS_FAMILY) }),
                 about.trim().to_string(),
             ),
-            text(mode)
-                .size(style::TINY)
-                .color(if expanded.is_empty() { P.fg_dim } else { P.warning })
-                .width(Fill),
+            text(mode).size(style::TINY).color(if expanded.is_empty() { P.fg_dim } else { P.warning }).width(Fill),
             tip(
-                keys::press(
-                    button(icons::glyph("x", 12.0, alpha(P.fg, 0.55)))
-                        .padding([4, 6])
-                        .style(style::quiet),
-                    Message::Perms(Event::Toggle(id.into())),
-                ),
+                keys::press(button(icons::glyph("x", 12.0, alpha(P.fg, 0.55))).padding([4, 6]).style(style::quiet), Message::Perms(Event::Toggle(id.into())),),
                 "Close".into(),
             ),
         ]
@@ -1030,10 +879,14 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
     ));
     match &perms.views {
         None => {
-            jail = jail.push(text(match &perms.error {
-                Some(error) => format!("Permissions could not be read: {error}"),
-                None => "Reading permissions…".into(),
-            }).size(style::TINY).color(P.fg_dim));
+            jail = jail.push(
+                text(match &perms.error {
+                    Some(error) => format!("Permissions could not be read: {error}"),
+                    None => "Reading permissions…".into(),
+                })
+                .size(style::TINY)
+                .color(P.fg_dim),
+            );
         }
         Some(views) => {
             for diagnostic in &views.preview.diagnostics {
@@ -1049,10 +902,8 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
             }
         }
     }
-    let restorable = perms.views.as_ref().is_some_and(|views| {
-        views.preview.permissions.iter().any(|p| p.requested.is_some())
-            || !views.preview.session_hosts.is_empty()
-    });
+    let restorable =
+        perms.views.as_ref().is_some_and(|views| views.preview.permissions.iter().any(|p| p.requested.is_some()) || !views.preview.session_hosts.is_empty());
     // Apply development permissions: the test desktop and private D-Bus together, for the next
     // build. Greyed, with the reason on hover, where either cannot be turned on or both are on.
     let (development, development_tip) = match &perms.views {
@@ -1082,19 +933,10 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
     };
     let jail_buttons: Element<'a, Message> = row![
         tip(
-            small(
-                "Restore defaults",
-                (can_change && restorable).then(|| Message::Perms(Event::Restore(id.into()))),
-            ),
+            small("Restore defaults", (can_change && restorable).then(|| Message::Perms(Event::Restore(id.into()))),),
             "Removes this session's added permissions and approved hosts. The policy and pins stay.".into(),
         ),
-        tip(
-            small(
-                "Apply development permissions",
-                (can_change && development).then(|| Message::Perms(Event::ApplyDevelopment(id.into()))),
-            ),
-            development_tip,
-        ),
+        tip(small("Apply development permissions", (can_change && development).then(|| Message::Perms(Event::ApplyDevelopment(id.into()))),), development_tip,),
     ]
     .spacing(16)
     .align_y(Alignment::Center)
@@ -1121,17 +963,15 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
         column![
             row![jail, space().width(GUTTER), host].align_y(Alignment::Start),
             space().height(4),
-            row![
-                container(jail_buttons).width(JAIL_COLUMN),
-                space().width(GUTTER),
-                container(host_buttons).width(HOST_COLUMN),
-            ]
-            .align_y(Alignment::Center),
+            row![container(jail_buttons).width(JAIL_COLUMN), space().width(GUTTER), container(host_buttons).width(HOST_COLUMN),].align_y(Alignment::Center),
         ]
         .into()
     };
     content = content.push(columns);
-    content = content.push(keys::press(button(text(if perms.filesystem_open { "▾ Filesystem" } else { "▸ Filesystem" }).size(style::TINY)).style(style::quiet), Message::Perms(Event::Filesystem(id.into()))));
+    content = content.push(keys::press(
+        button(text(if perms.filesystem_open { "▾ Filesystem" } else { "▸ Filesystem" }).size(style::TINY)).style(style::quiet),
+        Message::Perms(Event::Filesystem(id.into())),
+    ));
     if perms.filesystem_open {
         let mut files = Column::new().spacing(4);
         if let Some(views) = &perms.views {
@@ -1143,15 +983,17 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
                     None => rows = rows.push(text("Filesystem plan not recorded; rebuild this session.").size(style::TINY).color(P.warning)),
                     Some(fs) => {
                         for rule in fs.rules.iter().filter(|rule| {
-                            rule.behavior != "agent_mask"
-                                || !fs.rules.iter().any(|agent| {
-                                    agent.behavior == "agent" && agent.target == rule.target
-                                })
+                            rule.behavior != "agent_mask" || !fs.rules.iter().any(|agent| agent.behavior == "agent" && agent.target == rule.target)
                         }) {
                             let backing = rule.backing.as_ref().map(|p| format!(" → {}", p.display)).unwrap_or_default();
-                            rows = rows.push(tip(text(format!("{}: {}{}", rule.behavior, rule.target.display, backing)).size(style::TINY), format!("{} — {}", rule.source, rule.reason)));
+                            rows = rows.push(tip(
+                                text(format!("{}: {}{}", rule.behavior, rule.target.display, backing)).size(style::TINY),
+                                format!("{} — {}", rule.source, rule.reason),
+                            ));
                         }
-                        for path in &fs.unused { rows = rows.push(text(format!("Stored but unused: {}", path.display)).size(style::TINY).color(P.fg_dim)); }
+                        for path in &fs.unused {
+                            rows = rows.push(text(format!("Stored but unused: {}", path.display)).size(style::TINY).color(P.fg_dim));
+                        }
                     }
                 }
                 rows
@@ -1179,10 +1021,7 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
         }
         tip(
             keys::press_maybe(
-                button(text("Restart now").size(style::TINY))
-                    .width(RESTART_SLOT)
-                    .padding([2, 8])
-                    .style(style::quiet),
+                button(text("Restart now").size(style::TINY)).width(RESTART_SLOT).padding([2, 8]).style(style::quiet),
                 (!perms.busy).then(|| Message::Perms(Event::Restart(id.into(), Change::Restart))),
             ),
             why,
@@ -1191,25 +1030,12 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
         space().width(RESTART_SLOT).into()
     };
     content = content.push(
-        row![
-            container(
-                text(said)
-                    .size(style::TINY)
-                    .color(color)
-                    .wrapping(text::Wrapping::None),
-            )
-            .width(Fill)
-            .clip(true),
-            restart,
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
+        row![container(text(said).size(style::TINY).color(color).wrapping(text::Wrapping::None),).width(Fill).clip(true), restart,]
+            .spacing(8)
+            .align_y(Alignment::Center),
     );
     column![
-        container(content)
-            .padding([8, 12])
-            .width(Fill)
-            .style(style::fill(alpha(P.accent, 0.05))),
+        container(content).padding([8, 12]).width(Fill).style(style::fill(alpha(P.accent, 0.05))),
         rule::horizontal(1).style(style::rule_style(P.border)),
         space().height(4),
     ]
@@ -1245,12 +1071,7 @@ fn hosts<'a>(id: &'a str, views: &'a Views, perms: &'a Perms, can_change: bool) 
     if views.preview.session_hosts.is_empty() {
         list = list.push(text("None").size(style::SMALL).color(P.fg_dim));
     }
-    row![
-        name("Approved hosts", "Hosts you allowed when the proxy refused them: this session only.".into()),
-        container(list).width(Fill),
-    ]
-    .spacing(8)
-    .into()
+    row![name("Approved hosts", "Hosts you allowed when the proxy refused them: this session only.".into()), container(list).width(Fill),].spacing(8).into()
 }
 
 #[cfg(test)]
@@ -1311,7 +1132,10 @@ mod tests {
         assert!(!perms.restart_pending(true));
         perms.views.as_mut().unwrap().preview.filesystem.as_mut().unwrap().rules.push(sill_proto::admin::PathRule {
             target: sill_proto::sessions::HostPath::from_path(std::path::Path::new("/home/me/.codex")),
-            backing: None, behavior: "agent".into(), source: "home_paths".into(), reason: "new definition".into(),
+            backing: None,
+            behavior: "agent".into(),
+            source: "home_paths".into(),
+            reason: "new definition".into(),
         });
         assert!(perms.restart_pending(true));
         assert!(!perms.restart_pending(false));
@@ -1337,12 +1161,8 @@ mod tests {
             rule("agent_mask", "/home/me/.codex"),
             rule("mask", "/home/me/.claude"),
         ];
-        app.views.get_mut("demo").unwrap().permissions = Perms {
-            open: true,
-            filesystem_open: true,
-            views: Some(Views { preview, launch: None, agent_name: None, warnings: vec![] }),
-            ..Default::default()
-        };
+        app.views.get_mut("demo").unwrap().permissions =
+            Perms { open: true, filesystem_open: true, views: Some(Views { preview, launch: None, agent_name: None, warnings: vec![] }), ..Default::default() };
         let mut ui = simulator(&app, (720.0, 860.0));
         ui.find("agent: /home/me/.claude").unwrap();
         assert!(ui.find("agent_mask: /home/me/.claude").is_err());
@@ -1378,11 +1198,20 @@ mod tests {
         app.all_sessions = vec![session_record("demo", "demo", false, false)];
         let fake = std::thread::spawn(move || {
             let preview = daemon.expect("_sill/policy.preview");
-            daemon.reply(&preview, view("preview", true,
-                json!([{"host": "example.org", "applied": true, "reason": ""},
-                       {"host": "blocked.example", "applied": false, "reason": "offline: no network"}])));
+            daemon.reply(
+                &preview,
+                view(
+                    "preview",
+                    true,
+                    json!([{"host": "example.org", "applied": true, "reason": ""},
+                       {"host": "blocked.example", "applied": false, "reason": "offline: no network"}]),
+                ),
+            );
             let snapshot = daemon.expect("_sill/policy.snapshot");
-            daemon.reply(&snapshot, json!({"snapshot": view("launch", false, json!([])), "warnings": ["a host socket lies in a pinned folder: /pin/agent.sock"]}));
+            daemon.reply(
+                &snapshot,
+                json!({"snapshot": view("launch", false, json!([])), "warnings": ["a host socket lies in a pinned folder: /pin/agent.sock"]}),
+            );
             let agent = daemon.expect("_sill/agents.get");
             assert_eq!(agent["params"]["agent_id"], "claude");
             daemon.reply(&agent, json!({"id": "claude", "name": "Claude Code"}));
@@ -1436,10 +1265,7 @@ mod tests {
             for _ in 0..2 {
                 let request = daemon.next();
                 match request["method"].as_str().unwrap() {
-                    "_sill/sessions.list" => daemon.reply(
-                        &request,
-                        json!({"sessions": [session_record("demo", "demo", false, false)], "next": null}),
-                    ),
+                    "_sill/sessions.list" => daemon.reply(&request, json!({"sessions": [session_record("demo", "demo", false, false)], "next": null})),
                     "_sill/policy.preview" => daemon.refuse(&request, "unavailable", "later"),
                     other => panic!("unexpected {other}"),
                 }
@@ -1493,11 +1319,7 @@ mod tests {
             }
             seen
         });
-        for event in [
-            Event::Restore("demo".into()),
-            Event::SaveHost("demo".into(), "example.org".into()),
-            Event::AutoAllow("demo".into(), true),
-        ] {
+        for event in [Event::Restore("demo".into()), Event::SaveHost("demo".into(), "example.org".into()), Event::AutoAllow("demo".into(), true)] {
             let task = app.update(Message::Perms(event));
             settle_task(&mut app, task);
         }
@@ -1618,8 +1440,7 @@ mod tests {
         app.all_sessions = vec![session_record("demo", "demo", false, false)];
         let preview: PolicyView = serde_json::from_value(view("preview", true, json!([]))).unwrap();
         let launch: PolicyView = serde_json::from_value(view("launch", false, json!([]))).unwrap();
-        app.views.get_mut("demo").unwrap().permissions.views =
-            Some(Views { preview, launch: Some(launch), agent_name: None, warnings: vec![] });
+        app.views.get_mut("demo").unwrap().permissions.views = Some(Views { preview, launch: Some(launch), agent_name: None, warnings: vec![] });
         let mut ui = simulator(&app, (720.0, 860.0));
         assert!(ui.find("Default · jailed · permission changes apply after a restart").is_err());
         assert!(app.views["demo"].permissions.expanded(true).is_empty(), "the running jail has no public web yet");
@@ -1656,12 +1477,11 @@ mod tests {
         app.all_sessions = vec![ghost];
         let perms = &mut app.views.get_mut("demo").unwrap().permissions;
         perms.open = true;
-        perms.views = Some(serde_json::from_value::<PolicyView>(view("preview", false, json!([]))).map(|preview| Views {
-            preview,
-            launch: None,
-            agent_name: None,
-            warnings: vec![],
-        }).unwrap());
+        perms.views = Some(
+            serde_json::from_value::<PolicyView>(view("preview", false, json!([])))
+                .map(|preview| Views { preview, launch: None, agent_name: None, warnings: vec![] })
+                .unwrap(),
+        );
         let mut ui = simulator(&app, (720.0, 860.0));
         ui.find("Ghost · Default only").unwrap();
         assert!(ui.find("Restore defaults").is_ok());

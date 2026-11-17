@@ -13,11 +13,11 @@ use sill_proto::sessions::HostPath;
 
 use crate::{App, Message, SessionView, demo};
 
+mod drawer_ui;
 mod edits;
 mod links;
-mod tree;
-mod drawer_ui;
 mod reader_ui;
+mod tree;
 mod ui;
 
 pub use edits::ReaderView;
@@ -142,7 +142,7 @@ impl Drawer {
                     navigation: Default::default(),
                     serial: 0,
                     follow_seen: Default::default(),
-                follow_opened: None,
+                    follow_opened: None,
                     files: None,
                 },
                 Task::none(),
@@ -150,9 +150,7 @@ impl Drawer {
         };
         let (tx, rx) = async_channel::bounded(32);
         let files = Files::start(connect, move |reply| tx.send_blocking(reply).is_ok());
-        let stream = iced::futures::stream::unfold(rx, |rx| async move {
-            rx.recv().await.ok().map(|reply| (reply, rx))
-        });
+        let stream = iced::futures::stream::unfold(rx, |rx| async move { rx.recv().await.ok().map(|reply| (reply, rx)) });
         (
             Self {
                 shown: false,
@@ -165,9 +163,7 @@ impl Drawer {
                 follow_opened: None,
                 files: Some(files),
             },
-            Task::run(stream, |reply| {
-                Message::Files(Action::Reply(Box::new(reply)))
-            }),
+            Task::run(stream, |reply| Message::Files(Action::Reply(Box::new(reply)))),
         )
     }
 }
@@ -176,30 +172,18 @@ impl Drawer {
     /// Follow status transitions, so a manual choice lasts until the repository changes. Also
     /// the turn the repository took since it was last seen: `Some(true)` when changes appeared
     /// in a clean one, `Some(false)` when the last of them went.
-    fn follow(
-        &mut self,
-        session: &str,
-        files: &mut files::FilesState,
-        enabled: bool,
-    ) -> (Vec<Request>, Option<bool>) {
+    fn follow(&mut self, session: &str, files: &mut files::FilesState, enabled: bool) -> (Vec<Request>, Option<bool>) {
         if !enabled {
             self.follow_seen.remove(session);
             return (vec![], None);
         }
         // Iced has no separate scoped folder: follow the first session-pinned repository.
-        let repo = files
-            .roots
-            .iter()
-            .filter(|r| !r.global)
-            .find_map(|r| files.repo_of(&r.path));
+        let repo = files.roots.iter().filter(|r| !r.global).find_map(|r| files.repo_of(&r.path));
         let Some(repo) = repo.filter(|r| r.read && r.error.is_none()) else {
             self.follow_seen.remove(session);
             return (vec![], None);
         };
-        let state = format!(
-            "{:?}:{:?}:{:?}:{:?}",
-            repo.root, repo.head, repo.entries, repo.lines
-        );
+        let state = format!("{:?}:{:?}:{:?}:{:?}", repo.root, repo.head, repo.entries, repo.lines);
         let dirty = !repo.entries.is_empty();
         if self.follow_seen.get(session).map(|(seen, _)| seen) == Some(&state) {
             return (vec![], None);
@@ -207,11 +191,7 @@ impl Drawer {
         let was = self.follow_seen.insert(session.into(), (state, dirty));
         // a repository first seen with changes is not one they appeared in
         let turn = was.filter(|(_, was)| *was != dirty).map(|_| dirty);
-        let requests = if files.diff_mode != dirty {
-            files.set_diff_mode(dirty)
-        } else {
-            vec![]
-        };
+        let requests = if files.diff_mode != dirty { files.set_diff_mode(dirty) } else { vec![] };
         (requests, turn)
     }
 
@@ -223,24 +203,12 @@ impl Drawer {
 
 impl App {
     pub fn sync_drawer_follow(&mut self) {
-        let enabled = self
-            .daemon_settings
-            .as_ref()
-            .is_some_and(|s| s.drawer_follow_changes.unwrap_or(false));
+        let enabled = self.daemon_settings.as_ref().is_some_and(|s| s.drawer_follow_changes.unwrap_or(false));
         if !enabled {
             self.drawer.follow_opened = None;
         }
         // the setting or the snapshot changed, not a repository: no turn to act on
-        let requests: Vec<_> = self
-            .views
-            .iter_mut()
-            .map(|(id, view)| {
-                (
-                    id.clone(),
-                    self.drawer.follow(id, &mut view.files, enabled).0,
-                )
-            })
-            .collect();
+        let requests: Vec<_> = self.views.iter_mut().map(|(id, view)| (id.clone(), self.drawer.follow(id, &mut view.files, enabled).0)).collect();
         for (id, requests) in requests {
             self.files_send(&id, requests);
         }
@@ -260,29 +228,15 @@ impl App {
             match &self.drawer.files {
                 Some(worker) => {
                     if !worker.send(session, serial, request) {
-                        view.files
-                            .abandon("File connection stopped. Reopen the preview.");
+                        view.files.abandon("File connection stopped. Reopen the preview.");
                     }
                 }
                 None => {
-                    let reply = Reply {
-                        session: session.into(),
-                        serial,
-                        result: demo::files(&request),
-                        request,
-                    };
+                    let reply = Reply { session: session.into(), serial, result: demo::files(&request), request };
                     let mut effects = view.files.accept(reply);
                     // the demo's repository never changes: no turn to act on
                     effects.follow.extend(
-                        self.drawer
-                            .follow(
-                                session,
-                                &mut view.files,
-                                self.daemon_settings
-                                    .as_ref()
-                                    .is_some_and(|s| s.drawer_follow_changes.unwrap_or(false)),
-                            )
-                            .0,
+                        self.drawer.follow(session, &mut view.files, self.daemon_settings.as_ref().is_some_and(|s| s.drawer_follow_changes.unwrap_or(false))).0,
                     );
                     view.sync_reader();
                     queue.extend(effects.follow);
@@ -300,8 +254,7 @@ impl App {
             .get_mut(session)
             .filter(|v| {
                 // Do not supersede slow replies or pile up work on a remote daemon.
-                v.files.directories.values().all(|d| d.pending.is_none())
-                    && v.files.repos.values().all(|r| r.pending.is_none())
+                v.files.directories.values().all(|d| d.pending.is_none()) && v.files.repos.values().all(|r| r.pending.is_none())
             })
             .map(|v| v.files.refresh())
             .unwrap_or_default();
@@ -312,27 +265,12 @@ impl App {
 
     pub fn files_action(&mut self, action: Action) -> Task<Message> {
         match action {
-            Action::Link {
-                session,
-                source,
-                target,
-            } => self.follow_link(session, source, target),
+            Action::Link { session, source, target } => self.follow_link(session, source, target),
             Action::Back(forward) => self.navigate_back(forward),
-            Action::Navigate {
-                session,
-                path,
-                fragment,
-                history,
-            } => self.navigate(session, path, fragment, history),
+            Action::Navigate { session, path, fragment, history } => self.navigate(session, path, fragment, history),
             Action::AnchorOffset { session, key, y } => self.anchor_offset(session, key, y),
             Action::SaveFile => self.save_file(),
-            Action::Saved {
-                session,
-                key,
-                serial,
-                text,
-                outcome,
-            } => self.file_saved(session, key, serial, text, outcome),
+            Action::Saved { session, key, serial, text, outcome } => self.file_saved(session, key, serial, text, outcome),
             Action::CancelDiscard => self.cancel_discard(),
             Action::DiscardEdits => self.discard_edits(),
             Action::Reply(reply) => self.files_reply(*reply),
@@ -347,16 +285,8 @@ impl App {
                 Task::none()
             }
             Action::PickFolder => self.pick_folder(),
-            Action::FolderPicked {
-                session,
-                token,
-                path,
-            } => self.folder_picked(session, token, path),
-            Action::MacFolderShared {
-                session,
-                token,
-                result,
-            } => self.mac_folder_shared(session, token, result),
+            Action::FolderPicked { session, token, path } => self.folder_picked(session, token, path),
+            Action::MacFolderShared { session, token, result } => self.mac_folder_shared(session, token, result),
             Action::ToggleDrawer => self.toggle_drawer(),
             action => self.selected_files_action(action),
         }
@@ -369,13 +299,8 @@ impl App {
             return Task::none();
         };
         let mut effects = view.files.accept(reply);
-        let (follow, turn) = self.drawer.follow(
-            &session,
-            &mut view.files,
-            self.daemon_settings
-                .as_ref()
-                .is_some_and(|s| s.drawer_follow_changes.unwrap_or(false)),
-        );
+        let (follow, turn) =
+            self.drawer.follow(&session, &mut view.files, self.daemon_settings.as_ref().is_some_and(|s| s.drawer_follow_changes.unwrap_or(false)));
         effects.follow.extend(follow);
         view.sync_reader();
         // a background session's reply updates its own state, never the window
@@ -448,9 +373,7 @@ impl App {
         // in Drawer mode, putting the drawer away is Full: the same window without it
         // (Ctrl+Shift+F brings it back); elsewhere a quick look over the conversation
         if self.layout.mode == crate::layout::Mode::Drawer && !self.layout.plain {
-            return self.update(Message::Layout(crate::layout::Action::Mode(
-                crate::layout::Mode::Full,
-            )));
+            return self.update(Message::Layout(crate::layout::Action::Mode(crate::layout::Mode::Full)));
         }
         self.drawer.chosen();
         self.drawer.shown = !self.drawer.shown;

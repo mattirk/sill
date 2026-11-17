@@ -30,11 +30,7 @@ pub struct TextLayout {
 
 impl Default for TextLayout {
     fn default() -> Self {
-        Self {
-            paragraph: Paragraph::default(),
-            text: Arc::from(""),
-            line_starts: Arc::from([]),
-        }
+        Self { paragraph: Paragraph::default(), text: Arc::from(""), line_starts: Arc::from([]) }
     }
 }
 
@@ -47,11 +43,7 @@ impl TextLayout {
             text.push_str(line.text());
             text.push_str(line.ending().as_str());
         }
-        Self {
-            paragraph,
-            text: Arc::from(text),
-            line_starts: Arc::from(starts),
-        }
+        Self { paragraph, text: Arc::from(text), line_starts: Arc::from(starts) }
     }
 
     /// The text as it is laid out: every line followed by its own line ending.
@@ -65,11 +57,7 @@ impl TextLayout {
 
     /// Where the paragraph is drawn inside the widget's `bounds` (iced's text anchor).
     pub fn origin(&self, bounds: Rectangle) -> Point {
-        bounds.anchor(
-            self.paragraph.min_bounds(),
-            self.paragraph.align_x(),
-            self.paragraph.align_y(),
-        )
+        bounds.anchor(self.paragraph.min_bounds(), self.paragraph.align_x(), self.paragraph.align_y())
     }
 
     /// `offset` clamped to the text and moved back to a character boundary.
@@ -89,22 +77,14 @@ impl TextLayout {
     }
 
     fn line_len(&self, line: usize) -> usize {
-        self.paragraph
-            .buffer()
-            .lines
-            .get(line)
-            .map_or(0, |line| line.text().len())
+        self.paragraph.buffer().lines.get(line).map_or(0, |line| line.text().len())
     }
 
     fn cursor(&self, offset: usize, affinity: Affinity) -> Cursor {
         let offset = self.floor(offset);
         let line = self.line_of(offset);
         let start = self.line_starts.get(line).copied().unwrap_or(0);
-        Cursor::new_with_affinity(
-            line,
-            offset.saturating_sub(start).min(self.line_len(line)),
-            affinity,
-        )
+        Cursor::new_with_affinity(line, offset.saturating_sub(start).min(self.line_len(line)), affinity)
     }
 
     /// The logical line (without its ending) that holds `offset`.
@@ -119,14 +99,8 @@ impl TextLayout {
     pub fn word_at(&self, offset: usize, affinity: Affinity) -> (usize, usize) {
         let (start, end) = self.line_at(offset);
         let offset = self.floor(offset).clamp(start, end);
-        let probe = if affinity == Affinity::Before && offset > start {
-            self.text[..offset]
-                .char_indices()
-                .next_back()
-                .map_or(start, |(i, _)| i)
-        } else {
-            offset
-        };
+        let probe =
+            if affinity == Affinity::Before && offset > start { self.text[..offset].char_indices().next_back().map_or(start, |(i, _)| i) } else { offset };
         for (i, word) in self.text[start..end].split_word_bound_indices() {
             let (a, b) = (start + i, start + i + word.len());
             if probe >= a && probe < b {
@@ -208,20 +182,14 @@ impl TextLayout {
                 // an empty line inside the selection: show that its newline is selected
                 let at = self.line_starts.get(run.line_i).copied().unwrap_or(0);
                 if start <= at && at < end {
-                    rects.push(Rectangle::new(
-                        Point::new(0.0, run.line_top),
-                        Size::new(run.line_height * 0.3, run.line_height),
-                    ));
+                    rects.push(Rectangle::new(Point::new(0.0, run.line_top), Size::new(run.line_height * 0.3, run.line_height)));
                 }
                 continue;
             }
             if let Some((x, width)) = run.highlight(from, to)
                 && width > 0.0
             {
-                rects.push(Rectangle::new(
-                    Point::new(x, run.line_top),
-                    Size::new(width, run.line_height),
-                ));
+                rects.push(Rectangle::new(Point::new(x, run.line_top), Size::new(width, run.line_height)));
             }
         }
         rects
@@ -305,10 +273,7 @@ impl Selectable {
     /// All find-matched slices in this leaf.
     #[cfg(test)]
     pub fn find_matched_texts(&self) -> Vec<&str> {
-        self.find_matches
-            .iter()
-            .filter_map(|&(start, end)| self.layout.text().get(start..end))
-            .collect()
+        self.find_matches.iter().filter_map(|&(start, end)| self.layout.text().get(start..end)).collect()
     }
 
     /// The current find-matched slice in this leaf, if the current match lies here.
@@ -348,9 +313,7 @@ impl Selectable {
     pub fn highlight_rects(&self) -> Cow<'_, [Rectangle]> {
         match self.highlight {
             None => Cow::Borrowed(&[]),
-            Some(range) if self.rects_key == Some((range, self.layout_version)) => {
-                Cow::Borrowed(&self.rects)
-            }
+            Some(range) if self.rects_key == Some((range, self.layout_version)) => Cow::Borrowed(&self.rects),
             Some(range) => Cow::Owned(self.layout.highlight_rects(range)),
         }
     }
@@ -381,9 +344,7 @@ impl Selectable {
     /// Sets the highlighted byte range (clamped) and lays out its rectangles once, so drawing
     /// does not redo it every frame.
     pub fn set_highlight(&mut self, range: Option<(usize, usize)>) {
-        let range = range
-            .map(|(start, end)| (self.layout.floor(start), self.layout.floor(end)))
-            .filter(|(start, end)| start < end);
+        let range = range.map(|(start, end)| (self.layout.floor(start), self.layout.floor(end))).filter(|(start, end)| start < end);
         self.highlight = range;
         if let Some(range) = range
             && self.rects_key != Some((range, self.layout_version))
@@ -396,16 +357,10 @@ impl Selectable {
     /// Sets the find match byte ranges and optional current match index within `matches`, laying
     /// out their rectangles only when the matches or paragraph layout changed.
     pub fn set_find(&mut self, matches: Vec<(usize, usize)>, current: Option<usize>) {
-        let clamped: Vec<(usize, usize)> = matches
-            .into_iter()
-            .map(|(start, end)| (self.layout.floor(start), self.layout.floor(end)))
-            .filter(|(start, end)| start < end)
-            .collect();
+        let clamped: Vec<(usize, usize)> =
+            matches.into_iter().map(|(start, end)| (self.layout.floor(start), self.layout.floor(end))).filter(|(start, end)| start < end).collect();
         let current = current.filter(|&idx| idx < clamped.len());
-        if self.find_matches == clamped
-            && self.find_current == current
-            && self.find_rects_key == Some(self.layout_version)
-        {
+        if self.find_matches == clamped && self.find_current == current && self.find_rects_key == Some(self.layout_version) {
             return;
         }
         self.find_matches = clamped;

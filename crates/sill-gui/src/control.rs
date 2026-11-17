@@ -61,9 +61,7 @@ fn sockets() -> PathBuf {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("sill-{}", rustix::process::getuid().as_raw()))
-        });
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("sill-{}", rustix::process::getuid().as_raw())));
     runtime.join("sill")
 }
 
@@ -102,24 +100,22 @@ pub fn claim(sink: impl Fn(Command) -> bool + Send + 'static) -> std::io::Result
         }
         Err(e) => return Err(e),
     };
-    std::thread::Builder::new()
-        .name("sill-gui-control".into())
-        .spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                let mut line = String::new();
-                if BufReader::new(&stream).read_line(&mut line).is_err() {
-                    continue;
-                }
-                let answer = match Command::parse(&line) {
-                    Some(command) if sink(command) => "ok",
-                    Some(_) => "gone",
-                    None => "unknown command",
-                };
-                let _ = writeln!(stream, "{answer}");
+    std::thread::Builder::new().name("sill-gui-control".into()).spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut line = String::new();
+            if BufReader::new(&stream).read_line(&mut line).is_err() {
+                continue;
             }
-        })?;
+            let answer = match Command::parse(&line) {
+                Some(command) if sink(command) => "ok",
+                Some(_) => "gone",
+                None => "unknown command",
+            };
+            let _ = writeln!(stream, "{answer}");
+        }
+    })?;
     Ok(Some(()))
 }
 
@@ -129,12 +125,7 @@ mod tests {
 
     #[test]
     fn commands_read_back() {
-        for command in [
-            Command::Show,
-            Command::Hide,
-            Command::Toggle(123),
-            Command::Quit,
-        ] {
+        for command in [Command::Show, Command::Hide, Command::Toggle(123), Command::Quit] {
             assert_eq!(Command::parse(&command.line()), Some(command));
         }
         assert_eq!(Command::parse("toggle"), Some(Command::Toggle(0)));

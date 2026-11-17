@@ -11,9 +11,7 @@
 //! it shows the last listing at once while the new one is read; its actions wait for the new one.
 use std::collections::BTreeMap;
 
-use iced::widget::{
-    Column, button, column, container, row, rule, scrollable, space, text, tooltip,
-};
+use iced::widget::{Column, button, column, container, row, rule, scrollable, space, text, tooltip};
 use iced::{Alignment, Element, Fill, Padding};
 use sill_client::changes::{self, Entry, Group, Kind, SessionSection};
 use sill_client::files::{key, name, relative};
@@ -42,12 +40,7 @@ pub struct Listing {
 
 impl Listing {
     pub fn entry(&self, key: &str) -> Option<&Entry> {
-        self.entries
-            .as_ref()?
-            .as_ref()
-            .ok()?
-            .iter()
-            .find(|e| changes::entry_key(e) == key)
+        self.entries.as_ref()?.as_ref().ok()?.iter().find(|e| changes::entry_key(e) == key)
     }
 
     pub fn details(&self) -> &[api::Detail] {
@@ -161,20 +154,11 @@ fn warn_color(armed: bool, offered: bool) -> iced::Color {
 }
 
 fn small<'a>(label: &'a str, message: Option<Message>) -> Element<'a, Message> {
-    keys::press_maybe(
-        button(text(label).size(style::SMALL))
-            .padding([2, 8])
-            .style(style::quiet),
-        message,
-    )
+    keys::press_maybe(button(text(label).size(style::SMALL)).padding([2, 8]).style(style::quiet), message)
 }
 
 fn badge<'a>(label: impl Into<String>, color: iced::Color) -> Element<'a, Message> {
-    text(label.into())
-        .size(style::SMALL)
-        .font(iced::Font::with_name(crate::fonts::MONO_FAMILY))
-        .color(color)
-        .into()
+    text(label.into()).size(style::SMALL).font(iced::Font::with_name(crate::fonts::MONO_FAMILY)).color(color).into()
 }
 
 /// A changed file: its name, then its folder dimmed (and what was done, for a keep).
@@ -184,15 +168,8 @@ fn path_label<'a>(shown: &str, what: Option<&str>) -> Element<'a, Message> {
         Some((folder, file)) => (folder.to_string(), file.to_string()),
         None => (String::new(), shown.clone()),
     };
-    let dim = |value: String| {
-        text(value)
-            .size(style::SMALL)
-            .color(alpha(P.fg, 0.45))
-            .wrapping(text::Wrapping::None)
-    };
-    let mut line = row![text(file).size(style::SMALL).wrapping(text::Wrapping::None)]
-        .spacing(10)
-        .align_y(Alignment::Center);
+    let dim = |value: String| text(value).size(style::SMALL).color(alpha(P.fg, 0.45)).wrapping(text::Wrapping::None);
+    let mut line = row![text(file).size(style::SMALL).wrapping(text::Wrapping::None)].spacing(10).align_y(Alignment::Center);
     if !folder.is_empty() {
         line = line.push(dim(folder));
     }
@@ -220,27 +197,13 @@ fn letter_color(letter: &str) -> iced::Color {
 }
 
 /// A file's row: its letter, name and folder, what else to say, and the fold's chevron.
-fn file_line<'a>(
-    letter: String,
-    color: iced::Color,
-    label: Element<'a, Message>,
-    open: bool,
-    on_press: Message,
-) -> Element<'a, Message> {
+fn file_line<'a>(letter: String, color: iced::Color, label: Element<'a, Message>, open: bool, on_press: Message) -> Element<'a, Message> {
     keys::press(
         button(
             row![
                 text(letter).size(style::SMALL).color(color).width(26),
                 container(label).width(Fill).clip(true),
-                crate::icons::glyph(
-                    if open {
-                        "chevron-down"
-                    } else {
-                        "chevron-right"
-                    },
-                    12.0,
-                    P.fg_dim
-                ),
+                crate::icons::glyph(if open { "chevron-down" } else { "chevron-right" }, 12.0, P.fg_dim),
             ]
             .spacing(6)
             .align_y(Alignment::Center),
@@ -255,47 +218,22 @@ fn file_line<'a>(
 /// An open row's diff, below it.
 fn diff_block<'a>(diff: &'a Option<Result<String, String>>, path: &str) -> Element<'a, Message> {
     match diff {
-        None => container(text("Reading the diff…").size(style::SMALL).color(P.fg_dim))
-            .padding([4, 30])
+        None => container(text("Reading the diff…").size(style::SMALL).color(P.fg_dim)).padding([4, 30]).into(),
+        Some(Err(error)) => container(text(error).size(style::SMALL).color(P.error)).padding([4, 30]).into(),
+        Some(Ok(diff)) => container(container(crate::diff_ui::diff_rows(diff, path)).padding([6, 10]).style(style::fill(P.code_bg)))
+            .padding(Padding { top: 2.0, right: 4.0, bottom: 8.0, left: 30.0 })
             .into(),
-        Some(Err(error)) => container(text(error).size(style::SMALL).color(P.error))
-            .padding([4, 30])
-            .into(),
-        Some(Ok(diff)) => container(
-            container(crate::diff_ui::diff_rows(diff, path))
-                .padding([6, 10])
-                .style(style::fill(P.code_bg)),
-        )
-        .padding(Padding {
-            top: 2.0,
-            right: 4.0,
-            bottom: 8.0,
-            left: 30.0,
-        })
-        .into(),
     }
 }
 
 /// A section's heading with the line under it.
 fn section_head<'a>(body: Column<'a, Message>, header: iced::widget::Row<'a, Message>) -> Column<'a, Message> {
-    body.push(container(header).padding(Padding {
-        top: 14.0,
-        right: 4.0,
-        bottom: 4.0,
-        left: 4.0,
-    }))
-    .push(rule::horizontal(1).style(style::rule_style(P.border)))
+    body.push(container(header).padding(Padding { top: 14.0, right: 4.0, bottom: 4.0, left: 4.0 })).push(rule::horizontal(1).style(style::rule_style(P.border)))
 }
 
 /// A part of a session's section: its heading, smaller, with its actions at the right.
 fn part_head<'a>(header: iced::widget::Row<'a, Message>) -> Element<'a, Message> {
-    container(header.height(26)).padding(Padding {
-        top: 6.0,
-        right: 4.0,
-        bottom: 0.0,
-        left: 4.0,
-    })
-    .into()
+    container(header.height(26)).padding(Padding { top: 6.0, right: 4.0, bottom: 0.0, left: 4.0 }).into()
 }
 
 impl App {
@@ -311,13 +249,7 @@ impl App {
         let toggle = |label: &'static str, history: bool| {
             let on = page.history == history;
             keys::press(
-                button(
-                    text(label)
-                        .size(style::SMALL)
-                        .color(if on { P.fg } else { P.fg_dim }),
-                )
-                .padding([2, 8])
-                .style(style::quiet),
+                button(text(label).size(style::SMALL).color(if on { P.fg } else { P.fg_dim })).padding([2, 8]).style(style::quiet),
                 event(Event::History(history)),
             )
         };
@@ -328,39 +260,18 @@ impl App {
                 (0, 0) => "Nothing waiting".to_string(),
                 (w, 0) => format!("{} to apply", plural(w, "workspace", "workspaces")),
                 (0, n) => format!("{} to keep or revert", plural(n, "write", "writes")),
-                (w, n) => format!(
-                    "{} to apply · {} to keep or revert",
-                    plural(w, "workspace", "workspaces"),
-                    plural(n, "write", "writes")
-                ),
+                (w, n) => format!("{} to apply · {} to keep or revert", plural(w, "workspace", "workspaces"), plural(n, "write", "writes")),
             }
         };
         let heading = row![
-            text(if page.history {
-                "What was kept, reverted and undone".to_string()
-            } else {
-                waiting()
-            })
-            .size(style::TEXT)
-            .color(P.fg_dim),
+            text(if page.history { "What was kept, reverted and undone".to_string() } else { waiting() }).size(style::TEXT).color(P.fg_dim),
             space().width(Fill),
             toggle("Pending", false),
             toggle("History", true),
             keys::press_maybe(
-                button(crate::icons::glyph(
-                    "refresh",
-                    13.0,
-                    alpha(
-                        P.fg,
-                        if page.loading || page.history_loading {
-                            0.3
-                        } else {
-                            0.7
-                        }
-                    ),
-                ))
-                .padding([4, 8])
-                .style(style::quiet),
+                button(crate::icons::glyph("refresh", 13.0, alpha(P.fg, if page.loading || page.history_loading { 0.3 } else { 0.7 }),))
+                    .padding([4, 8])
+                    .style(style::quiet),
                 Some(event(Event::Refresh)),
             ),
         ]
@@ -368,18 +279,13 @@ impl App {
         .align_y(Alignment::Center);
         let mut body = Column::new().spacing(2);
         if let Some(said) = &page.said {
-            body =
-                body.push(container(text(said).size(style::SMALL).color(P.fg_dim)).padding([4, 4]));
+            body = body.push(container(text(said).size(style::SMALL).color(P.fg_dim)).padding([4, 4]));
         }
         if page.history {
             body = self.history_rows(page, body);
         } else {
-            for error in [
-                listing.entries.as_ref().and_then(|e| e.as_ref().err()),
-                listing.workspaces.as_ref().and_then(|w| w.as_ref().err()),
-            ]
-            .into_iter()
-            .flatten()
+            for error in
+                [listing.entries.as_ref().and_then(|e| e.as_ref().err()), listing.workspaces.as_ref().and_then(|w| w.as_ref().err())].into_iter().flatten()
             {
                 body = body.push(container(text(error).color(P.error)).padding([4, 4]));
             }
@@ -387,9 +293,7 @@ impl App {
                 body = body.push(
                     container(
                         column![
-                            text(format!("{}: its writes outside a workspace cannot be listed", u.title))
-                                .size(style::SMALL)
-                                .color(P.fg),
+                            text(format!("{}: its writes outside a workspace cannot be listed", u.title)).size(style::SMALL).color(P.fg),
                             text(format!(
                                 "{}. A session launched by an older Sill cannot be read by this one: rebuild it, or delete it once its work is applied.",
                                 u.why
@@ -415,13 +319,9 @@ impl App {
                 body = body.push(
                     container(
                         column![
-                            row![
-                                text(format!("{}: a workspace that cannot be read", w.name)).size(style::SMALL).color(P.fg),
-                                space().width(Fill),
-                                remove,
-                            ]
-                            .spacing(10)
-                            .align_y(Alignment::Center),
+                            row![text(format!("{}: a workspace that cannot be read", w.name)).size(style::SMALL).color(P.fg), space().width(Fill), remove,]
+                                .spacing(10)
+                                .align_y(Alignment::Center),
                             text(why.to_string()).size(style::TINY).color(P.fg_dim),
                         ]
                         .spacing(2),
@@ -433,13 +333,7 @@ impl App {
             if unread {
                 body = body.push(container(text("Reading changes…").color(P.fg_dim)).padding([12, 4]));
             } else if sections.is_empty() && discarded.is_empty() && matches!(listing.entries, Some(Ok(_))) {
-                body = body.push(
-                    container(
-                        text("Nothing waiting: every session's work is applied, kept or reverted.")
-                            .color(P.fg_dim),
-                    )
-                    .padding([12, 4]),
-                );
+                body = body.push(container(text("Nothing waiting: every session's work is applied, kept or reverted.").color(P.fg_dim)).padding([12, 4]));
             }
             let now = now();
             for section in &sections.sessions {
@@ -453,19 +347,9 @@ impl App {
             }
         }
         column![
-            container(heading).padding(Padding {
-                top: 8.0,
-                right: 12.0,
-                bottom: 6.0,
-                left: 16.0
-            }),
+            container(heading).padding(Padding { top: 8.0, right: 12.0, bottom: 6.0, left: 16.0 }),
             rule::horizontal(1).style(style::rule_style(P.border)),
-            scrollable(container(body).padding(Padding {
-                top: 0.0,
-                right: 12.0,
-                bottom: 12.0,
-                left: 12.0
-            }))
+            scrollable(container(body).padding(Padding { top: 0.0, right: 12.0, bottom: 12.0, left: 12.0 }))
                 .direction(scrollable::Direction::Vertical(style::bar()))
                 .id("changes")
                 .height(Fill)
@@ -477,27 +361,13 @@ impl App {
 
     /// One session's work: its name, then its workspaces, its writes outside its pins and what
     /// was kept from it.
-    fn session_section<'a>(
-        &'a self,
-        page: &'a ChangesPage,
-        mut body: Column<'a, Message>,
-        section: &SessionSection<'a>,
-        now: i64,
-    ) -> Column<'a, Message> {
+    fn session_section<'a>(&'a self, page: &'a ChangesPage, mut body: Column<'a, Message>, section: &SessionSection<'a>, now: i64) -> Column<'a, Message> {
         let session = self.all_sessions.iter().find(|s| s.session_id == section.session_id);
         let mut header = row![].spacing(10).align_y(Alignment::Center);
         if let Some(session) = session {
-            header = header.push(
-                iced::widget::svg(self.agent_icon(&session.agent))
-                    .width(15)
-                    .height(15)
-                    .style(style::icon(P.fg)),
-            );
+            header = header.push(iced::widget::svg(self.agent_icon(&session.agent)).width(15).height(15).style(style::icon(P.fg)));
         }
-        let title = session
-            .map(sill_client::sessions::display_title)
-            .or(section.title.as_deref())
-            .unwrap_or(&section.session_id);
+        let title = session.map(sill_client::sessions::display_title).or(section.title.as_deref()).unwrap_or(&section.session_id);
         header = header.push(text(crate::ui::one_line(title, 60)).size(style::TEXT));
         if section.ghost || session.is_some_and(|s| s.ghost) {
             header = header.push(badge("ghost", P.fg_dim));
@@ -514,12 +384,9 @@ impl App {
         }
         if !section.kept.is_empty() {
             body = body.push(part_head(
-                row![
-                    text("Kept").size(style::SMALL),
-                    text("on the host now; Undo puts back what was there").size(style::TINY).color(P.fg_dim),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
+                row![text("Kept").size(style::SMALL), text("on the host now; Undo puts back what was there").size(style::TINY).color(P.fg_dim),]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
             ));
             for entry in &section.kept {
                 body = self.entry_row(page, body, None, entry, now);
@@ -530,13 +397,7 @@ impl App {
 
     /// A workspace with work waiting: the repository, what an Apply would bring, Apply and
     /// Discard, and the files it would change.
-    fn workspace_part<'a>(
-        &'a self,
-        page: &'a ChangesPage,
-        mut body: Column<'a, Message>,
-        d: &'a api::Detail,
-        session_lives: bool,
-    ) -> Column<'a, Message> {
+    fn workspace_part<'a>(&'a self, page: &'a ChangesPage, mut body: Column<'a, Message>, d: &'a api::Detail, session_lives: bool) -> Column<'a, Message> {
         use crate::workspaces::Event as W;
         let id = d.workspace.workspace_id.clone();
         let fresh = page.fresh_workspaces;
@@ -554,22 +415,16 @@ impl App {
         .spacing(8)
         .align_y(Alignment::Center);
         if let Some(op) = &d.workspace.operation {
-            header = header.push(
-                container(text(op.detail.clone()).size(style::TINY).color(P.warning).wrapping(text::Wrapping::None))
-                    .width(Fill)
-                    .clip(true),
-            );
+            header = header.push(container(text(op.detail.clone()).size(style::TINY).color(P.warning).wrapping(text::Wrapping::None)).width(Fill).clip(true));
         } else {
             header = header.push(space().width(Fill));
         }
         // a stopped or interrupted operation is seen to first; a carry's line leaves Apply offered
         if !d.workspace.operation.as_ref().is_some_and(|o| o.state == "conflict" || o.state == "interrupted") {
-            let onto = sill_client::workspaces::other_branch(d)
-                .map(|(_, now)| now)
-                .filter(|now| {
-                    page.workspace_apply_armed.get().is_some_and(|(w, seen)| *w == id && *seen == d.revision)
-                        || page.workspace_apply_onto.as_ref().is_some_and(|(w, b)| *w == id && b == now)
-                });
+            let onto = sill_client::workspaces::other_branch(d).map(|(_, now)| now).filter(|now| {
+                page.workspace_apply_armed.get().is_some_and(|(w, seen)| *w == id && *seen == d.revision)
+                    || page.workspace_apply_onto.as_ref().is_some_and(|(w, b)| *w == id && b == now)
+            });
             let label = onto.map_or("Apply".to_string(), |now| format!("Apply onto {now}?"));
             header = header.push(keys::press_maybe(
                 button(text(label).size(style::SMALL)).padding([2, 10]).style(style::solid(P.accent)),
@@ -578,28 +433,16 @@ impl App {
         }
         let armed = page.workspace_armed.get().is_some_and(|(w, seen)| *w == id && *seen == d.revision);
         header = header.push(keys::press_maybe(
-            button(
-                text(if armed { "Discard?" } else { "Discard" })
-                    .size(style::SMALL)
-                    .color(warn_color(armed, fresh)),
-            )
-            .padding([2, 8])
-            .style(style::quiet),
+            button(text(if armed { "Discard?" } else { "Discard" }).size(style::SMALL).color(warn_color(armed, fresh))).padding([2, 8]).style(style::quiet),
             fresh.then(|| Message::Workspaces(W::PageDiscard(id.clone()))),
         ));
         body = body.push(part_head(header));
         for file in &d.files {
             let key = workspace_key(&id, &file.path);
-            let mut label = row![path_label(&relative(&file.path, &d.workspace.source), None)]
-                .spacing(10)
-                .align_y(Alignment::Center);
+            let mut label = row![path_label(&relative(&file.path, &d.workspace.source), None)].spacing(10).align_y(Alignment::Center);
             if file.added != "0" || file.removed != "0" {
-                label = label.push(
-                    text(format!("+{} −{}", file.added, file.removed))
-                        .size(style::TINY)
-                        .color(alpha(P.fg, 0.45))
-                        .wrapping(text::Wrapping::None),
-                );
+                label =
+                    label.push(text(format!("+{} −{}", file.added, file.removed)).size(style::TINY).color(alpha(P.fg, 0.45)).wrapping(text::Wrapping::None));
             }
             body = body.push(file_line(
                 file.status.clone(),
@@ -617,24 +460,13 @@ impl App {
 
     /// A session's writes outside its pinned folders, in one repository (or none): held in its
     /// overlay until kept or reverted.
-    fn writes_part<'a>(
-        &'a self,
-        page: &'a ChangesPage,
-        mut body: Column<'a, Message>,
-        group: &Group,
-        now: i64,
-    ) -> Column<'a, Message> {
+    fn writes_part<'a>(&'a self, page: &'a ChangesPage, mut body: Column<'a, Message>, group: &Group, now: i64) -> Column<'a, Message> {
         let Kind::Session { repo, .. } = &group.kind else {
             return body;
         };
         let fresh = page.fresh_entries;
         let all: Vec<String> = group.entries.iter().map(changes::entry_key).collect();
-        let keepable: Vec<String> = group
-            .entries
-            .iter()
-            .filter(|e| changes::keeps_in_bulk(e))
-            .map(changes::entry_key)
-            .collect();
+        let keepable: Vec<String> = group.entries.iter().filter(|e| changes::keeps_in_bulk(e)).map(changes::entry_key).collect();
         let armed = page.armed.get().is_some_and(|a| matches!(a, Reverting::All(keys) if *keys == all));
         let header = row![
             crate::icons::glyph("file", 13.0, alpha(P.fg, 0.6)),
@@ -645,18 +477,11 @@ impl App {
             },
             text("held until kept or reverted").size(style::TINY).color(P.fg_dim),
             space().width(Fill),
-            small(
-                "Keep all",
-                (fresh && !keepable.is_empty()).then(|| event(Event::KeepAll(keepable))),
-            ),
+            small("Keep all", (fresh && !keepable.is_empty()).then(|| event(Event::KeepAll(keepable))),),
             keys::press_maybe(
-                button(
-                    text(if armed { "Revert all?" } else { "Revert all" })
-                        .size(style::SMALL)
-                        .color(warn_color(armed, fresh)),
-                )
-                .padding([2, 8])
-                .style(style::quiet),
+                button(text(if armed { "Revert all?" } else { "Revert all" }).size(style::SMALL).color(warn_color(armed, fresh)),)
+                    .padding([2, 8])
+                    .style(style::quiet),
                 fresh.then(|| event(Event::RevertAll(all))),
             ),
         ]
@@ -670,13 +495,7 @@ impl App {
     }
 
     /// One of the person's own checkouts: a pinned repository as git sees it, live on the host.
-    fn checkout<'a>(
-        &'a self,
-        page: &'a ChangesPage,
-        mut body: Column<'a, Message>,
-        group: &Group,
-        now: i64,
-    ) -> Column<'a, Message> {
+    fn checkout<'a>(&'a self, page: &'a ChangesPage, mut body: Column<'a, Message>, group: &Group, now: i64) -> Column<'a, Message> {
         let Kind::Live { repo } = &group.kind else {
             return body;
         };
@@ -696,24 +515,11 @@ impl App {
     }
 
     /// Discarded workspaces, undoable while they are kept; collapsed by default.
-    fn discarded_rows<'a>(
-        &'a self,
-        page: &'a ChangesPage,
-        mut body: Column<'a, Message>,
-        discarded: &'a [api::Discarded],
-    ) -> Column<'a, Message> {
+    fn discarded_rows<'a>(&'a self, page: &'a ChangesPage, mut body: Column<'a, Message>, discarded: &'a [api::Discarded]) -> Column<'a, Message> {
         let toggle = keys::press(
             button(
                 row![
-                    crate::icons::glyph(
-                        if page.discarded_open {
-                            "chevron-down"
-                        } else {
-                            "chevron-right"
-                        },
-                        13.0,
-                        P.fg_dim,
-                    ),
+                    crate::icons::glyph(if page.discarded_open { "chevron-down" } else { "chevron-right" }, 13.0, P.fg_dim,),
                     text("Discarded workspaces").size(style::TEXT).color(P.fg_dim),
                     text(discarded.len().to_string()).size(style::SMALL).color(P.fg_dim),
                     space().width(Fill),
@@ -727,12 +533,7 @@ impl App {
             event(Event::ToggleDiscarded),
         );
         body = body
-            .push(container(toggle).padding(Padding {
-                top: 10.0,
-                right: 0.0,
-                bottom: 0.0,
-                left: 0.0,
-            }))
+            .push(container(toggle).padding(Padding { top: 10.0, right: 0.0, bottom: 0.0, left: 0.0 }))
             .push(rule::horizontal(1).style(style::rule_style(P.border)));
         if !page.discarded_open {
             return body;
@@ -741,15 +542,9 @@ impl App {
             let line = row![
                 crate::icons::glyph("git-branch", 13.0, alpha(P.fg, 0.4)),
                 text(name(&d.source).to_string()).size(style::SMALL).color(P.fg_dim),
-                text(format!("kept until {}", d.until.get(..10).unwrap_or(&d.until)))
-                    .size(style::TINY)
-                    .color(P.fg_dim),
+                text(format!("kept until {}", d.until.get(..10).unwrap_or(&d.until))).size(style::TINY).color(P.fg_dim),
                 space().width(Fill),
-                small(
-                    "Undo",
-                    page.fresh_workspaces
-                        .then(|| Message::Workspaces(crate::workspaces::Event::PageUndo(d.discard_id.clone()))),
-                ),
+                small("Undo", page.fresh_workspaces.then(|| Message::Workspaces(crate::workspaces::Event::PageUndo(d.discard_id.clone()))),),
             ]
             .spacing(8)
             .align_y(Alignment::Center);
@@ -760,14 +555,7 @@ impl App {
 
     /// An entry's row with its actions, and its diff below when open. `repo`: the checkout the
     /// entry is shown inside, its path relative to it.
-    fn entry_row<'a>(
-        &'a self,
-        page: &'a ChangesPage,
-        mut body: Column<'a, Message>,
-        repo: Option<&HostPath>,
-        entry: &Entry,
-        now: i64,
-    ) -> Column<'a, Message> {
+    fn entry_row<'a>(&'a self, page: &'a ChangesPage, mut body: Column<'a, Message>, repo: Option<&HostPath>, entry: &Entry, now: i64) -> Column<'a, Message> {
         let key = changes::entry_key(entry);
         let armed = page.armed.get().is_some_and(|a| matches!(a, Reverting::One(k) if *k == key));
         let fresh = page.fresh_entries;
@@ -780,10 +568,7 @@ impl App {
                     "deleted" => "D",
                     _ => "M",
                 };
-                (
-                    format!("{letter}{}", if *conflict { "!" } else { "" }),
-                    letter_color(letter),
-                )
+                (format!("{letter}{}", if *conflict { "!" } else { "" }), letter_color(letter))
             }
             Entry::Kept { .. } => ("K".into(), P.fg_dim),
         };
@@ -792,60 +577,29 @@ impl App {
             (_, Entry::Kept { what, path, .. }) => (short(&path.display), Some(what.as_str())),
             _ => (short(&changes::path(entry).display), None),
         };
-        let line = file_line(
-            letter,
-            color,
-            path_label(&shown, what),
-            page.open.contains_key(&key),
-            event(Event::Diff(key.clone())),
-        );
+        let line = file_line(letter, color, path_label(&shown, what), page.open.contains_key(&key), event(Event::Diff(key.clone())));
         let mut actions = row![].spacing(2).align_y(Alignment::Center);
         match entry {
             Entry::Live { .. } => {
-                actions = actions.push(revert(
-                    &key,
-                    armed,
-                    fresh,
-                    "git checkout HEAD (an untracked file is removed)",
-                ));
+                actions = actions.push(revert(&key, armed, fresh, "git checkout HEAD (an untracked file is removed)"));
             }
-            Entry::Overlay {
-                conflict,
-                protected,
-                ..
-            } => {
+            Entry::Overlay { conflict, protected, .. } => {
                 if *conflict {
-                    actions = actions.push(
-                        text("changed on the host too")
-                            .size(style::TINY)
-                            .color(P.warning),
-                    );
+                    actions = actions.push(text("changed on the host too").size(style::TINY).color(P.warning));
                 } else if let Some(seconds) = changes::reverts_in(entry, auto_revert, now) {
                     actions = actions.push(
-                        text(if seconds == 0 {
-                            "reverting".to_string()
-                        } else {
-                            format!("reverts in {}", changes::human(seconds))
-                        })
-                        .size(style::TINY)
-                        .color(P.fg_dim),
+                        text(if seconds == 0 { "reverting".to_string() } else { format!("reverts in {}", changes::human(seconds)) })
+                            .size(style::TINY)
+                            .color(P.fg_dim),
                     );
                 }
-                let keep = small(
-                    "Keep",
-                    (fresh && changes::keepable(entry)).then(|| event(Event::Keep(key.clone()))),
-                );
+                let keep = small("Keep", (fresh && changes::keepable(entry)).then(|| event(Event::Keep(key.clone()))));
                 actions = actions.push(match protected {
                     Some(why) => tooltip(
                         keep,
-                        container(
-                            text(format!(
-                                "not kept by sill: {why} — do it by hand if you mean it"
-                            ))
-                            .size(style::TINY),
-                        )
-                        .padding([3, 8])
-                        .style(style::fill(P.surface)),
+                        container(text(format!("not kept by sill: {why} — do it by hand if you mean it")).size(style::TINY))
+                            .padding([3, 8])
+                            .style(style::fill(P.surface)),
                         tooltip::Position::Left,
                     )
                     .into(),
@@ -864,11 +618,7 @@ impl App {
         body
     }
 
-    fn history_rows<'a>(
-        &'a self,
-        page: &'a ChangesPage,
-        mut body: Column<'a, Message>,
-    ) -> Column<'a, Message> {
+    fn history_rows<'a>(&'a self, page: &'a ChangesPage, mut body: Column<'a, Message>) -> Column<'a, Message> {
         if let Some(error) = &page.history_error {
             body = body.push(text(error).color(P.error));
         }
@@ -881,27 +631,14 @@ impl App {
                 (None, n) if n > 0 => format!("{n} files"),
                 _ => event.what.clone(),
             };
-            let when = event
-                .timestamp
-                .parse::<i64>()
-                .map_or_else(|_| event.timestamp.clone(), |t| ago(now() - t));
+            let when = event.timestamp.parse::<i64>().map_or_else(|_| event.timestamp.clone(), |t| ago(now() - t));
             body = body.push(
                 row![
                     text(when).size(style::TINY).color(P.fg_dim).width(70),
-                    text(&event.kind)
-                        .size(style::SMALL)
-                        .color(P.accent)
-                        .width(80),
-                    container(
-                        text(crate::ui::one_line(
-                            &format!("{what} — {}", event.session_title),
-                            110
-                        ))
-                        .size(style::SMALL)
-                        .wrapping(text::Wrapping::None),
-                    )
-                    .width(Fill)
-                    .clip(true),
+                    text(&event.kind).size(style::SMALL).color(P.accent).width(80),
+                    container(text(crate::ui::one_line(&format!("{what} — {}", event.session_title), 110)).size(style::SMALL).wrapping(text::Wrapping::None),)
+                        .width(Fill)
+                        .clip(true),
                 ]
                 .spacing(6)
                 .padding([2, 4])
@@ -909,14 +646,7 @@ impl App {
             );
         }
         if page.next.is_some() {
-            body = body.push(small(
-                if page.history_loading {
-                    "Loading…"
-                } else {
-                    "Load more…"
-                },
-                (!page.history_loading).then(|| event(Event::MoreHistory)),
-            ));
+            body = body.push(small(if page.history_loading { "Loading…" } else { "Load more…" }, (!page.history_loading).then(|| event(Event::MoreHistory))));
         }
         body
     }
@@ -926,27 +656,17 @@ impl App {
 fn revert<'a>(key: &str, armed: bool, offered: bool, tip: &'a str) -> Element<'a, Message> {
     tooltip(
         keys::press_maybe(
-            button(
-                text(if armed { "Revert?" } else { "Revert" })
-                    .size(style::SMALL)
-                    .color(warn_color(armed, offered)),
-            )
-            .padding([2, 8])
-            .style(style::quiet),
+            button(text(if armed { "Revert?" } else { "Revert" }).size(style::SMALL).color(warn_color(armed, offered))).padding([2, 8]).style(style::quiet),
             offered.then(|| event(Event::Revert(key.to_string()))),
         ),
-        container(text(if armed { "Press again to revert" } else { tip }).size(style::TINY))
-            .padding([3, 8])
-            .style(style::fill(P.surface)),
+        container(text(if armed { "Press again to revert" } else { tip }).size(style::TINY)).padding([3, 8]).style(style::fill(P.surface)),
         tooltip::Position::Left,
     )
     .into()
 }
 
 fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
 /// `just now`, `3 min ago`, `2 h ago`, `4 d ago`.

@@ -7,25 +7,14 @@ use sill_proto::host::Operation;
 
 pub const MAX_RECEIPTS: i64 = 65_536;
 fn error(code: &'static str, message: &str) -> anyhow::Error {
-    crate::sfp::DomainError {
-        code,
-        message: message.into(),
-        details: None,
-    }
-    .into()
+    crate::sfp::DomainError { code, message: message.into(), details: None }.into()
 }
 fn digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 fn key(id: &str) -> Result<String> {
     if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
-        return Err(sill_proto::rpc::Error::invalid_params(
-            "operation_id must be 1–128 bytes without control characters",
-        )
-        .into());
+        return Err(sill_proto::rpc::Error::invalid_params("operation_id must be 1–128 bytes without control characters").into());
     }
     Ok(digest(id.as_bytes()))
 }
@@ -37,45 +26,21 @@ impl<'a> Journal<'a> {
     }
     /// Run only once when the daemon adopts its store, before serving requests.
     pub fn recover(&self) -> Result<()> {
-        self.0.execute(
-            "UPDATE sfp_operations SET state='unknown' WHERE state='running'",
-            [],
-        )?;
+        self.0.execute("UPDATE sfp_operations SET state='unknown' WHERE state='running'", [])?;
         Ok(())
     }
     pub fn get(&self, id: &str) -> Result<Operation> {
-        self.lookup(id)?
-            .map(|(_, op)| op)
-            .ok_or_else(|| error("not_found", "operation not found"))
+        self.lookup(id)?.map(|(_, op)| op).ok_or_else(|| error("not_found", "operation not found"))
     }
     fn lookup(&self, id: &str) -> Result<Option<(String, Operation)>> {
         let row = self
             .0
-            .query_row(
-                "SELECT fingerprint,method,state,agent_id,code FROM sfp_operations WHERE id=?1",
-                [key(id)?],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, Option<String>>(3)?,
-                        r.get::<_, Option<String>>(4)?,
-                    ))
-                },
-            )
+            .query_row("SELECT fingerprint,method,state,agent_id,code FROM sfp_operations WHERE id=?1", [key(id)?], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, Option<String>>(4)?))
+            })
             .optional()?;
         row.map(|(fingerprint, method, state, agent_id, code)| {
-            Ok((
-                fingerprint,
-                Operation {
-                    operation_id: id.into(),
-                    method,
-                    state: serde_json::from_value(Value::String(state))?,
-                    agent_id,
-                    code,
-                },
-            ))
+            Ok((fingerprint, Operation { operation_id: id.into(), method, state: serde_json::from_value(Value::String(state))?, agent_id, code }))
         })
         .transpose()
     }
@@ -87,10 +52,7 @@ impl<'a> Journal<'a> {
             return Ok(None);
         };
         if fingerprint != previous {
-            return Err(error(
-                "id_conflict",
-                "operation_id was already used for different input",
-            ));
+            return Err(error("id_conflict", "operation_id was already used for different input"));
         }
         Ok(Some(operation))
     }
@@ -107,22 +69,16 @@ impl<'a> Journal<'a> {
         }
         tx.execute(
             "INSERT INTO sfp_operations(id,fingerprint,method,state) VALUES(?1,?2,?3,'running')",
-            params![
-                key(id)?,
-                digest(&serde_json::to_vec(&(method, input))?),
-                method
-            ],
+            params![key(id)?, digest(&serde_json::to_vec(&(method, input))?), method],
         )?;
         tx.commit()?;
         Ok((self.get(id)?, true))
     }
     pub fn finish(&self, id: &str, agent_id: Option<&str>, code: Option<&str>) -> Result<()> {
-        let state = if code.is_some() {
-            "failed"
-        } else {
-            "completed"
-        };
-        let count = self.0.execute("UPDATE sfp_operations SET state=?2,agent_id=?3,code=?4 WHERE id=?1 AND state='running'", params![key(id)?,state,agent_id,code])?;
+        let state = if code.is_some() { "failed" } else { "completed" };
+        let count = self
+            .0
+            .execute("UPDATE sfp_operations SET state=?2,agent_id=?3,code=?4 WHERE id=?1 AND state='running'", params![key(id)?, state, agent_id, code])?;
         if count != 1 {
             return Err(error("invalid_state", "operation is not running"));
         }
@@ -154,10 +110,7 @@ mod tests {
         j.recover().unwrap();
         assert_eq!(j.get("completed").unwrap().state, OperationState::Completed);
         assert_eq!(j.get("failed").unwrap().state, OperationState::Failed);
-        assert_eq!(
-            j.get("completed").unwrap().agent_id.as_deref(),
-            Some("fixture")
-        );
+        assert_eq!(j.get("completed").unwrap().agent_id.as_deref(), Some("fixture"));
         assert!(j.get("").is_err());
     }
     #[test]

@@ -29,7 +29,8 @@ fn detail(files: u32) -> Value {
 fn loaded(files: u32) -> Loaded {
     Loaded {
         view: serde_json::from_value(json!({"workspaces_mode": true, "workspaces": [workspace()],
-            "live": [{"source": path("/home/me/sub"), "reason": "submodules", "message": "Live: Repositories with submodules are not supported yet."}]})).unwrap(),
+            "live": [{"source": path("/home/me/sub"), "reason": "submodules", "message": "Live: Repositories with submodules are not supported yet."}]}))
+        .unwrap(),
         details: vec![serde_json::from_value(detail(files)).unwrap()],
     }
 }
@@ -102,8 +103,7 @@ fn resolve_asks_the_agent_to_finish_a_stopped_rebase() {
     let mut app = live_app(vec![client]);
     let stopped = "The rebase onto main (3335b133341e) stopped: src/drawer.rs";
     let mut conflict = loaded(3);
-    conflict.details[0].workspace.operation =
-        Some(serde_json::from_value(json!({"kind": "rebase", "state": "conflict", "detail": stopped})).unwrap());
+    conflict.details[0].workspace.operation = Some(serde_json::from_value(json!({"kind": "rebase", "state": "conflict", "detail": stopped})).unwrap());
     // the demo's own session is in a turn: the agent is not asked then
     app.views.get_mut("demo").unwrap().workspaces.loaded = Some(conflict.clone());
     let task = app.update(Message::Workspaces(Event::Resolve("demo".into(), "ws-1".into())));
@@ -158,7 +158,11 @@ fn apply_with_uncommitted_changes_asks_the_agent_to_commit_and_applies_after_its
         let get = daemon.expect("_sill/workspaces.get");
         daemon.reply(&get, serde_json::to_value(&uncommitted().details[0]).unwrap());
         let apply = daemon.expect("_sill/workspaces.apply");
-        daemon.refuse_for(&apply, "uncommitted", "The workspace has uncommitted changes: apply from its session, where the agent is asked to commit them first.");
+        daemon.refuse_for(
+            &apply,
+            "uncommitted",
+            "The workspace has uncommitted changes: apply from its session, where the agent is asked to commit them first.",
+        );
         let submit = daemon.expect("_sill/sessions.submit");
         assert_eq!(submit["params"]["session_id"], "idle");
         let text = submit["params"]["text"].as_str().unwrap().to_string();

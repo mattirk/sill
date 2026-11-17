@@ -46,12 +46,7 @@ fn parse_target(request_line: &str) -> Option<Target> {
     let (method, target) = (parts.next()?, parts.next()?);
     if method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = split_host_port(target, 443)?;
-        return Some(Target {
-            method: method.into(),
-            host,
-            port,
-            path: None,
-        });
+        return Some(Target { method: method.into(), host, port, path: None });
     }
     let rest = target.strip_prefix("http://")?;
     let (hostport, path) = match rest.find('/') {
@@ -59,12 +54,7 @@ fn parse_target(request_line: &str) -> Option<Target> {
         None => (rest, "/"),
     };
     let (host, port) = split_host_port(hostport, 80)?;
-    Some(Target {
-        method: method.into(),
-        host,
-        port,
-        path: Some(path.into()),
-    })
+    Some(Target { method: method.into(), host, port, path: Some(path.into()) })
 }
 
 fn split_host_port(s: &str, default: u16) -> Option<(String, u16)> {
@@ -85,8 +75,7 @@ fn split_host_port(s: &str, default: u16) -> Option<(String, u16)> {
 
 /// `localhost` or a loopback literal: the jail's own `lo` — no resolver, the proxy owns names.
 fn is_loopback(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost")
-        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Ports with a TCP listener in this network namespace, from `/proc/net/tcp{,6}` text.
@@ -107,10 +96,7 @@ fn listening_ports(table: &str) -> HashSet<u16> {
 }
 
 fn jail_listens_on(port: u16) -> bool {
-    ["/proc/net/tcp", "/proc/net/tcp6"]
-        .iter()
-        .filter_map(|p| std::fs::read_to_string(p).ok())
-        .any(|t| listening_ports(&t).contains(&port))
+    ["/proc/net/tcp", "/proc/net/tcp6"].iter().filter_map(|p| std::fs::read_to_string(p).ok()).any(|t| listening_ports(&t).contains(&port))
 }
 
 /// A two-way byte pump needs a second handle of each end; both stream kinds give one.
@@ -178,11 +164,9 @@ fn handle(mut client: TcpStream, socket: &PathBuf) -> Result<()> {
     client.set_read_timeout(None)?;
     let buffered = reader.buffer().to_vec();
 
-    let local =
-        parse_target(&request_line).filter(|t| is_loopback(&t.host) && jail_listens_on(t.port));
+    let local = parse_target(&request_line).filter(|t| is_loopback(&t.host) && jail_listens_on(t.port));
     let Some(t) = local else {
-        let mut unix =
-            UnixStream::connect(socket).with_context(|| format!("connect {}", socket.display()))?;
+        let mut unix = UnixStream::connect(socket).with_context(|| format!("connect {}", socket.display()))?;
         unix.write_all(&head)?;
         unix.write_all(&buffered)?;
         pump(client, unix);
@@ -191,12 +175,7 @@ fn handle(mut client: TcpStream, socket: &PathBuf) -> Result<()> {
 
     let addr = std::net::SocketAddr::new(IpAddr::from([127, 0, 0, 1]), t.port);
     let mut up = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
-        .or_else(|_| {
-            TcpStream::connect_timeout(
-                &std::net::SocketAddr::new(IpAddr::from([0, 0, 0, 0, 0, 0, 0, 1]), t.port),
-                Duration::from_secs(5),
-            )
-        })
+        .or_else(|_| TcpStream::connect_timeout(&std::net::SocketAddr::new(IpAddr::from([0, 0, 0, 0, 0, 0, 0, 1]), t.port), Duration::from_secs(5)))
         .with_context(|| format!("connect jail {}:{}", t.host, t.port))?;
     match &t.path {
         None => client.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")?,
@@ -205,10 +184,7 @@ fn handle(mut client: TcpStream, socket: &PathBuf) -> Result<()> {
             let mut req = format!("{} {path} HTTP/1.1\r\n", t.method);
             for h in &headers {
                 let lower = h.to_ascii_lowercase();
-                if lower.starts_with("proxy-connection:")
-                    || lower.starts_with("connection:")
-                    || lower.starts_with("keep-alive:")
-                {
+                if lower.starts_with("proxy-connection:") || lower.starts_with("connection:") || lower.starts_with("keep-alive:") {
                     continue;
                 }
                 req.push_str(h);
@@ -232,34 +208,15 @@ mod tests {
     fn targets() {
         assert_eq!(
             parse_target("CONNECT 127.0.0.1:8080 HTTP/1.1\r\n"),
-            Some(Target {
-                method: "CONNECT".into(),
-                host: "127.0.0.1".into(),
-                port: 8080,
-                path: None
-            })
+            Some(Target { method: "CONNECT".into(), host: "127.0.0.1".into(), port: 8080, path: None })
         );
         assert_eq!(
             parse_target("GET http://localhost:3000/api?x=1 HTTP/1.1\r\n"),
-            Some(Target {
-                method: "GET".into(),
-                host: "localhost".into(),
-                port: 3000,
-                path: Some("/api?x=1".into())
-            })
+            Some(Target { method: "GET".into(), host: "localhost".into(), port: 3000, path: Some("/api?x=1".into()) })
         );
-        assert_eq!(
-            parse_target("GET http://example.com HTTP/1.1\r\n").map(|t| (t.port, t.path)),
-            Some((80, Some("/".into())))
-        );
-        assert_eq!(
-            parse_target("CONNECT [::1]:8443 HTTP/1.1").map(|t| (t.host, t.port)),
-            Some(("::1".into(), 8443))
-        );
-        assert_eq!(
-            parse_target("CONNECT api.example.com HTTP/1.1").map(|t| t.port),
-            Some(443)
-        );
+        assert_eq!(parse_target("GET http://example.com HTTP/1.1\r\n").map(|t| (t.port, t.path)), Some((80, Some("/".into()))));
+        assert_eq!(parse_target("CONNECT [::1]:8443 HTTP/1.1").map(|t| (t.host, t.port)), Some(("::1".into(), 8443)));
+        assert_eq!(parse_target("CONNECT api.example.com HTTP/1.1").map(|t| t.port), Some(443));
         assert_eq!(parse_target("GET /path HTTP/1.1"), None);
         assert_eq!(parse_target("GET https://example.com/ HTTP/1.1"), None);
         assert_eq!(parse_target(""), None);
@@ -267,13 +224,7 @@ mod tests {
 
     #[test]
     fn loopback_names() {
-        assert!(
-            is_loopback("localhost")
-                && is_loopback("LOCALHOST")
-                && is_loopback("127.0.0.1")
-                && is_loopback("127.1.2.3")
-                && is_loopback("::1")
-        );
+        assert!(is_loopback("localhost") && is_loopback("LOCALHOST") && is_loopback("127.0.0.1") && is_loopback("127.1.2.3") && is_loopback("::1"));
         assert!(!is_loopback("example.com") && !is_loopback("10.0.0.1") && !is_loopback("0.0.0.0"));
     }
 

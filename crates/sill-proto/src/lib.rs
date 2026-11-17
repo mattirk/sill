@@ -7,24 +7,24 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+pub mod admin;
+pub mod boxlink;
 pub mod client;
+pub mod crosscheck;
+pub mod host;
+pub mod host_control;
 pub mod initialize;
+pub mod memory;
 pub mod rpc;
 pub mod schema;
 pub mod schema_compat;
-pub mod wire;
-pub mod sfp;
 pub mod sessions;
-pub mod terminals;
-pub mod host;
-pub mod host_control;
-pub mod workspaces;
-pub mod crosscheck;
-pub mod admin;
+pub mod sfp;
 pub mod storage;
-pub mod memory;
+pub mod terminals;
 pub mod transport;
-pub mod boxlink;
+pub mod wire;
+pub mod workspaces;
 
 pub use client::Client;
 
@@ -44,7 +44,10 @@ pub fn socket_path() -> Result<PathBuf> {
 pub fn runtime_dir() -> Result<PathBuf> {
     let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
     #[cfg(target_os = "macos")]
-    let base = match base { Some(base) => Some(base), None => Some(macos_runtime_base()?) };
+    let base = match base {
+        Some(base) => Some(base),
+        None => Some(macos_runtime_base()?),
+    };
     let base = base.context("XDG_RUNTIME_DIR not set: no place for the daemon socket")?;
     Ok(base.join("sill"))
 }

@@ -11,16 +11,9 @@ impl App {
     pub(crate) fn start_view<'a>(&'a self, agents: &'a [Definition]) -> Element<'a, Message> {
         let body: Element<'_, Message> = if agents.is_empty() {
             keys::press(
-                button(
-                    row![
-                        crate::icons::glyph("plus", 15.0, P.accent),
-                        text("Install agent").size(style::TEXT),
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                )
-                .padding([8, 14])
-                .style(style::outlined_accent),
+                button(row![crate::icons::glyph("plus", 15.0, P.accent), text("Install agent").size(style::TEXT),].spacing(8).align_y(Alignment::Center))
+                    .padding([8, 14])
+                    .style(style::outlined_accent),
                 Message::ShowPage(Page::Agents),
             )
         } else {
@@ -28,12 +21,10 @@ impl App {
             for agent in agents {
                 let ready = agent.home_paths.is_some();
                 let ink = if ready { P.fg } else { alpha(P.fg, 0.5) };
-                let mut label = row![
-                    svg(self.agent_icon(&agent.id)).width(16).height(16).style(style::icon(ink)),
-                    text(&agent.name).size(style::TEXT).color(ink),
-                ]
-                .spacing(9)
-                .align_y(Alignment::Center);
+                let mut label =
+                    row![svg(self.agent_icon(&agent.id)).width(16).height(16).style(style::icon(ink)), text(&agent.name).size(style::TEXT).color(ink),]
+                        .spacing(9)
+                        .align_y(Alignment::Center);
                 if !ready {
                     label = label.push(text("needs setup").size(style::TINY).color(P.warning));
                 }
@@ -46,13 +37,10 @@ impl App {
                     }),
                 ));
             }
-            column![
-                text("Start a session with").size(style::TEXT).color(P.fg_dim),
-                buttons.wrap().vertical_spacing(10),
-            ]
-            .spacing(16)
-            .align_x(Alignment::Center)
-            .into()
+            column![text("Start a session with").size(style::TEXT).color(P.fg_dim), buttons.wrap().vertical_spacing(10),]
+                .spacing(16)
+                .align_x(Alignment::Center)
+                .into()
         };
         container(center(body)).padding(24).height(Fill).into()
     }

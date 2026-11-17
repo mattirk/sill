@@ -9,9 +9,7 @@ use iced::widget::{operation, text_editor};
 use serde_json::json;
 use sill_client::actions::Outcome;
 use sill_client::lane;
-use sill_proto::sfp::{
-    Answer, AnswerQuestion, CancelTurn, ConfigValue, Control, SessionControl, SubmissionKey,
-};
+use sill_proto::sfp::{Answer, AnswerQuestion, CancelTurn, ConfigValue, Control, SessionControl, SubmissionKey};
 
 use crate::{Act, App, Message, Pick, blocking, demo, editor, forms, keys, lists, media, terminal};
 
@@ -106,12 +104,16 @@ impl App {
             }
             Event::Prompt(action) => {
                 if let Some(view) = self.views.get_mut(&id) {
-                    if view.annotation.is_none() { view.draft.perform(action); }
+                    if view.annotation.is_none() {
+                        view.draft.perform(action);
+                    }
                 }
             }
             Event::PromptHistory(redo) => {
                 if let Some(view) = self.views.get_mut(&id) {
-                    if view.annotation.is_none() { view.draft.history(redo); }
+                    if view.annotation.is_none() {
+                        view.draft.history(redo);
+                    }
                 }
             }
             Event::PromptNewline => {
@@ -120,47 +122,29 @@ impl App {
                 }
             }
             Event::PromptIndent(outdent) => {
-                let indented = self.views.get_mut(&id).is_some_and(|view| {
-                    view.annotation.is_none() && view.draft.edit(|draft| lists::indent(draft, outdent))
-                });
+                let indented = self.views.get_mut(&id).is_some_and(|view| view.annotation.is_none() && view.draft.edit(|draft| lists::indent(draft, outdent)));
                 if !indented {
                     return keys::step(!outdent);
                 }
             }
             Event::Send => return self.send(&id),
             Event::Stop => return self.stop(&id),
-            Event::Answer {
-                question_id,
-                option_id,
-            } => return self.answer(&id, question_id, option_id),
+            Event::Answer { question_id, option_id } => return self.answer(&id, question_id, option_id),
             Event::Unqueue(submission_id) => {
                 let Some(view) = self.views.get(&id) else {
                     return Task::none();
                 };
-                let params = SubmissionKey {
-                    session_id: view.id.clone(),
-                    submission_id,
-                };
-                return self.act(
-                    &view.id,
-                    Act::Unqueue,
-                    "_sill/submissions.cancel",
-                    json!(params),
-                );
+                let params = SubmissionKey { session_id: view.id.clone(), submission_id };
+                return self.act(&view.id, Act::Unqueue, "_sill/submissions.cancel", json!(params));
             }
             Event::SendNow(submission_id) => {
                 let (Some(view), Some(actions)) = (self.views.get(&id), self.actions.clone()) else {
                     return Task::none();
                 };
                 let session = view.id.clone();
-                let params = json!(SubmissionKey {
-                    session_id: session.clone(),
-                    submission_id,
-                });
+                let params = json!(SubmissionKey { session_id: session.clone(), submission_id });
                 return blocking(
-                    move || {
-                        actions.call_needing("sill.send_now", "_sill/submissions.send_now", params)
-                    },
+                    move || actions.call_needing("sill.send_now", "_sill/submissions.send_now", params),
                     move |outcome| Message::Done(session, Act::SendNow, outcome),
                 );
             }
@@ -180,12 +164,7 @@ impl App {
                 }
             }
             Event::SetMode(pick) => {
-                return self.control(
-                    &id,
-                    Control::SetMode {
-                        mode_id: pick.value,
-                    },
-                );
+                return self.control(&id, Control::SetMode { mode_id: pick.value });
             }
             Event::SetOption(option_id, pick) => {
                 let value = match pick.boolean {
@@ -204,7 +183,8 @@ impl App {
                         text.push_str("\n\n");
                     }
                     text.push_str(pending.text());
-                    let restored = view.pending_attachments.remove(&submission).unwrap_or_else(|| pending.submit.attachments.into_iter().map(Into::into).collect());
+                    let restored =
+                        view.pending_attachments.remove(&submission).unwrap_or_else(|| pending.submit.attachments.into_iter().map(Into::into).collect());
                     view.attachments.extend(restored);
                     view.draft = editor::Editor::with_text(&text);
                     return operation::focus("prompt");
@@ -217,12 +197,7 @@ impl App {
                 let Some(submit) = view.outbox.retry(&submission) else {
                     return Task::none();
                 };
-                return self.act(
-                    &id,
-                    Act::Send(submission),
-                    "_sill/sessions.submit",
-                    json!(submit),
-                );
+                return self.act(&id, Act::Send(submission), "_sill/sessions.submit", json!(submit));
             }
             Event::CheckSend(submission) => {
                 let Some(view) = self.views.get_mut(&id) else {
@@ -231,12 +206,7 @@ impl App {
                 let Some(key) = view.outbox.check(&submission) else {
                     return Task::none();
                 };
-                return self.act(
-                    &id,
-                    Act::Check(submission),
-                    "_sill/submissions.get",
-                    json!(key),
-                );
+                return self.act(&id, Act::Check(submission), "_sill/submissions.get", json!(key));
             }
             Event::DiscardSend(submission) => {
                 if let Some(view) = self.views.get_mut(&id) {
@@ -263,9 +233,7 @@ impl App {
                     Ok(values) => {
                         return self.answer_with(&id, question_id, Answer::Form { values });
                     }
-                    Err(problem) => {
-                        view.failed = Some(format!("The form cannot be sent: {problem}"))
-                    }
+                    Err(problem) => view.failed = Some(format!("The form cannot be sent: {problem}")),
                 }
             }
             Event::DeclineForm(question_id) => {
@@ -276,24 +244,20 @@ impl App {
                 let Some(view) = self.views.get(&id) else {
                     return Task::none();
                 };
-                let key = SubmissionKey {
-                    session_id: view.id.clone(),
-                    submission_id,
-                };
+                let key = SubmissionKey { session_id: view.id.clone(), submission_id };
                 return self.act(&id, Act::Resume, "_sill/submissions.resume", json!(key));
             }
             Event::DiscardHeld(submission_id) => {
                 let Some(view) = self.views.get(&id) else {
                     return Task::none();
                 };
-                let key = SubmissionKey {
-                    session_id: view.id.clone(),
-                    submission_id,
-                };
+                let key = SubmissionKey { session_id: view.id.clone(), submission_id };
                 return self.act(&id, Act::Unqueue, "_sill/submissions.cancel", json!(key));
             }
             Event::ToggleTerminal | Event::ToggleHostTerminal => {
-                if self.views.get(&id).is_some_and(|v| v.annotation.is_some()) { return Task::none(); }
+                if self.views.get(&id).is_some_and(|v| v.annotation.is_some()) {
+                    return Task::none();
+                }
                 return self.toggle_shell(&id, matches!(event, Event::ToggleHostTerminal));
             }
             Event::ReopenTerminal => return self.open_terminal(&id),
@@ -317,14 +281,10 @@ impl App {
                         }
                     }
                     terminal::Action::Paste => {
-                        return iced::clipboard::read().map(move |text| {
-                            Message::TermPaste(id.clone(), generation, text)
-                        });
+                        return iced::clipboard::read().map(move |text| Message::TermPaste(id.clone(), generation, text));
                     }
                     terminal::Action::PastePrimary => {
-                        return iced::clipboard::read_primary().map(move |text| {
-                            Message::TermPaste(id.clone(), generation, text)
-                        });
+                        return iced::clipboard::read_primary().map(move |text| Message::TermPaste(id.clone(), generation, text));
                     }
                     terminal::Action::Open(url) => terminal::open_link(url),
                     action => pane.perform(action),
@@ -346,9 +306,11 @@ impl App {
             return Task::none();
         }
         if text.trim().is_empty() && view.attachments.is_empty() {
-            let next = view.conversation.submissions.values()
-                .filter(|s| s.delivery == "queued" && s.insertion == "pending"
-                    && s.outcome == "pending" && !s.held)
+            let next = view
+                .conversation
+                .submissions
+                .values()
+                .filter(|s| s.delivery == "queued" && s.insertion == "pending" && s.outcome == "pending" && !s.held)
                 .min_by_key(|s| s.accepted_seq.parse::<u64>().unwrap_or(u64::MAX))
                 .map(|s| s.submission_id.clone());
             return match next {
@@ -359,11 +321,7 @@ impl App {
         view.draft = editor::Editor::new();
         view.follow_tail = true;
         view.failed = None;
-        let logged_in = view
-            .conversation
-            .session
-            .as_ref()
-            .is_some_and(|s| s.authentication.is_none());
+        let logged_in = view.conversation.session.as_ref().is_some_and(|s| s.authentication.is_none());
         view.login.settle(logged_in);
         if demo {
             for event in demo::prompt(view.conversation.seq + 1, &text) {
@@ -383,40 +341,20 @@ impl App {
 
     /// [`App::submit`] with the prompt's `purpose` (`Submit::purpose`): one a button wrote for
     /// the person whose turn the conversation folds (Apply's commit).
-    pub(crate) fn submit_for(
-        &mut self,
-        session: &str,
-        text: String,
-        attachments: Vec<media::DraftAttachment>,
-        purpose: Option<String>,
-    ) -> Task<Message> {
+    pub(crate) fn submit_for(&mut self, session: &str, text: String, attachments: Vec<media::DraftAttachment>, purpose: Option<String>) -> Task<Message> {
         let Some(view) = self.views.get_mut(session) else {
             return Task::none();
         };
         view.follow_tail = true;
         view.failed = None;
-        let submit = view.outbox.send_for(
-            session,
-            text,
-            attachments.iter().map(|a| a.attachment.clone()).collect(),
-            purpose,
-        );
+        let submit = view.outbox.send_for(session, text, attachments.iter().map(|a| a.attachment.clone()).collect(), purpose);
         view.pending_attachments.insert(submit.submission_id.clone(), attachments);
         let reopen = view.lane.is_none();
         if reopen {
             self.open_lane(session, lane::Mode::Open);
         }
         let id = submit.submission_id.clone();
-        Task::batch([
-            self.act(
-                session,
-                Act::Send(id),
-                "_sill/sessions.submit",
-                json!(submit),
-            ),
-            operation::snap_to_end("conversation"),
-            self.focus_prompt(),
-        ])
+        Task::batch([self.act(session, Act::Send(id), "_sill/sessions.submit", json!(submit)), operation::snap_to_end("conversation"), self.focus_prompt()])
     }
 
     /// Stop the turn. Prompts still queued are removed first: stopping first
@@ -428,12 +366,7 @@ impl App {
         let (Some(view), Some(actions)) = (self.views.get(session), self.actions.clone()) else {
             return Task::none();
         };
-        let Some(turn_id) = view
-            .conversation
-            .session
-            .as_ref()
-            .and_then(|s| s.turn_id.clone())
-        else {
+        let Some(turn_id) = view.conversation.session.as_ref().and_then(|s| s.turn_id.clone()) else {
             return Task::none();
         };
         let queued = view.conversation.queued_submission_ids();
@@ -443,32 +376,17 @@ impl App {
             move || {
                 let mut kept = vec![];
                 for submission_id in queued {
-                    let key = SubmissionKey {
-                        session_id: session_id.clone(),
-                        submission_id,
-                    };
-                    if let Some(problem) = actions
-                        .call("_sill/submissions.cancel", json!(key))
-                        .problem()
-                    {
+                    let key = SubmissionKey { session_id: session_id.clone(), submission_id };
+                    if let Some(problem) = actions.call("_sill/submissions.cancel", json!(key)).problem() {
                         kept.push(problem.to_string());
                     }
                 }
-                let cancel = CancelTurn {
-                    session_id,
-                    turn_id,
-                };
+                let cancel = CancelTurn { session_id, turn_id };
                 let outcome = actions.call("_sill/sessions.cancel", json!(cancel));
                 if kept.is_empty() || !outcome.is_done() {
                     outcome
                 } else {
-                    Outcome::Refused {
-                        code: None,
-                        message: format!(
-                            "stop requested, but some queued prompts could not be removed: {}",
-                            kept.join("; ")
-                        ),
-                    }
+                    Outcome::Refused { code: None, message: format!("stop requested, but some queued prompts could not be removed: {}", kept.join("; ")) }
                 }
             },
             move |outcome| Message::Done(session, Act::Stop, outcome),
@@ -501,19 +419,9 @@ impl App {
             return Task::none();
         }
         view.failed = None;
-        let params = AnswerQuestion {
-            session_id: view.id.clone(),
-            question_id: question_id.clone(),
-            answer_id: sill_client::request_id("answer"),
-            answer,
-        };
+        let params = AnswerQuestion { session_id: view.id.clone(), question_id: question_id.clone(), answer_id: sill_client::request_id("answer"), answer };
         let session = view.id.clone();
-        self.act(
-            &session,
-            Act::Answer(question_id),
-            "_sill/questions.answer",
-            json!(params),
-        )
+        self.act(&session, Act::Answer(question_id), "_sill/questions.answer", json!(params))
     }
 
     fn control(&mut self, session: &str, control: Control) -> Task<Message> {
@@ -524,17 +432,9 @@ impl App {
             return Task::none();
         };
         view.failed = None;
-        let params = SessionControl {
-            session_id: view.id.clone(),
-            control,
-        };
+        let params = SessionControl { session_id: view.id.clone(), control };
         let session = view.id.clone();
-        self.act(
-            &session,
-            Act::Control,
-            "_sill/sessions.control",
-            json!(params),
-        )
+        self.act(&session, Act::Control, "_sill/sessions.control", json!(params))
     }
 
     fn toggle_shell(&mut self, session: &str, host: bool) -> Task<Message> {
@@ -553,12 +453,7 @@ impl App {
             return operation::focus("prompt");
         }
         view.terminal_shown = true;
-        let reusable = view.terminal.as_ref().is_some_and(|t| {
-            matches!(
-                t.status,
-                terminal::Status::Opening | terminal::Status::Running
-            )
-        });
+        let reusable = view.terminal.as_ref().is_some_and(|t| matches!(t.status, terminal::Status::Opening | terminal::Status::Running));
         if let Some(pane) = view.terminal.as_mut().filter(|_| reusable) {
             pane.focused = true;
             return Task::none();
@@ -577,10 +472,7 @@ impl App {
             return Task::none();
         };
         view.terminal_generation = generation;
-        let (cols, rows) = view
-            .terminal
-            .as_ref()
-            .map_or((80, 16), |t| (t.cols, t.rows));
+        let (cols, rows) = view.terminal.as_ref().map_or((80, 16), |t| (t.cols, t.rows));
         // the old pane goes first, so its stream is closed before another attaches
         view.terminal = None;
         let (pane, events) = match (demo, connect) {
@@ -606,12 +498,8 @@ impl App {
         };
         view.terminal = Some(pane);
         let session = view.id.clone();
-        let stream = iced::futures::stream::unfold(events, |events| async move {
-            events.recv().await.ok().map(|event| (event, events))
-        });
-        Task::run(stream, move |event| {
-            Message::Terminal(session.clone(), generation, event)
-        })
+        let stream = iced::futures::stream::unfold(events, |events| async move { events.recv().await.ok().map(|event| (event, events)) });
+        Task::run(stream, move |event| Message::Terminal(session.clone(), generation, event))
     }
 }
 

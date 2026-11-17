@@ -14,10 +14,7 @@ fn dir() -> PathBuf {
 
 pub fn settings() -> Settings {
     crate::fonts::install();
-    Settings {
-        default_font: Font::with_name(crate::fonts::SANS_FAMILY),
-        ..Settings::default()
-    }
+    Settings { default_font: Font::with_name(crate::fonts::SANS_FAMILY), ..Settings::default() }
 }
 
 /// Render `app`'s view as `name` (any earlier image of that name is replaced).
@@ -29,11 +26,7 @@ pub fn render_size(app: &App, name: &str, size: (f32, f32)) {
     let dir = dir();
     std::fs::create_dir_all(&dir).unwrap();
     for entry in std::fs::read_dir(&dir).unwrap().flatten() {
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(&format!("{name}-"))
-        {
+        if entry.file_name().to_string_lossy().starts_with(&format!("{name}-")) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -57,23 +50,14 @@ fn render_views() {
         let _ = app.update(Message::DemoTick);
     }
     render(&app, "2-question");
-    let _ = app.update(crate::tests::in_session(&app, crate::session::Event::Answer {
-        question_id: "demo-question".into(),
-        option_id: "allow".into(),
-    }));
+    let _ = app.update(crate::tests::in_session(&app, crate::session::Event::Answer { question_id: "demo-question".into(), option_id: "allow".into() }));
     let _ = app.update(crate::tests::in_session(&app, crate::session::Event::ToggleTool("edit".into())));
     let _ = app.update(crate::tests::in_session(&app, crate::session::Event::ToggleTool("tool".into())));
     render(&app, "3-answered");
     // the jail shell in the prompt's place: the pretend shell lists its files
     // the task carries the pane's events; dropping it would hang the shell up
     let _events = app.update(Message::ToggleTerminal);
-    let pane = app
-        .views
-        .get_mut("demo")
-        .unwrap()
-        .terminal
-        .as_mut()
-        .unwrap();
+    let pane = app.views.get_mut("demo").unwrap().terminal.as_mut().unwrap();
     pane.accept(crate::terminal::Event::Opened);
     crate::tests::settle(pane, "project$");
     pane.input(b"ls\r".to_vec());
@@ -93,9 +77,7 @@ fn calibrate() {
     use iced::widget::text;
     let line = "Reduced the send arrow from 1.1em to 1em. Button size stays the same.";
     for size in [15.0_f32, 15.3, 15.5] {
-        let view: iced::Element<'_, ()> = iced::widget::container(text(line).size(size))
-            .padding(10)
-            .into();
+        let view: iced::Element<'_, ()> = iced::widget::container(text(line).size(size)).padding(10).into();
         let name = format!("calibrate-{}", size.to_string().replace('.', "_"));
         let _ = std::fs::remove_file(dir().join(format!("{name}-tiny-skia.png")));
         let mut ui = iced_test::Simulator::with_size(settings(), (720.0, 40.0), view);
@@ -111,24 +93,14 @@ fn render_files() {
     use sill_proto::sessions::HostPath;
     let path = |s: &str| HostPath::from_path(std::path::Path::new(s));
     let (mut app, _) = App::new(true, None);
-    let _ = app.update(Message::Layout(crate::layout::Action::Mode(
-        crate::layout::Mode::Drawer,
-    )));
-    let _ = app.update(Message::Files(Action::Toggle(path(
-        "/home/demo/project/src",
-    ))));
+    let _ = app.update(Message::Layout(crate::layout::Action::Mode(crate::layout::Mode::Drawer)));
+    let _ = app.update(Message::Files(Action::Toggle(path("/home/demo/project/src"))));
     render_size(&app, "6-drawer", (1000.0, 860.0));
     render(&app, "7-drawer-small");
-    let _ = app.update(Message::Files(Action::Open {
-        path: path("/home/demo/project/README.md"),
-        repo: None,
-    }));
+    let _ = app.update(Message::Files(Action::Open { path: path("/home/demo/project/README.md"), repo: None }));
     render_size(&app, "8-file", (1000.0, 860.0));
     let _ = app.update(Message::Files(Action::DiffMode(true)));
-    let _ = app.update(Message::Files(Action::Open {
-        path: path("/home/demo/project/README.md"),
-        repo: Some(path("/home/demo/project")),
-    }));
+    let _ = app.update(Message::Files(Action::Open { path: path("/home/demo/project/README.md"), repo: Some(path("/home/demo/project")) }));
     render_size(&app, "9-diff", (1000.0, 860.0));
     render_size(&app, "10-narrow-drawer", (480.0, 700.0));
     // The agent waits on a question while the file is open; no bottom status panel.
@@ -146,11 +118,7 @@ fn render_lifecycle() {
     let _ = app.update(Message::Menu(crate::menu::Event::Toggle));
     app.all_sessions = (0..3)
         .map(|i| {
-            let titles = [
-                "Permission modes",
-                "Drawer layout and flicker",
-                "Compact prompt queue",
-            ];
+            let titles = ["Permission modes", "Drawer layout and flicker", "Compact prompt queue"];
             let title = titles[i];
             serde_json::from_value(serde_json::json!({
                 "session_id": format!("s{i}"), "agent": if i == 1 { "codex" } else { "claude" },
@@ -185,13 +153,10 @@ fn render_lifecycle() {
         event: sill_proto::sfp::Event::QuestionUpdated { question },
     };
     view.accept(event);
-    let _ = app.update(crate::tests::in_session(&app, crate::session::Event::FormEdit(
-        "form".into(),
-        crate::forms::Edit::Pick {
-            key: "env".into(),
-            value: "stage".into(),
-        },
-    )));
+    let _ = app.update(crate::tests::in_session(
+        &app,
+        crate::session::Event::FormEdit("form".into(), crate::forms::Edit::Pick { key: "env".into(), value: "stage".into() }),
+    ));
     let _ = app.update(Message::Latest);
     render(&app, "13-form");
 }
@@ -202,22 +167,13 @@ fn render_changes() {
     use crate::Message;
     let (mut app, _) = App::new(true, None);
     let _ = app.update(Message::ToggleChanges);
-    let _ = app.update(Message::Changes(crate::changes_ui::Event::Loaded(Ok((
-        demo::changes(),
-        vec![],
-        0,
-    )))));
+    let _ = app.update(Message::Changes(crate::changes_ui::Event::Loaded(Ok((demo::changes(), vec![], 0)))));
     let key = {
         let entries = app.changes_listing.entries.as_ref().unwrap().as_ref().unwrap();
         sill_client::changes::entry_key(&entries[2])
     };
-    let _ = app.update(Message::Changes(crate::changes_ui::Event::Diff(
-        key.clone(),
-    )));
-    let _ = app.update(Message::Changes(crate::changes_ui::Event::DiffLoaded(
-        key,
-        Ok(demo::changes_diff()),
-    )));
+    let _ = app.update(Message::Changes(crate::changes_ui::Event::Diff(key.clone())));
+    let _ = app.update(Message::Changes(crate::changes_ui::Event::DiffLoaded(key, Ok(demo::changes_diff()))));
     render(&app, "14-changes");
 }
 
@@ -234,11 +190,7 @@ fn render_thoughts() {
     // as Codex sends its reasoning summaries: bold titles after blank lines
     for (seq, id, text) in [
         (900, "t1", "\n\n**Checking entry icons**"),
-        (
-            901,
-            "t2",
-            "\n\n**Adding UI snapshot test**\n\n**Reviewing UI behavior**",
-        ),
+        (901, "t2", "\n\n**Adding UI snapshot test**\n\n**Reviewing UI behavior**"),
         (902, "t3", "The `render` path keeps *one* parse per item."),
         // a model's raw reasoning: folded to its last line
         (
@@ -270,10 +222,7 @@ fn render_syntax_views() {
     use sill_proto::sessions::HostPath;
     let path = |s: &str| HostPath::from_path(std::path::Path::new(s));
     let (mut app, _) = App::new(true, None);
-    let _ = app.update(Message::Files(Action::Open {
-        path: path("/home/demo/project/src/main.rs"),
-        repo: None,
-    }));
+    let _ = app.update(Message::Files(Action::Open { path: path("/home/demo/project/src/main.rs"), repo: None }));
     render(&app, "syntax-source");
     let view = app.views.get_mut("demo").unwrap();
     let file = view.files.reader.as_mut().unwrap();
@@ -296,13 +245,8 @@ fn render_source_editing() {
     use iced::widget::text_editor;
     use sill_proto::sessions::HostPath;
     let (mut app, _) = App::new(true, None);
-    let _ = app.update(Message::Files(Action::Open {
-        path: HostPath::from_path(std::path::Path::new("/home/demo/project/src/main.rs")),
-        repo: None,
-    }));
-    let _ = app.update(Message::Files(Action::Text(text_editor::Action::Edit(
-        text_editor::Edit::Insert('X'),
-    ))));
+    let _ = app.update(Message::Files(Action::Open { path: HostPath::from_path(std::path::Path::new("/home/demo/project/src/main.rs")), repo: None }));
+    let _ = app.update(Message::Files(Action::Text(text_editor::Action::Edit(text_editor::Edit::Insert('X')))));
     render(&app, "edit-source");
     let _ = app.update(Message::Files(Action::CloseViewer));
     render(&app, "unsaved-source");
@@ -323,14 +267,7 @@ fn render_timer_boundaries() {
         (36000, "timer-10h00"),
         (360000, "timer-100h00"),
     ] {
-        let state = app
-            .views
-            .get_mut("demo")
-            .unwrap()
-            .conversation
-            .session
-            .as_mut()
-            .unwrap();
+        let state = app.views.get_mut("demo").unwrap().conversation.session.as_mut().unwrap();
         state.active_ms = seconds * 1000;
         state.active_since_ms = None;
         state.activity = "idle".into();
@@ -364,10 +301,7 @@ fn render_login() {
     );
     view.follow_tail = true;
     render(&app, "13-login");
-    let _ = app.update(crate::Message::Login(
-        "demo".into(),
-        crate::login_ui::Event::Pick("key".into()),
-    ));
+    let _ = app.update(crate::Message::Login("demo".into(), crate::login_ui::Event::Pick("key".into())));
     render(&app, "14-login-key");
 }
 
@@ -408,12 +342,7 @@ fn render_network() {
     for _ in 0..=demo::CHUNKS.len() {
         let _ = app.update(crate::Message::DemoTick);
     }
-    app.views
-        .get_mut("demo")
-        .unwrap()
-        .conversation
-        .questions
-        .clear();
+    app.views.get_mut("demo").unwrap().conversation.questions.clear();
     let _ = app.update(crate::Message::NetworkRead(
         "demo".into(),
         Ok(serde_json::from_value(serde_json::json!({
@@ -433,16 +362,8 @@ fn render_processes() {
     for _ in 0..=demo::CHUNKS.len() {
         let _ = app.update(crate::Message::DemoTick);
     }
-    app.views
-        .get_mut("demo")
-        .unwrap()
-        .conversation
-        .questions
-        .clear();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    app.views.get_mut("demo").unwrap().conversation.questions.clear();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     let list = serde_json::from_value(serde_json::json!([
         {"name": "web", "argv": ["npm", "run", "dev", "--", "--port", "5173"],
          "cwd": {"display": "/home/demo/project", "bytes_base64": "L2hvbWUvZGVtby9wcm9qZWN0"},
@@ -454,19 +375,12 @@ fn render_processes() {
          "exit_code": 101, "last_line": "error: could not compile `demo` (bin \"demo\")"}
     ]))
     .unwrap();
-    app.views
-        .get_mut("demo")
-        .unwrap()
-        .processes
-        .read(list, Some(&[]));
+    app.views.get_mut("demo").unwrap().processes.read(list, Some(&[]));
     render(&app, "16-process-question");
     let _ = app.update(crate::Message::Procs(Event::NotNow("demo".into(), 5173)));
     let _ = app.update(crate::Message::Procs(Event::Toggle("demo".into())));
     render(&app, "17-processes");
-    let _ = app.update(crate::Message::Procs(Event::Log(
-        "demo".into(),
-        "build".into(),
-    )));
+    let _ = app.update(crate::Message::Procs(Event::Log("demo".into(), "build".into())));
     app.views.get_mut("demo").unwrap().processes.log = Some((
         "build".into(),
         iced::widget::text_editor::Content::with_text(
@@ -483,10 +397,7 @@ fn render_source_gutter() {
     use iced::widget::text_editor;
     use sill_proto::sessions::HostPath;
     let (mut app, _) = App::new(true, None);
-    let _ = app.update(Message::Files(Action::Open {
-        path: HostPath::from_path(std::path::Path::new("/home/demo/project/README.md")),
-        repo: None,
-    }));
+    let _ = app.update(Message::Files(Action::Open { path: HostPath::from_path(std::path::Path::new("/home/demo/project/README.md")), repo: None }));
     let _ = app.update(Message::Files(Action::Source));
     let content = (1..=130)
         .map(|line| {
@@ -500,50 +411,23 @@ fn render_source_gutter() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    app.views
-        .get_mut("demo")
-        .unwrap()
-        .reader
-        .as_mut()
-        .unwrap()
-        .content = crate::editor::Editor::with_text(&content);
-    app.views
-        .get_mut("demo")
-        .unwrap()
-        .reader
-        .as_mut()
-        .unwrap()
-        .source_columns = crate::files::source_columns(&content);
+    app.views.get_mut("demo").unwrap().reader.as_mut().unwrap().content = crate::editor::Editor::with_text(&content);
+    app.views.get_mut("demo").unwrap().reader.as_mut().unwrap().source_columns = crate::files::source_columns(&content);
     render_size(&app, "source-gutter-top", (720.0, 860.0));
     {
         let mut ui = iced_test::Simulator::with_size(settings(), (720.0, 860.0), app.view());
         ui.point_at(iced::Point::new(350.0, 250.0));
-        let statuses = ui.simulate([iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
-            delta: iced::mouse::ScrollDelta::Lines { x: -12.0, y: 0.0 },
-        })]);
+        let statuses = ui.simulate([iced::Event::Mouse(iced::mouse::Event::WheelScrolled { delta: iced::mouse::ScrollDelta::Lines { x: -12.0, y: 0.0 } })]);
         assert_eq!(statuses, [iced::event::Status::Captured]);
         // Sideways scrolling is handled by the outer scrollbar, not a vertical editor action.
         let snapshot = ui.snapshot(&crate::style::theme()).unwrap();
-        assert!(
-            snapshot
-                .matches_image(dir().join("source-horizontal-right"))
-                .unwrap()
-        );
-        assert!(!ui.into_messages().any(|m| matches!(
-            m,
-            Message::Files(Action::Text(text_editor::Action::Scroll { .. }))
-        )));
+        assert!(snapshot.matches_image(dir().join("source-horizontal-right")).unwrap());
+        assert!(!ui.into_messages().any(|m| matches!(m, Message::Files(Action::Text(text_editor::Action::Scroll { .. })))));
     }
-    let _ = app.update(Message::Files(Action::Text(
-        text_editor::Action::Scroll { lines: 95 },
-    )));
+    let _ = app.update(Message::Files(Action::Text(text_editor::Action::Scroll { lines: 95 })));
     render_size(&app, "source-gutter-scrolled", (720.0, 860.0));
-    let _ = app.update(Message::Files(Action::Text(text_editor::Action::Move(
-        text_editor::Motion::DocumentEnd,
-    ))));
-    let _ = app.update(Message::Files(Action::Text(text_editor::Action::Edit(
-        text_editor::Edit::Enter,
-    ))));
+    let _ = app.update(Message::Files(Action::Text(text_editor::Action::Move(text_editor::Motion::DocumentEnd))));
+    let _ = app.update(Message::Files(Action::Text(text_editor::Action::Edit(text_editor::Edit::Enter))));
     render_size(&app, "source-gutter-edited", (720.0, 860.0));
 }
 
@@ -569,7 +453,8 @@ fn render_workspaces() {
     assert!(!view.conversation.busy(), "the turn has ended");
     view.workspaces.loaded = Some(sill_client::workspaces::Loaded {
         view: serde_json::from_value(serde_json::json!({"workspaces_mode": true, "workspaces": [ws],
-            "live": [{"source": host("/home/demo/vendored"), "reason": "submodules", "message": "Live: Repositories with submodules are not supported yet."}]})).unwrap(),
+            "live": [{"source": host("/home/demo/vendored"), "reason": "submodules", "message": "Live: Repositories with submodules are not supported yet."}]}))
+        .unwrap(),
         details: vec![serde_json::from_value(detail).unwrap()],
     });
     let dir = sill_proto::admin::FileMetadata { file: false, directory: true, symlink: false, target: None, length: "0".into(), readonly: false };
@@ -580,7 +465,11 @@ fn render_workspaces() {
     render(&app, "workspaces-4-apply-menu");
     let view = app.views.get_mut("demo").unwrap();
     view.workspaces.menu = None;
-    view.workspaces.diff = Some(("ws-1".into(), Ok("diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,3 @@\n fn main() {\n-    old();\n+    new();\n+    more();\n }\n".into())));
+    view.workspaces.diff = Some((
+        "ws-1".into(),
+        Ok("diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,3 @@\n fn main() {\n-    old();\n+    new();\n+    more();\n }\n"
+            .into()),
+    ));
     let seen = view.workspaces.loaded.as_ref().unwrap().details[0].revision.clone();
     view.workspaces.armed.press(("ws-1".into(), seen));
     render(&app, "workspaces-2-diff");
@@ -622,7 +511,13 @@ fn render_crosscheck() {
     let size = (720.0, 420.0);
     app.crosscheck.offered = true;
     render_size(&app, "crosscheck-1-before", size);
-    let steps = ["Read AGENTS.md", "Compared the work with where it leaves the checkout: 1 file", "Read crates/sill-core/src/jail.rs around the changed test", "Read the VM mount configuration", "Running the jail tests"];
+    let steps = [
+        "Read AGENTS.md",
+        "Compared the work with where it leaves the checkout: 1 file",
+        "Read crates/sill-core/src/jail.rs around the changed test",
+        "Read the VM mount configuration",
+        "Running the jail tests",
+    ];
     app.crosscheck.runs.insert("ws-1".into(), run("reviewing", false, &[], &steps));
     render_size(&app, "crosscheck-2-reviewing", size);
     let _ = app.update(Message::Crosscheck(Event::Toggle("ws-1".into())));
@@ -652,7 +547,8 @@ fn render_crosscheck() {
         app.settings_page.as_mut().unwrap().collapsed.insert(section);
     }
     let mut setup = crate::crosscheck::tests::setup();
-    setup.reviewers = vec![sill_proto::crosscheck::Reviewer { name: String::new(), agent: "codex".into(), options: [("effort".to_string(), "high".to_string())].into() }];
+    setup.reviewers =
+        vec![sill_proto::crosscheck::Reviewer { name: String::new(), agent: "codex".into(), options: [("effort".to_string(), "high".to_string())].into() }];
     let _ = app.update(Message::Crosscheck(Event::Reviewers(Ok(setup.clone()))));
     render_size(&app, "crosscheck-9-settings-reviewer", size);
     setup.reviewers[0].agent = "claude".into();
@@ -679,44 +575,20 @@ fn render_tool_runs() {
     let calls = [
         ("sed -n 960,1257p crates/sill-core/src/workspace/records.rs", "completed"),
         ("cat crates/sill/src/daemon/workspaces.rs", "completed"),
-        (
-            "grep -n \"workspaces\\|thread::spawn\\|fn handle\" crates/sill/src/daemon/hub.rs",
-            "completed",
-        ),
-        (
-            "grep -rn \"dispatch(\" crates/sill/src/daemon/*.rs | head; grep -n \"fn serve\\|spawn\" crates/sill/src/daemon/hub.rs",
-            "completed",
-        ),
-        (
-            "sed -n 925,1000p crates/sill/src/daemon/hub.rs && sed -n 1225,1330p crates/sill/src/daemon/hub.rs",
-            "completed",
-        ),
-        (
-            "grep -n \"workspace\\|borrowed\" -i crates/sill-core/src/jail.rs | head -80",
-            "completed",
-        ),
-        (
-            "cd /home/demo/project && sed -n 540,640p crates/sill-core/src/jail.rs",
-            "completed",
-        ),
+        ("grep -n \"workspaces\\|thread::spawn\\|fn handle\" crates/sill/src/daemon/hub.rs", "completed"),
+        ("grep -rn \"dispatch(\" crates/sill/src/daemon/*.rs | head; grep -n \"fn serve\\|spawn\" crates/sill/src/daemon/hub.rs", "completed"),
+        ("sed -n 925,1000p crates/sill/src/daemon/hub.rs && sed -n 1225,1330p crates/sill/src/daemon/hub.rs", "completed"),
+        ("grep -n \"workspace\\|borrowed\" -i crates/sill-core/src/jail.rs | head -80", "completed"),
+        ("cd /home/demo/project && sed -n 540,640p crates/sill-core/src/jail.rs", "completed"),
         ("grep -n \"pub fn\\|pub(crate) fn\" crates/sill-core/src/changes.rs", "failed"),
         ("cat crates/sill-core/src/workspace/carry.rs", "completed"),
-        (
-            "git for-each-ref | head -20; echo \"--- remotes:\"; git remote -v; echo \"--- tags: $(git tag | wc -l)\"",
-            "completed",
-        ),
-        (
-            "sed -i 's/add_note/add_error/; s/old;name/new/' crates/sill-gui/src/ui.rs",
-            "completed",
-        ),
+        ("git for-each-ref | head -20; echo \"--- remotes:\"; git remote -v; echo \"--- tags: $(git tag | wc -l)\"", "completed"),
+        ("sed -i 's/add_note/add_error/; s/old;name/new/' crates/sill-gui/src/ui.rs", "completed"),
         (
             "grep -rn \"interrupted\" --include=*.rs crates/sill-core/src/workspace; echo ----; grep -n \"conflict\" crates/sill-gui/src/workspaces.rs",
             "completed",
         ),
-        (
-            "for f in records flow carry; do wc -l crates/sill-core/src/workspace/$f.rs; done",
-            "completed",
-        ),
+        ("for f in records flow carry; do wc -l crates/sill-core/src/workspace/$f.rs; done", "completed"),
         ("sed -n 20,80p crates/sill-gui/src/workspaces_ui.rs", "in_progress"),
     ];
     let view = app.views.get_mut("demo").unwrap();
@@ -737,24 +609,12 @@ fn render_tool_runs() {
     }
     let other = |id: &str, kind: &str, title: &str, status: &str| Item {
         item_id: id.into(),
-        tool: Some(Tool {
-            title: title.into(),
-            kind: kind.into(),
-            status: status.into(),
-            command: None,
-            ..template.tool.clone().unwrap()
-        }),
+        tool: Some(Tool { title: title.into(), kind: kind.into(), status: status.into(), command: None, ..template.tool.clone().unwrap() }),
         ..template.clone()
     };
-    view.conversation.insert_item(other(
-        "tool-97",
-        "read",
-        "Read file '/home/demo/project/docs/parallel-coding.md'",
-        "completed",
-    ));
+    view.conversation.insert_item(other("tool-97", "read", "Read file '/home/demo/project/docs/parallel-coding.md'", "completed"));
     // a shell call whose input still streams: no command declared yet
-    view.conversation
-        .insert_item(other("tool-98", "execute", "Terminal", "pending"));
+    view.conversation.insert_item(other("tool-98", "execute", "Terminal", "pending"));
     render(&app, "12-tool-run");
     let _ = app.update(crate::tests::in_session(&app, crate::session::Event::ToggleGroup("tool-02".into())));
     render(&app, "13-tool-run-open");
@@ -766,22 +626,24 @@ fn render_tool_runs() {
 #[ignore = "writes tab-bar PNGs for review"]
 fn render_tabs() {
     let names = [
-        "gray-blade", "humble-bell", "quiet-river", "a-much-longer-session-name", "ox",
-        "silver-fox", "tidy-lamp", "brave-owl", "calm-sea", "dusty-road", "eager-elk", "fuzzy-moss",
+        "gray-blade",
+        "humble-bell",
+        "quiet-river",
+        "a-much-longer-session-name",
+        "ox",
+        "silver-fox",
+        "tidy-lamp",
+        "brave-owl",
+        "calm-sea",
+        "dusty-road",
+        "eager-elk",
+        "fuzzy-moss",
     ];
     for count in [1, 2, 4, 6, 8, 9, 10, 12] {
         let (mut app, _) = App::new(true, None);
         app.demo = false;
         let agent = app.tabs[0].agent.clone();
-        app.tabs = names[..count]
-            .iter()
-            .map(|n| crate::Tab {
-                id: n.to_string(),
-                title: n.to_string(),
-                agent: agent.clone(),
-                running: true,
-            })
-            .collect();
+        app.tabs = names[..count].iter().map(|n| crate::Tab { id: n.to_string(), title: n.to_string(), agent: agent.clone(), running: true }).collect();
         app.selected = Some(names[count.min(2) - 1].to_string());
         render_size(&app, &format!("tabs-{count}"), (720.0, 80.0));
     }
@@ -824,12 +686,7 @@ fn render_tab_hover() {
     let agent = app.tabs[0].agent.clone();
     app.tabs = ["gray-blade", "a-much-longer-session-name", "ox", "silver-fox"]
         .iter()
-        .map(|n| crate::Tab {
-            id: n.to_string(),
-            title: n.to_string(),
-            agent: agent.clone(),
-            running: true,
-        })
+        .map(|n| crate::Tab { id: n.to_string(), title: n.to_string(), agent: agent.clone(), running: true })
         .collect();
     app.selected = Some("gray-blade".into());
     let _ = std::fs::remove_file(dir().join("tabs-hover-tiny-skia.png"));
@@ -856,9 +713,11 @@ fn render_changes_workspaces() {
     let _ = app.update(Message::ToggleChanges);
     let sill = "/home/demo/GIT/sill";
     let live = |file: &str, status: &str| serde_json::json!({"type":"live", "repo": host(sill), "path": host(&format!("{sill}/{file}")), "status": status});
-    let overlay = |session: &str, title: &str, file: &str, kind: &str| serde_json::json!({"type":"overlay", "session_id": session, "title": title,
+    let overlay = |session: &str, title: &str, file: &str, kind: &str| {
+        serde_json::json!({"type":"overlay", "session_id": session, "title": title,
             "ghost": false, "agent_state": false, "path": host(file), "kind": kind, "file_type":"file", "size":"120", "conflict": false, "written": "1793806135",
-            "repo": null, "hash":"h", "protected": null});
+            "repo": null, "hash":"h", "protected": null})
+    };
     let entries: Vec<sill_proto::changes::Entry> = [
         live("crates/sill-gui/src/ui.rs", "M"),
         live("docs/notes.md", "?"),
@@ -866,10 +725,15 @@ fn render_changes_workspaces() {
         overlay("s1", "Changes view grouping", "/home/demo/scratch/plan.md", "added"),
         serde_json::json!({"type":"kept", "session_id":"s3", "title":"Session tab layout fix", "ghost": false, "keep_id":"k1", "timestamp":"1793806135",
             "path": host("/home/demo/.bashrc"), "what":"wrote", "before":"a file", "hash": null}),
-    ].into_iter().map(|e| serde_json::from_value(e).unwrap()).collect();
-    let ws = |n: &str, session: &str, state: &str| serde_json::json!({"workspace_id": format!("ws-{n}"), "name": "sill", "session_id": session, "source": host(sill),
+    ]
+    .into_iter()
+    .map(|e| serde_json::from_value(e).unwrap())
+    .collect();
+    let ws = |n: &str, session: &str, state: &str| {
+        serde_json::json!({"workspace_id": format!("ws-{n}"), "name": "sill", "session_id": session, "source": host(sill),
         "source_branch": "master", "base": "b0", "branch": format!("sill/sill-ws-{n}"), "path": host(&format!("/ws/sill-ws-{n}")),
-        "state": state, "operation": null, "limitations": [], "created_at": "t", "updated_at": "t"});
+        "state": state, "operation": null, "limitations": [], "created_at": "t", "updated_at": "t"})
+    };
     let detail = |w: &serde_json::Value, commits: u32, files: &[(&str, &str, u32, u32)]| -> sill_proto::workspaces::Detail {
         let listed: Vec<serde_json::Value> = files.iter().map(|(path, status, added, removed)| serde_json::json!({"path": host(&format!("{sill}/{path}")), "status": status, "added": added.to_string(), "removed": removed.to_string()})).collect();
         serde_json::from_value(serde_json::json!({"workspace": w, "revision": {"tip": "t1", "worktree": "w", "destination_branch": "master", "destination_tip": "b0"},
@@ -880,7 +744,11 @@ fn render_changes_workspaces() {
     let listed: sill_proto::workspaces::Listed = serde_json::from_value(serde_json::json!({"workspaces": [w1, w2, w3],
         "discarded": [{"discard_id": "d1", "workspace_id": "ws-old", "name": "sill", "source": host(sill), "until": "2026-11-17T10:00:00Z", "created_at": "t"}], "next": null})).unwrap();
     let details = vec![
-        detail(&w1, 0, &[("crates/sill-client/src/changes.rs", "M", 96, 4), ("crates/sill-gui/src/changes_ui.rs", "M", 310, 180), ("docs/sill-gui.md", "M", 12, 3)]),
+        detail(
+            &w1,
+            0,
+            &[("crates/sill-client/src/changes.rs", "M", 96, 4), ("crates/sill-gui/src/changes_ui.rs", "M", 310, 180), ("docs/sill-gui.md", "M", 12, 3)],
+        ),
         detail(&w2, 1, &[("crates/sill-gui/src/main.rs", "M", 38, 6), ("crates/sill-gui/src/tests.rs", "M", 120, 0)]),
         detail(&w3, 0, &[("crates/sill-gui/src/old_tabs.rs", "D", 0, 64), ("crates/sill-gui/src/tabs.png", "A", 0, 0)]),
     ];
@@ -907,36 +775,19 @@ fn render_box_link() {
     for _ in 0..demo::CHUNKS.len() {
         let _ = app.demo_tick();
     }
-    let status = |problem, detail: &str, retry_in| Status {
-        host: "10.0.0.140".into(),
-        problem,
-        detail: detail.into(),
-        retry_in,
-        signing_in: false,
-    };
-    app.box_link.fake_status = Some(status(
-        Problem::SignIn,
-        "pat@10.0.0.140: Permission denied (publickey,password).",
-        None,
-    ));
+    let status = |problem, detail: &str, retry_in| Status { host: "10.0.0.140".into(), problem, detail: detail.into(), retry_in, signing_in: false };
+    app.box_link.fake_status = Some(status(Problem::SignIn, "pat@10.0.0.140: Permission denied (publickey,password).", None));
     render(&app, "box-sign-in");
     let (reply, _answer) = std::sync::mpsc::channel();
     let _ = app.box_event(crate::box_ui::Event::Asked(crate::box_ui::Ask {
-        prompt: Prompt {
-            host: "10.0.0.140".into(),
-            text: "Enter passphrase for key '/home/pat/.ssh/id_ed25519': ".into(),
-            kind: PromptKind::Secret,
-        },
+        prompt: Prompt { host: "10.0.0.140".into(), text: "Enter passphrase for key '/home/pat/.ssh/id_ed25519': ".into(), kind: PromptKind::Secret },
         reply,
     }));
     let _ = app.box_event(crate::box_ui::Event::Input("open sesame".into()));
     render(&app, "box-question");
     let _ = app.box_event(crate::box_ui::Event::Cancel);
-    app.box_link.fake_status = Some(status(
-        Problem::Offline,
-        "ssh: connect to host 10.0.0.140 port 22: No route to host",
-        Some(std::time::Duration::from_secs(14)),
-    ));
+    app.box_link.fake_status =
+        Some(status(Problem::Offline, "ssh: connect to host 10.0.0.140 port 22: No route to host", Some(std::time::Duration::from_secs(14))));
     render(&app, "box-offline");
 }
 
@@ -958,13 +809,7 @@ fn render_settings_tabs() {
         for width in [320.0, 420.0, 720.0, 1100.0] {
             let view = app.settings_view(app.settings_page.as_ref().unwrap());
             let mut ui = iced_test::Simulator::with_size(settings(), (width, 860.0), view);
-            for label in [
-                "Interface",
-                "Sessions",
-                "Agent behaviour",
-                "Memory & history",
-                "System",
-            ] {
+            for label in ["Interface", "Sessions", "Agent behaviour", "Memory & history", "System"] {
                 ui.click(label).unwrap();
             }
             std::fs::create_dir_all(dir()).unwrap();
@@ -976,30 +821,15 @@ fn render_settings_tabs() {
                 }
             }
             let snapshot = ui.snapshot(&crate::style::theme()).unwrap();
-            assert!(
-                snapshot
-                    .matches_image(dir().join(format!("settings-{name}-{width}")))
-                    .unwrap()
-            );
+            assert!(snapshot.matches_image(dir().join(format!("settings-{name}-{width}"))).unwrap());
             let clicked: Vec<_> = ui
                 .into_messages()
                 .filter_map(|message| match message {
-                    crate::Message::Settings(crate::settings_ui::Event::Category(category)) => {
-                        Some(category)
-                    }
+                    crate::Message::Settings(crate::settings_ui::Event::Category(category)) => Some(category),
                     _ => None,
                 })
                 .collect();
-            assert_eq!(
-                clicked,
-                vec![
-                    Category::Interface,
-                    Category::Sessions,
-                    Category::AgentBehaviour,
-                    Category::MemoryHistory,
-                    Category::System
-                ]
-            );
+            assert_eq!(clicked, vec![Category::Interface, Category::Sessions, Category::AgentBehaviour, Category::MemoryHistory, Category::System]);
         }
     }
 }

@@ -10,12 +10,7 @@ impl App {
     /// Put the window where it belongs in its mode (`geometry::target`), off the window's thread:
     /// the displays read as they are now, the window placed and held to its mode's limits. What
     /// it was placed with comes back (`Message::Placed`).
-    fn placing(
-        &self,
-    ) -> impl Fn() -> Option<(Vec<geometry::Display>, Option<geometry::Target>)>
-    + Send
-    + Clone
-    + 'static {
+    fn placing(&self) -> impl Fn() -> Option<(Vec<geometry::Display>, Option<geometry::Target>)> + Send + Clone + 'static {
         let (xid, mode, settings) = (self.xid, self.layout.mode, self.settings.clone());
         move || {
             let xid = xid?;
@@ -72,14 +67,7 @@ impl App {
                 // to the journal when it took more than one ask: how often the window
                 // manager lets a request go by
                 if asks > 1 {
-                    eprintln!(
-                        "sill-gui: brought up: {} after {asks} asks",
-                        if desktop::is_active(xid) {
-                            "active"
-                        } else {
-                            "still not active"
-                        }
-                    );
+                    eprintln!("sill-gui: brought up: {} after {asks} asks", if desktop::is_active(xid) { "active" } else { "still not active" });
                 }
                 placed
             },
@@ -97,10 +85,7 @@ impl App {
         }
         self.visible = false;
         match self.xid {
-            Some(xid) => blocking(
-                move || desktop::snapshot(xid),
-                |read| Message::Geometry(Read::Hide, read),
-            ),
+            Some(xid) => blocking(move || desktop::snapshot(xid), |read| Message::Geometry(Read::Hide, read)),
             None => self.hidden(),
         }
     }
@@ -123,10 +108,7 @@ impl App {
         let Some(xid) = self.xid else {
             return self.hide();
         };
-        blocking(
-            move || desktop::is_active(xid),
-            move |active| Message::ToggleDecided(active, time),
-        )
+        blocking(move || desktop::is_active(xid), move |active| Message::ToggleDecided(active, time))
     }
 
     /// The window where it belongs (`placing`) on X11; elsewhere Shelf mode's width rule
@@ -146,11 +128,7 @@ impl App {
 
     /// The displays and the window as read (`Message::Geometry`): the regular look, or the last
     /// one before the window hides or leaves a mode, when the person's change is kept at once.
-    pub(crate) fn geometry_read(
-        &mut self,
-        why: Read,
-        read: Option<(Vec<geometry::Display>, Option<geometry::Rect>)>,
-    ) -> Task<Message> {
+    pub(crate) fn geometry_read(&mut self, why: Read, read: Option<(Vec<geometry::Display>, Option<geometry::Rect>)>) -> Task<Message> {
         match why {
             Read::Poll => {
                 // hidden since it was asked: showing reads the displays afresh
@@ -158,10 +136,7 @@ impl App {
                     return Task::none();
                 };
                 let target = geometry::target(self.layout.mode, &self.settings, &displays);
-                match self
-                    .geometry
-                    .observe(displays, window, target.as_ref(), Instant::now())
-                {
+                match self.geometry.observe(displays, window, target.as_ref(), Instant::now()) {
                     geometry::Step::Nothing => {}
                     geometry::Step::Place => return self.place(),
                     geometry::Step::Keep(rect) => self.keep(self.layout.mode, rect),
@@ -208,10 +183,7 @@ impl App {
 
     /// Shelf mode's share on the main display, as Settings shows it.
     pub fn shelf_share(&self) -> f32 {
-        geometry::main_display(&self.geometry.displays).map_or_else(
-            || self.settings.shelf_share(),
-            |main| self.settings.shelf_share_on(&main.name),
-        )
+        geometry::main_display(&self.geometry.displays).map_or_else(|| self.settings.shelf_share(), |main| self.settings.shelf_share_on(&main.name))
     }
 
     /// Interface scale changes now: everything inside the window grows or shrinks, the window
@@ -227,9 +199,7 @@ impl App {
         let ratio = old / new;
         self.width *= ratio;
         self.height *= ratio;
-        self.monitor = self
-            .monitor
-            .map(|m| iced::Size::new(m.width * ratio, m.height * ratio));
+        self.monitor = self.monitor.map(|m| iced::Size::new(m.width * ratio, m.height * ratio));
         self.settings.interface_scale = Some(new);
         self.save_settings();
         match self.window_id {
@@ -244,14 +214,7 @@ impl App {
         let Some(id) = self.window_id else {
             return Task::none();
         };
-        iced::window::set_level(
-            id,
-            if on {
-                iced::window::Level::AlwaysOnTop
-            } else {
-                iced::window::Level::Normal
-            },
-        )
+        iced::window::set_level(id, if on { iced::window::Level::AlwaysOnTop } else { iced::window::Level::Normal })
     }
 
     pub(crate) fn save_settings(&mut self) {
@@ -274,12 +237,8 @@ impl App {
         };
         if self.layout.mode == layout::Mode::Shelf {
             let width = (monitor.width * self.settings.shelf_share()).round();
-            let max = iced::Size::new(
-                (monitor.width * layout::SHELF_MAX).round(),
-                monitor.height.max(self.height),
-            );
-            return iced::window::set_max_size(id, Some(max))
-                .chain(iced::window::resize(id, iced::Size::new(width, self.height)));
+            let max = iced::Size::new((monitor.width * layout::SHELF_MAX).round(), monitor.height.max(self.height));
+            return iced::window::set_max_size(id, Some(max)).chain(iced::window::resize(id, iced::Size::new(width, self.height)));
         }
         let unlimited = iced::window::set_max_size(id, None);
         if !entering {
@@ -318,10 +277,7 @@ impl App {
                 Some(_) if self.switching.is_some() => {}
                 Some(xid) => {
                     self.switching = Some(mode);
-                    tasks.push(blocking(
-                        move || desktop::snapshot(xid),
-                        move |read| Message::Geometry(Read::Leave(old), read),
-                    ));
+                    tasks.push(blocking(move || desktop::snapshot(xid), move |read| Message::Geometry(Read::Leave(old), read)));
                 }
                 None => tasks.push(self.place()),
             }

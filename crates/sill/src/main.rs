@@ -17,9 +17,9 @@ use sill_core::mounts;
 use sill_core::policy::Policy;
 use sill_core::shim;
 
+mod changes_client;
 mod daemon;
 mod frontend;
-mod changes_client;
 mod init;
 mod tui;
 
@@ -197,7 +197,12 @@ enum HostControlCmd {
     /// End the session's activation
     Revoke { session: String },
     /// Deliberately keep a host process after revocation (false removes the keep mark)
-    Keep { session: String, name: String, #[arg(value_parser = clap::value_parser!(bool))] keep: bool },
+    Keep {
+        session: String,
+        name: String,
+        #[arg(value_parser = clap::value_parser!(bool))]
+        keep: bool,
+    },
     /// The session's Host control state
     State { session: String },
 }
@@ -225,7 +230,10 @@ enum PermissionsCmd {
 #[derive(Subcommand)]
 enum PolicyCmd {
     /// Show an installed policy
-    Show { #[arg(default_value = "default")] name: String },
+    Show {
+        #[arg(default_value = "default")]
+        name: String,
+    },
     /// Preview a session's next-build rules and diagnostics
     Preview { session: String },
     /// Inspect a session's recorded launch rules
@@ -235,8 +243,10 @@ enum PolicyCmd {
     /// Install a complete client-local policy on the daemon host
     Import {
         file: PathBuf,
-        #[arg(long = "as")] name: Option<String>,
-        #[arg(long)] replace: bool,
+        #[arg(long = "as")]
+        name: Option<String>,
+        #[arg(long)]
+        replace: bool,
     },
 }
 
@@ -253,11 +263,17 @@ enum BoxCmd {
         install: Option<PathBuf>,
     },
     List,
-    Remove { name: String },
+    Remove {
+        name: String,
+    },
     /// Open sill-gui on a saved box.
-    Connect { name: String },
+    Connect {
+        name: String,
+    },
     /// Close the shared SSH connection to a saved box: the next connection signs in again.
-    Disconnect { name: String },
+    Disconnect {
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -274,14 +290,21 @@ enum PinCmd {
 enum DaemonCmd {
     #[command(hide = true)]
     Relay {
-        #[arg(long)] session: String,
-        #[arg(long)] socket: PathBuf,
-        #[arg(long)] agent_socket: PathBuf,
-        #[arg(long)] cwd: PathBuf,
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        socket: PathBuf,
+        #[arg(long)]
+        agent_socket: PathBuf,
+        #[arg(long)]
+        cwd: PathBuf,
         /// A pinned folder of the session (repeatable): an ACP additional workspace root.
-        #[arg(long)] root: Vec<PathBuf>,
-        #[arg(long)] resume: Option<String>,
-        #[arg(long)] experimental_acp_v2: bool,
+        #[arg(long)]
+        root: Vec<PathBuf>,
+        #[arg(long)]
+        resume: Option<String>,
+        #[arg(long)]
+        experimental_acp_v2: bool,
     },
     /// Enable/disable login and on-demand startup for this account; omit VALUE to inspect
     Autostart {
@@ -555,18 +578,28 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
         let c = sill_proto::Client::connect_or_start()?;
         match &cmd {
             MemoryCmd::Recall { id } => {
-                let id=c.resolve_session(&id.join(" "))?.session_id;
-                let text=c.memory_text(id,sill_proto::memory::Format::Recall,None)?;
+                let id = c.resolve_session(&id.join(" "))?.session_id;
+                let text = c.memory_text(id, sill_proto::memory::Format::Recall, None)?;
                 print!("{text}");
                 return Ok(());
             }
             MemoryCmd::Export { dir } => {
-                let mut files=Vec::<ExportFile>::new();
-                for s in c.list_sessions()? {if s.ghost {continue;}files.push(ExportFile {name:format!("{}.md",s.session_id),text:c.memory_text(s.session_id,sill_proto::memory::Format::Export,None)?});}
+                let mut files = Vec::<ExportFile>::new();
+                for s in c.list_sessions()? {
+                    if s.ghost {
+                        continue;
+                    }
+                    files.push(ExportFile {
+                        name: format!("{}.md", s.session_id),
+                        text: c.memory_text(s.session_id, sill_proto::memory::Format::Export, None)?,
+                    });
+                }
                 std::fs::create_dir_all(dir)?;
                 for file in &files {
                     let name = Path::new(&file.name);
-                    if name.components().count() != 1 || !matches!(name.components().next(), Some(std::path::Component::Normal(_))) { bail!("box returned an invalid export filename"); }
+                    if name.components().count() != 1 || !matches!(name.components().next(), Some(std::path::Component::Normal(_))) {
+                        bail!("box returned an invalid export filename");
+                    }
                     std::fs::write(dir.join(name), &file.text)?;
                 }
                 println!("{} sessions written to {}", files.len(), dir.display());
@@ -592,9 +625,17 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
         }
         MemoryCmd::List => {
             let c = sill_proto::Client::connect_or_start()?;
-            let mut rows=Vec::new();let mut after=None;
-            loop {let page:sill_proto::memory::Page=c.call("_sill/memory.list",sill_proto::memory::List {after,limit:Some(128)})?;rows.extend(page.sessions);after=page.next;if after.is_none(){break;}}
-            rows.sort_by(|a,b|b.ended_at.parse::<i64>().unwrap_or(0).cmp(&a.ended_at.parse::<i64>().unwrap_or(0)));
+            let mut rows = Vec::new();
+            let mut after = None;
+            loop {
+                let page: sill_proto::memory::Page = c.call("_sill/memory.list", sill_proto::memory::List { after, limit: Some(128) })?;
+                rows.extend(page.sessions);
+                after = page.next;
+                if after.is_none() {
+                    break;
+                }
+            }
+            rows.sort_by(|a, b| b.ended_at.parse::<i64>().unwrap_or(0).cmp(&a.ended_at.parse::<i64>().unwrap_or(0)));
             if rows.is_empty() {
                 println!("no ended sessions yet (a session ends when its tab is closed)");
             }
@@ -605,21 +646,37 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
         }
         MemoryCmd::Show { id } => {
             let c = sill_proto::Client::connect_or_start()?;
-            let id=c.resolve_session(&id.join(" "))?.session_id;
-            print!("{}",c.memory_text(id,sill_proto::memory::Format::Show,None)?);
+            let id = c.resolve_session(&id.join(" "))?.session_id;
+            print!("{}", c.memory_text(id, sill_proto::memory::Format::Show, None)?);
             return Ok(());
         }
         MemoryCmd::Search { words, folder, agent, since } => {
             let c = sill_proto::Client::connect_or_start()?;
-            let mut terms=words;if let Some(f)=folder {terms.push(format!("folder:{f}"));}if let Some(a)=agent {terms.push(format!("agent:{a}"));}if let Some(s)=since {anyhow::ensure!(sill_memory::parse_age(&s).is_some(),"since expects 30d, 12h, 2w …");terms.push(format!("since:{s}"));}
-            let hits:sill_proto::memory::Hits=c.call("_sill/memory.search",sill_proto::memory::Search {query:terms.join(" "),after:None,limit:Some(50)})?;
-            if hits.hits.is_empty(){println!("nothing found");}for h in hits.hits {print!("{}",h.text);}
+            let mut terms = words;
+            if let Some(f) = folder {
+                terms.push(format!("folder:{f}"));
+            }
+            if let Some(a) = agent {
+                terms.push(format!("agent:{a}"));
+            }
+            if let Some(s) = since {
+                anyhow::ensure!(sill_memory::parse_age(&s).is_some(), "since expects 30d, 12h, 2w …");
+                terms.push(format!("since:{s}"));
+            }
+            let hits: sill_proto::memory::Hits =
+                c.call("_sill/memory.search", sill_proto::memory::Search { query: terms.join(" "), after: None, limit: Some(50) })?;
+            if hits.hits.is_empty() {
+                println!("nothing found");
+            }
+            for h in hits.hits {
+                print!("{}", h.text);
+            }
             return Ok(());
         }
         MemoryCmd::Transcript { id, grep } => {
             let c = sill_proto::Client::connect_or_start()?;
-            let id=c.resolve_session(&id.join(" "))?.session_id;
-            print!("{}",c.memory_text(id,sill_proto::memory::Format::Transcript,grep)?);
+            let id = c.resolve_session(&id.join(" "))?.session_id;
+            print!("{}", c.memory_text(id, sill_proto::memory::Format::Transcript, grep)?);
             return Ok(());
         }
         _ => {}
@@ -683,20 +740,31 @@ fn policy_cmd(cmd: Option<PolicyCmd>) -> Result<()> {
             let key = policy_session_key(&c, &session)?;
             let view: api::PolicyView = c.call("_sill/policy.preview", SessionKey { session_id: key })?;
             print_policy_view(&view);
-            if !view.diagnostics.is_empty() { bail!("policy preview has errors"); }
+            if !view.diagnostics.is_empty() {
+                bail!("policy preview has errors");
+            }
         }
         PolicyCmd::Snapshot { session } => {
             let key = policy_session_key(&c, &session)?;
             let result: api::PolicySnapshot = c.call("_sill/policy.snapshot", SessionKey { session_id: key })?;
-            if let Some(view) = result.snapshot { print_policy_view(&view); }
-            else { println!("No launch policy snapshot was recorded for this session."); }
-            for w in &result.warnings { println!("# launch warning: {w}"); }
+            if let Some(view) = result.snapshot {
+                print_policy_view(&view);
+            } else {
+                println!("No launch policy snapshot was recorded for this session.");
+            }
+            for w in &result.warnings {
+                println!("# launch warning: {w}");
+            }
         }
         PolicyCmd::Check { file } => {
             let text = read_policy_input(&file)?;
             let result: api::PolicyChecked = c.call("_sill/policy.check", api::PolicyCheck { text })?;
-            for diagnostic in result.diagnostics { eprintln!("{diagnostic}"); }
-            if !result.valid { bail!("policy check failed"); }
+            for diagnostic in result.diagnostics {
+                eprintln!("{diagnostic}");
+            }
+            if !result.valid {
+                bail!("policy check failed");
+            }
             println!("Policy check passed.");
         }
         PolicyCmd::Import { file, name, replace } => {
@@ -786,14 +854,18 @@ fn permissions_cmd(cmd: PermissionsCmd) -> Result<()> {
     let c = sill_proto::Client::connect_or_start()?;
     let print_changed = |changed: api::PermissionsChanged| {
         print_permissions(&changed.preview);
-        if changed.restart_required { println!("The running jail keeps its launch state until the session is restarted."); }
+        if changed.restart_required {
+            println!("The running jail keeps its launch state until the session is restarted.");
+        }
     };
     match cmd {
         PermissionsCmd::Show { session } => {
             let row = c.resolve_session(&session)?;
             let preview: api::PolicyView = c.call("_sill/policy.preview", SessionKey { session_id: row.session_id.clone() })?;
             print_permissions(&preview);
-            for diagnostic in &preview.diagnostics { eprintln!("{diagnostic}"); }
+            for diagnostic in &preview.diagnostics {
+                eprintln!("{diagnostic}");
+            }
             let launch: api::PolicySnapshot = c.call("_sill/policy.snapshot", SessionKey { session_id: row.session_id })?;
             if let Some(launch) = launch.snapshot.filter(|_| row.running) {
                 let effective = |view: &api::PolicyView| view.permissions.iter().map(|p| (p.capability.clone(), p.effective)).collect::<Vec<_>>();
@@ -802,11 +874,17 @@ fn permissions_cmd(cmd: PermissionsCmd) -> Result<()> {
                     print_permissions(&launch);
                 }
             }
-            if !preview.diagnostics.is_empty() { bail!("policy preview has errors"); }
+            if !preview.diagnostics.is_empty() {
+                bail!("policy preview has errors");
+            }
         }
         PermissionsCmd::Set { session, capability, value } => {
             let key = policy_session_key(&c, &session)?;
-            let enabled = match value.as_str() { "on" => Some(true), "off" => Some(false), _ => None };
+            let enabled = match value.as_str() {
+                "on" => Some(true),
+                "off" => Some(false),
+                _ => None,
+            };
             print_changed(c.call("_sill/permissions.set", api::PermissionChoice { session_id: key, capability, enabled })?);
         }
         PermissionsCmd::Development { session } => {
@@ -827,18 +905,40 @@ fn permissions_cmd(cmd: PermissionsCmd) -> Result<()> {
 }
 fn print_permissions(view: &sill_proto::admin::PolicyView) {
     for p in &view.permissions {
-        let state = if p.effective { "on" } else if p.available { "off" } else { "unavailable" };
-        let choice = match p.requested { Some(true) => ", session: on", Some(false) => ", session: off", None => "" };
-        println!("{:<13} {state:<11} policy default: {}{choice}{} ({})", p.capability,
-            if !p.allowed { "forbidden" } else if p.default_enabled { "on" } else { "off" },
-            if p.blocked { ", blocked" } else { "" }, p.reason);
+        let state = if p.effective {
+            "on"
+        } else if p.available {
+            "off"
+        } else {
+            "unavailable"
+        };
+        let choice = match p.requested {
+            Some(true) => ", session: on",
+            Some(false) => ", session: off",
+            None => "",
+        };
+        println!(
+            "{:<13} {state:<11} policy default: {}{choice}{} ({})",
+            p.capability,
+            if !p.allowed {
+                "forbidden"
+            } else if p.default_enabled {
+                "on"
+            } else {
+                "off"
+            },
+            if p.blocked { ", blocked" } else { "" },
+            p.reason
+        );
     }
 }
 fn read_policy_input(path: &Path) -> Result<String> {
     use std::io::Read;
     let mut text = String::new();
     std::fs::File::open(path)?.take((sill_proto::admin::TEXT_BYTES + 1) as u64).read_to_string(&mut text)?;
-    if text.len() > sill_proto::admin::TEXT_BYTES { bail!("policy text exceeds 1 MiB"); }
+    if text.len() > sill_proto::admin::TEXT_BYTES {
+        bail!("policy text exceeds 1 MiB");
+    }
     Ok(text)
 }
 fn policy_session_key(c: &sill_proto::Client, key: &str) -> Result<String> {
@@ -853,26 +953,41 @@ fn print_policy_view(view: &sill_proto::admin::PolicyView) {
                 let backing = rule.backing.as_ref().map(|p| format!(" -> {}", p.display)).unwrap_or_default();
                 println!("  {}: {}{} [{}] {}", rule.behavior, rule.target.display, backing, rule.source, rule.reason);
             }
-            for path in &fs.unused { println!("  stored but unused: {}", path.display); }
+            for path in &fs.unused {
+                println!("  stored but unused: {}", path.display);
+            }
         }
     }
 
     println!("# {} policy for {} ({})", view.view, view.session_id, view.name);
-    if let Some(text) = &view.text { print!("{text}"); }
-    for permission in &view.permissions {
-        println!("# permission {}: allowed={}, default={}, requested={}, effective={}, available={}, source={} ({})",
-            permission.capability, permission.allowed, permission.default_enabled,
-            permission.requested.map_or("policy".into(), |enabled| enabled.to_string()),
-            permission.effective, permission.available, permission.source, permission.reason);
+    if let Some(text) = &view.text {
+        print!("{text}");
     }
-    for diagnostic in &view.diagnostics { eprintln!("{diagnostic}"); }
+    for permission in &view.permissions {
+        println!(
+            "# permission {}: allowed={}, default={}, requested={}, effective={}, available={}, source={} ({})",
+            permission.capability,
+            permission.allowed,
+            permission.default_enabled,
+            permission.requested.map_or("policy".into(), |enabled| enabled.to_string()),
+            permission.effective,
+            permission.available,
+            permission.source,
+            permission.reason
+        );
+    }
+    for diagnostic in &view.diagnostics {
+        eprintln!("{diagnostic}");
+    }
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Some(name) = &cli.box_name {
         // SAFETY: argument parsing is single-threaded; no worker exists yet.
-        unsafe { std::env::set_var("SILL_BOX", name); }
+        unsafe {
+            std::env::set_var("SILL_BOX", name);
+        }
     }
     match cli.cmd {
         Cmd::Policy { cmd } => policy_cmd(cmd),
@@ -884,9 +999,11 @@ fn main() -> Result<()> {
         Cmd::Changes { cmd } => changes_cmd(cmd.unwrap_or(ChangesCmd::List)),
         Cmd::Attach { key, fresh, verbose } => tui::line_mode(&key, fresh, verbose),
         Cmd::Daemon { cmd, stdio } => {
-            if stdio && cmd.is_some() { bail!("--stdio cannot be combined with a daemon subcommand"); }
+            if stdio && cmd.is_some() {
+                bail!("--stdio cannot be combined with a daemon subcommand");
+            }
             if stdio { daemon_stdio() } else { daemon_cmd(cmd) }
-        },
+        }
         Cmd::Box { cmd } => box_cmd(cmd),
         Cmd::Registry { cmd: RegistryCmd::Snapshot { out } } => {
             let out = out.unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sill-core/registry/snapshot.json"));
@@ -912,9 +1029,10 @@ fn main() -> Result<()> {
             if sill_proto::transport::selected()?.is_some() {
                 anyhow::ensure!(!jails, "restart --jails must run on the local host");
                 restart_daemon_only()
+            } else {
+                frontend::restart(hidden, dev, detached, jails)
             }
-            else { frontend::restart(hidden, dev, detached, jails) }
-        },
+        }
         Cmd::Login { agent, method } => {
             let home = home()?;
             let registry = sill_core::agents::load(&home)?;
@@ -933,9 +1051,13 @@ fn main() -> Result<()> {
                 // this command runs where the person is: open it here, and say it for another browser
                 sill_core::login::Line::OpenUrl { url, .. } => {
                     eprintln!("open: {url}");
-                    let _ = std::process::Command::new("xdg-open").arg(&url)
-                        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-                        .spawn().map(|mut child| std::thread::spawn(move || child.wait()));
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(&url)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .map(|mut child| std::thread::spawn(move || child.wait()));
                 }
             })?;
             eprintln!("logged in; running {agent} sessions pick it up when they start again");
@@ -1084,14 +1206,7 @@ fn print_changes(spec: &JailSpec, plan: &jail::JailPlan, all: bool, diff: Option
         if c.ignored && !all {
             continue;
         }
-        println!(
-            "{}{} {:>9}  {}{}",
-            c.kind.letter(),
-            if c.conflict { '!' } else { ' ' },
-            c.size,
-            c.path.display(),
-            if c.ignored { "  (ignored)" } else { "" }
-        );
+        println!("{}{} {:>9}  {}{}", c.kind.letter(), if c.conflict { '!' } else { ' ' }, c.size, c.path.display(), if c.ignored { "  (ignored)" } else { "" });
     }
     let hidden = changes.iter().filter(|c| c.ignored).count();
     if hidden > 0 && !all {
@@ -1126,13 +1241,7 @@ fn dev_cmd(cmd: DevCmd) -> Result<()> {
             println!("bwrap pid: {}", pid.as_deref().unwrap_or("-"));
             let mut c = shim::Control::connect(&socket)?;
             let s = c.status()?;
-            println!(
-                "agent: {} pid={:?} exit={:?} buffered_lines={}",
-                if s.running { "running" } else { "not running" },
-                s.pid,
-                s.exit,
-                s.buffered_lines
-            );
+            println!("agent: {} pid={:?} exit={:?} buffered_lines={}", if s.running { "running" } else { "not running" }, s.pid, s.exit, s.buffered_lines);
             Ok(())
         }
         DevCmd::Prompt { text, agent, cwd, fresh, reject, verbose } => {
@@ -1181,7 +1290,16 @@ fn dev_cmd(cmd: DevCmd) -> Result<()> {
                         let names: Vec<String> = methods.iter().map(|m| format!("{} ({})", m.name, m.id)).collect();
                         let _ = writeln!(out, "\n\x1b[33mlogin needed: {message} — methods: {}\x1b[0m", names.join(", "));
                     }
-                    Event::UserText(_) | Event::Ready { .. } | Event::V2PermissionsCancelled | Event::V2Ready { .. } | Event::V2Update { .. } | Event::PromptAccepted { .. } | Event::V2PromptFailed { .. } | Event::V2PermissionRequest { .. } | Event::TurnStarted | Event::Controls(_) => {}
+                    Event::UserText(_)
+                    | Event::Ready { .. }
+                    | Event::V2PermissionsCancelled
+                    | Event::V2Ready { .. }
+                    | Event::V2Update { .. }
+                    | Event::PromptAccepted { .. }
+                    | Event::V2PromptFailed { .. }
+                    | Event::V2PermissionRequest { .. }
+                    | Event::TurnStarted
+                    | Event::Controls(_) => {}
                     Event::Stopped(r) => {
                         let _ = writeln!(out, "\n\x1b[2m[stop: {r:?}]\x1b[0m");
                     }
@@ -1261,7 +1379,8 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
             plan.prepare()?;
             plan.apply(&mut spec)?;
         } else {
-            spec.agent_masks = registry.values().flat_map(|a| a.home_paths.iter().flatten()).map(|p| (sill_core::paths::expand_home(&p.path, &spec.home), p.kind)).collect();
+            spec.agent_masks =
+                registry.values().flat_map(|a| a.home_paths.iter().flatten()).map(|p| (sill_core::paths::expand_home(&p.path, &spec.home), p.kind)).collect();
         }
     }
     let idle = spec.policy.limits.agent_idle_minutes as u64 * 60;
@@ -1272,7 +1391,8 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
         spec.command.extend(["--bus".into(), sill_core::bus::socket_path(spec.uid).into()]);
     }
     // the shim, and the same binary as `sill-proc` on the jail's PATH (docs/tasks.md §2.4)
-    spec.extra_args = vec!["--ro-bind".into(), shim_bin.clone().into(), "/.sill/shim".into(), "--ro-bind".into(), shim_bin.clone().into(), "/.sill/bin/sill-proc".into()];
+    spec.extra_args =
+        vec!["--ro-bind".into(), shim_bin.clone().into(), "/.sill/shim".into(), "--ro-bind".into(), shim_bin.clone().into(), "/.sill/bin/sill-proc".into()];
     // memory (docs/memory.md §2.3): the snapshot's directory read-only, and the shim as
     // `sill-memory` to read it; made here if the daemon has not written one yet, so the first
     // snapshot shows up in jails already running
@@ -1337,14 +1457,8 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
     // this scope, outside the jail, their two sockets the only display inside. It stops when this
     // launcher returns (or dies with it); a desktop that cannot start fails the launch.
     let _desktop = if spec.policy.permissions.test_desktop == sill_core::permissions::Rule::On {
-        let desktop = sill_core::desktop::Desktop::start(&rt.join("desktop"), sill_core::desktop::scale())
-            .context("starting the test desktop")?;
-        eprintln!(
-            "sill launch: test desktop: Weston pid {}, headless at scale {}, X11 display :{}",
-            desktop.pid(),
-            desktop.scale,
-            desktop.x11_display
-        );
+        let desktop = sill_core::desktop::Desktop::start(&rt.join("desktop"), sill_core::desktop::scale()).context("starting the test desktop")?;
+        eprintln!("sill launch: test desktop: Weston pid {}, headless at scale {}, X11 display :{}", desktop.pid(), desktop.scale, desktop.x11_display);
         spec.binds.extend(desktop.jail_binds(spec.uid));
         spec.env.extend(desktop.jail_env());
         Some(desktop)
@@ -1461,7 +1575,10 @@ fn start_session(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>) -> Re
         session: session.to_string(),
         policy: jail.policy.clone(),
         pins: vec![],
-        cwd: match jail.cwd { Some(c) => c, None => std::env::current_dir()? },
+        cwd: match jail.cwd {
+            Some(c) => c,
+            None => std::env::current_dir()?,
+        },
         state_dir: jail.state_dir.clone(),
         unsafe_state: jail.unsafe_state,
         share_net: jail.net,
@@ -1550,7 +1667,9 @@ fn changes_cmd(cmd: ChangesCmd) -> Result<()> {
             let items = abs(paths)?.into_iter().map(|p| (p, None)).collect();
             report(changes_client::keep(&call, sill_proto::ChangesKeep { session: session(&key)?, items })?)
         }
-        ChangesCmd::Revert { session: key, paths } => report(changes_client::revert(&call, sill_proto::ChangesPaths { session: session(&key)?, paths: abs(paths)? })?),
+        ChangesCmd::Revert { session: key, paths } => {
+            report(changes_client::revert(&call, sill_proto::ChangesPaths { session: session(&key)?, paths: abs(paths)? })?)
+        }
         ChangesCmd::History { since, path, agent, kind, session: key } => {
             let since = match since {
                 Some(v) => Some(sill_core::store::now() - sill_memory::parse_age(&v).context("--since expects 7d, 12h, 2w …")?),
@@ -1591,9 +1710,13 @@ fn pin_cmd(cmd: PinCmd) -> Result<()> {
             let mut after = None;
             loop {
                 let page: api::Page = c.call("_sill/pins.list", api::List { after, ..Default::default() })?;
-                for p in page.pins { println!("{}", p.display); }
+                for p in page.pins {
+                    println!("{}", p.display);
+                }
                 after = page.next;
-                if after.is_none() { break; }
+                if after.is_none() {
+                    break;
+                }
             }
         }
         PinCmd::Add { path } => {
@@ -1625,9 +1748,15 @@ fn session_cmd(cmd: SessionCmd) -> Result<()> {
         SessionCmd::New { agent, policy, ghost, pins } => {
             let pins = pins.into_iter().map(|p| p.canonicalize().with_context(|| format!("pin {}", p.display()))).collect::<Result<Vec<_>>>()?;
             let create = sill_proto::sessions::Create {
-                create_id: sill_core::sfp::new_id(), agent, policy,
+                create_id: sill_core::sfp::new_id(),
+                agent,
+                policy,
                 pins: pins.iter().map(|p| sill_proto::sessions::HostPath::from_path(p)).collect(),
-                memory_scope: String::new(), follows: String::new(), remember_pins: false, ghost, workspaces: None,
+                memory_scope: String::new(),
+                follows: String::new(),
+                remember_pins: false,
+                ghost,
+                workspaces: None,
             };
             let k: sill_proto::sessions::SessionKey = c.call("_sill/sessions.create", create)?;
             let _: sill_proto::sessions::Started = c.call("_sill/sessions.start", &k)?;
@@ -1637,13 +1766,20 @@ fn session_cmd(cmd: SessionCmd) -> Result<()> {
         SessionCmd::List => {
             let rows = c.list_sessions()?;
             for s in rows {
-                let state = if s.running { "running" } else if s.ended_at.is_some() { "ended" } else { "open" };
+                let state = if s.running {
+                    "running"
+                } else if s.ended_at.is_some() {
+                    "ended"
+                } else {
+                    "open"
+                };
                 println!("{}  {:<7} {}{:<8} {}", s.session_id, state, if s.ghost { "ghost " } else { "" }, s.agent, s.title);
             }
         }
         SessionCmd::End { key } => {
             let s = c.resolve_session(&key.join(" "))?;
-            let e: sill_proto::sessions::Ending = c.call("_sill/sessions.end", sill_proto::sessions::End { session_id: s.session_id.clone(), reason: "close".into() })?;
+            let e: sill_proto::sessions::Ending =
+                c.call("_sill/sessions.end", sill_proto::sessions::End { session_id: s.session_id.clone(), reason: "close".into() })?;
             match (e.pending, e.deleted) {
                 (true, _) => println!("{}: the agent writes its summary; the session ends when it is done", s.session_id),
                 (false, true) => println!("{}: deleted ({})", s.session_id, if s.ghost { "a ghost leaves nothing" } else { "nothing was asked in it" }),
@@ -1656,13 +1792,16 @@ fn session_cmd(cmd: SessionCmd) -> Result<()> {
 
 fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
     match cmd {
-        Some(DaemonCmd::Relay { session, socket, agent_socket, cwd, root, resume, experimental_acp_v2 }) => daemon::relay::run(&session, &socket, &agent_socket, &cwd, root, resume, experimental_acp_v2),
+        Some(DaemonCmd::Relay { session, socket, agent_socket, cwd, root, resume, experimental_acp_v2 }) => {
+            daemon::relay::run(&session, &socket, &agent_socket, &cwd, root, resume, experimental_acp_v2)
+        }
         None => daemon::run(),
         Some(DaemonCmd::Autostart { value }) => init::autostart(value.as_deref()),
         Some(DaemonCmd::Restart) => restart_daemon_only(),
         Some(DaemonCmd::Status) => {
             let c = sill_proto::Client::connect_or_start()?;
-            let s: sill_proto::DaemonStatus = c.call_within(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
+            let s: sill_proto::DaemonStatus =
+                c.call_within(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
             println!("sill daemon {} ({}), pid {}, {}, up since {}", s.version, sill_proto::initialize::PROTOCOL_ID, s.pid, s.mode, s.started);
             println!("jails:    {}", s.launcher);
             println!("socket:   {}", s.socket.display);
@@ -1672,13 +1811,16 @@ fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
         Some(DaemonCmd::Schema) => {
             let schema = if sill_proto::transport::selected()?.is_some() {
                 sill_proto::Client::connect()?.call::<serde_json::Value>(sill_proto::method::DAEMON_SCHEMA, sill_proto::Empty::default())?
-            } else { sill_proto::schema::document() };
+            } else {
+                sill_proto::schema::document()
+            };
             println!("{}", serde_json::to_string_pretty(&schema)?);
             Ok(())
         }
         Some(DaemonCmd::Stop) => match sill_proto::Client::connect() {
             Ok(c) => {
-                let _: serde_json::Value = c.call_within(sill_proto::method::DAEMON_SHUTDOWN, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
+                let _: serde_json::Value =
+                    c.call_within(sill_proto::method::DAEMON_SHUTDOWN, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
                 println!("asked the daemon to leave; sessions keep running");
                 Ok(())
             }
@@ -1717,13 +1859,11 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
     let home = home()?;
     let uid = rustix::process::getuid().as_raw();
     let user = std::env::var("USER").unwrap_or_else(|_| uid.to_string());
-    let resolution = a.resolved_policy.as_ref().map(|path| -> Result<sill_core::session::Resolution> {
-        Ok(serde_json::from_slice(&std::fs::read(path)?)?)
-    }).transpose()?;
+    let resolution =
+        a.resolved_policy.as_ref().map(|path| -> Result<sill_core::session::Resolution> { Ok(serde_json::from_slice(&std::fs::read(path)?)?) }).transpose()?;
     let policy = match &resolution {
         Some(resolved) => resolved.policy.clone(),
-        None => sill_core::session::effective_base_policy(&a.policy, &home,
-            a.ghost)?,
+        None => sill_core::session::effective_base_policy(&a.policy, &home, a.ghost)?,
     };
     let state_dir = match a.state_dir {
         Some(d) => d,
@@ -1738,14 +1878,17 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
         Some(c) => c,
         None => std::env::current_dir()?,
     };
-    let command = if command.is_empty() {
-        vec![OsString::from(std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into())), "-l".into()]
-    } else {
-        command
-    };
+    let command = if command.is_empty() { vec![OsString::from(std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into())), "-l".into()] } else { command };
     let mut extra_args = vec![];
     if let Some(shim) = &a.shim_bin {
-        extra_args.extend(["--ro-bind".into(), shim.clone().into(), "/.sill/shim".into(), "--ro-bind".into(), shim.clone().into(), "/.sill/bin/sill-proc".into()]);
+        extra_args.extend([
+            "--ro-bind".into(),
+            shim.clone().into(),
+            "/.sill/shim".into(),
+            "--ro-bind".into(),
+            shim.clone().into(),
+            "/.sill/bin/sill-proc".into(),
+        ]);
     }
     let mut binds = Vec::new();
     for b in &a.binds {
@@ -1805,7 +1948,6 @@ fn default_state_dir(uid: u32, home: &Path) -> Result<PathBuf> {
 
 use std::os::fd::AsRawFd;
 
-
 /// A transport endpoint, not a daemon per SSH connection: the existing per-user daemon keeps
 /// ownership of all sessions when the pipe closes.
 fn daemon_stdio() -> Result<()> {
@@ -1832,7 +1974,9 @@ fn daemon_stdio() -> Result<()> {
     let mut bytes = [0u8; 32 * 1024];
     loop {
         let count = socket.read(&mut bytes)?;
-        if count == 0 { break; }
+        if count == 0 {
+            break;
+        }
         output.write_all(&bytes[..count])?;
         output.flush()?;
     }
@@ -1844,7 +1988,9 @@ fn box_cmd(cmd: BoxCmd) -> Result<()> {
     match cmd {
         BoxCmd::List => {
             println!("local\tthis machine");
-            for (name, target) in transport::list()? { println!("{name}\t{}\t{}", target.host, target.binary); }
+            for (name, target) in transport::list()? {
+                println!("{name}\t{}\t{}", target.host, target.binary);
+            }
         }
         BoxCmd::Remove { name } => transport::remove(&name)?,
         BoxCmd::Add { host, name, mut binary, install } => {
@@ -1863,7 +2009,9 @@ fn box_cmd(cmd: BoxCmd) -> Result<()> {
             let status = transport::verify_and_save(&name, &host, &binary)?;
             println!("{name}: sill {}, protocol {}, {} sessions", status.version, status.protocol, status.sessions);
             if !sill_proto::boxlink::unattended(&host).unwrap_or(true) {
-                println!("{name}: SSH cannot log in to {host} without asking (no agent or unencrypted key accepts it). Sill keeps one shared connection open; after a sleep, a reboot of the box or a longer network loss the window shows Sign in to reconnect.");
+                println!(
+                    "{name}: SSH cannot log in to {host} without asking (no agent or unencrypted key accepts it). Sill keeps one shared connection open; after a sleep, a reboot of the box or a longer network loss the window shows Sign in to reconnect."
+                );
             }
         }
         BoxCmd::Disconnect { name } => {
@@ -1872,45 +2020,58 @@ fn box_cmd(cmd: BoxCmd) -> Result<()> {
         }
         BoxCmd::Connect { name } => {
             let all = transport::list()?;
-            if name != "local" && !all.contains_key(&name) { bail!("unknown sill box {name:?}"); }
+            if name != "local" && !all.contains_key(&name) {
+                bail!("unknown sill box {name:?}");
+            }
             // SAFETY: command dispatch is still single-threaded.
-            unsafe { std::env::set_var("SILL_BOX", name); }
+            unsafe {
+                std::env::set_var("SILL_BOX", name);
+            }
             return frontend::gui(false);
         }
     }
     Ok(())
 }
 
-
 /// Restart only the selected daemon (local or SSH), never a frontend or another host.
 fn restart_daemon_only() -> Result<()> {
     let old = match sill_proto::Client::connect() {
         Ok(client) => client,
         Err(error) => {
-            let absent = error.chain().filter_map(|e| e.downcast_ref::<std::io::Error>())
+            let absent = error
+                .chain()
+                .filter_map(|e| e.downcast_ref::<std::io::Error>())
                 .any(|e| matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused));
             if sill_proto::transport::selected()?.is_none() && absent {
                 let client = sill_proto::Client::connect_or_start_explicit()?;
-                let status: sill_proto::DaemonStatus = client.call_within(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
+                let status: sill_proto::DaemonStatus =
+                    client.call_within(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
                 println!("daemon started (pid {})", status.pid);
                 return Ok(());
             }
             return Err(error);
         }
     };
-    let status: sill_proto::DaemonStatus = old.call_within(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
+    let status: sill_proto::DaemonStatus =
+        old.call_within(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
     old.call_within::<serde_json::Value>(sill_proto::method::DAEMON_SHUTDOWN, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
     drop(old);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         std::thread::sleep(std::time::Duration::from_millis(100));
         if let Ok(client) = sill_proto::Client::connect_or_start_explicit()
-            && let Ok(next) = client.call_within::<sill_proto::DaemonStatus>(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)
+            && let Ok(next) = client.call_within::<sill_proto::DaemonStatus>(
+                sill_proto::method::DAEMON_STATUS,
+                sill_proto::Empty::default(),
+                sill_proto::client::QUICK_TIMEOUT,
+            )
             && (next.pid != status.pid || next.started != status.started)
         {
             println!("daemon restarted (pid {}); sessions keep running", next.pid);
             return Ok(());
         }
-        if std::time::Instant::now() >= deadline { bail!("the daemon did not restart within 10 s; inspect its journal or daemon.log"); }
+        if std::time::Instant::now() >= deadline {
+            bail!("the daemon did not restart within 10 s; inspect its journal or daemon.log");
+        }
     }
 }

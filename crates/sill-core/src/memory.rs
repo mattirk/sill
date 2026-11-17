@@ -46,11 +46,7 @@ pub fn collect(store: &Store, s: &Session, kept_dir: &Path) -> Facts {
 
 /// A list for a sentence: the first `n`, then "and N more".
 fn some(items: &[String], n: usize) -> String {
-    if items.len() <= n {
-        items.join(", ")
-    } else {
-        format!("{} and {} more", items[..n].join(", "), items.len() - n)
-    }
+    if items.len() <= n { items.join(", ") } else { format!("{} and {} more", items[..n].join(", "), items.len() - n) }
 }
 
 /// The facts as one sentence each, shared by the prompt and the mechanical summary.
@@ -66,7 +62,13 @@ fn fact_lines(f: &Facts, home: &Path) -> Vec<String> {
         let items: Vec<String> = f.kept.iter().map(|(p, what)| format!("{what} {}", tilde(p, home))).collect();
         lines.push(format!("kept to the host ({}): {}", f.kept.len(), some(&items, 8)));
     }
-    lines.push(format!("{} prompt{}, {} tool call{}", f.prompts, if f.prompts == 1 { "" } else { "s" }, f.tool_calls, if f.tool_calls == 1 { "" } else { "s" }));
+    lines.push(format!(
+        "{} prompt{}, {} tool call{}",
+        f.prompts,
+        if f.prompts == 1 { "" } else { "s" },
+        f.tool_calls,
+        if f.tool_calls == 1 { "" } else { "s" }
+    ));
     lines
 }
 
@@ -211,7 +213,13 @@ pub fn compact_all(store: &Store, now: i64, remove_state: &dyn Fn(&str)) -> Resu
             done.deleted += 1;
             continue;
         }
-        let level = if after2 > 0 && age > after2 { 2 } else if after1 > 0 && age > after1 { 1 } else { 0 };
+        let level = if after2 > 0 && age > after2 {
+            2
+        } else if after1 > 0 && age > after1 {
+            1
+        } else {
+            0
+        };
         if level > s.compacted {
             store.compact(&s.id, level)?;
             if level == 2 { done.trimmed += 1 } else { done.compacted += 1 }
@@ -363,7 +371,10 @@ mod tests {
 
     #[test]
     fn the_summary_names_the_session() {
-        assert_eq!(split_title("Title: proxy allow button\nAsked: make it safer.\nDone."), (Some("proxy allow button".into()), "Asked: make it safer.\nDone.".into()));
+        assert_eq!(
+            split_title("Title: proxy allow button\nAsked: make it safer.\nDone."),
+            (Some("proxy allow button".into()), "Asked: make it safer.\nDone.".into())
+        );
         assert_eq!(split_title("**Title:** “Settings page sections.”\n\nbody"), (Some("Settings page sections".into()), "body".into()));
         assert_eq!(split_title("TITLE: x"), (Some("x".into()), "".into()));
         assert_eq!(split_title("Title:\nbody"), (None, "body".into()));

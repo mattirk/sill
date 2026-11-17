@@ -74,15 +74,7 @@ pub struct Area<'a, Message> {
 }
 
 pub fn area<'a, Message>(content: impl Into<Element<'a, Message>>) -> Area<'a, Message> {
-    Area {
-        content: content.into(),
-        on_copy: None,
-        on_drag: None,
-        find: None,
-        selection: None,
-        visible_leaves: None,
-        on_text_change: None,
-    }
+    Area { content: content.into(), on_copy: None, on_drag: None, find: None, selection: None, visible_leaves: None, on_text_change: None }
 }
 
 impl<'a, Message> Area<'a, Message> {
@@ -160,9 +152,7 @@ impl Check {
     }
 
     fn matches(&self, text: &str) -> bool {
-        text.len() >= self.len
-            && text.is_char_boundary(self.len)
-            && fingerprint(text, self.len) == self.hash
+        text.len() >= self.len && text.is_char_boundary(self.len) && fingerprint(text, self.len) == self.hash
     }
 }
 
@@ -220,10 +210,7 @@ impl State {
     }
 
     fn positions(&self) -> impl Iterator<Item = Position> + '_ {
-        self.anchor
-            .into_iter()
-            .chain(self.focus)
-            .flat_map(|(a, b)| [a, b])
+        self.anchor.into_iter().chain(self.focus).flat_map(|(a, b)| [a, b])
     }
 
     /// Remembers enough of every referenced leaf to recognise it after the content changes.
@@ -242,13 +229,7 @@ impl State {
                     check.hash = fingerprint(text, len);
                 }
                 Some(_) => {}
-                None => self.checks.push(Check {
-                    leaf: position.leaf,
-                    uid: leaf.uid,
-                    generation: leaf.generation,
-                    len,
-                    hash: fingerprint(text, len),
-                }),
+                None => self.checks.push(Check { leaf: position.leaf, uid: leaf.uid, generation: leaf.generation, len, hash: fingerprint(text, len) }),
             }
         }
     }
@@ -264,31 +245,20 @@ impl State {
         let mut moves = Vec::new();
         for check in &self.checks {
             let here = leaves.get(check.leaf);
-            if here.is_some_and(|l| {
-                (l.uid == check.uid && l.generation == check.generation)
-                    || check.matches(l.layout.text())
-            }) {
+            if here.is_some_and(|l| (l.uid == check.uid && l.generation == check.generation) || check.matches(l.layout.text())) {
                 continue;
             }
-            let found = nearest(leaves, check.leaf, |l| {
-                l.uid == check.uid && check.matches(l.layout.text())
-            })
-            .or_else(|| nearest(leaves, check.leaf, |l| check.matches(l.layout.text())));
+            let found = nearest(leaves, check.leaf, |l| l.uid == check.uid && check.matches(l.layout.text()))
+                .or_else(|| nearest(leaves, check.leaf, |l| check.matches(l.layout.text())));
             match found {
                 Some(leaf) => moves.push((check.leaf, leaf)),
                 None => return false,
             }
         }
         let remap = |position: Position| -> Option<Position> {
-            let leaf = moves
-                .iter()
-                .find(|(from, _)| *from == position.leaf)
-                .map_or(position.leaf, |(_, to)| *to);
+            let leaf = moves.iter().find(|(from, _)| *from == position.leaf).map_or(position.leaf, |(_, to)| *to);
             let layout = &leaves.get(leaf)?.layout;
-            Some(Position {
-                leaf,
-                offset: layout.floor(position.offset),
-            })
+            Some(Position { leaf, offset: layout.floor(position.offset) })
         };
         let unit = |(a, b): Unit| Some((remap(a)?, remap(b)?));
         match (self.anchor.and_then(unit), self.focus.and_then(unit)) {
@@ -304,12 +274,8 @@ impl State {
 }
 
 fn nearest(leaves: &[Leaf], around: usize, matches: impl Fn(&Leaf) -> bool) -> Option<usize> {
-    (0..leaves.len()).find_map(|distance| {
-        [around.checked_add(distance), around.checked_sub(distance)]
-            .into_iter()
-            .flatten()
-            .find(|&k| leaves.get(k).is_some_and(&matches))
-    })
+    (0..leaves.len())
+        .find_map(|distance| [around.checked_add(distance), around.checked_sub(distance)].into_iter().flatten().find(|&k| leaves.get(k).is_some_and(&matches)))
 }
 
 /// One leaf as collected: its text layout and where it is, in the area's coordinates.
@@ -335,13 +301,7 @@ impl Leaf {
     fn hit(&self, ordinal: usize, point: Point) -> (Position, Affinity) {
         let origin = self.layout.origin(self.bounds);
         let (offset, affinity) = self.layout.hit(point - (origin - Point::ORIGIN));
-        (
-            Position {
-                leaf: ordinal,
-                offset,
-            },
-            affinity,
-        )
+        (Position { leaf: ordinal, offset }, affinity)
     }
 }
 
@@ -366,11 +326,7 @@ fn locate(leaves: &[Leaf], point: Point) -> Option<(Position, Affinity, bool)> {
     for (k, leaf) in leaves.iter().enumerate() {
         let Some(v) = leaf.visible() else { continue };
         if point.y >= v.y && point.y < v.y + v.height {
-            let distance = if point.x < v.x {
-                v.x - point.x
-            } else {
-                point.x - (v.x + v.width)
-            };
+            let distance = if point.x < v.x { v.x - point.x } else { point.x - (v.x + v.width) };
             if beside.is_none_or(|(d, ..)| distance < d) {
                 beside = Some((distance, k, v));
             }
@@ -384,13 +340,7 @@ fn locate(leaves: &[Leaf], point: Point) -> Option<(Position, Affinity, bool)> {
     let position = leaves
         .iter()
         .position(|leaf| leaf.bounds.y > point.y)
-        .map_or(
-            Position {
-                leaf: last,
-                offset: leaves[last].layout.text().len(),
-            },
-            |leaf| Position { leaf, offset: 0 },
-        );
+        .map_or(Position { leaf: last, offset: leaves[last].layout.text().len() }, |leaf| Position { leaf, offset: 0 });
     Some((position, Affinity::After, false))
 }
 
@@ -404,13 +354,7 @@ fn unit(leaves: &[Leaf], granularity: Granularity, at: (Position, Affinity, bool
         Granularity::Line => layout.line_at(position.offset),
     };
     let leaf = position.leaf;
-    (
-        Position {
-            leaf,
-            offset: start,
-        },
-        Position { leaf, offset: end },
-    )
+    (Position { leaf, offset: start }, Position { leaf, offset: end })
 }
 
 /// Two leaves side by side on one row (a bullet and its item, two table cells) are joined by a
@@ -418,11 +362,7 @@ fn unit(leaves: &[Leaf], granularity: Granularity, at: (Position, Affinity, bool
 fn separator(previous: &Leaf, next: &Leaf) -> &'static str {
     let (a, b) = (previous.bounds, next.bounds);
     let same_row = b.y < a.y + a.height - 0.5 && b.y + b.height > a.y + 0.5;
-    if same_row && b.x >= a.x + a.width - 0.5 {
-        " "
-    } else {
-        "\n"
-    }
+    if same_row && b.x >= a.x + a.width - 0.5 { " " } else { "\n" }
 }
 
 /// The selected text in reading order. Empty slices at either end (a range that starts at the
@@ -433,16 +373,8 @@ fn extract(leaves: &[Leaf], (start, end): (Position, Position)) -> String {
     for k in start.leaf..=last {
         let Some(leaf) = leaves.get(k) else { break };
         let text = leaf.layout.text();
-        let from = if k == start.leaf {
-            leaf.layout.floor(start.offset)
-        } else {
-            0
-        };
-        let to = if k == end.leaf {
-            leaf.layout.floor(end.offset)
-        } else {
-            text.len()
-        };
+        let from = if k == start.leaf { leaf.layout.floor(start.offset) } else { 0 };
+        let to = if k == end.leaf { leaf.layout.floor(end.offset) } else { text.len() };
         parts.push((k, text.get(from.min(to)..to).unwrap_or("")));
     }
     while parts.first().is_some_and(|(_, part)| part.is_empty()) {
@@ -477,34 +409,15 @@ fn autoscroll_speed(beyond: f32) -> f32 {
 impl<Message> Area<'_, Message> {
     fn collect(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer) -> Collected {
         let mut collected = Collected::default();
-        let mut operation = Collect {
-            collected: &mut collected,
-            scrollables: 0,
-            frame: Frame::default(),
-            stack: vec![Frame::default()],
-        };
-        self.content
-            .as_widget_mut()
-            .operate(tree, layout, renderer, &mut operation);
+        let mut operation = Collect { collected: &mut collected, scrollables: 0, frame: Frame::default(), stack: vec![Frame::default()] };
+        self.content.as_widget_mut().operate(tree, layout, renderer, &mut operation);
         collected
     }
 
     /// Hands every leaf its part of `range`; returns whether any leaf now shows a highlight.
-    fn paint(
-        &mut self,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        range: Option<(Position, Position)>,
-    ) -> bool {
-        let mut operation = Paint {
-            range,
-            ordinal: 0,
-            painted: false,
-        };
-        self.content
-            .as_widget_mut()
-            .operate(tree, layout, renderer, &mut operation);
+    fn paint(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer, range: Option<(Position, Position)>) -> bool {
+        let mut operation = Paint { range, ordinal: 0, painted: false };
+        self.content.as_widget_mut().operate(tree, layout, renderer, &mut operation);
         operation.painted
     }
 
@@ -520,9 +433,7 @@ impl<Message> Area<'_, Message> {
             scrollable_stack: Vec::new(),
             visible_leaves: self.visible_leaves.is_some().then_some(&mut recorded),
         };
-        self.content
-            .as_widget_mut()
-            .operate(tree, layout, renderer, &mut operation);
+        self.content.as_widget_mut().operate(tree, layout, renderer, &mut operation);
         let painted = operation.painted;
         if let Some(slot) = self.visible_leaves {
             *slot.borrow_mut() = recorded;
@@ -532,21 +443,11 @@ impl<Message> Area<'_, Message> {
 
     fn sync_selection(&self, state: &State, leaves: &[Leaf]) {
         if let Some(slot) = self.selection {
-            *slot.borrow_mut() = state
-                .range()
-                .filter(|(a, b)| a != b)
-                .map(|r| extract(leaves, r))
-                .filter(|s| !s.is_empty());
+            *slot.borrow_mut() = state.range().filter(|(a, b)| a != b).map(|r| extract(leaves, r)).filter(|s| !s.is_empty());
         }
     }
 
-    fn clear(
-        &mut self,
-        state: &mut State,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-    ) -> bool {
+    fn clear(&mut self, state: &mut State, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer) -> bool {
         let had = state.anchor.is_some() || state.painted;
         state.reset();
         if state.painted {
@@ -558,14 +459,7 @@ impl<Message> Area<'_, Message> {
         had
     }
 
-    fn press(
-        &mut self,
-        state: &mut State,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        point: Point,
-    ) {
+    fn press(&mut self, state: &mut State, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer, point: Point) {
         let collected = self.collect(tree, layout, renderer);
         let click = mouse::Click::new(point, mouse::Button::Left, state.last_click);
         state.last_click = Some(click);
@@ -579,10 +473,7 @@ impl<Message> Area<'_, Message> {
             mouse::click::Kind::Triple => Granularity::Line,
         };
         let unit = unit(&collected.leaves, granularity, at);
-        let extend = granularity == Granularity::Char
-            && state.modifiers.shift()
-            && state.anchor.is_some()
-            && state.revalidate(&collected.leaves);
+        let extend = granularity == Granularity::Char && state.modifiers.shift() && state.anchor.is_some() && state.revalidate(&collected.leaves);
         if !extend {
             state.anchor = Some(unit);
         }
@@ -597,14 +488,7 @@ impl<Message> Area<'_, Message> {
     }
 
     /// Moves the focus to where the pointer is now. Returns whether the selection changed.
-    fn drag(
-        &mut self,
-        state: &mut State,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        viewport: &Rectangle,
-    ) -> bool {
+    fn drag(&mut self, state: &mut State, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer, viewport: &Rectangle) -> bool {
         let (Some(granularity), Some(point)) = (state.drag, state.cursor) else {
             return false;
         };
@@ -613,10 +497,7 @@ impl<Message> Area<'_, Message> {
             return self.clear(state, tree, layout, renderer);
         }
         // select what is visible; past the conversation's top or bottom edge, scroll it
-        let mut target = Point::new(
-            point.x.clamp(viewport.x, viewport.x + viewport.width),
-            point.y.clamp(viewport.y, viewport.y + viewport.height),
-        );
+        let mut target = Point::new(point.x.clamp(viewport.x, viewport.x + viewport.width), point.y.clamp(viewport.y, viewport.y + viewport.height));
         state.outer = collected.outer;
         state.autoscroll = 0.0;
         if let Some(outer) = collected.outer {
@@ -667,25 +548,13 @@ impl<Message> Area<'_, Message> {
             None => Duration::from_millis(16),
         };
         state.last_frame = Some(now);
-        let mut operation = ScrollBy {
-            target: outer.index,
-            seen: 0,
-            dy: state.autoscroll * elapsed.as_secs_f32(),
-        };
-        self.content
-            .as_widget_mut()
-            .operate(tree, layout, renderer, &mut operation);
+        let mut operation = ScrollBy { target: outer.index, seen: 0, dy: state.autoscroll * elapsed.as_secs_f32() };
+        self.content.as_widget_mut().operate(tree, layout, renderer, &mut operation);
         let _ = self.drag(state, tree, layout, renderer, viewport);
         shell.request_redraw();
     }
 
-    fn selected_text(
-        &mut self,
-        state: &mut State,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-    ) -> Option<String> {
+    fn selected_text(&mut self, state: &mut State, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer) -> Option<String> {
         let collected = self.collect(tree, layout, renderer);
         if !state.revalidate(&collected.leaves) {
             let _ = self.clear(state, tree, layout, renderer);
@@ -712,28 +581,24 @@ impl<Message> Area<'_, Message> {
         let captured = shell.is_event_captured();
         match event {
             // a press the content took (a button, a link, a scrollbar) is not a selection's
-            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) if !captured => {
-                match cursor.position_over(layout.bounds()) {
-                    Some(point) => {
-                        self.press(state, child, content, renderer, point);
-                        shell.capture_event();
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) if !captured => match cursor.position_over(layout.bounds()) {
+                Some(point) => {
+                    self.press(state, child, content, renderer, point);
+                    shell.capture_event();
+                    shell.request_redraw();
+                }
+                None => {
+                    if self.clear(state, child, content, renderer) {
                         shell.request_redraw();
                     }
-                    None => {
-                        if self.clear(state, child, content, renderer) {
-                            shell.request_redraw();
-                        }
-                    }
                 }
-            }
+            },
             Event::Mouse(mouse::Event::CursorMoved { .. }) if state.drag.is_some() => {
                 // a scrollable hands its content a levitating cursor once the pointer leaves
                 // it; the drag goes on wherever the pointer is
                 if let Some(point) = cursor.land().position() {
                     state.cursor = Some(point);
-                    if self.drag(state, child, content, renderer, viewport)
-                        || state.autoscroll != 0.0
-                    {
+                    if self.drag(state, child, content, renderer, viewport) || state.autoscroll != 0.0 {
                         shell.request_redraw();
                     }
                 }
@@ -772,10 +637,7 @@ impl<Message> Area<'_, Message> {
                         let collected = self.collect(child, content, renderer);
                         if let Some(last) = collected.leaves.len().checked_sub(1) {
                             let start = Position::default();
-                            let end = Position {
-                                leaf: last,
-                                offset: collected.leaves[last].layout.text().len(),
-                            };
+                            let end = Position { leaf: last, offset: collected.leaves[last].layout.text().len() };
                             state.anchor = Some((start, start));
                             state.focus = Some((end, end));
                             state.record(&collected.leaves);
@@ -785,9 +647,7 @@ impl<Message> Area<'_, Message> {
                             shell.request_redraw();
                         }
                     }
-                    keyboard::Key::Named(keyboard::key::Named::Escape)
-                        if state.anchor.is_some() =>
-                    {
+                    keyboard::Key::Named(keyboard::key::Named::Escape) if state.anchor.is_some() => {
                         let _ = self.clear(state, child, content, renderer);
                         shell.capture_event();
                         shell.request_redraw();
@@ -828,15 +688,8 @@ impl<Message> Widget<Message, Theme, Renderer> for Area<'_, Message> {
         self.content.as_widget().size_hint()
     }
 
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        let Tree {
-            state, children, ..
-        } = tree;
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) -> layout::Node {
+        let Tree { state, children, .. } = tree;
         let state = state.downcast_mut::<State>();
         let child = &mut children[0];
         let node = self.content.as_widget_mut().layout(child, renderer, limits);
@@ -881,15 +734,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Area<'_, Message> {
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        self.content.as_widget().draw(
-            &tree.children[0],
-            renderer,
-            theme,
-            style,
-            layout.children().next().expect("area content"),
-            cursor,
-            viewport,
-        );
+        self.content.as_widget().draw(&tree.children[0], renderer, theme, style, layout.children().next().expect("area content"), cursor, viewport);
     }
 
     fn update(
@@ -904,9 +749,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Area<'_, Message> {
         viewport: &Rectangle,
     ) {
         let content = layout.children().next().expect("area content");
-        let Tree {
-            state, children, ..
-        } = tree;
+        let Tree { state, children, .. } = tree;
         let state = state.downcast_mut::<State>();
         let child = &mut children[0];
 
@@ -919,12 +762,8 @@ impl<Message> Widget<Message, Theme, Renderer> for Area<'_, Message> {
             self.autoscroll(state, child, content, renderer, *now, viewport, shell);
         }
         // the content first: buttons, links and scrollbars keep their presses
-        self.content.as_widget_mut().update(
-            child, event, content, cursor, renderer, clipboard, shell, viewport,
-        );
-        self.handle(
-            state, child, event, layout, content, cursor, renderer, clipboard, shell, viewport,
-        );
+        self.content.as_widget_mut().update(child, event, content, cursor, renderer, clipboard, shell, viewport);
+        self.handle(state, child, event, layout, content, cursor, renderer, clipboard, shell, viewport);
         // a drag can also end in layout (its text went away); report whatever changed
         let dragging = state.drag.is_some();
         if dragging != state.reported {
@@ -935,39 +774,15 @@ impl<Message> Widget<Message, Theme, Renderer> for Area<'_, Message> {
         }
     }
 
-    fn mouse_interaction(
-        &self,
-        tree: &Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &Renderer,
-    ) -> mouse::Interaction {
+    fn mouse_interaction(&self, tree: &Tree, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle, renderer: &Renderer) -> mouse::Interaction {
         if tree.state.downcast_ref::<State>().drag.is_some() {
             return mouse::Interaction::Text;
         }
-        self.content.as_widget().mouse_interaction(
-            &tree.children[0],
-            layout.children().next().expect("area content"),
-            cursor,
-            viewport,
-            renderer,
-        )
+        self.content.as_widget().mouse_interaction(&tree.children[0], layout.children().next().expect("area content"), cursor, viewport, renderer)
     }
 
-    fn operate(
-        &mut self,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        operation: &mut dyn Operation,
-    ) {
-        self.content.as_widget_mut().operate(
-            &mut tree.children[0],
-            layout.children().next().expect("area content"),
-            renderer,
-            operation,
-        );
+    fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer, operation: &mut dyn Operation) {
+        self.content.as_widget_mut().operate(&mut tree.children[0], layout.children().next().expect("area content"), renderer, operation);
     }
 
     fn overlay<'b>(
@@ -978,13 +793,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Area<'_, Message> {
         viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
-        self.content.as_widget_mut().overlay(
-            &mut tree.children[0],
-            layout.children().next().expect("area content"),
-            renderer,
-            viewport,
-            translation,
-        )
+        self.content.as_widget_mut().overlay(&mut tree.children[0], layout.children().next().expect("area content"), renderer, viewport, translation)
     }
 }
 
@@ -1021,36 +830,17 @@ impl Operation for Collect<'_> {
         self.frame = self.stack.last().copied().unwrap_or_default();
     }
 
-    fn scrollable(
-        &mut self,
-        _id: Option<&Id>,
-        bounds: Rectangle,
-        content_bounds: Rectangle,
-        translation: Vector,
-        _state: &mut dyn Scrollable,
-    ) {
+    fn scrollable(&mut self, _id: Option<&Id>, bounds: Rectangle, content_bounds: Rectangle, translation: Vector, _state: &mut dyn Scrollable) {
         let viewport = bounds + self.frame.translation;
         let visible = match self.frame.clip {
-            Some(clip) => clip
-                .intersection(&viewport)
-                .unwrap_or(Rectangle::new(viewport.position(), Size::ZERO)),
+            Some(clip) => clip.intersection(&viewport).unwrap_or(Rectangle::new(viewport.position(), Size::ZERO)),
             None => viewport,
         };
-        if self.frame.depth == 0
-            && self.collected.outer.is_none()
-            && content_bounds.height > bounds.height + 0.5
-        {
-            self.collected.outer = Some(Outer {
-                index: self.scrollables,
-                viewport: visible,
-            });
+        if self.frame.depth == 0 && self.collected.outer.is_none() && content_bounds.height > bounds.height + 0.5 {
+            self.collected.outer = Some(Outer { index: self.scrollables, viewport: visible });
         }
         self.scrollables += 1;
-        self.frame = Frame {
-            clip: Some(visible),
-            translation: self.frame.translation - translation,
-            depth: self.frame.depth + 1,
-        };
+        self.frame = Frame { clip: Some(visible), translation: self.frame.translation - translation, depth: self.frame.depth + 1 };
     }
 
     fn custom(&mut self, _id: Option<&Id>, bounds: Rectangle, state: &mut dyn Any) {
@@ -1089,14 +879,8 @@ impl Operation for Paint {
             let k = self.ordinal;
             self.ordinal += 1;
             let part = self.range.and_then(|(start, end)| {
-                (start.leaf <= k && k <= end.leaf).then_some((
-                    if k == start.leaf { start.offset } else { 0 },
-                    if k == end.leaf {
-                        end.offset
-                    } else {
-                        usize::MAX
-                    },
-                ))
+                (start.leaf <= k && k <= end.leaf)
+                    .then_some((if k == start.leaf { start.offset } else { 0 }, if k == end.leaf { end.offset } else { usize::MAX }))
             });
             selectable.set_highlight(part);
             self.painted |= selectable.is_highlighted();
@@ -1132,14 +916,7 @@ impl Operation for PaintFind<'_> {
         }
     }
 
-    fn scrollable(
-        &mut self,
-        _id: Option<&Id>,
-        bounds: Rectangle,
-        _content_bounds: Rectangle,
-        translation: Vector,
-        _state: &mut dyn Scrollable,
-    ) {
+    fn scrollable(&mut self, _id: Option<&Id>, bounds: Rectangle, _content_bounds: Rectangle, translation: Vector, _state: &mut dyn Scrollable) {
         self.entered_scrollable = Some((bounds.y, translation.y));
     }
 
@@ -1160,26 +937,16 @@ impl Operation for PaintFind<'_> {
         if let Some(out) = self.visible_leaves.as_deref_mut() {
             let origin = selectable.origin(bounds);
             let (scroll_y, view_top) = self.scrollable_stack.first().copied().unwrap_or_default();
-            out.push(VisibleLeaf {
-                row: self.current_row,
-                origin_y: origin.y - scroll_y,
-                view_top,
-                layout: selectable.layout().clone(),
-            });
+            out.push(VisibleLeaf { row: self.current_row, origin_y: origin.y - scroll_y, view_top, layout: selectable.layout().clone() });
         }
         let Some(query) = self.query.filter(|q| !q.needle.is_empty()) else {
             selectable.set_find(Vec::new(), None);
             return;
         };
-        let ranges =
-            crate::find::match_ranges(selectable.text(), &query.needle, query.case_sensitive);
+        let ranges = crate::find::match_ranges(selectable.text(), &query.needle, query.case_sensitive);
         let count = ranges.len();
         let current_in_leaf = match (query.current, self.current_row) {
-            (Some((target_row, occ)), Some(row))
-                if row == target_row && (self.row_seen..self.row_seen + count).contains(&occ) =>
-            {
-                Some(occ - self.row_seen)
-            }
+            (Some((target_row, occ)), Some(row)) if row == target_row && (self.row_seen..self.row_seen + count).contains(&occ) => Some(occ - self.row_seen),
             _ => None,
         };
         if self.current_row.is_some() {
@@ -1204,20 +971,9 @@ impl Operation for ScrollBy {
         }
     }
 
-    fn scrollable(
-        &mut self,
-        _id: Option<&Id>,
-        bounds: Rectangle,
-        content_bounds: Rectangle,
-        _translation: Vector,
-        state: &mut dyn Scrollable,
-    ) {
+    fn scrollable(&mut self, _id: Option<&Id>, bounds: Rectangle, content_bounds: Rectangle, _translation: Vector, state: &mut dyn Scrollable) {
         if self.seen == self.target {
-            state.scroll_by(
-                AbsoluteOffset { x: 0.0, y: self.dy },
-                bounds,
-                content_bounds,
-            );
+            state.scroll_by(AbsoluteOffset { x: 0.0, y: self.dy }, bounds, content_bounds);
         }
         self.seen += 1;
     }

@@ -15,13 +15,9 @@ impl App {
         let workspaces = self.workspaces_page_load();
         let changes = blocking(
             move || {
-                let (entries, unreadable) = actions
-                    .reading(sill_client::changes::listing)
-                    .map_err(|e| format!("{e:#}"))?;
+                let (entries, unreadable) = actions.reading(sill_client::changes::listing).map_err(|e| format!("{e:#}"))?;
                 // unread settings: no countdown rather than a wrong one
-                let minutes = actions
-                    .read::<sill_proto::admin::Settings>("_sill/settings.get", json!({}))
-                    .map_or(0, |s| sill_client::changes::auto_revert(&s));
+                let minutes = actions.read::<sill_proto::admin::Settings>("_sill/settings.get", json!({})).map_or(0, |s| sill_client::changes::auto_revert(&s));
                 Ok((entries, unreadable, minutes))
             },
             |loaded| Message::Changes(Event::Loaded(loaded)),
@@ -36,11 +32,7 @@ impl App {
         };
         let append = before.is_some();
         blocking(
-            move || {
-                actions
-                    .reading(|c| sill_client::changes::history(c, before.clone()))
-                    .map_err(|e| format!("{e:#}"))
-            },
+            move || actions.reading(|c| sill_client::changes::history(c, before.clone())).map_err(|e| format!("{e:#}")),
             move |page| Message::Changes(Event::HistoryLoaded(page, append)),
         )
     }
@@ -70,8 +62,7 @@ impl App {
                 if let Some(Ok(entries)) = &listing.entries {
                     page.fresh_entries = true;
                     let keys: Vec<String> = entries.iter().map(changes::entry_key).collect();
-                    page.open
-                        .retain(|k, _| changes_ui::workspace_of(k).is_some() || keys.contains(k));
+                    page.open.retain(|k, _| changes_ui::workspace_of(k).is_some() || keys.contains(k));
                     // a revert whose entry went is not waited for (a group's: its first entry)
                     let gone = page.armed.get().is_some_and(|armed| {
                         let key = match armed {
@@ -141,17 +132,10 @@ impl App {
                 let target = changes::target(entry);
                 page.open.insert(key.clone(), None);
                 let Some(actions) = self.actions.clone() else {
-                    return Task::done(Message::Changes(Event::DiffLoaded(
-                        key,
-                        Ok(demo::changes_diff()),
-                    )));
+                    return Task::done(Message::Changes(Event::DiffLoaded(key, Ok(demo::changes_diff()))));
                 };
                 return blocking(
-                    move || {
-                        actions
-                            .reading(|c| changes::diff(c, target.clone()))
-                            .map_err(|e| format!("{e:#}"))
-                    },
+                    move || actions.reading(|c| changes::diff(c, target.clone())).map_err(|e| format!("{e:#}")),
                     move |diff| Message::Changes(Event::DiffLoaded(key, diff)),
                 );
             }
@@ -168,20 +152,13 @@ impl App {
                     *slot = Some(diff);
                 }
             }
-            event @ (Event::Keep(_)
-            | Event::KeepAll(_)
-            | Event::Revert(_)
-            | Event::RevertAll(_)
-            | Event::Undo(_)) => {
+            event @ (Event::Keep(_) | Event::KeepAll(_) | Event::Revert(_) | Event::RevertAll(_) | Event::Undo(_)) => {
                 let (keys, armed_as) = match &event {
                     Event::Keep(key) | Event::Undo(key) => (vec![key.clone()], None),
                     Event::KeepAll(keys) => (keys.clone(), None),
                     Event::Revert(key) => (vec![key.clone()], Some(Reverting::One(key.clone()))),
                     // an empty group has nothing to revert and asks nothing
-                    Event::RevertAll(keys) => (
-                        keys.clone(),
-                        (!keys.is_empty()).then(|| Reverting::All(keys.clone())),
-                    ),
+                    Event::RevertAll(keys) => (keys.clone(), (!keys.is_empty()).then(|| Reverting::All(keys.clone()))),
                     _ => unreachable!(),
                 };
                 // the listing from before the page was opened is shown, not acted on
@@ -203,33 +180,17 @@ impl App {
                     return Task::none();
                 };
                 let (verb, requests) = match (&event, first) {
-                    (Event::Revert(_), Entry::Live { repo, path, .. }) => {
-                        ("reverted", vec![changes::git_revert(repo, path)])
-                    }
-                    (
-                        Event::Undo(_),
-                        Entry::Kept {
-                            session_id,
-                            keep_id,
-                            ..
-                        },
-                    ) => ("undone", vec![changes::undo(session_id, keep_id)]),
+                    (Event::Revert(_), Entry::Live { repo, path, .. }) => ("reverted", vec![changes::git_revert(repo, path)]),
+                    (Event::Undo(_), Entry::Kept { session_id, keep_id, .. }) => ("undone", vec![changes::undo(session_id, keep_id)]),
                     // the daemon takes 128 paths a request: more go in several
-                    (Event::Keep(_) | Event::KeepAll(_), Entry::Overlay { session_id, .. }) => {
-                        ("kept", changes::keep_all(session_id, &entries))
-                    }
-                    (Event::Revert(_) | Event::RevertAll(_), Entry::Overlay { session_id, .. }) => {
-                        ("reverted", changes::revert_all(session_id, &entries))
-                    }
+                    (Event::Keep(_) | Event::KeepAll(_), Entry::Overlay { session_id, .. }) => ("kept", changes::keep_all(session_id, &entries)),
+                    (Event::Revert(_) | Event::RevertAll(_), Entry::Overlay { session_id, .. }) => ("reverted", changes::revert_all(session_id, &entries)),
                     _ => return Task::none(),
                 };
                 let Some(actions) = self.actions.clone() else {
                     return Task::none();
                 };
-                return blocking(
-                    move || changes::call_all(&actions, requests),
-                    move |outcome| Message::Done(String::new(), Act::Changes(verb), outcome),
-                );
+                return blocking(move || changes::call_all(&actions, requests), move |outcome| Message::Done(String::new(), Act::Changes(verb), outcome));
             }
         }
         Task::none()

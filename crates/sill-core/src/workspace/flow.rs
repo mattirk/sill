@@ -20,12 +20,8 @@ use anyhow::{Context, Result, bail};
 use super::{Stop, ok, ok_raw, read_tree_stop, run};
 use crate::changes::Git;
 
-pub(super) const IDENT: [(&str, &str); 4] = [
-    ("GIT_AUTHOR_NAME", "sill"),
-    ("GIT_AUTHOR_EMAIL", "sill@localhost"),
-    ("GIT_COMMITTER_NAME", "sill"),
-    ("GIT_COMMITTER_EMAIL", "sill@localhost"),
-];
+pub(super) const IDENT: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "sill"), ("GIT_AUTHOR_EMAIL", "sill@localhost"), ("GIT_COMMITTER_NAME", "sill"), ("GIT_COMMITTER_EMAIL", "sill@localhost")];
 
 pub(super) fn rev(git: &Git, what: &str) -> Result<String> {
     let mut c = git.cmd();
@@ -149,11 +145,7 @@ pub(super) type Have = Option<(String, String)>;
 /// into the workspace's store). Files no attribute converts — nearly all — are hashed by one
 /// `hash-object` per 128; one with `text`, `eol`, `ident`, `filter` or an encoding set is hashed
 /// on its own with its path named.
-pub(super) fn worktree_entries(
-    store: &Git,
-    root: &Path,
-    paths: &[String],
-) -> Result<Vec<(String, Have)>> {
+pub(super) fn worktree_entries(store: &Git, root: &Path, paths: &[String]) -> Result<Vec<(String, Have)>> {
     use rustix::fs::{AtFlags, FileType, Mode, OFlags, RawMode, ResolveFlags, fstat, openat2, readlinkat, statat};
     use rustix::io::Errno;
     use std::os::fd::{AsRawFd, OwnedFd};
@@ -438,8 +430,7 @@ fn equivalent_prefix(ws: &Git, dest: &str, tip: &str, mut upstream: String) -> R
     let mut c = ws.cmd();
     c.args(["cherry", dest, tip, &upstream]);
     let cherry = ok(c, "compare rebased workspace patches")?;
-    let equivalent: std::collections::BTreeSet<_> =
-        cherry.lines().filter_map(|line| line.strip_prefix("- ")).collect();
+    let equivalent: std::collections::BTreeSet<_> = cherry.lines().filter_map(|line| line.strip_prefix("- ")).collect();
     if equivalent.is_empty() {
         return Ok(upstream);
     }
@@ -486,11 +477,7 @@ pub(super) fn diff_tree(git: &Git, from: &str, to: &str) -> Result<Vec<Entry>> {
         if f.len() < 5 {
             continue;
         }
-        entries.push(Entry {
-            mode: f[1].to_string(),
-            blob: (!f[4].starts_with('D')).then(|| f[3].to_string()),
-            path: path.to_string(),
-        });
+        entries.push(Entry { mode: f[1].to_string(), blob: (!f[4].starts_with('D')).then(|| f[3].to_string()), path: path.to_string() });
     }
     Ok(entries)
 }
@@ -800,11 +787,8 @@ pub fn copy(source: &Path, clone: &Path, branch: &str, expected: &str, before: &
         return Ok(Err(Stop::NeedsPrepare));
     }
     let state = worktree_tree(&ws, clone)?;
-    let changes: BTreeMap<String, Have> = diff_tree(&ws, expected, &state)?
-        .into_iter()
-        .filter(|e| e.mode != "160000")
-        .map(|e| (e.path, e.blob.map(|b| (e.mode, b))))
-        .collect();
+    let changes: BTreeMap<String, Have> =
+        diff_tree(&ws, expected, &state)?.into_iter().filter(|e| e.mode != "160000").map(|e| (e.path, e.blob.map(|b| (e.mode, b)))).collect();
     // a path the last copy wrote that the workspace no longer changes goes back too
     let paths: Vec<String> = changes.keys().chain(before.keys()).cloned().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
     let base = tree_entries(&ws, expected, &paths)?;
@@ -819,7 +803,8 @@ pub fn copy(source: &Path, clone: &Path, branch: &str, expected: &str, before: &
         let clean = blob == base.get(&path).map(|(_, b)| b) && !on_disk.as_ref().is_some_and(|m| m.is_dir());
         let wrote = before.get(&path).is_some_and(|w| w.as_ref() == blob);
         // something on the way down to it that is no directory
-        let blocked = want.is_some() && Path::new(&path).ancestors().skip(1).any(|d| !d.as_os_str().is_empty() && std::fs::symlink_metadata(source.join(d)).is_ok_and(|m| !m.is_dir()));
+        let blocked = want.is_some()
+            && Path::new(&path).ancestors().skip(1).any(|d| !d.as_os_str().is_empty() && std::fs::symlink_metadata(source.join(d)).is_ok_and(|m| !m.is_dir()));
         if (clean || wrote) && !blocked {
             write.push((path, want));
         } else if base.contains_key(&path) {
@@ -925,13 +910,7 @@ pub fn reset_to(clone: &Path, workspace_branch: &str, state: &str, at: &str) -> 
 /// (`refs/sill/workspaces/<id>/discarded/<n>`, for Undo even after the folder is reused), then
 /// reset the clone to the person's commit ([`discard_target`]), clean. Returns the discarded
 /// snapshot.
-pub fn discard(
-    source: &Path,
-    clone: &Path,
-    id: &str,
-    n: &str,
-    workspace_branch: &str,
-) -> Result<String> {
+pub fn discard(source: &Path, clone: &Path, id: &str, n: &str, workspace_branch: &str) -> Result<String> {
     discard_retained(source, clone, id, n, workspace_branch, |_| Ok(()))
 }
 
@@ -956,10 +935,7 @@ pub(super) fn discard_retained(
     let mut c = src.cmd_write();
     c.args(["fetch", "-q", "--no-tags", "--no-write-fetch-head"])
         .arg(ws.view_dir())
-        .arg(format!(
-            "+refs/sill/discarding:{}",
-            super::anchor_ref(id, &format!("discarded/{n}"))
-        ));
+        .arg(format!("+refs/sill/discarding:{}", super::anchor_ref(id, &format!("discarded/{n}"))));
     ok(c, "keep the discarded work")?;
     drop(ws);
     let at = discard_target(source, clone, workspace_branch)?;

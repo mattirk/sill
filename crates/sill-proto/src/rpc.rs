@@ -125,7 +125,11 @@ pub struct Incoming {
 /// Public domain errors preserve unknown codes. Clients must not retry mutations on an
 /// unfamiliar error, timeout or disconnection.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct DomainData { pub code: String, #[serde(skip_serializing_if="Option::is_none")] pub details: Option<DomainDetails> }
+pub struct DomainData {
+    pub code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<DomainDetails>,
+}
 /// `details` by code. Only the codes listed in [`detail_codes`] carry details; for those, the
 /// record shape is fixed by sfp/1 and may only gain optional fields. Clients ignore unknown fields.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -138,10 +142,14 @@ pub enum DomainDetails {
 }
 /// `incompatible`: the protocol identities the daemon supports. Always present.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct IncompatibleDetails { pub supported_protocols: Vec<String> }
+pub struct IncompatibleDetails {
+    pub supported_protocols: Vec<String>,
+}
 /// `stale_answer`: the question as currently resolved. Always present.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct StaleAnswerDetails { pub question: crate::sfp::Question }
+pub struct StaleAnswerDetails {
+    pub question: crate::sfp::Question,
+}
 /// `limit_exceeded`: which kind of bound was hit, so a client knows what could succeed instead.
 /// Always present.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -168,7 +176,9 @@ pub enum LimitScope {
 /// `unsupported`: present when the method or feature needs a capability the connection did not
 /// negotiate. Absent when the refusal is about the target (platform, policy, agent).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct UnsupportedDetails { pub capability: String }
+pub struct UnsupportedDetails {
+    pub capability: String,
+}
 
 /// `invalid_state` (with `sill.workspaces`): why a workspace operation cannot run, as a stable
 /// reason (`stale_revision`, `source_overlap`, `submodules`…), and the files involved.

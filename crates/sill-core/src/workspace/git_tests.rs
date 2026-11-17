@@ -332,14 +332,14 @@ fn no_program_from_either_config_runs_on_the_host() {
     let kept = super::flow::discard(&s, &c.path, "ab12", "1", &c.branch).unwrap();
     assert!(super::flow::undo(&s, &c.path, &c.branch, &kept).unwrap());
     // (inspect would now refuse it: the applied .gitattributes names a filter its config defines)
-    let again = Source { root: s.clone(), branch: "main".into(), head: git(&s, &["rev-parse", "main"]), object_format: "sha1".into(), shallow: false, dirty: true };
+    let again =
+        Source { root: s.clone(), branch: "main".into(), head: git(&s, &["rev-parse", "main"]), object_format: "sha1".into(), shallow: false, dirty: true };
     let to = path_for(&d.0.join("ws"), &again, "cd34", "again");
     create_as(&again, "cd34", "again", &to, "op-2", seed::How::Bytes).unwrap();
     drop_anchors(&s, "ab12").unwrap();
     let ran = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(ran.is_empty(), "programs ran on the host: {ran}");
 }
-
 
 /// A filter driver of the person's own configuration (git-lfs after `git lfs install`) named by
 /// the agent's `.gitattributes`: found wherever their configuration keeps it, and run by neither

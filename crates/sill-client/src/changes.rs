@@ -4,11 +4,8 @@
 //! requests and diffs, without a toolkit.
 use serde_json::{Value, json};
 use sill_proto::Client;
+use sill_proto::changes::{Diff, DiffPage, Done, GitRevert, History, HistoryPage, Keep, KeepItem, List, Page, Revert, Target, Undo};
 pub use sill_proto::changes::{Entry, Unreadable};
-use sill_proto::changes::{
-    Diff, DiffPage, Done, GitRevert, History, HistoryPage, Keep, KeepItem, List, Page, Revert,
-    Target, Undo,
-};
 use sill_proto::sessions::HostPath;
 
 use crate::files::key;
@@ -20,9 +17,7 @@ pub const AUTO_REVERT_DEFAULT: u64 = 1440;
 
 /// The auto-revert minutes a settings record means: its value, or the default when unset.
 pub fn auto_revert(settings: &sill_proto::admin::Settings) -> u64 {
-    settings
-        .auto_revert_minutes
-        .map_or(AUTO_REVERT_DEFAULT, u64::from)
+    settings.auto_revert_minutes.map_or(AUTO_REVERT_DEFAULT, u64::from)
 }
 
 /// One request: the method and its parameters.
@@ -33,12 +28,7 @@ pub enum Kind {
     /// A pinned repository's own changes: live on the host, as git sees them.
     Live { repo: HostPath },
     /// A session's writes outside its pins, in one repository (or none).
-    Session {
-        session_id: String,
-        title: String,
-        ghost: bool,
-        repo: Option<HostPath>,
-    },
+    Session { session_id: String, title: String, ghost: bool, repo: Option<HostPath> },
     /// Changes kept from a session, which can be undone.
     Kept { session_id: String, title: String },
 }
@@ -65,44 +55,16 @@ pub fn groups(entries: &[Entry]) -> Vec<Group> {
     let mut groups: Vec<(String, Group)> = vec![];
     for entry in entries {
         let (name, kind) = match entry {
-            Entry::Live { repo, .. } => (
-                format!("live {}", key(repo)),
-                Kind::Live { repo: repo.clone() },
-            ),
-            Entry::Overlay {
-                session_id,
-                title,
-                ghost,
-                repo,
-                ..
-            } => (
+            Entry::Live { repo, .. } => (format!("live {}", key(repo)), Kind::Live { repo: repo.clone() }),
+            Entry::Overlay { session_id, title, ghost, repo, .. } => (
                 format!("session {session_id} {}", repo.as_ref().map_or("", key)),
-                Kind::Session {
-                    session_id: session_id.clone(),
-                    title: title.clone(),
-                    ghost: *ghost,
-                    repo: repo.clone(),
-                },
+                Kind::Session { session_id: session_id.clone(), title: title.clone(), ghost: *ghost, repo: repo.clone() },
             ),
-            Entry::Kept {
-                session_id, title, ..
-            } => (
-                format!("kept {session_id}"),
-                Kind::Kept {
-                    session_id: session_id.clone(),
-                    title: title.clone(),
-                },
-            ),
+            Entry::Kept { session_id, title, .. } => (format!("kept {session_id}"), Kind::Kept { session_id: session_id.clone(), title: title.clone() }),
         };
         match groups.iter_mut().find(|(n, _)| *n == name) {
             Some((_, group)) => group.entries.push(entry.clone()),
-            None => groups.push((
-                name,
-                Group {
-                    kind,
-                    entries: vec![entry.clone()],
-                },
-            )),
+            None => groups.push((name, Group { kind, entries: vec![entry.clone()] })),
         }
     }
     let rank = |g: &Group| match g.kind {
@@ -192,14 +154,8 @@ pub fn sections<'a>(entries: &[Entry], details: &'a [sill_proto::workspaces::Det
 pub fn entry_key(entry: &Entry) -> String {
     match entry {
         Entry::Live { repo, path, .. } => format!("live {} {}", key(repo), key(path)),
-        Entry::Overlay {
-            session_id, path, ..
-        } => format!("overlay {session_id} {}", key(path)),
-        Entry::Kept {
-            session_id,
-            keep_id,
-            ..
-        } => format!("kept {session_id} {keep_id}"),
+        Entry::Overlay { session_id, path, .. } => format!("overlay {session_id} {}", key(path)),
+        Entry::Kept { session_id, keep_id, .. } => format!("kept {session_id} {keep_id}"),
     }
 }
 
@@ -212,24 +168,9 @@ pub fn path(entry: &Entry) -> &HostPath {
 /// What the entry's diff is read from.
 pub fn target(entry: &Entry) -> Target {
     match entry {
-        Entry::Live { repo, path, .. } => Target::Live {
-            repo: repo.clone(),
-            path: path.clone(),
-        },
-        Entry::Overlay {
-            session_id, path, ..
-        } => Target::Change {
-            session_id: session_id.clone(),
-            path: path.clone(),
-        },
-        Entry::Kept {
-            session_id,
-            keep_id,
-            ..
-        } => Target::Kept {
-            session_id: session_id.clone(),
-            keep_id: keep_id.clone(),
-        },
+        Entry::Live { repo, path, .. } => Target::Live { repo: repo.clone(), path: path.clone() },
+        Entry::Overlay { session_id, path, .. } => Target::Change { session_id: session_id.clone(), path: path.clone() },
+        Entry::Kept { session_id, keep_id, .. } => Target::Kept { session_id: session_id.clone(), keep_id: keep_id.clone() },
     }
 }
 
@@ -239,26 +180,17 @@ pub fn keep(session_id: &str, entries: &[&Entry]) -> Request {
     let items = entries
         .iter()
         .filter_map(|e| match e {
-            Entry::Overlay { path, hash, .. } => Some(KeepItem {
-                path: path.clone(),
-                expected_hash: hash.clone(),
-            }),
+            Entry::Overlay { path, hash, .. } => Some(KeepItem { path: path.clone(), expected_hash: hash.clone() }),
             _ => None,
         })
         .collect();
-    let keep = Keep {
-        session_id: session_id.into(),
-        items,
-    };
+    let keep = Keep { session_id: session_id.into(), items };
     ("_sill/changes.keep", json!(keep))
 }
 
 /// Drop these overlay writes.
 pub fn revert(session_id: &str, entries: &[&Entry]) -> Request {
-    let revert = Revert {
-        session_id: session_id.into(),
-        paths: entries.iter().map(|e| path(e).clone()).collect(),
-    };
+    let revert = Revert { session_id: session_id.into(), paths: entries.iter().map(|e| path(e).clone()).collect() };
     ("_sill/changes.revert", json!(revert))
 }
 
@@ -266,9 +198,7 @@ pub fn revert(session_id: &str, entries: &[&Entry]) -> Request {
 pub const BATCH: usize = 128;
 
 fn depth(entry: &Entry) -> usize {
-    path(entry)
-        .to_path()
-        .map_or(0, |p| p.components().count())
+    path(entry).to_path().map_or(0, |p| p.components().count())
 }
 
 /// Keep any number of entries: requests of at most `BATCH`, folders before what is in them (a
@@ -276,10 +206,7 @@ fn depth(entry: &Entry) -> usize {
 pub fn keep_all(session_id: &str, entries: &[&Entry]) -> Vec<Request> {
     let mut entries = entries.to_vec();
     entries.sort_by_key(|e| depth(e));
-    entries
-        .chunks(BATCH)
-        .map(|batch| keep(session_id, batch))
-        .collect()
+    entries.chunks(BATCH).map(|batch| keep(session_id, batch)).collect()
 }
 
 /// Revert any number of entries: requests of at most `BATCH`, deepest first. What is inside a
@@ -289,13 +216,7 @@ pub fn revert_all(session_id: &str, entries: &[&Entry]) -> Vec<Request> {
     let created: Vec<std::path::PathBuf> = entries
         .iter()
         .filter_map(|e| match e {
-            Entry::Overlay {
-                path,
-                kind,
-                file_type,
-                conflict: false,
-                ..
-            } if kind == "added" && file_type == "dir" => path.to_path().ok(),
+            Entry::Overlay { path, kind, file_type, conflict: false, .. } if kind == "added" && file_type == "dir" => path.to_path().ok(),
             _ => None,
         })
         .collect();
@@ -310,10 +231,7 @@ pub fn revert_all(session_id: &str, entries: &[&Entry]) -> Vec<Request> {
         })
         .collect();
     entries.sort_by_key(|e| std::cmp::Reverse(depth(e)));
-    entries
-        .chunks(BATCH)
-        .map(|batch| revert(session_id, batch))
-        .collect()
+    entries.chunks(BATCH).map(|batch| revert(session_id, batch)).collect()
 }
 
 /// Make the requests in order and answer as one: what each did, together. The first that is not
@@ -321,10 +239,7 @@ pub fn revert_all(session_id: &str, entries: &[&Entry]) -> Vec<Request> {
 pub fn call_all(actions: &crate::actions::Actions, requests: Vec<Request>) -> crate::actions::Outcome {
     use crate::actions::Outcome;
     let single = requests.len() == 1;
-    let mut all = Done {
-        done: vec![],
-        failed: vec![],
-    };
+    let mut all = Done { done: vec![], failed: vec![] };
     for (method, params) in requests {
         match actions.call(method, params) {
             Outcome::Done(value) if single => return Outcome::Done(value),
@@ -342,33 +257,19 @@ pub fn call_all(actions: &crate::actions::Actions, requests: Vec<Request>) -> cr
 
 /// Undo a keep: the host file goes back to what it was before.
 pub fn undo(session_id: &str, keep_id: &str) -> Request {
-    let undo = Undo {
-        session_id: session_id.into(),
-        keep_ids: vec![keep_id.into()],
-        force: false,
-    };
+    let undo = Undo { session_id: session_id.into(), keep_ids: vec![keep_id.into()], force: false };
     ("_sill/changes.undo", json!(undo))
 }
 
 /// `git checkout HEAD` for a pinned repository's file; an untracked file is removed.
 pub fn git_revert(repo: &HostPath, path: &HostPath) -> Request {
-    let revert = GitRevert {
-        repo: repo.clone(),
-        path: path.clone(),
-    };
+    let revert = GitRevert { repo: repo.clone(), path: path.clone() };
     ("_sill/changes.git-revert", json!(revert))
 }
 
 /// Can be kept: an overlay write the host has not changed meanwhile, of a path sill keeps.
 pub fn keepable(entry: &Entry) -> bool {
-    matches!(
-        entry,
-        Entry::Overlay {
-            conflict: false,
-            protected: None,
-            ..
-        }
-    )
+    matches!(entry, Entry::Overlay { conflict: false, protected: None, .. })
 }
 
 /// Goes with "Keep all": a plain file the session wrote or changed, checked against the content
@@ -407,13 +308,7 @@ fn list_once(client: &Client) -> anyhow::Result<(Vec<Entry>, Vec<Unreadable>)> {
     let mut unreadable = vec![];
     let mut after = None;
     loop {
-        let page: Page = client.call(
-            "_sill/changes.list",
-            List {
-                after,
-                limit: Some(128),
-            },
-        )?;
+        let page: Page = client.call("_sill/changes.list", List { after, limit: Some(128) })?;
         entries.extend(page.entries);
         unreadable.extend(page.unreadable);
         anyhow::ensure!(entries.len() <= 20_000, "too many changes to show");
@@ -426,14 +321,7 @@ fn list_once(client: &Client) -> anyhow::Result<(Vec<Entry>, Vec<Unreadable>)> {
 
 /// History before `before` (newest first).
 pub fn history(client: &Client, before: Option<String>) -> anyhow::Result<HistoryPage> {
-    client.call(
-        "_sill/changes.history",
-        History {
-            before,
-            limit: Some(100),
-            ..History::default()
-        },
-    )
+    client.call("_sill/changes.history", History { before, limit: Some(100), ..History::default() })
 }
 
 /// An entry's whole diff, read page by page against one fingerprint: a file that changes
@@ -443,25 +331,12 @@ pub fn diff(client: &Client, target: Target) -> anyhow::Result<String> {
     let mut offset = None;
     let mut fingerprint: Option<String> = None;
     loop {
-        let page: DiffPage = client.call(
-            "_sill/changes.diff",
-            Diff {
-                target: target.clone(),
-                offset: offset.clone(),
-                fingerprint: fingerprint.clone(),
-            },
-        )?;
+        let page: DiffPage = client.call("_sill/changes.diff", Diff { target: target.clone(), offset: offset.clone(), fingerprint: fingerprint.clone() })?;
         if let Some(expected) = &fingerprint {
-            anyhow::ensure!(
-                *expected == page.fingerprint,
-                "The file changed while reading its diff. Open it again."
-            );
+            anyhow::ensure!(*expected == page.fingerprint, "The file changed while reading its diff. Open it again.");
         }
         text.push_str(&page.text);
-        anyhow::ensure!(
-            text.len() <= crate::files::MAX_TEXT,
-            "This diff exceeds the 2 MiB preview limit."
-        );
+        anyhow::ensure!(text.len() <= crate::files::MAX_TEXT, "This diff exceeds the 2 MiB preview limit.");
         match page.next_offset {
             Some(next) => {
                 offset = Some(next);
@@ -483,11 +358,7 @@ pub fn said(verb: &str, value: &Value) -> String {
         n => format!("{verb}: {n} files"),
     };
     if !done.failed.is_empty() {
-        let why: Vec<String> = done
-            .failed
-            .iter()
-            .map(|f| format!("{} ({})", crate::files::name(&f.path), f.message))
-            .collect();
+        let why: Vec<String> = done.failed.iter().map(|f| format!("{} ({})", crate::files::name(&f.path), f.message)).collect();
         line.push_str(&format!("; not done: {}", why.join(", ")));
     }
     line
@@ -496,14 +367,7 @@ pub fn said(verb: &str, value: &Value) -> String {
 /// When an overlay write reverts by itself, in seconds from `now`: a ghost's after an hour, other
 /// writes outside a repository after Settings → auto-revert (0 is off).
 pub fn reverts_in(entry: &Entry, auto_revert_minutes: u64, now: i64) -> Option<u64> {
-    let Entry::Overlay {
-        ghost,
-        written,
-        repo,
-        conflict: false,
-        ..
-    } = entry
-    else {
+    let Entry::Overlay { ghost, written, repo, conflict: false, .. } = entry else {
         return None;
     };
     let minutes = if *ghost {
@@ -521,11 +385,7 @@ pub fn reverts_in(entry: &Entry, auto_revert_minutes: u64, now: i64) -> Option<u
 /// `45 min`, `17 h`.
 pub fn human(seconds: u64) -> String {
     let minutes = seconds.div_ceil(60);
-    if minutes >= 120 {
-        format!("{} h", minutes / 60)
-    } else {
-        format!("{minutes} min")
-    }
+    if minutes >= 120 { format!("{} h", minutes / 60) } else { format!("{minutes} min") }
 }
 
 #[cfg(test)]
@@ -640,14 +500,8 @@ mod tests {
         serde_json::from_value::<Keep>(params.clone()).unwrap();
         assert_eq!(params["items"][0]["expected_hash"], "h1");
         let (_, params) = undo("s1", "k1");
-        assert_eq!(
-            params,
-            json!({"session_id":"s1", "keep_ids":["k1"], "force": false})
-        );
-        assert_eq!(
-            git_revert(&path("/r"), &path("/r/x")).0,
-            "_sill/changes.git-revert"
-        );
+        assert_eq!(params, json!({"session_id":"s1", "keep_ids":["k1"], "force": false}));
+        assert_eq!(git_revert(&path("/r"), &path("/r/x")).0, "_sill/changes.git-revert");
     }
 
     #[test]
@@ -694,16 +548,8 @@ mod tests {
         assert_eq!(human(17 * 3_600), "17 h");
         let done = json!({"done":[{"path": path("/tmp/a"), "message":""}],
                           "failed":[{"path": path("/tmp/b"), "message":"changed on the host"}]});
-        assert_eq!(
-            said("kept", &done),
-            "kept: a; not done: b (changed on the host)"
-        );
-        let unset: sill_proto::admin::Settings =
-            serde_json::from_value(json!({"theme": "dracula"})).unwrap();
-        assert_eq!(
-            auto_revert(&unset),
-            AUTO_REVERT_DEFAULT,
-            "unset is a day, not off"
-        );
+        assert_eq!(said("kept", &done), "kept: a; not done: b (changed on the host)");
+        let unset: sill_proto::admin::Settings = serde_json::from_value(json!({"theme": "dracula"})).unwrap();
+        assert_eq!(auto_revert(&unset), AUTO_REVERT_DEFAULT, "unset is a day, not off");
     }
 }

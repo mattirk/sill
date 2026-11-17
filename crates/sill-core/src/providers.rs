@@ -76,7 +76,10 @@ impl Endpoint {
 /// environment sets `NO_PROXY` for it), so a server on the daemon host is reached by the
 /// host's address on its network, never by `localhost`.
 pub fn endpoint(base_url: &str) -> Result<Endpoint> {
-    ensure!(base_url.len() <= 2048 && !base_url.chars().any(|c| c.is_control() || c.is_whitespace()), "the address has spaces or control characters, or is too long");
+    ensure!(
+        base_url.len() <= 2048 && !base_url.chars().any(|c| c.is_control() || c.is_whitespace()),
+        "the address has spaces or control characters, or is too long"
+    );
     let (scheme, rest) = base_url.split_once("://").context("the address must start with http:// or https://")?;
     let default_port = match scheme {
         "http" => 80,
@@ -94,12 +97,19 @@ pub fn endpoint(base_url: &str) -> Result<Endpoint> {
     let host = host.to_ascii_lowercase();
     ensure!(crate::proxy::valid_hostname(&host), "the address has an invalid host name");
     let loopback = host == "localhost" || host.ends_with(".localhost") || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified());
-    ensure!(!loopback, "inside a session {host} is the session's own jail, not this machine; use the machine's address on its network (for example 192.168.1.20)");
+    ensure!(
+        !loopback,
+        "inside a session {host} is the session's own jail, not this machine; use the machine's address on its network (for example 192.168.1.20)"
+    );
     Ok(Endpoint { host, port })
 }
 
 fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && !id.starts_with('-') && !id.ends_with('-') && id.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    !id.is_empty()
+        && id.len() <= 64
+        && !id.starts_with('-')
+        && !id.ends_with('-')
+        && id.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
 }
 
 fn valid_text(text: &str, max: usize) -> bool {
@@ -121,19 +131,10 @@ impl Provider {
             ensure!(self.models.contains(default), "the default model {default} is not among the provider's models");
         }
         for (model, limits) in &self.model_limits {
-            ensure!(
-                self.models.contains(model),
-                "limits for {model} must belong to an offered model"
-            );
-            ensure!(
-                limits.context != Some(0) && limits.output != Some(0),
-                "token limits must be positive whole numbers"
-            );
+            ensure!(self.models.contains(model), "limits for {model} must belong to an offered model");
+            ensure!(limits.context != Some(0) && limits.output != Some(0), "token limits must be positive whole numbers");
             if let (Some(context), Some(output)) = (limits.context, limits.output) {
-                ensure!(
-                    output < context,
-                    "output limit must be smaller than context for {model}"
-                );
+                ensure!(output < context, "output limit must be smaller than context for {model}");
             }
         }
         Ok(())
@@ -164,11 +165,18 @@ pub fn load(home: &Path) -> Result<BTreeMap<String, Provider>> {
     let mut out = BTreeMap::new();
     for entry in rd {
         let path = entry?.path();
-        if path.extension().and_then(|x| x.to_str()) != Some("toml") { continue; }
+        if path.extension().and_then(|x| x.to_str()) != Some("toml") {
+            continue;
+        }
         let text = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         let provider: Provider = toml::from_str(&text).with_context(|| format!("invalid model provider {}", path.display()))?;
         provider.validate().with_context(|| format!("invalid model provider {}", path.display()))?;
-        ensure!(path.file_stem().and_then(|s| s.to_str()) == Some(provider.id.as_str()), "model provider {} is not named after its id {}", path.display(), provider.id);
+        ensure!(
+            path.file_stem().and_then(|s| s.to_str()) == Some(provider.id.as_str()),
+            "model provider {} is not named after its id {}",
+            path.display(),
+            provider.id
+        );
         out.insert(provider.id.clone(), provider);
     }
     Ok(out)
@@ -285,16 +293,21 @@ impl Translation {
                     if has_key(p) {
                         options["apiKey"] = format!("{{env:{}}}", p.key_env()).into();
                     }
-                    let models: serde_json::Map<String, serde_json::Value> = p.models.iter().map(|m| {
+                    let models: serde_json::Map<String, serde_json::Value> = p
+                        .models
+                        .iter()
+                        .map(|m| {
                             let mut model = serde_json::json!({});
                             if let Some(limits) = p.model_limits.get(m) {
-                                model["limit"] =
-                                    serde_json::to_value(limits).expect("token limits serialize");
+                                model["limit"] = serde_json::to_value(limits).expect("token limits serialize");
                             }
                             (m.clone(), model)
                         })
                         .collect();
-                    entries.insert(self.provider_id(p), serde_json::json!({ "npm": "@ai-sdk/openai-compatible", "name": p.name, "options": options, "models": models }));
+                    entries.insert(
+                        self.provider_id(p),
+                        serde_json::json!({ "npm": "@ai-sdk/openai-compatible", "name": p.name, "options": options, "models": models }),
+                    );
                 }
                 let mut config = serde_json::json!({ "provider": entries });
                 // one `model` for the whole configuration: the first provider that names a default
@@ -318,7 +331,9 @@ fn offered(home: &Path, agent_id: &str) -> Result<Option<(Translation, Vec<Provi
 /// providers, and each saved key. Empty without a translation or without providers.
 pub fn agent_env(home: &Path, agent_id: &str) -> Result<BTreeMap<String, String>> {
     let Some((translation, providers)) = offered(home, agent_id)? else { return Ok(BTreeMap::new()) };
-    if providers.is_empty() { return Ok(BTreeMap::new()); }
+    if providers.is_empty() {
+        return Ok(BTreeMap::new());
+    }
     let mut keys = BTreeMap::new();
     for p in &providers {
         if let Some(key) = key(home, &p.id)? {
@@ -347,10 +362,7 @@ pub fn agent_endpoints(home: &Path, agent_id: &str) -> Result<Vec<String>> {
 /// host, where sessions reach it from. curl, as the registry download uses; the key goes in on
 /// stdin, never on the command line.
 pub fn list_models(base_url: &str, key: Option<&str>) -> Result<Vec<String>> {
-    parse_models(&request(
-        &format!("{}/models", base_url.trim_end_matches('/')),
-        key,
-    )?)
+    parse_models(&request(&format!("{}/models", base_url.trim_end_matches('/')), key)?)
 }
 
 fn request(url: &str, key: Option<&str>) -> Result<String> {
@@ -367,8 +379,11 @@ fn request(url: &str, key: Option<&str>) -> Result<String> {
     }
     let mut child = Command::new("curl")
         .args(["-sS", "--max-time", "15", "--max-filesize", "4194304", "--proto", "=http,https", "--write-out", "\n%{http_code}", "--config", "-"])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().context("run curl")?;
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("run curl")?;
     child.stdin.take().expect("piped stdin").write_all(config.as_bytes())?;
     let out = child.wait_with_output()?;
     if !out.status.success() {
@@ -387,9 +402,7 @@ fn request(url: &str, key: Option<&str>) -> Result<String> {
 fn ollama_ps_url(base_url: &str) -> Result<String> {
     endpoint(base_url)?;
     let base = base_url.trim_end_matches('/');
-    let prefix = base
-        .strip_suffix("/v1")
-        .context("Ollama detection needs an API address ending in /v1")?;
+    let prefix = base.strip_suffix("/v1").context("Ollama detection needs an API address ending in /v1")?;
     Ok(format!("{prefix}/api/ps"))
 }
 pub fn detect_context(base_url: &str, key: Option<&str>, model: &str) -> Result<u32> {
@@ -397,18 +410,15 @@ pub fn detect_context(base_url: &str, key: Option<&str>, model: &str) -> Result<
     parse_active_context(&request(&ollama_ps_url(base_url)?, key)?, model)
 }
 fn parse_active_context(body: &str, model: &str) -> Result<u32> {
-    let data: serde_json::Value =
-        serde_json::from_str(body).context("the server did not return Ollama model information")?;
-    let models = data["models"]
-        .as_array()
-        .context("this endpoint does not report Ollama's running models; enter limits manually")?;
+    let data: serde_json::Value = serde_json::from_str(body).context("the server did not return Ollama model information")?;
+    let models = data["models"].as_array().context("this endpoint does not report Ollama's running models; enter limits manually")?;
     let canonical = |id: &str| {
-        if id.rsplit('/').next().unwrap_or(id).contains(':') { id.to_string() }
-        else { format!("{id}:latest") }
+        if id.rsplit('/').next().unwrap_or(id).contains(':') { id.to_string() } else { format!("{id}:latest") }
     };
     let wanted = canonical(model);
-    let active = models.iter().find(|m| ["name", "model"].iter().any(|field|
-        m[*field].as_str().is_some_and(|name| canonical(name) == wanted)))
+    let active = models
+        .iter()
+        .find(|m| ["name", "model"].iter().any(|field| m[*field].as_str().is_some_and(|name| canonical(name) == wanted)))
         .context("this model is not loaded on the server; load it there and detect again, or enter its configured context manually")?;
     active["context_length"]
         .as_u64()
@@ -419,13 +429,11 @@ fn parse_active_context(body: &str, model: &str) -> Result<u32> {
 
 /// `{"data":[{"id":…}]}`, the OpenAI shape; a bare list of the same objects is read too.
 fn parse_models(body: &str) -> Result<Vec<String>> {
-    let value: serde_json::Value = serde_json::from_str(body).context("the endpoint's answer is not a model list (is the address the API's root, ending in /v1?)")?;
+    let value: serde_json::Value =
+        serde_json::from_str(body).context("the endpoint's answer is not a model list (is the address the API's root, ending in /v1?)")?;
     let list = value.get("data").unwrap_or(&value).as_array().context("the endpoint's answer is not a model list")?;
-    let mut models: Vec<String> = list.iter()
-        .filter_map(|m| m.get("id").and_then(|id| id.as_str()))
-        .filter(|id| valid_text(id, 256) && id.trim() == *id)
-        .map(str::to_string)
-        .collect();
+    let mut models: Vec<String> =
+        list.iter().filter_map(|m| m.get("id").and_then(|id| id.as_str())).filter(|id| valid_text(id, 256) && id.trim() == *id).map(str::to_string).collect();
     models.sort();
     models.dedup();
     models.truncate(2000);
@@ -446,11 +454,19 @@ mod tests {
         }
     }
     impl Drop for Home {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     fn provider(id: &str, url: &str) -> Provider {
-        Provider { id: id.into(), name: format!("Provider {id}"), api: Api::Openai, base_url: url.into(), models: vec!["qwen/coder".into(), "small".into()], default_model: None,
+        Provider {
+            id: id.into(),
+            name: format!("Provider {id}"),
+            api: Api::Openai,
+            base_url: url.into(),
+            models: vec!["qwen/coder".into(), "small".into()],
+            default_model: None,
             model_limits: BTreeMap::new(),
         }
     }
@@ -470,13 +486,7 @@ mod tests {
     fn limits_round_trip_and_reach_opencode_without_affecting_other_models() {
         let home = Home::new("limits");
         let mut p = provider("local", "http://192.168.1.20:11434/v1");
-        p.model_limits.insert(
-            "qwen/coder".into(),
-            ModelLimits {
-                context: Some(32768),
-                output: Some(4096),
-            },
-        );
+        p.model_limits.insert("qwen/coder".into(), ModelLimits { context: Some(32768), output: Some(4096) });
         save(&home.0, &p).unwrap();
         assert_eq!(load(&home.0).unwrap()["local"], p);
         // One record, written by hand as it is saved: the limits are a table of the TOML.
@@ -489,51 +499,28 @@ mod tests {
         assert!(remove(&home.0, "local").unwrap());
         assert_eq!(std::fs::read_dir(dir(&home.0)).unwrap().count(), 0);
         let env = Translation::OpenCode.env(&[&p], &|_| false);
-        let config: serde_json::Value =
-            serde_json::from_str(&env["OPENCODE_CONFIG_CONTENT"]).unwrap();
-        assert_eq!(
-            config["provider"]["sill-local"]["models"]["qwen/coder"]["limit"],
-            serde_json::json!({"context":32768,"output":4096})
-        );
-        assert_eq!(
-            config["provider"]["sill-local"]["models"]["small"],
-            serde_json::json!({})
-        );
+        let config: serde_json::Value = serde_json::from_str(&env["OPENCODE_CONFIG_CONTENT"]).unwrap();
+        assert_eq!(config["provider"]["sill-local"]["models"]["qwen/coder"]["limit"], serde_json::json!({"context":32768,"output":4096}));
+        assert_eq!(config["provider"]["sill-local"]["models"]["small"], serde_json::json!({}));
         p.model_limits.get_mut("qwen/coder").unwrap().output = Some(32768);
         assert!(p.validate().is_err());
         p.model_limits.get_mut("qwen/coder").unwrap().output = Some(0);
         assert!(p.validate().is_err());
         p.model_limits.clear();
-        p.model_limits
-            .insert("not-offered".into(), ModelLimits::default());
+        p.model_limits.insert("not-offered".into(), ModelLimits::default());
         assert!(p.validate().is_err());
     }
 
     #[test]
     fn detection_uses_active_allocation_and_preserves_the_endpoint_prefix() {
-        assert_eq!(
-            ollama_ps_url("https://host.example/ollama/v1/").unwrap(),
-            "https://host.example/ollama/api/ps"
-        );
+        assert_eq!(ollama_ps_url("https://host.example/ollama/v1/").unwrap(), "https://host.example/ollama/api/ps");
         assert!(ollama_ps_url("http://localhost:11434/v1").is_err());
         assert!(ollama_ps_url("https://host.example/wrong").is_err());
         let body = r#"{"models":[{"name":"qwen:27b","context_length":32768,"model_info":{"context_length":262144}},{"name":"other","context_length":4096}]}"#;
         assert_eq!(parse_active_context(body, "qwen:27b").unwrap(), 32768);
         assert!(parse_active_context(body, "unloaded").is_err());
-        assert!(
-            parse_active_context(
-                r#"{"models":[{"name":"qwen:27b","context_length":0}]}"#,
-                "qwen:27b"
-            )
-            .is_err()
-        );
-        assert!(
-            parse_active_context(
-                r#"{"models":[{"name":"qwen:27b","context_length":4294967296}]}"#,
-                "qwen:27b"
-            )
-            .is_err()
-        );
+        assert!(parse_active_context(r#"{"models":[{"name":"qwen:27b","context_length":0}]}"#, "qwen:27b").is_err());
+        assert!(parse_active_context(r#"{"models":[{"name":"qwen:27b","context_length":4294967296}]}"#, "qwen:27b").is_err());
         assert!(parse_active_context(r#"{"data":[{"id":"qwen:27b"}]}"#, "qwen:27b").is_err());
     }
 
@@ -544,7 +531,17 @@ mod tests {
         assert_eq!(endpoint("http://GPU-Box.lan/v1").unwrap().pattern(), "gpu-box.lan:80");
         assert!(endpoint("http://192.168.1.20:11434/v1").unwrap().local_literal());
         assert!(!endpoint("https://openrouter.ai/api/v1").unwrap().local_literal());
-        for bad in ["openrouter.ai/v1", "ftp://x/v1", "https://user:pw@x.example/v1", "https://x.example/v1?a=b", "https://x.example:0/v1", "https://x.example:99999/v1", "https://[::1]:8080/v1", "https://x .example/v1", "https:///v1"] {
+        for bad in [
+            "openrouter.ai/v1",
+            "ftp://x/v1",
+            "https://user:pw@x.example/v1",
+            "https://x.example/v1?a=b",
+            "https://x.example:0/v1",
+            "https://x.example:99999/v1",
+            "https://[::1]:8080/v1",
+            "https://x .example/v1",
+            "https:///v1",
+        ] {
             assert!(endpoint(bad).is_err(), "{bad}");
         }
     }

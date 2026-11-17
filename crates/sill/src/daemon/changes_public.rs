@@ -24,30 +24,16 @@ fn batch(n: usize) -> Result<()> {
 }
 fn limit(n: Option<u16>) -> Result<usize> {
     let n = n.unwrap_or(64) as usize;
-    if !(1..=128).contains(&n) {
-        Err(invalid("limit must be 1–128"))
-    } else {
-        Ok(n)
-    }
+    if !(1..=128).contains(&n) { Err(invalid("limit must be 1–128")) } else { Ok(n) }
 }
 fn session(h: &Hub, id: &str) -> Result<()> {
     if !sill_core::session::valid_id(id) {
         return Err(invalid("invalid session_id"));
     }
-    h.with_store(|s| {
-        if s.sessions()?.iter().any(|s| s.id == id) {
-            Ok(())
-        } else {
-            Err(domain("not_found", "session not found"))
-        }
-    })
+    h.with_store(|s| if s.sessions()?.iter().any(|s| s.id == id) { Ok(()) } else { Err(domain("not_found", "session not found")) })
 }
 fn kept_id(id: &str) -> Result<()> {
-    if id.is_empty() || id.len() > 128 || id.contains('/') || id.chars().any(char::is_control) {
-        Err(invalid("invalid keep_id"))
-    } else {
-        Ok(())
-    }
+    if id.is_empty() || id.len() > 128 || id.contains('/') || id.chars().any(char::is_control) { Err(invalid("invalid keep_id")) } else { Ok(()) }
 }
 fn live(repo: &HostPath, p: &HostPath) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
     let repo = path(repo)?;
@@ -187,23 +173,11 @@ impl Hub {
             for (rel, status) in r.status {
                 let p = HostPath::from_path(&r.repo.join(rel));
                 let key = json!(["live", "", p.bytes_base64, ""]).to_string();
-                rows.push((
-                    key,
-                    api::Entry::Live {
-                        repo: HostPath::from_path(&r.repo),
-                        path: p,
-                        status,
-                    },
-                ));
+                rows.push((key, api::Entry::Live { repo: HostPath::from_path(&r.repo), path: p, status }));
             }
         }
         for s in list.sessions {
-            for (agent_state, r) in s
-                .changes
-                .into_iter()
-                .map(|r| (false, r))
-                .chain(s.agent_state.into_iter().map(|r| (true, r)))
-            {
+            for (agent_state, r) in s.changes.into_iter().map(|r| (false, r)).chain(s.agent_state.into_iter().map(|r| (true, r))) {
                 let p = HostPath::from_path(&r.change.path);
                 let key = json!(["overlay", s.id, p.bytes_base64, ""]).to_string();
                 rows.push((
@@ -226,8 +200,7 @@ impl Hub {
                         size: r.change.size.to_string(),
                         conflict: r.change.conflict,
                         written: r.written.map(|v| v.to_string()),
-                        repo: (!r.repo.as_os_str().is_empty())
-                            .then(|| HostPath::from_path(&r.repo)),
+                        repo: (!r.repo.as_os_str().is_empty()).then(|| HostPath::from_path(&r.repo)),
                         hash: r.hash,
                         protected: r.protected,
                     },
@@ -299,26 +272,14 @@ impl Hub {
             "_sill/changes.diff" => {
                 let a: api::Diff = parse(params)?;
                 let target = match a.target {
-                    api::Target::Change {
-                        session_id,
-                        path: p,
-                    } => {
+                    api::Target::Change { session_id, path: p } => {
                         session(self, &session_id)?;
-                        sill_core::wire::DiffOf::Change {
-                            session: session_id,
-                            path: path(&p)?,
-                        }
+                        sill_core::wire::DiffOf::Change { session: session_id, path: path(&p)? }
                     }
-                    api::Target::Kept {
-                        session_id,
-                        keep_id,
-                    } => {
+                    api::Target::Kept { session_id, keep_id } => {
                         session(self, &session_id)?;
                         kept_id(&keep_id)?;
-                        sill_core::wire::DiffOf::Kept {
-                            session: session_id,
-                            id: keep_id,
-                        }
+                        sill_core::wire::DiffOf::Kept { session: session_id, id: keep_id }
                     }
                     api::Target::Live { repo, path } => {
                         let (repo, rel) = live(&repo, &path)?;
@@ -327,17 +288,9 @@ impl Hub {
                 };
                 let text = self.changes_diff(target)?;
                 let fingerprint = sill_core::sfp::create_fingerprint(&text);
-                let offset = a
-                    .offset
-                    .as_deref()
-                    .unwrap_or("0")
-                    .parse::<usize>()
-                    .map_err(invalid)?;
+                let offset = a.offset.as_deref().unwrap_or("0").parse::<usize>().map_err(invalid)?;
                 if offset > 0 && a.fingerprint.as_ref() != Some(&fingerprint) {
-                    return Err(domain(
-                        "invalid_cursor",
-                        "diff changed; restart from offset zero",
-                    ));
+                    return Err(domain("invalid_cursor", "diff changed; restart from offset zero"));
                 }
                 if offset > text.len() || !text.is_char_boundary(offset) {
                     return Err(domain("invalid_cursor", "invalid diff offset"));
@@ -346,11 +299,7 @@ impl Hub {
                 while !text.is_char_boundary(end) {
                     end -= 1;
                 }
-                bounded(api::DiffPage {
-                    text: text[offset..end].into(),
-                    next_offset: (end < text.len()).then(|| end.to_string()),
-                    fingerprint,
-                })
+                bounded(api::DiffPage { text: text[offset..end].into(), next_offset: (end < text.len()).then(|| end.to_string()), fingerprint })
             }
             "_sill/changes.keep" => {
                 let a: api::Keep = parse(params)?;
@@ -360,9 +309,7 @@ impl Hub {
                     .items
                     .into_iter()
                     .map(|i| {
-                        if i.expected_hash.as_ref().is_some_and(|s| {
-                            s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit())
-                        }) {
+                        if i.expected_hash.as_ref().is_some_and(|s| s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit())) {
                             return Err(invalid("invalid expected_hash"));
                         }
                         Ok((path(&i.path)?, i.expected_hash))
@@ -396,20 +343,9 @@ impl Hub {
             "_sill/changes.history" => {
                 let a: api::History = parse(params)?;
                 let limit = limit(a.limit)?;
-                let before = a
-                    .before
-                    .map(|s| {
-                        serde_json::from_str::<(i64, i64)>(&s)
-                            .map_err(|_| domain("invalid_cursor", "invalid history cursor"))
-                    })
-                    .transpose()?;
-                let kind = a
-                    .kind
-                    .map(|s| {
-                        sill_core::history::Kind::parse(&s)
-                            .ok_or_else(|| invalid("unknown history kind"))
-                    })
-                    .transpose()?;
+                let before =
+                    a.before.map(|s| serde_json::from_str::<(i64, i64)>(&s).map_err(|_| domain("invalid_cursor", "invalid history cursor"))).transpose()?;
+                let kind = a.kind.map(|s| sill_core::history::Kind::parse(&s).ok_or_else(|| invalid("unknown history kind"))).transpose()?;
                 let f = sill_core::history::Filter {
                     before,
                     since: a.since.map(|s| s.parse().map_err(invalid)).transpose()?,
@@ -434,8 +370,7 @@ impl Hub {
                         session_title: e.session_title,
                         agent: e.agent,
                         ghost: e.ghost,
-                        path: (!e.path.as_os_str().is_empty())
-                            .then(|| HostPath::from_path(&e.path)),
+                        path: (!e.path.as_os_str().is_empty()).then(|| HostPath::from_path(&e.path)),
                         what: e.what,
                         hash_new: e.hash_new,
                         hash_old: e.hash_old,
@@ -458,10 +393,7 @@ impl Hub {
                     events.push(entry);
                     next = Some(cursor);
                 }
-                bounded(api::HistoryPage {
-                    events,
-                    next: if more { next } else { None },
-                })
+                bounded(api::HistoryPage { events, next: if more { next } else { None } })
             }
             _ => unreachable!(),
         })())

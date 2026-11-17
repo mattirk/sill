@@ -52,12 +52,7 @@ impl Focusable for State {
 }
 
 pub fn focus<'a, M>(content: impl Into<Element<'a, M>>) -> Focus<'a, M> {
-    Focus {
-        content: content.into(),
-        on_activate: None,
-        on_key: None,
-        before_children: None,
-    }
+    Focus { content: content.into(), on_activate: None, on_key: None, before_children: None }
 }
 
 impl<'a, M> Focus<'a, M> {
@@ -81,10 +76,7 @@ pub fn intercept_shortcuts<'a>(content: impl Into<Element<'a, Message>>) -> Elem
     wrapper.into()
 }
 
-pub fn configured_shortcuts<'a>(
-    content: impl Into<Element<'a, Message>>,
-    bindings: &'a crate::shortcuts::Bindings,
-) -> Element<'a, Message> {
+pub fn configured_shortcuts<'a>(content: impl Into<Element<'a, Message>>, bindings: &'a crate::shortcuts::Bindings) -> Element<'a, Message> {
     window_shortcuts(content, bindings, false, false)
 }
 
@@ -99,18 +91,9 @@ pub fn window_shortcuts<'a>(
         if find_shown {
             match key.as_ref() {
                 Key::Named(Named::F3) if !modifiers.command() && !modifiers.alt() => {
-                    return Some(Message::Find(if modifiers.shift() {
-                        crate::find::Event::Prev
-                    } else {
-                        crate::find::Event::Next
-                    }));
+                    return Some(Message::Find(if modifiers.shift() { crate::find::Event::Prev } else { crate::find::Event::Next }));
                 }
-                Key::Character(c)
-                    if modifiers.alt()
-                        && !modifiers.command()
-                        && !modifiers.shift()
-                        && c.eq_ignore_ascii_case("c") =>
-                {
+                Key::Character(c) if modifiers.alt() && !modifiers.command() && !modifiers.shift() && c.eq_ignore_ascii_case("c") => {
                     return Some(Message::Find(crate::find::Event::ToggleCase));
                 }
                 _ => {}
@@ -128,9 +111,7 @@ pub fn window_shortcuts<'a>(
 /// Wraps the Find bar's query input so `Enter` sends `Next` and `Shift+Enter` sends `Prev`
 /// while the query input has focus, without joining focus traversal itself.
 pub fn find_input<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    Element::new(FindInput {
-        content: content.into(),
-    })
+    Element::new(FindInput { content: content.into() })
 }
 
 struct FindInput<'a> {
@@ -173,25 +154,12 @@ impl Widget<Message, Theme, Renderer> for FindInput<'_> {
         self.content.as_widget().size_hint()
     }
 
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) -> layout::Node {
         self.content.as_widget_mut().layout(tree, renderer, limits)
     }
 
-    fn operate(
-        &mut self,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        operation: &mut dyn Operation,
-    ) {
-        self.content
-            .as_widget_mut()
-            .operate(tree, layout, renderer, operation);
+    fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer, operation: &mut dyn Operation) {
+        self.content.as_widget_mut().operate(tree, layout, renderer, operation);
     }
 
     fn update(
@@ -205,31 +173,19 @@ impl Widget<Message, Theme, Renderer> for FindInput<'_> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        if let Event::Keyboard(keyboard::Event::KeyPressed {
-            key: Key::Named(Named::Enter),
-            modifiers,
-            ..
-        }) = event
+        if let Event::Keyboard(keyboard::Event::KeyPressed { key: Key::Named(Named::Enter), modifiers, .. }) = event
             && !modifiers.command()
             && !modifiers.alt()
         {
             let mut focused = ChildFocused(false);
-            self.content
-                .as_widget_mut()
-                .operate(tree, layout, renderer, &mut focused);
+            self.content.as_widget_mut().operate(tree, layout, renderer, &mut focused);
             if focused.0 {
-                shell.publish(Message::Find(if modifiers.shift() {
-                    crate::find::Event::Prev
-                } else {
-                    crate::find::Event::Next
-                }));
+                shell.publish(Message::Find(if modifiers.shift() { crate::find::Event::Prev } else { crate::find::Event::Next }));
                 shell.capture_event();
                 return;
             }
         }
-        self.content.as_widget_mut().update(
-            tree, event, layout, cursor, renderer, clipboard, shell, viewport,
-        );
+        self.content.as_widget_mut().update(tree, event, layout, cursor, renderer, clipboard, shell, viewport);
     }
 
     fn draw(
@@ -242,22 +198,11 @@ impl Widget<Message, Theme, Renderer> for FindInput<'_> {
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        self.content
-            .as_widget()
-            .draw(tree, renderer, theme, style, layout, cursor, viewport);
+        self.content.as_widget().draw(tree, renderer, theme, style, layout, cursor, viewport);
     }
 
-    fn mouse_interaction(
-        &self,
-        tree: &Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &Renderer,
-    ) -> mouse::Interaction {
-        self.content
-            .as_widget()
-            .mouse_interaction(tree, layout, cursor, viewport, renderer)
+    fn mouse_interaction(&self, tree: &Tree, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle, renderer: &Renderer) -> mouse::Interaction {
+        self.content.as_widget().mouse_interaction(tree, layout, cursor, viewport, renderer)
     }
 
     fn overlay<'b>(
@@ -268,22 +213,15 @@ impl Widget<Message, Theme, Renderer> for FindInput<'_> {
         viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
-        self.content
-            .as_widget_mut()
-            .overlay(tree, layout, renderer, viewport, translation)
+        self.content.as_widget_mut().overlay(tree, layout, renderer, viewport, translation)
     }
 }
 
 /// Annotation shortcuts take precedence over hidden prompt/file editors while the canvas is shown.
-pub fn annotation_shortcuts<'a>(
-    content: impl Into<Element<'a, Message>>,
-    active: bool,
-) -> Element<'a, Message> {
+pub fn annotation_shortcuts<'a>(content: impl Into<Element<'a, Message>>, active: bool) -> Element<'a, Message> {
     // Keep the same wrapper and widget tree when the editor opens and closes.
     let mut wrapper = focus(content);
-    wrapper.before_children = Some(Rc::new(move |key, modifiers| {
-        active.then(|| annotation_key(key, modifiers)).flatten()
-    }));
+    wrapper.before_children = Some(Rc::new(move |key, modifiers| active.then(|| annotation_key(key, modifiers)).flatten()));
     wrapper.into()
 }
 
@@ -314,16 +252,11 @@ pub fn label(text: &str) -> String {
 
 /// A button the keyboard reaches too: Tab focuses it, Enter or Space presses it.
 pub fn press<'a>(button: Button<'a, Message>, message: Message) -> Element<'a, Message> {
-    focus(button.on_press(message.clone()))
-        .on_activate(message)
-        .into()
+    focus(button.on_press(message.clone())).on_activate(message).into()
 }
 
 /// [`press`] for a button that may be disabled. A disabled button is skipped by Tab.
-pub fn press_maybe<'a>(
-    button: Button<'a, Message>,
-    message: Option<Message>,
-) -> Element<'a, Message> {
+pub fn press_maybe<'a>(button: Button<'a, Message>, message: Option<Message>) -> Element<'a, Message> {
     match message {
         Some(message) => press(button, message),
         None => button.into(),
@@ -355,30 +288,15 @@ impl<M: Clone> Widget<M, Theme, Renderer> for Focus<'_, M> {
         self.content.as_widget().size_hint()
     }
 
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        self.content
-            .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits)
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) -> layout::Node {
+        self.content.as_widget_mut().layout(&mut tree.children[0], renderer, limits)
     }
 
-    fn operate(
-        &mut self,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        operation: &mut dyn Operation,
-    ) {
+    fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer, operation: &mut dyn Operation) {
         if self.before_children.is_none() {
             operation.focusable(None, layout.bounds(), tree.state.downcast_mut::<State>());
         }
-        self.content
-            .as_widget_mut()
-            .operate(&mut tree.children[0], layout, renderer, operation);
+        self.content.as_widget_mut().operate(&mut tree.children[0], layout, renderer, operation);
     }
 
     fn update(
@@ -393,10 +311,7 @@ impl<M: Clone> Widget<M, Theme, Renderer> for Focus<'_, M> {
         viewport: &Rectangle,
     ) {
         if let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event
-            && let Some(message) = self
-                .before_children
-                .as_ref()
-                .and_then(|on| on(key, *modifiers))
+            && let Some(message) = self.before_children.as_ref().and_then(|on| on(key, *modifiers))
         {
             shell.publish(message);
             shell.capture_event();
@@ -404,16 +319,9 @@ impl<M: Clone> Widget<M, Theme, Renderer> for Focus<'_, M> {
         }
         let state = tree.state.downcast_mut::<State>();
         match event {
-            Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
-                if state.focused =>
-            {
-                let pressed = matches!(key.as_ref(), Key::Named(Named::Enter | Named::Space))
-                    && !modifiers.control()
-                    && !modifiers.alt();
-                let message = pressed
-                    .then(|| self.on_activate.clone())
-                    .flatten()
-                    .or_else(|| self.on_key.as_ref().and_then(|keys| keys(key, *modifiers)));
+            Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) if state.focused => {
+                let pressed = matches!(key.as_ref(), Key::Named(Named::Enter | Named::Space)) && !modifiers.control() && !modifiers.alt();
+                let message = pressed.then(|| self.on_activate.clone()).flatten().or_else(|| self.on_key.as_ref().and_then(|keys| keys(key, *modifiers)));
                 if let Some(message) = message {
                     shell.publish(message);
                     shell.capture_event();
@@ -426,16 +334,7 @@ impl<M: Clone> Widget<M, Theme, Renderer> for Focus<'_, M> {
             }
             _ => {}
         }
-        self.content.as_widget_mut().update(
-            &mut tree.children[0],
-            event,
-            layout,
-            cursor,
-            renderer,
-            clipboard,
-            shell,
-            viewport,
-        );
+        self.content.as_widget_mut().update(&mut tree.children[0], event, layout, cursor, renderer, clipboard, shell, viewport);
     }
 
     fn draw(
@@ -449,46 +348,17 @@ impl<M: Clone> Widget<M, Theme, Renderer> for Focus<'_, M> {
         viewport: &Rectangle,
     ) {
         use iced::advanced::Renderer as _;
-        self.content.as_widget().draw(
-            &tree.children[0],
-            renderer,
-            theme,
-            style,
-            layout,
-            cursor,
-            viewport,
-        );
+        self.content.as_widget().draw(&tree.children[0], renderer, theme, style, layout, cursor, viewport);
         if tree.state.downcast_ref::<State>().focused {
             renderer.fill_quad(
-                Quad {
-                    bounds: layout.bounds(),
-                    border: Border {
-                        color: P.accent,
-                        width: 2.0,
-                        radius: crate::style::CONTROL.into(),
-                    },
-                    ..Quad::default()
-                },
+                Quad { bounds: layout.bounds(), border: Border { color: P.accent, width: 2.0, radius: crate::style::CONTROL.into() }, ..Quad::default() },
                 Color::TRANSPARENT,
             );
         }
     }
 
-    fn mouse_interaction(
-        &self,
-        tree: &Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &Renderer,
-    ) -> mouse::Interaction {
-        self.content.as_widget().mouse_interaction(
-            &tree.children[0],
-            layout,
-            cursor,
-            viewport,
-            renderer,
-        )
+    fn mouse_interaction(&self, tree: &Tree, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle, renderer: &Renderer) -> mouse::Interaction {
+        self.content.as_widget().mouse_interaction(&tree.children[0], layout, cursor, viewport, renderer)
     }
 
     fn overlay<'b>(
@@ -499,13 +369,7 @@ impl<M: Clone> Widget<M, Theme, Renderer> for Focus<'_, M> {
         viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, M, Theme, Renderer>> {
-        self.content.as_widget_mut().overlay(
-            &mut tree.children[0],
-            layout,
-            renderer,
-            viewport,
-            translation,
-        )
+        self.content.as_widget_mut().overlay(&mut tree.children[0], layout, renderer, viewport, translation)
     }
 }
 
@@ -518,11 +382,7 @@ impl<'a, M: Clone + 'a> From<Focus<'a, M>> for Element<'a, M> {
 /// Tab (`forward`) or Shift+Tab: the next or previous control takes the keyboard, scrolled into
 /// sight.
 pub fn step(forward: bool) -> Task<Message> {
-    let inner: Box<dyn Operation> = if forward {
-        Box::new(focusable::focus_next())
-    } else {
-        Box::new(focusable::focus_previous())
-    };
+    let inner: Box<dyn Operation> = if forward { Box::new(focusable::focus_next()) } else { Box::new(focusable::focus_previous()) };
     effect(AndReveal { inner })
 }
 
@@ -535,10 +395,7 @@ pub(crate) fn effect(operation: impl Operation + 'static) -> Task<Message> {
 /// Focuses the text input `id` and selects all of its text.
 pub fn focus_and_select_all(id: &'static str) -> Task<Message> {
     use iced::advanced::widget::operation::text_input;
-    Task::batch([
-        iced::widget::operation::focus(id),
-        effect(text_input::select_all(Id::new(id))),
-    ])
+    Task::batch([iced::widget::operation::focus(id), effect(text_input::select_all(Id::new(id)))])
 }
 
 /// Runs `inner` (and whatever it chains), then [`Reveal`].
@@ -553,16 +410,8 @@ impl Operation for AndReveal {
     fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
         self.inner.container(id, bounds);
     }
-    fn scrollable(
-        &mut self,
-        id: Option<&Id>,
-        bounds: Rectangle,
-        content_bounds: Rectangle,
-        translation: Vector,
-        state: &mut dyn Scrollable,
-    ) {
-        self.inner
-            .scrollable(id, bounds, content_bounds, translation, state);
+    fn scrollable(&mut self, id: Option<&Id>, bounds: Rectangle, content_bounds: Rectangle, translation: Vector, state: &mut dyn Scrollable) {
+        self.inner.scrollable(id, bounds, content_bounds, translation, state);
     }
     fn focusable(&mut self, id: Option<&Id>, bounds: Rectangle, state: &mut dyn Focusable) {
         self.inner.focusable(id, bounds, state);
@@ -613,19 +462,8 @@ impl Operation for Reveal {
         }
     }
 
-    fn scrollable(
-        &mut self,
-        id: Option<&Id>,
-        bounds: Rectangle,
-        _content_bounds: Rectangle,
-        translation: Vector,
-        _state: &mut dyn Scrollable,
-    ) {
-        self.entered = Some(Frame {
-            id: id.cloned(),
-            bounds,
-            translation,
-        });
+    fn scrollable(&mut self, id: Option<&Id>, bounds: Rectangle, _content_bounds: Rectangle, translation: Vector, _state: &mut dyn Scrollable) {
+        self.entered = Some(Frame { id: id.cloned(), bounds, translation });
     }
 
     fn focusable(&mut self, _id: Option<&Id>, bounds: Rectangle, state: &mut dyn Focusable) {
@@ -650,13 +488,7 @@ impl Operation for Reveal {
 
     fn finish(&self) -> Outcome<()> {
         match &self.target {
-            Some((id, y)) => Outcome::Chain(Box::new(scroll::scroll_to(
-                id.clone(),
-                AbsoluteOffset {
-                    x: None,
-                    y: Some(*y),
-                },
-            ))),
+            Some((id, y)) => Outcome::Chain(Box::new(scroll::scroll_to(id.clone(), AbsoluteOffset { x: None, y: Some(*y) }))),
             None => Outcome::None,
         }
     }
@@ -673,34 +505,16 @@ pub fn page(ids: &[&'static str], down: bool) -> Task<Message> {
         fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
             operate(self);
         }
-        fn scrollable(
-            &mut self,
-            id: Option<&Id>,
-            bounds: Rectangle,
-            content_bounds: Rectangle,
-            _translation: Vector,
-            state: &mut dyn Scrollable,
-        ) {
+        fn scrollable(&mut self, id: Option<&Id>, bounds: Rectangle, content_bounds: Rectangle, _translation: Vector, state: &mut dyn Scrollable) {
             if self.done || !id.is_some_and(|id| self.ids.contains(id)) {
                 return;
             }
             self.done = true;
             let step = bounds.height * 0.85;
-            state.scroll_by(
-                AbsoluteOffset {
-                    x: 0.0,
-                    y: if self.down { step } else { -step },
-                },
-                bounds,
-                content_bounds,
-            );
+            state.scroll_by(AbsoluteOffset { x: 0.0, y: if self.down { step } else { -step } }, bounds, content_bounds);
         }
     }
-    effect(Page {
-        ids: ids.iter().copied().map(Id::new).collect(),
-        down,
-        done: false,
-    })
+    effect(Page { ids: ids.iter().copied().map(Id::new).collect(), down, done: false })
 }
 
 /// New text arrived while `id` followed its tail: scroll it to its end, unless it has been
@@ -715,23 +529,13 @@ pub fn follow_end(id: &'static str, from: f32) -> Task<Message> {
         fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
             operate(self);
         }
-        fn scrollable(
-            &mut self,
-            id: Option<&Id>,
-            _bounds: Rectangle,
-            _content_bounds: Rectangle,
-            translation: Vector,
-            state: &mut dyn Scrollable,
-        ) {
+        fn scrollable(&mut self, id: Option<&Id>, _bounds: Rectangle, _content_bounds: Rectangle, translation: Vector, state: &mut dyn Scrollable) {
             if id == Some(&self.id) && translation.y >= self.from - 1.0 {
                 state.snap_to(scroll::RelativeOffset { x: None, y: Some(1.0) });
             }
         }
     }
-    effect(Follow {
-        id: Id::new(id),
-        from,
-    })
+    effect(Follow { id: Id::new(id), from })
 }
 
 /// Window shortcuts shared by the root, editors and shell; word-selection keys stay local.
@@ -752,9 +556,7 @@ pub fn shortcut(event: keyboard::Event) -> Option<Message> {
     navigation(keyboard::Event::KeyPressed {
         key: key.clone(),
         modified_key: key,
-        physical_key: keyboard::key::Physical::Unidentified(
-            keyboard::key::NativeCode::Unidentified,
-        ),
+        physical_key: keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified),
         location: keyboard::Location::Standard,
         modifiers,
         text: None,
@@ -804,11 +606,7 @@ mod annotation_tests {
                 .on_action(|action| crate::session::message("demo", crate::session::Event::Prompt(action)))
                 .key_binding(crate::ui::reading_keys);
             let view = annotation_shortcuts(input, active);
-            let mut ui = iced_test::Simulator::with_size(
-                crate::snapshots::settings(),
-                (400.0, 100.0),
-                view,
-            );
+            let mut ui = iced_test::Simulator::with_size(crate::snapshots::settings(), (400.0, 100.0), view);
             ui.click(Id::new("annotation-shortcut-input")).unwrap();
             for character in ["s", "z"] {
                 let key = Key::Character(character.into());
@@ -817,9 +615,7 @@ mod annotation_tests {
                     Event::Keyboard(keyboard::Event::KeyPressed {
                         key: key.clone(),
                         modified_key: key,
-                        physical_key: keyboard::key::Physical::Unidentified(
-                            keyboard::key::NativeCode::Unidentified,
-                        ),
+                        physical_key: keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified),
                         location: keyboard::Location::Standard,
                         modifiers: Modifiers::COMMAND,
                         text: None,
@@ -827,18 +623,14 @@ mod annotation_tests {
                     }),
                 ]);
             }
-            let messages: Vec<_> = ui.into_messages()
-                .filter(|message| !matches!(message, Message::Session(_, crate::session::Event::Prompt(_))))
-                .collect();
+            let messages: Vec<_> = ui.into_messages().filter(|message| !matches!(message, Message::Session(_, crate::session::Event::Prompt(_)))).collect();
             if active {
-                assert!(matches!(messages.as_slice(), [
-                    Message::Annotation(crate::annotation::Event::Save),
-                    Message::Annotation(crate::annotation::Event::Undo),
-                ]));
+                assert!(matches!(
+                    messages.as_slice(),
+                    [Message::Annotation(crate::annotation::Event::Save), Message::Annotation(crate::annotation::Event::Undo),]
+                ));
             } else {
-                assert!(messages.iter().any(|m| matches!(m, Message::Files(
-                    crate::files::Action::SaveFile
-                ))));
+                assert!(messages.iter().any(|m| matches!(m, Message::Files(crate::files::Action::SaveFile))));
                 assert!(!messages.iter().any(|m| matches!(m, Message::Annotation(_))));
             }
         }

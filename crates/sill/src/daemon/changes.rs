@@ -25,38 +25,25 @@ impl Hub {
         let mut pinned: Vec<PathBuf> = self.with_store(|st| self.pinned_checkouts(st))?;
         pinned.sort();
         pinned.dedup();
-        let live = pinned
-            .into_iter()
-            .map(|repo| LiveRepo { status: sill_core::changes::git_status(&repo), repo })
-            .filter(|l| !l.status.is_empty())
-            .collect();
+        let live = pinned.into_iter().map(|repo| LiveRepo { status: sill_core::changes::git_status(&repo), repo }).filter(|l| !l.status.is_empty()).collect();
         let known = hashes::take();
         let mut hashed = hashes::Hashes::default();
         let mut row = |c: Change| row(c, &known, &mut hashed);
         let mut out = Vec::new();
         let mut unreadable = Vec::new();
         for s in sessions {
-            if self.crosscheck_worker(&s.id) { continue; }
+            if self.crosscheck_worker(&s.id) {
+                continue;
+            }
             let kept = kept_dir(uid, &s.id).map(|d| keep::undoable(&d)).unwrap_or_default();
             // one session that cannot be read (a launch recorded by an older Sill) is told on its
             // own; it does not take every other session's changes with it
             let list: Vec<Change> = match self.session_changes(&s, uid) {
                 Ok(list) => list.into_iter().filter(|c| !c.ignored).collect(),
                 Err(error) => {
-                    unreadable.push(sill_proto::changes::Unreadable {
-                        session_id: s.id.clone(),
-                        title: s.title.clone(),
-                        why: format!("{error:#}"),
-                    });
+                    unreadable.push(sill_proto::changes::Unreadable { session_id: s.id.clone(), title: s.title.clone(), why: format!("{error:#}") });
                     if !kept.is_empty() {
-                        out.push(SessionChanges {
-                            id: s.id.clone(),
-                            title: s.title.clone(),
-                            ghost: s.ghost,
-                            changes: vec![],
-                            agent_state: vec![],
-                            kept,
-                        });
+                        out.push(SessionChanges { id: s.id.clone(), title: s.title.clone(), ghost: s.ghost, changes: vec![], agent_state: vec![], kept });
                     }
                     continue;
                 }
@@ -65,8 +52,7 @@ impl Hub {
                 continue;
             }
             let state_dirs = sill_core::session::recorded_filesystem(&s.id)?.state_paths()?;
-            let (agent_state, changes): (Vec<Change>, Vec<Change>) =
-                list.into_iter().partition(|c| sill_core::changes::is_agent_state(&c.path, &state_dirs));
+            let (agent_state, changes): (Vec<Change>, Vec<Change>) = list.into_iter().partition(|c| sill_core::changes::is_agent_state(&c.path, &state_dirs));
             out.push(SessionChanges {
                 id: s.id.clone(),
                 title: s.title.clone(),
@@ -189,7 +175,9 @@ impl Hub {
         let uid = own_uid();
         let sessions: Vec<Session> = self.with_store(|s| s.sessions()).unwrap_or_default().into_iter().filter(|s| !s.ghost).collect();
         for s in sessions {
-            if self.crosscheck_worker(&s.id) { continue; }
+            if self.crosscheck_worker(&s.id) {
+                continue;
+            }
             if self.children.lock().unwrap().contains_key(&s.id) && self.runner(&s.id).map_or(true, |r| r.busy()) {
                 continue;
             }
@@ -220,14 +208,21 @@ impl Hub {
                 }
             }
             self.changes_changed();
-            eprintln!("sill daemon: session {}: auto-reverted {} path(s) outside git{}", s.id, d.done.len(), if d.failed.is_empty() { String::new() } else { format!(", {} failed", d.failed.len()) });
+            eprintln!(
+                "sill daemon: session {}: auto-reverted {} path(s) outside git{}",
+                s.id,
+                d.done.len(),
+                if d.failed.is_empty() { String::new() } else { format!(", {} failed", d.failed.len()) }
+            );
         }
     }
 
     /// After a turn, report ordinary overlay changes. Reading the ledger never adopts files
     /// or changes the filesystem rules of this or another session.
     pub fn turn_ended(self: &std::sync::Arc<Self>, id: &str) {
-        if self.crosscheck_worker(id) { return; }
+        if self.crosscheck_worker(id) {
+            return;
+        }
         let hub = self.clone();
         let id = id.to_string();
         let _ = std::thread::Builder::new().name(format!("sill-turn-{id}")).spawn(move || {
@@ -326,7 +321,9 @@ impl Hub {
         let mut out = Vec::new();
         for s in st.sessions()?.into_iter().filter(|s| s.ended_at.is_none()) {
             let worker: bool = st.conn().query_row("SELECT EXISTS(SELECT 1 FROM crosscheck_workers WHERE session_id=?1)", [&s.id], |r| r.get(0))?;
-            if worker { continue; }
+            if worker {
+                continue;
+            }
             out.extend(st.pins(&s.id)?.into_iter().filter(|p| p.join(".git").exists()));
         }
         Ok(out)
@@ -516,7 +513,8 @@ mod keep_parent_tests {
         let dir = std::env::temp_dir().join(format!("sill-keep-parents-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let change = |p: PathBuf, ft| Change { path: p, upper: PathBuf::from("/upper"), kind: Kind::Added, file_type: ft, size: 0, conflict: false, ignored: false };
+        let change =
+            |p: PathBuf, ft| Change { path: p, upper: PathBuf::from("/upper"), kind: Kind::Added, file_type: ft, size: 0, conflict: false, ignored: false };
         let (new, deeper) = (dir.join("new"), dir.join("new/deeper"));
         let file = deeper.join("a.txt");
         let changes = vec![change(new.clone(), FileType::Dir), change(deeper.clone(), FileType::Dir), change(file.clone(), FileType::File)];

@@ -13,7 +13,9 @@ const HOST: &str = "sill-test-box";
 const PASSPHRASE: &str = "open sesame";
 
 fn main() {
-    if boxlink::is_askpass() { boxlink::askpass_main(); }
+    if boxlink::is_askpass() {
+        boxlink::askpass_main();
+    }
     let Some(sshd) = ["/usr/sbin/sshd", "/usr/bin/sshd"].into_iter().find(|p| Path::new(p).exists()) else {
         return println!("boxlink: skipped, no sshd");
     };
@@ -21,8 +23,12 @@ fn main() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("bin")).unwrap();
     std::fs::create_dir_all(dir.join("run")).unwrap();
-    let keygen = |name: &str, passphrase: &str| Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", passphrase, "-f"]).arg(dir.join(name)).status().is_ok_and(|s| s.success());
-    if !keygen("hostkey", "") || !keygen("userkey", PASSPHRASE) { return println!("boxlink: skipped, no ssh-keygen"); }
+    let keygen = |name: &str, passphrase: &str| {
+        Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", passphrase, "-f"]).arg(dir.join(name)).status().is_ok_and(|s| s.success())
+    };
+    if !keygen("hostkey", "") || !keygen("userkey", PASSPHRASE) {
+        return println!("boxlink: skipped, no ssh-keygen");
+    }
     std::fs::copy(dir.join("userkey.pub"), dir.join("authorized_keys")).unwrap();
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let d = dir.display();
@@ -41,21 +47,29 @@ fn main() {
     let start_server = || {
         let started = Command::new(sshd).arg("-f").arg(dir.join("sshd_config")).arg("-E").arg(dir.join("sshd.log")).status().is_ok_and(|s| s.success());
         let deadline = Instant::now() + Duration::from_secs(5);
-        while started && std::net::TcpStream::connect(("127.0.0.1", port)).is_err() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(20)); }
+        while started && std::net::TcpStream::connect(("127.0.0.1", port)).is_err() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         started && std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
     };
     let stop_server = || {
         let pid = std::fs::read_to_string(dir.join("sshd.pid")).unwrap_or_default();
         let _ = Command::new("kill").arg(pid.trim()).status();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(20)); }
+        while std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
     };
-    if !start_server() { return println!("boxlink: skipped, sshd did not start here"); }
+    if !start_server() {
+        return println!("boxlink: skipped, sshd did not start here");
+    }
     let result = std::panic::catch_unwind(|| scenario(&start_server, &stop_server));
     let _ = boxlink::disconnect(HOST);
     stop_server();
     let _ = std::fs::remove_dir_all(&dir);
-    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
     println!("boxlink: ok");
 }
 
@@ -83,7 +97,9 @@ fn scenario(start_server: &dyn Fn() -> bool, stop_server: &dyn Fn()) {
     assert_eq!((shown.problem, shown.retry_in), (Problem::HostKey, None), "{shown:?}");
     // and nothing more reaches the server until the person acts
     let before = Instant::now();
-    for _ in 0..20 { assert_eq!(problem(&boxlink::ensure(HOST).unwrap_err()), Problem::HostKey); }
+    for _ in 0..20 {
+        assert_eq!(problem(&boxlink::ensure(HOST).unwrap_err()), Problem::HostKey);
+    }
     assert!(before.elapsed() < Duration::from_secs(2), "waiting for the person costs no network attempts");
 
     // one Cancel ends the sign-in, whatever SSH would have asked next
@@ -110,15 +126,29 @@ fn scenario(start_server: &dyn Fn() -> bool, stop_server: &dyn Fn()) {
     asked.lock().unwrap().clear();
 
     // sessions ride the master: many at once, no prompt, no second master
-    let workers: Vec<_> = (0..8).map(|i| std::thread::spawn(move || {
-        boxlink::ensure(HOST).unwrap();
-        let output = session(&format!("echo rode-{i}"));
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), format!("rode-{i}"), "{}", String::from_utf8_lossy(&output.stderr));
-    })).collect();
-    for worker in workers { worker.join().unwrap(); }
+    let workers: Vec<_> = (0..8)
+        .map(|i| {
+            std::thread::spawn(move || {
+                boxlink::ensure(HOST).unwrap();
+                let output = session(&format!("echo rode-{i}"));
+                assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), format!("rode-{i}"), "{}", String::from_utf8_lossy(&output.stderr));
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().unwrap();
+    }
     assert!(asked.lock().unwrap().is_empty());
-    let sockets = || std::fs::read_dir(sill_proto::runtime_dir().unwrap().join("ssh")).unwrap().flatten()
-        .filter(|e| { use std::os::unix::fs::FileTypeExt; e.file_type().is_ok_and(|t| t.is_socket()) }).count();
+    let sockets = || {
+        std::fs::read_dir(sill_proto::runtime_dir().unwrap().join("ssh"))
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                use std::os::unix::fs::FileTypeExt;
+                e.file_type().is_ok_and(|t| t.is_socket())
+            })
+            .count()
+    };
     assert_eq!(sockets(), 1, "one control socket for the box");
 
     // a second sign-in while connected asks nothing, and says the master was not its own (a

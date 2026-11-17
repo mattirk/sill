@@ -78,14 +78,7 @@ impl LimitInputs {
             if s.trim().is_empty() {
                 return Ok(None);
             }
-            s.trim()
-                .parse::<u32>()
-                .ok()
-                .filter(|n| *n > 0)
-                .map(Some)
-                .ok_or(
-                    "Limits must be positive whole token counts, or blank for the agent default.",
-                )
+            s.trim().parse::<u32>().ok().filter(|n| *n > 0).map(Some).ok_or("Limits must be positive whole token counts, or blank for the agent default.")
         };
         let context = parse(&self.context)?;
         let output = parse(&self.output)?;
@@ -181,12 +174,12 @@ impl Form {
         self.limits_model.as_ref().filter(|m| self.ticked.contains(*m)).or_else(|| self.ticked.first())
     }
     fn can_save(&self) -> bool {
-        !self.saving && self.detecting.is_none()
-            && !self.name.trim().is_empty() && !self.address.trim().is_empty() && !self.ticked.is_empty()
-            && self
-                .ticked
-                .iter()
-                .all(|m| self.limits.get(m).is_none_or(|l| l.value().is_ok()))
+        !self.saving
+            && self.detecting.is_none()
+            && !self.name.trim().is_empty()
+            && !self.address.trim().is_empty()
+            && !self.ticked.is_empty()
+            && self.ticked.iter().all(|m| self.limits.get(m).is_none_or(|l| l.value().is_ok()))
     }
     /// The record the form describes, with an id not among `taken` for a new one.
     fn provider(&self, taken: &[&str]) -> api::Provider {
@@ -201,12 +194,7 @@ impl Form {
                 .limits
                 .iter()
                 .filter(|(m, _)| self.ticked.contains(*m))
-                .filter_map(|(m, l)| {
-                    l.value()
-                        .ok()
-                        .filter(|l| l.context.is_some() || l.output.is_some())
-                        .map(|l| (m.clone(), l))
-                })
+                .filter_map(|(m, l)| l.value().ok().filter(|l| l.context.is_some() || l.output.is_some()).map(|l| (m.clone(), l)))
                 .collect(),
         }
     }
@@ -246,12 +234,7 @@ fn msg(e: Event) -> Message {
     Message::Agents(agents_ui::Event::Providers(e))
 }
 fn control<'a>(label: impl text::IntoFragment<'a>, event: Option<Event>) -> Element<'a, Message> {
-    keys::press_maybe(
-        button(text(label).size(style::SMALL))
-            .padding([4, 8])
-            .style(style::quiet),
-        event.map(msg),
-    )
+    keys::press_maybe(button(text(label).size(style::SMALL)).padding([4, 8]).style(style::quiet), event.map(msg))
 }
 fn dim<'a>(t: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
     text(t).size(style::SMALL).color(P.fg_dim)
@@ -317,13 +300,10 @@ impl Providers {
 
     /// One line under the catalogue for people who come looking.
     pub fn footer<'a>(&'a self, agent_name: &str) -> Element<'a, Message> {
-        row![
-            dim("Your own model server or OpenRouter?"),
-            control(format!("Set up {agent_name} with a model provider"), Some(Event::Open)),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .into()
+        row![dim("Your own model server or OpenRouter?"), control(format!("Set up {agent_name} with a model provider"), Some(Event::Open)),]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into()
     }
 }
 
@@ -351,22 +331,16 @@ fn form_view(form: &Form) -> Element<'_, Message> {
         body = body.push(dim("Ollama's active context is set on the server. Detect it below, or enter it manually; the model's advertised maximum may be larger than its active allocation."));
     }
     let key_hint = if form.had_key { "Saved: leave empty to keep it" } else { "Empty for a server that wants none" };
-    let mut key = row![
-        labelled("API key"),
-        text_input(key_hint, &form.key).on_input(|s| msg(Event::Key(s))).secure(true).padding(7).size(style::SMALL),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
+    let mut key = row![labelled("API key"), text_input(key_hint, &form.key).on_input(|s| msg(Event::Key(s))).secure(true).padding(7).size(style::SMALL),]
+        .spacing(8)
+        .align_y(Alignment::Center);
     if form.had_key && form.key.is_empty() {
         key = key.push(checkbox(form.clear_key).label("Forget saved key").text_size(style::SMALL).on_toggle(|v| msg(Event::ClearKey(v))));
     }
     body = body.push(key);
-    let mut test = row![control(
-        if form.testing { "Testing…" } else { "Test" },
-        (!form.testing && !form.address.trim().is_empty()).then_some(Event::Test),
-    )]
-    .spacing(8)
-    .align_y(Alignment::Center);
+    let mut test = row![control(if form.testing { "Testing…" } else { "Test" }, (!form.testing && !form.address.trim().is_empty()).then_some(Event::Test),)]
+        .spacing(8)
+        .align_y(Alignment::Center);
     test = test.push(match &form.status {
         Some(Ok(said)) => dim(said.as_str()),
         Some(Err(said)) => text(said.as_str()).size(style::SMALL).color(P.error),
@@ -387,10 +361,14 @@ fn form_view(form: &Form) -> Element<'_, Message> {
         }));
     }
     if let Some(model) = form.selected_limits_model() {
-        models = models.push(row![
-            labelled("Limits for"),
-            pick_list(form.ticked.iter().cloned().collect::<Vec<_>>(), Some(model.clone()), |m| msg(Event::LimitsModel(m))).text_size(style::SMALL),
-        ].spacing(8).align_y(Alignment::Center));
+        models = models.push(
+            row![
+                labelled("Limits for"),
+                pick_list(form.ticked.iter().cloned().collect::<Vec<_>>(), Some(model.clone()), |m| msg(Event::LimitsModel(m))).text_size(style::SMALL),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
         let empty = String::new();
         let fields = form.limits.get(model);
         let model_context = model.clone();
@@ -399,13 +377,10 @@ fn form_view(form: &Form) -> Element<'_, Message> {
             text(format!("{model} · token limits")).size(style::SMALL),
             row![
                 text("Context").size(style::SMALL),
-                text_input(
-                    "Agent default",
-                    fields.map(|l| &l.context).unwrap_or(&empty)
-                )
-                .on_input(move |v| msg(Event::Context(model_context.clone(), v)))
-                .size(style::SMALL)
-                .padding(7),
+                text_input("Agent default", fields.map(|l| &l.context).unwrap_or(&empty))
+                    .on_input(move |v| msg(Event::Context(model_context.clone(), v)))
+                    .size(style::SMALL)
+                    .padding(7),
                 text("Output").size(style::SMALL),
                 text_input("Agent default", fields.map(|l| &l.output).unwrap_or(&empty))
                     .on_input(move |v| msg(Event::Output(model_output.clone(), v)))
@@ -422,19 +397,16 @@ fn form_view(form: &Form) -> Element<'_, Message> {
         let detecting = form.detecting.as_ref().is_some_and(|(_, m)| m == model);
         // Offered for every endpoint: nothing in the record says which server answers, and one
         // that is not Ollama answers with the reason.
-        limits = limits.push(control(if detecting { "Detecting…" } else { "Detect Ollama context" },
-            (!form.saving && form.detecting.is_none() && !form.address.trim().is_empty()).then(|| Event::Detect(model.clone()))));
+        limits = limits.push(control(
+            if detecting { "Detecting…" } else { "Detect Ollama context" },
+            (!form.saving && form.detecting.is_none() && !form.address.trim().is_empty()).then(|| Event::Detect(model.clone())),
+        ));
         if let Some(result) = form.detected.get(model) {
             limits = match result {
                 Ok(n) => limits.push(
                     row![
-                        dim(format!(
-                            "Server is using {n} tokens. Output limit is not reported."
-                        )),
-                        control(
-                            "Use detected context",
-                            Some(Event::UseDetected(model.clone()))
-                        ),
+                        dim(format!("Server is using {n} tokens. Output limit is not reported.")),
+                        control("Use detected context", Some(Event::UseDetected(model.clone()))),
                     ]
                     .spacing(8)
                     .align_y(Alignment::Center),
@@ -452,10 +424,8 @@ fn form_view(form: &Form) -> Element<'_, Message> {
     }
     let typed = form.model_input.trim();
     let can_add = !typed.is_empty() && !form.models.iter().any(|m| m == typed);
-    let mut input = text_input("Filter, or a model id the endpoint did not list", &form.model_input)
-        .on_input(|s| msg(Event::ModelInput(s)))
-        .padding(7)
-        .size(style::SMALL);
+    let mut input =
+        text_input("Filter, or a model id the endpoint did not list", &form.model_input).on_input(|s| msg(Event::ModelInput(s))).padding(7).size(style::SMALL);
     if can_add {
         input = input.on_submit(msg(Event::AddModel));
     }
@@ -613,8 +583,7 @@ impl App {
                         }
                     }
                     Event::Detect(model) => {
-                        if form.detecting.is_some() || form.saving || !form.ticked.contains(&model)
-                        {
+                        if form.detecting.is_some() || form.saving || !form.ticked.contains(&model) {
                             return Task::none();
                         }
                         let Some(connect) = connect else {
@@ -627,16 +596,13 @@ impl App {
                         let request = api::DetectLimits {
                             base_url: form.address.trim().into(),
                             model: model.clone(),
-                            key: Some(form.key.clone())
-                                .filter(|k| !k.is_empty())
-                                .map(sill_proto::wire::Secret),
+                            key: Some(form.key.clone()).filter(|k| !k.is_empty()).map(sill_proto::wire::Secret),
                             provider_id: form.editing.clone().filter(|_| !form.clear_key),
                         };
                         return crate::blocking(
                             move || {
                                 let client = connect().map_err(|e| format!("{e:#}"))?;
-                                providers::detect_limits(&client, request)
-                                    .map_err(|e| format!("{e:#}"))
+                                providers::detect_limits(&client, request).map_err(|e| format!("{e:#}"))
                             },
                             move |r| msg(Event::Detected(serial, model.clone(), r)),
                         );
@@ -651,7 +617,11 @@ impl App {
                     Event::Test => {
                         let Some(connect) = connect else { return Task::none() };
                         (form.testing, form.status) = (true, None);
-                        let (address, key, id) = (form.address.trim().to_string(), Some(form.key.clone()).filter(|k| !k.is_empty()), form.editing.clone().filter(|_| !form.clear_key));
+                        let (address, key, id) = (
+                            form.address.trim().to_string(),
+                            Some(form.key.clone()).filter(|k| !k.is_empty()),
+                            form.editing.clone().filter(|_| !form.clear_key),
+                        );
                         return crate::blocking(
                             move || {
                                 let client = connect().map_err(|e| format!("{e:#}"))?;
@@ -705,7 +675,13 @@ mod tests {
 
     fn entry(id: &str, key: bool) -> api::Entry {
         api::Entry {
-            provider: api::Provider { id: id.into(), name: format!("Name {id}"), api: api::Api::Openai, base_url: "https://x.example/v1".into(), models: vec!["a".into(), "b".into()], default_model: Some("b".into()),
+            provider: api::Provider {
+                id: id.into(),
+                name: format!("Name {id}"),
+                api: api::Api::Openai,
+                base_url: "https://x.example/v1".into(),
+                models: vec!["a".into(), "b".into()],
+                default_model: Some("b".into()),
                 model_limits: BTreeMap::new(),
             },
             has_key: key,
@@ -743,29 +719,14 @@ mod tests {
         let model = "qwen3-coder:30b".to_string();
         form.know([model.clone()]);
         form.ticked.insert(model.clone());
-        form.limits.insert(
-            model.clone(),
-            LimitInputs {
-                context: "32768".into(),
-                output: "4096".into(),
-            },
-        );
+        form.limits.insert(model.clone(), LimitInputs { context: "32768".into(), output: "4096".into() });
         form.detected.insert(model, Ok(32768));
-        let mut ui = iced_test::Simulator::with_size(
-            crate::snapshots::settings(),
-            (680.0, 1000.0),
-            form_view(&form),
-        );
+        let mut ui = iced_test::Simulator::with_size(crate::snapshots::settings(), (680.0, 1000.0), form_view(&form));
         let image = ui.snapshot(&crate::style::theme()).unwrap();
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/sill-gui-snapshots");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/sill-gui-snapshots");
         std::fs::create_dir_all(&dir).unwrap();
         for entry in std::fs::read_dir(&dir).unwrap().flatten() {
-            if entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("provider-limits-")
-            {
+            if entry.file_name().to_string_lossy().starts_with("provider-limits-") {
                 std::fs::remove_file(entry.path()).unwrap();
             }
         }
@@ -782,18 +743,8 @@ mod tests {
         let form = app.agents_page.providers.form.as_ref().unwrap();
         assert!(form.can_save());
         let record = form.provider(&[]);
-        assert_eq!(
-            record.model_limits["a"],
-            api::ModelLimits {
-                context: Some(32768),
-                output: Some(4096)
-            }
-        );
-        let form = Form::of(&api::Entry {
-            provider: record,
-            has_key: false,
-            endpoint: "x.example:443".into(),
-        });
+        assert_eq!(record.model_limits["a"], api::ModelLimits { context: Some(32768), output: Some(4096) });
+        let form = Form::of(&api::Entry { provider: record, has_key: false, endpoint: "x.example:443".into() });
         assert_eq!(form.limits["a"].context, "32768");
         let _ = app.providers_event(Event::Output("a".into(), "32768".into()));
         assert!(!app.agents_page.providers.form.as_ref().unwrap().can_save());
@@ -801,22 +752,8 @@ mod tests {
         let form = app.agents_page.providers.form.as_ref().unwrap();
         assert!(form.can_save());
         assert!(form.provider(&[]).model_limits.is_empty());
-        assert!(
-            LimitInputs {
-                context: "invalid".into(),
-                output: String::new()
-            }
-            .value()
-            .is_err()
-        );
-        assert!(
-            LimitInputs {
-                context: "0".into(),
-                output: String::new()
-            }
-            .value()
-            .is_err()
-        );
+        assert!(LimitInputs { context: "invalid".into(), output: String::new() }.value().is_err());
+        assert!(LimitInputs { context: "0".into(), output: String::new() }.value().is_err());
     }
 
     #[test]
@@ -826,27 +763,13 @@ mod tests {
         let _ = app.providers_event(Event::Edit("one".into()));
         let _ = app.providers_event(Event::Context("a".into(), "16384".into()));
         app.agents_page.providers.form.as_mut().unwrap().detecting = Some((1, "a".into()));
-        let _ = app.providers_event(Event::Detected(
-            1,
-            "a".into(),
-            Ok(api::DetectedLimits { context: 32768 }),
-        ));
-        assert_eq!(
-            app.agents_page.providers.form.as_ref().unwrap().limits["a"].context,
-            "16384"
-        );
+        let _ = app.providers_event(Event::Detected(1, "a".into(), Ok(api::DetectedLimits { context: 32768 })));
+        assert_eq!(app.agents_page.providers.form.as_ref().unwrap().limits["a"].context, "16384");
         let _ = app.providers_event(Event::UseDetected("a".into()));
-        assert_eq!(
-            app.agents_page.providers.form.as_ref().unwrap().limits["a"].context,
-            "32768"
-        );
+        assert_eq!(app.agents_page.providers.form.as_ref().unwrap().limits["a"].context, "32768");
         app.agents_page.providers.form.as_mut().unwrap().detecting = Some((2, "a".into()));
         let _ = app.providers_event(Event::Address("http://new.example/v1".into()));
-        let _ = app.providers_event(Event::Detected(
-            2,
-            "a".into(),
-            Ok(api::DetectedLimits { context: 65536 }),
-        ));
+        let _ = app.providers_event(Event::Detected(2, "a".into(), Ok(api::DetectedLimits { context: 65536 })));
         let form = app.agents_page.providers.form.as_ref().unwrap();
         assert!(form.detected.is_empty());
         assert_eq!(form.limits["a"].context, "32768");

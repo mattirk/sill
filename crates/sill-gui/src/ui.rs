@@ -11,12 +11,10 @@ use std::time::{Duration, Instant};
 use iced::keyboard::{Key, key::Named};
 use iced::widget::markdown::{self, Highlight};
 use iced::widget::{
-    Column, button, canvas, center, column, container, mouse_area, pick_list, responsive, right,
-    row, rule, scrollable, space, stack, svg, text, text_editor, tooltip,
+    Column, button, canvas, center, column, container, mouse_area, pick_list, responsive, right, row, rule, scrollable, space, stack, svg, text, text_editor,
+    tooltip,
 };
-use iced::{
-    Alignment, Color, Element, Fill, Font, Padding, Radians, Rectangle, Renderer, Shrink, Theme,
-};
+use iced::{Alignment, Color, Element, Fill, Font, Padding, Radians, Rectangle, Renderer, Shrink, Theme};
 use sill_client::lane::Status;
 use sill_client::outbox::State;
 use sill_client::supervision::{Activity, Attention, Level, clock};
@@ -58,9 +56,7 @@ impl App {
             };
             let placement = self.layout.drawer(self.drawer.shown, size.width);
             let body = if let Some(editor) = &view.annotation {
-                column![crate::annotation::view(editor), self.composer(view)]
-                    .height(Fill)
-                    .into()
+                column![crate::annotation::view(editor), self.composer(view)].height(Fill).into()
             } else if let Some(details) = &self.details {
                 self.details_view(details)
             } else {
@@ -69,22 +65,14 @@ impl App {
                     // the test desktop in the conversation's place, the composer staying
                     None if view.desktop.shown => {
                         let session = self.all_sessions.iter().find(|s| s.session_id == view.id);
-                        column![crate::desktop_view::pane(view, session), self.composer(view)]
-                            .height(Fill)
-                            .into()
+                        column![crate::desktop_view::pane(view, session), self.composer(view)].height(Fill).into()
                     }
-                    None => column![self.feed(view), self.composer(view)]
-                        .height(Fill)
-                        .into(),
+                    None => column![self.feed(view), self.composer(view)].height(Fill).into(),
                 }
             };
             // a file open takes the chips' row too
             let chips: Element<'_, Message> =
-                if self.details.is_some() || view.files.reader.is_some() {
-                    space().height(0).into()
-                } else {
-                    self.file_chips(view)
-                };
+                if self.details.is_some() || view.files.reader.is_some() { space().height(0).into() } else { self.file_chips(view) };
             let main = column![chips, body].width(Fill).height(Fill);
             // the conversation keeps one place in the widget tree wherever the drawer is: moving
             // it would give its scrollable fresh state (back at the top) and drop a selection
@@ -107,59 +95,35 @@ impl App {
             if let Drawer::Over(width) = placement {
                 // A file opened from the overlay takes the conversation's place.
                 let drawer = self.file_drawer(view).map(|message| match message {
-                    Message::Files(crate::files::Action::Open { path, repo }) => {
-                        Message::Files(crate::files::Action::OpenAndHide { path, repo })
-                    }
+                    Message::Files(crate::files::Action::Open { path, repo }) => Message::Files(crate::files::Action::OpenAndHide { path, repo }),
                     message => message,
                 });
                 page = page.push(row![
-                    mouse_area(
-                        container(space())
-                            .width(Fill)
-                            .height(Fill)
-                            .style(style::fill(alpha(Color::BLACK, 0.25)))
-                    )
-                    .on_press(Message::Files(crate::files::Action::ToggleDrawer)),
+                    mouse_area(container(space()).width(Fill).height(Fill).style(style::fill(alpha(Color::BLACK, 0.25))))
+                        .on_press(Message::Files(crate::files::Action::ToggleDrawer)),
                     self.drawer_grip(true),
-                    container(drawer)
-                        .width(width)
-                        .height(Fill)
-                        .style(style::fill(P.bg)),
+                    container(drawer).width(width).height(Fill).style(style::fill(P.bg)),
                 ]);
             }
             column![page.height(Fill)].height(Fill).into()
         });
         let bar = container(responsive(move |size| self.top_bar(size.width))).height(37);
         let edge = |direction, horizontal| {
-            mouse_area(
-                container(space())
-                    .width(if horizontal {
-                        Fill
-                    } else {
-                        iced::Length::Fixed(EDGE)
-                    })
-                    .height(if horizontal {
-                        iced::Length::Fixed(EDGE)
-                    } else {
-                        Fill
-                    }),
-            )
-            .on_press(Message::ResizeWindow(direction))
-            .interaction(if horizontal {
-                iced::mouse::Interaction::ResizingVertically
+            mouse_area(container(space()).width(if horizontal { Fill } else { iced::Length::Fixed(EDGE) }).height(if horizontal {
+                iced::Length::Fixed(EDGE)
             } else {
-                iced::mouse::Interaction::ResizingHorizontally
-            })
+                Fill
+            }))
+            .on_press(Message::ResizeWindow(direction))
+            .interaction(if horizontal { iced::mouse::Interaction::ResizingVertically } else { iced::mouse::Interaction::ResizingHorizontally })
         };
         // where two edges meet: both ways at once (the same 5 px, no larger target)
         let corner = |direction, falling| {
-            mouse_area(container(space()).width(EDGE).height(EDGE))
-                .on_press(Message::ResizeWindow(direction))
-                .interaction(if falling {
-                    iced::mouse::Interaction::ResizingDiagonallyDown
-                } else {
-                    iced::mouse::Interaction::ResizingDiagonallyUp
-                })
+            mouse_area(container(space()).width(EDGE).height(EDGE)).on_press(Message::ResizeWindow(direction)).interaction(if falling {
+                iced::mouse::Interaction::ResizingDiagonallyDown
+            } else {
+                iced::mouse::Interaction::ResizingDiagonallyUp
+            })
         };
         // the window-level Host control line: every session with active control, whichever shows
         let mut window = column![bar];
@@ -205,26 +169,10 @@ impl App {
                 .push(container(edge(Direction::West, false)).align_left(Fill))
                 .push(container(edge(Direction::North, true)).align_top(Fill))
                 .push(container(edge(Direction::South, true)).align_bottom(Fill))
-                .push(
-                    container(corner(Direction::NorthWest, true))
-                        .align_left(Fill)
-                        .align_top(Fill),
-                )
-                .push(
-                    container(corner(Direction::NorthEast, false))
-                        .align_right(Fill)
-                        .align_top(Fill),
-                )
-                .push(
-                    container(corner(Direction::SouthWest, false))
-                        .align_left(Fill)
-                        .align_bottom(Fill),
-                )
-                .push(
-                    container(corner(Direction::SouthEast, true))
-                        .align_right(Fill)
-                        .align_bottom(Fill),
-                );
+                .push(container(corner(Direction::NorthWest, true)).align_left(Fill).align_top(Fill))
+                .push(container(corner(Direction::NorthEast, false)).align_right(Fill).align_top(Fill))
+                .push(container(corner(Direction::SouthWest, false)).align_left(Fill).align_bottom(Fill))
+                .push(container(corner(Direction::SouthEast, true)).align_right(Fill).align_bottom(Fill));
         }
         if !self.backend_shown()
             && let Some(view) = self.current()
@@ -232,17 +180,8 @@ impl App {
         {
             layers = layers.push(crate::media::expanded(view, key));
         }
-        let annotating = !self.backend_shown()
-            && self.current().is_some_and(|view| view.annotation.is_some());
-        keys::annotation_shortcuts(
-            keys::window_shortcuts(
-                layers,
-                &self.settings.shortcuts,
-                self.find.shown,
-                self.terminal_focused(),
-            ),
-            annotating,
-        )
+        let annotating = !self.backend_shown() && self.current().is_some_and(|view| view.annotation.is_some());
+        keys::annotation_shortcuts(keys::window_shortcuts(layers, &self.settings.shortcuts, self.find.shown, self.terminal_focused()), annotating)
     }
 
     /// The drawer's edge: flush with its horizontal separators. The wider drag target
@@ -250,35 +189,26 @@ impl App {
     /// The grip between the conversation and the drawer; `lined` draws the drawer's edge in
     /// it (the drawer over the conversation), else the drawer draws its own.
     fn drawer_grip(&self, lined: bool) -> Element<'_, Message> {
-        let line = if self.layout.dragging {
-            P.accent
-        } else {
-            P.border
-        };
-        let strip: Element<'_, Message> = if lined {
-            rule::vertical(1).style(style::rule_style(line)).into()
-        } else {
-            space().into()
-        };
+        let line = if self.layout.dragging { P.accent } else { P.border };
+        let strip: Element<'_, Message> = if lined { rule::vertical(1).style(style::rule_style(line)).into() } else { space().into() };
         // lined, it stands between the two with the window's background; else it lies over the
         // drawer's edge, unseen
         let grip = container(strip).align_right(layout::HANDLE).height(Fill);
         mouse_area(if lined { grip.style(style::fill(P.bg)) } else { grip })
-        .interaction(iced::mouse::Interaction::ResizingHorizontally)
-        .on_press(Message::Layout(layout::Action::DragStart))
-        .into()
+            .interaction(iced::mouse::Interaction::ResizingHorizontally)
+            .on_press(Message::Layout(layout::Action::DragStart))
+            .into()
     }
 
     /// No session selected: why, and what to do.
     fn empty(&self) -> Element<'_, Message> {
         // the Mac's own VM while it starts, or what keeps it from starting
         #[cfg(target_os = "macos")]
-        if !self.listed && let Some((said, trouble)) = crate::local_vm::waiting_text() {
+        if !self.listed
+            && let Some((said, trouble)) = crate::local_vm::waiting_text()
+        {
             return container(center(
-                text(said)
-                    .size(style::TEXT)
-                    .color(if trouble { P.error } else { P.fg_dim })
-                    .align_x(iced::alignment::Horizontal::Center),
+                text(said).size(style::TEXT).color(if trouble { P.error } else { P.fg_dim }).align_x(iced::alignment::Horizontal::Center),
             ))
             .padding(24)
             .height(Fill)
@@ -301,16 +231,7 @@ impl App {
         } else {
             "No session is running. Choose one above to open it.".into()
         };
-        container(center(text(hint).size(style::TEXT).color(
-            if self.list_error.is_some() {
-                P.error
-            } else {
-                P.fg_dim
-            },
-        )))
-        .padding(24)
-        .height(Fill)
-        .into()
+        container(center(text(hint).size(style::TEXT).color(if self.list_error.is_some() { P.error } else { P.fg_dim }))).padding(24).height(Fill).into()
     }
 
     // --- top bar --------------------------------------------------------------------------------
@@ -320,54 +241,31 @@ impl App {
         let shown = self.backend_shown();
         let drawer_open = self.drawer.shown && !shown && self.current().is_some();
         // room on its right
-        let activity = container(self.activity()).padding(Padding {
-            left: 2.0,
-            right: 8.0,
-            ..Padding::ZERO
-        });
+        let activity = container(self.activity()).padding(Padding { left: 2.0, right: 8.0, ..Padding::ZERO });
         // the hover's box just round the mark, as a tab's round its label, with rounder corners
         // beside the window's; the underline under it, as wide as the tab's place
         // (the person, 2026-11-13)
         let mark_button = keys::press(
             button(crate::herring::herring(18.0, P.fg, self.herring_flick))
                 .padding([5, 6])
-                .style(|theme, status| button::Style {
-                    border: iced::Border { radius: 8.0.into(), ..iced::Border::default() },
-                    ..style::quiet(theme, status)
-                }),
+                .style(|theme, status| button::Style { border: iced::Border { radius: 8.0.into(), ..iced::Border::default() }, ..style::quiet(theme, status) }),
             Message::ToggleChanges,
         );
         let mark = tooltip(
-            column![
-                container(mark_button).center(Fill),
-                rule::horizontal(2).style(style::rule_style(if shown {
-                    P.accent
-                } else {
-                    Color::TRANSPARENT
-                })),
-            ]
-            .width(38)
-            .height(Fill),
-            container(
-                text(if shown {
-                    "Back to the conversation"
-                } else {
-                    "Sill: Changes, Agents and Settings"
-                })
-                .size(style::TINY),
-            )
-            .padding([3, 8])
-            .style(style::card(P.surface)),
+            column![container(mark_button).center(Fill), rule::horizontal(2).style(style::rule_style(if shown { P.accent } else { Color::TRANSPARENT })),]
+                .width(38)
+                .height(Fill),
+            container(text(if shown { "Back to the conversation" } else { "Sill: Changes, Agents and Settings" }).size(style::TINY))
+                .padding([3, 8])
+                .style(style::card(P.surface)),
             tooltip::Position::Bottom,
         );
         let tabs = responsive(move |size| {
             let mut tabs = row![].spacing(2).height(Fill);
             if shown {
-                for (page, glyph, title) in [
-                    (crate::Page::Changes, "changes", "Changes"),
-                    (crate::Page::Agents, "agents", "Agents"),
-                    (crate::Page::Settings, "settings", "Settings"),
-                ] {
+                for (page, glyph, title) in
+                    [(crate::Page::Changes, "changes", "Changes"), (crate::Page::Agents, "agents", "Agents"), (crate::Page::Settings, "settings", "Settings")]
+                {
                     tabs = tabs.push(self.page_tab(page, glyph, title));
                 }
             } else {
@@ -380,10 +278,7 @@ impl App {
                 let icons = self.tabs.iter().filter(|t| folded(t)).count() as f32;
                 let count = (all - icons).max(1.0);
                 let room = size.width - 2.0 * (all - 1.0) - icons * TAB_FOLDED;
-                let selected_full = self
-                    .tabs
-                    .iter()
-                    .any(|t| self.selected.as_deref() == Some(t.id.as_str()) && !folded(t));
+                let selected_full = self.tabs.iter().any(|t| self.selected.as_deref() == Some(t.id.as_str()) && !folded(t));
                 let mut share = room / count;
                 if share < TAB_CLOSE_FROM && count > 1.0 && selected_full {
                     share = (room - TAB_CLOSE_FROM) / (count - 1.0);
@@ -399,12 +294,7 @@ impl App {
                     tabs = tabs.push(self.tab(tab, width));
                 }
             }
-            scrollable(tabs)
-                .width(Fill)
-                .height(Fill)
-                .direction(scrollable::Direction::Horizontal(style::bar()))
-                .style(style::feed_scroll)
-                .into()
+            scrollable(tabs).width(Fill).height(Fill).direction(scrollable::Direction::Horizontal(style::bar())).style(style::feed_scroll).into()
         })
         .width(Fill)
         .height(Fill);
@@ -415,8 +305,7 @@ impl App {
                 row![
                     container(mark).padding(Padding::from([0.0, 2.0])),
                     // a window on a saved box says which (`boxes_ui`)
-                    container(self.box_chip().unwrap_or_else(|| iced::widget::space().width(0).into()))
-                        .center_y(Fill),
+                    container(self.box_chip().unwrap_or_else(|| iced::widget::space().width(0).into())).center_y(Fill),
                     tabs,
                     // Keep the timer open across the gap and + button, so the button does
                     // not move away as the pointer approaches it from the indicator.
@@ -424,14 +313,7 @@ impl App {
                         row![
                             // Hover opens the menu; pressing + keeps it open, including by keyboard.
                             mouse_area(keys::press(
-                                button(
-                                    svg(icons::plus())
-                                        .width(15)
-                                        .height(15)
-                                        .style(style::icon(alpha(P.fg, 0.75))),
-                                )
-                                .padding(4)
-                                .style(style::quiet),
+                                button(svg(icons::plus()).width(15).height(15).style(style::icon(alpha(P.fg, 0.75))),).padding(4).style(style::quiet),
                                 Message::Menu(crate::menu::Event::Hover),
                             ))
                             .on_enter(Message::Menu(crate::menu::Event::Hover)),
@@ -440,9 +322,7 @@ impl App {
                             match self.layout.drawer(drawer_open, width) {
                                 // reaching back across the bar's spacing and the +'s padding, so the +
                                 // sits about 10 px left of the divider
-                                Drawer::Beside(drawer) => container(activity)
-                                    .width(drawer + layout::HANDLE - 14.0)
-                                    .align_right(drawer + layout::HANDLE - 14.0),
+                                Drawer::Beside(drawer) => container(activity).width(drawer + layout::HANDLE - 14.0).align_right(drawer + layout::HANDLE - 14.0),
                                 _ => container(activity),
                             },
                         ]
@@ -456,12 +336,7 @@ impl App {
                 .align_y(Alignment::Center),
             )
             .height(37)
-            .padding(Padding {
-                top: 0.0,
-                right: 6.0,
-                bottom: 0.0,
-                left: 0.0,
-            })
+            .padding(Padding { top: 0.0, right: 6.0, bottom: 0.0, left: 0.0 })
             .width(Fill)
             .style(style::fill(P.bg)),
         );
@@ -472,12 +347,7 @@ impl App {
     }
 
     /// A page's tab: its glyph and title, underlined while it shows.
-    fn page_tab<'a>(
-        &'a self,
-        page: crate::Page,
-        glyph: &'static str,
-        title: &'static str,
-    ) -> Element<'a, Message> {
+    fn page_tab<'a>(&'a self, page: crate::Page, glyph: &'static str, title: &'static str) -> Element<'a, Message> {
         let active = match page {
             crate::Page::Agents => self.agents_page.shown,
             crate::Page::Changes => self.changes.is_some(),
@@ -485,25 +355,14 @@ impl App {
         };
         let color = if active { P.fg } else { alpha(P.fg, 0.6) };
         let label = keys::press(
-            button(
-                row![
-                    icons::glyph(glyph, 14.0, color),
-                    text(title).size(style::TEXT).color(color),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            )
-            .padding([4, 12])
-            .style(style::quiet),
+            button(row![icons::glyph(glyph, 14.0, color), text(title).size(style::TEXT).color(color),].spacing(8).align_y(Alignment::Center))
+                .padding([4, 12])
+                .style(style::quiet),
             Message::ShowPage(page),
         );
         column![
             container(label).height(Fill).align_y(Alignment::Center),
-            rule::horizontal(2).style(style::rule_style(if active {
-                P.accent
-            } else {
-                Color::TRANSPARENT
-            })),
+            rule::horizontal(2).style(style::rule_style(if active { P.accent } else { Color::TRANSPARENT })),
         ]
         .width(Shrink)
         .height(Fill)
@@ -523,9 +382,7 @@ impl App {
             (false, false) => alpha(P.fg, 0.35),
         };
         let attention = view.map(SessionView::attention);
-        let working = attention
-            .as_ref()
-            .is_some_and(|a| a.activity == Activity::Working);
+        let working = attention.as_ref().is_some_and(|a| a.activity == Activity::Working);
         let pulse = attention.as_ref().map_or(P.accent, work_color);
         // A tab is as wide as its content, up to `width`: the agent glyph, the title, the mark
         // and the close button, which follows the title. What must give way is the title, cut
@@ -534,77 +391,45 @@ impl App {
         let closable = !self.demo && (active || width >= TAB_CLOSE_FROM);
         let mark = attention.as_ref().and_then(mark);
         // the room left for the title and its paddings, by the widths of the fixed parts
-        let title_max = (width
-            - TAB_AGENT
-            - if closable { TAB_CLOSE } else { 0.0 }
-            - if mark.is_some() { TAB_MARK } else { 0.0 })
-        .max(TITLE_LEFT + TITLE_FADE);
+        let title_max = (width - TAB_AGENT - if closable { TAB_CLOSE } else { 0.0 } - if mark.is_some() { TAB_MARK } else { 0.0 }).max(TITLE_LEFT + TITLE_FADE);
         // The text runs on into the right padding when it is too long, and fades out there into
         // the bar's colour, as a browser's tab does.
         let fade = container(space().width(TITLE_FADE).height(Fill)).style(|_| container::Style {
             background: Some(
-                iced::gradient::Linear::new(Radians(std::f32::consts::FRAC_PI_2))
-                    .add_stop(0.0, Color { a: 0.0, ..P.bg })
-                    .add_stop(1.0, P.bg)
-                    .into(),
+                iced::gradient::Linear::new(Radians(std::f32::consts::FRAC_PI_2)).add_stop(0.0, Color { a: 0.0, ..P.bg }).add_stop(1.0, P.bg).into(),
             ),
             ..container::Style::default()
         });
         let title = stack![
-            container(
-                text(self.session_name(&tab.id, &tab.title))
-                    .size(style::TEXT)
-                    .color(color)
-                    .wrapping(text::Wrapping::None),
-            )
-            .padding(Padding {
-                left: TITLE_LEFT,
-                right: TITLE_FADE,
-                ..Padding::ZERO
-            })
-            .max_width(title_max)
-            .clip(true),
+            container(text(self.session_name(&tab.id, &tab.title)).size(style::TEXT).color(color).wrapping(text::Wrapping::None),)
+                .padding(Padding { left: TITLE_LEFT, right: TITLE_FADE, ..Padding::ZERO })
+                .max_width(title_max)
+                .clip(true),
             right(fade).height(Fill),
         ];
         // the glyph's, the title's and the close button's hover boxes one height, `TAB_HOVER`
         // (the person, 2026-11-13)
         let agent = keys::press(
             button(
-                container(icons::tab_agent(
-                    &tab.agent,
-                    self.agent_icons.get(&tab.agent).map(Vec::as_slice),
-                    if working { pulse } else { color },
-                    working,
-                ))
-                .center_y(Fill),
+                container(icons::tab_agent(&tab.agent, self.agent_icons.get(&tab.agent).map(Vec::as_slice), if working { pulse } else { color }, working))
+                    .center_y(Fill),
             )
             .height(TAB_HOVER)
             .padding([0, 4])
             .style(style::quiet),
             Message::Details(crate::details::Event::Open(tab.id.clone())),
         );
-        let label: Element<'a, Message> = if let Some(editor) =
-            self.name_editor.as_ref().filter(|e| e.id == tab.id)
-        {
+        let label: Element<'a, Message> = if let Some(editor) = self.name_editor.as_ref().filter(|e| e.id == tab.id) {
             let input = iced::widget::text_input("Session name", &editor.text)
                 .id("session-name")
-                .on_input_maybe(
-                    (!editor.pending).then_some(|s| Message::Name(crate::names::Event::Input(s))),
-                )
-                .on_submit_maybe(
-                    (!editor.pending).then_some(Message::Name(crate::names::Event::Save)),
-                )
+                .on_input_maybe((!editor.pending).then_some(|s| Message::Name(crate::names::Event::Input(s))))
+                .on_submit_maybe((!editor.pending).then_some(Message::Name(crate::names::Event::Save)))
                 .size(style::TEXT)
                 // the tab at its full width while its name is edited
                 .width((title_max - if editor.error.is_some() { 14.0 } else { 0.0 }).max(24.0));
             let input: Element<'a, Message> = input.into();
             if let Some(error) = &editor.error {
-                tooltip(
-                    row![input, text("!").color(P.error)].spacing(4),
-                    text(error).size(style::SMALL),
-                    tooltip::Position::Bottom,
-                )
-                .into()
+                tooltip(row![input, text("!").color(P.error)].spacing(4), text(error).size(style::SMALL), tooltip::Position::Bottom).into()
             } else {
                 input
             }
@@ -634,41 +459,23 @@ impl App {
             let armed = self.armed_close.is(&tab.id);
             label = label.push(
                 container(keys::press(
-                    button(
-                        container(icons::glyph(
-                            "x",
-                            12.0,
-                            if armed { P.error } else { alpha(P.fg, 0.55) },
-                        ))
-                        .center_y(Fill),
-                    )
-                    .width(TAB_CLOSE)
-                    .height(TAB_HOVER)
-                    .padding([0, 6])
-                    .style(style::quiet),
+                    button(container(icons::glyph("x", 12.0, if armed { P.error } else { alpha(P.fg, 0.55) })).center_y(Fill))
+                        .width(TAB_CLOSE)
+                        .height(TAB_HOVER)
+                        .padding([0, 6])
+                        .style(style::quiet),
                     Message::CloseTab(tab.id.clone()),
                 ))
                 .id("close-tab"),
             );
         }
-        let underline = rule::horizontal(2).style(style::rule_style(if active {
-            P.accent
-        } else {
-            Color::TRANSPARENT
-        }));
+        let underline = rule::horizontal(2).style(style::rule_style(if active { P.accent } else { Color::TRANSPARENT }));
         // the underline as wide as the content: a column takes its widest child's width
-        let tab_body = column![
-            container(label).height(Fill).align_y(Alignment::Center),
-            underline
-        ]
-        .width(Shrink)
-        .height(Fill);
+        let tab_body = column![container(label).height(Fill).align_y(Alignment::Center), underline].width(Shrink).height(Fill);
         match attention.filter(|a| a.level() >= Level::Problem) {
             Some(attention) => tooltip(
                 tab_body,
-                container(text(attention.summary()).size(style::TINY))
-                    .padding([3, 8])
-                    .style(style::fill(P.surface)),
+                container(text(attention.summary()).size(style::TINY)).padding([3, 8]).style(style::fill(P.surface)),
                 tooltip::Position::Bottom,
             )
             .into(),
@@ -680,20 +487,12 @@ impl App {
     /// underline while selected. Pressing it opens the session; its name is in the tooltip.
     fn folded_tab<'a>(&'a self, tab: &'a Tab) -> Element<'a, Message> {
         let active = self.selected.as_deref() == Some(tab.id.as_str());
-        let working = self
-            .views
-            .get(&tab.id)
-            .is_some_and(|v| v.attention().activity == Activity::Working);
+        let working = self.views.get(&tab.id).is_some_and(|v| v.attention().activity == Activity::Working);
         let color = if active { P.fg } else { alpha(P.fg, 0.6) };
         let glyph = keys::press(
             button(
-                container(icons::tab_agent(
-                    &tab.agent,
-                    self.agent_icons.get(&tab.agent).map(Vec::as_slice),
-                    if working { P.success } else { color },
-                    working,
-                ))
-                .center_x(Fill),
+                container(icons::tab_agent(&tab.agent, self.agent_icons.get(&tab.agent).map(Vec::as_slice), if working { P.success } else { color }, working))
+                    .center_x(Fill),
             )
             .width(TAB_FOLDED)
             .padding([4, 0])
@@ -702,25 +501,15 @@ impl App {
         );
         let body = column![
             container(glyph).height(Fill).align_y(Alignment::Center),
-            rule::horizontal(2).style(style::rule_style(if active {
-                P.accent
-            } else {
-                Color::TRANSPARENT
-            })),
+            rule::horizontal(2).style(style::rule_style(if active { P.accent } else { Color::TRANSPARENT })),
         ]
         .width(TAB_FOLDED)
         .height(Fill);
         tooltip(
             body,
-            container(
-                text(format!(
-                    "{} — summarizing",
-                    self.session_name(&tab.id, &tab.title)
-                ))
-                .size(style::TINY),
-            )
-            .padding([3, 8])
-            .style(style::fill(P.surface)),
+            container(text(format!("{} — summarizing", self.session_name(&tab.id, &tab.title))).size(style::TINY))
+                .padding([3, 8])
+                .style(style::fill(P.surface)),
             tooltip::Position::Bottom,
         )
         .into()
@@ -732,44 +521,20 @@ impl App {
             return self.daemon_indicator(activity_canvas(self.daemon_dot(), None));
         };
         let attention = view.attention();
-        let trouble = view
-            .status
-            .problem()
-            .map(str::to_owned)
-            .or_else(|| self.list_error.clone());
-        let busy_now = trouble.is_none()
-            && matches!(attention.activity, Activity::Working | Activity::Waiting);
-        let indicator = if busy_now && (!self.daemon_trouble() || self.demo) {
-            Indicator::Spinner(work_color(&attention))
-        } else {
-            self.daemon_dot()
-        };
+        let trouble = view.status.problem().map(str::to_owned).or_else(|| self.list_error.clone());
+        let busy_now = trouble.is_none() && matches!(attention.activity, Activity::Working | Activity::Waiting);
+        let indicator = if busy_now && (!self.daemon_trouble() || self.demo) { Indicator::Spinner(work_color(&attention)) } else { self.daemon_dot() };
         // the timer: while the agent works, and whenever the pointer is over the
         // activity — the session's worked time, still while it does not work; it slides out from
         // under the indicator when it appears
-        let working = attention
-            .working_ms
-            .filter(|_| attention.activity == Activity::Working);
+        let working = attention.working_ms.filter(|_| attention.activity == Activity::Working);
         // Settings → Timer autoshow (the demo shows it)
-        let auto = self
-            .daemon_settings
-            .as_ref()
-            .and_then(|s| s.timer_auto)
-            .unwrap_or(self.demo);
-        let shown_ms = if self.activity_hovered {
-            attention.worked_ms
-        } else {
-            working.filter(|_| auto)
-        };
+        let auto = self.daemon_settings.as_ref().and_then(|s| s.timer_auto).unwrap_or(self.demo);
+        let shown_ms = if self.activity_hovered { attention.worked_ms } else { working.filter(|_| auto) };
         let clock = shown_ms.map(|ms| {
             let shown = view.clock_shown.get().unwrap_or_else(Instant::now);
             view.clock_shown.set(Some(shown));
-            Clock {
-                ticking: attention.working_ms.is_some(),
-                ms,
-                shown,
-                width: clock_width(ms),
-            }
+            Clock { ticking: attention.working_ms.is_some(), ms, shown, width: clock_width(ms) }
         });
         if clock.is_none() {
             view.clock_shown.set(None);
@@ -784,36 +549,20 @@ impl App {
         } else if self.daemon.stopped && !self.daemon.restarting {
             Indicator::Dot(alpha(P.error, 0.7))
         } else {
-            Indicator::Pulse(if self.daemon_trouble() {
-                P.warning
-            } else {
-                P.success
-            })
+            Indicator::Pulse(if self.daemon_trouble() { P.warning } else { P.success })
         }
     }
 
     fn daemon_indicator<'a>(&'a self, shown: Element<'a, Message>) -> Element<'a, Message> {
         let shown = tooltip(
             shown,
-            container(
-                text(if self.demo {
-                    "Demo — no daemon".into()
-                } else {
-                    self.daemon_label()
-                })
-                .size(style::TINY),
-            )
-            .padding([3, 8])
-            .style(style::fill(P.surface)),
+            container(text(if self.demo { "Demo — no daemon".into() } else { self.daemon_label() }).size(style::TINY))
+                .padding([3, 8])
+                .style(style::fill(P.surface)),
             tooltip::Position::Bottom,
         );
         let area = mouse_area(shown).on_enter(Message::ActivityHover(true));
-        if !self.demo && self.daemon_trouble() {
-            area.on_press(Message::Daemon(crate::daemon_ui::Event::Open))
-                .into()
-        } else {
-            area.into()
-        }
+        if !self.demo && self.daemon_trouble() { area.on_press(Message::Daemon(crate::daemon_ui::Event::Open)).into() } else { area.into() }
     }
 
     // --- the conversation -----------------------------------------------------------------------
@@ -823,38 +572,22 @@ impl App {
         if conversation.session_id.is_empty() {
             let (hint, color) = match &view.status {
                 Status::Reconnecting(error) => (format!("Connecting… {error}"), P.error),
-                Status::NotRunning => (
-                    "Not running. Send a prompt, or choose the tab again, to start it.".into(),
-                    P.fg_dim,
-                ),
+                Status::NotRunning => ("Not running. Send a prompt, or choose the tab again, to start it.".into(), P.fg_dim),
                 Status::Gone(why) | Status::Stopped(why) => (why.clone(), P.error),
                 _ => ("Loading conversation…".into(), P.fg_dim),
             };
-            return container(center(text(hint).size(style::TEXT).color(color)))
-                .padding(24)
-                .height(Fill)
-                .into();
+            return container(center(text(hint).size(style::TEXT).color(color))).padding(24).height(Fill).into();
         }
         // the layout every row height depends on: the width the rows get, from the window's,
         // the drawer beside the conversation and the reading measure. Only that: dragging the
         // drawer in a window wider than the measure changes no row, and while it is dragged the
         // width is the one from before the drag, so a long conversation is measured anew once,
         // at the release, not at every pointer move.
-        let layout_key = rows::signature(
-            self.layout
-                .row_width(self.drawer.shown, self.width)
-                .to_bits(),
-            0,
-        );
+        let layout_key = rows::signature(self.layout.row_width(self.drawer.shown, self.width).to_bits(), 0);
         let items = conversation.visible_items();
         // each question under its tool's item, or the item it was asked after
         let places = conversation.question_places();
-        let below = |item: &Item| -> Vec<&'a Question> {
-            places
-                .get(item.item_id.as_str())
-                .cloned()
-                .unwrap_or_default()
-        };
+        let below = |item: &Item| -> Vec<&'a Question> { places.get(item.item_id.as_str()).cloned().unwrap_or_default() };
         // the last item of a turn that was stopped or failed: say so under it
         let turn_end = |index: usize, item: &Item| -> Option<String> {
             let turn_id = item.turn_id.as_ref()?;
@@ -866,11 +599,7 @@ impl App {
         // the feed's rows: an item, a run of tool calls shown as one block (`tool_runs`), or a
         // turn sill started folded to a line (`folds`); a call with a question under it keeps its
         // own row, so the question stays under its call
-        let folds = crate::folds::rows(
-            &items,
-            |item| conversation.purpose(item),
-            |item| places.contains_key(item.item_id.as_str()),
-        );
+        let folds = crate::folds::rows(&items, |item| conversation.purpose(item), |item| places.contains_key(item.item_id.as_str()));
         let entries: Vec<std::ops::Range<usize>> = folds.iter().map(|r| r.range().clone()).collect();
         // what each row's height depends on, so a measured height is used only while it holds
         let signatures: Vec<u64> = folds
@@ -885,9 +614,7 @@ impl App {
                         .iter()
                         .filter(|_| open)
                         .map(|item| {
-                            let tool = item.tool.as_ref().map(|t| {
-                                (&t.title, &t.command, &t.status, t.detail.len(), t.diff.len())
-                            });
+                            let tool = item.tool.as_ref().map(|t| (&t.title, &t.command, &t.status, t.detail.len(), t.diff.len()));
                             (
                                 &item.item_id,
                                 view.rendered.get(&item.item_id).map(|r| r.source.as_str()),
@@ -898,13 +625,7 @@ impl App {
                         })
                         .collect();
                     return rows::signature(
-                        (
-                            purpose,
-                            entry.len(),
-                            fold_running(conversation, &items[entry.clone()]),
-                            inside,
-                            turn_end(index, items[index]),
-                        ),
+                        (purpose, entry.len(), fold_running(conversation, &items[entry.clone()]), inside, turn_end(index, items[index])),
                         layout_key,
                     );
                 }
@@ -926,38 +647,15 @@ impl App {
                     let calls: Vec<_> = items[entry.clone()]
                         .iter()
                         .map(|item| {
-                            let tool = item.tool.as_ref().map(|t| {
-                                (
-                                    &t.title,
-                                    &t.command,
-                                    &t.kind,
-                                    &t.status,
-                                    t.detail.len(),
-                                    t.diff.len(),
-                                )
-                            });
-                            (
-                                &item.item_id,
-                                tool,
-                                view.open_tools.contains(&item.item_id),
-                                view.open_groups.contains(&item.item_id),
-                            )
+                            let tool = item.tool.as_ref().map(|t| (&t.title, &t.command, &t.kind, &t.status, t.detail.len(), t.diff.len()));
+                            (&item.item_id, tool, view.open_tools.contains(&item.item_id), view.open_groups.contains(&item.item_id))
                         })
                         .collect();
                     return rows::signature((calls, turn_end(index, items[index])), layout_key);
                 }
                 let item = items[index];
                 let source = view.rendered.get(&item.item_id).map(|r| r.source.as_str());
-                let tool = item.tool.as_ref().map(|t| {
-                    (
-                        &t.title,
-                        &t.command,
-                        &t.status,
-                        t.detail.len(),
-                        t.diff.len(),
-                        view.open_tools.contains(&item.item_id),
-                    )
-                });
+                let tool = item.tool.as_ref().map(|t| (&t.title, &t.command, &t.status, t.detail.len(), t.diff.len(), view.open_tools.contains(&item.item_id)));
                 let asked: Vec<_> = below(item)
                     .into_iter()
                     .map(|q| {
@@ -974,18 +672,7 @@ impl App {
                         )
                     })
                     .collect();
-                rows::signature(
-                    (
-                        &item.item_id,
-                        &item.kind,
-                        source,
-                        tool,
-                        view.open_tools.contains(&item.item_id),
-                        asked,
-                        turn_end(index, item),
-                    ),
-                    layout_key,
-                )
+                rows::signature((&item.item_id, &item.kind, source, tool, view.open_tools.contains(&item.item_id), asked, turn_end(index, item)), layout_key)
             })
             .collect();
         let known: Vec<Option<f32>> = {
@@ -993,38 +680,15 @@ impl App {
             entries
                 .iter()
                 .zip(&signatures)
-                .map(|(entry, signature)| {
-                    heights
-                        .get(&items[entry.start].item_id)
-                        .filter(|(s, _)| s == signature)
-                        .map(|(_, h)| *h)
-                })
+                .map(|(entry, signature)| heights.get(&items[entry.start].item_id).filter(|(s, _)| s == signature).map(|(_, h)| *h))
                 .collect()
         };
         use rows::SPACING;
         // until the conversation has scrolled, the window's height stands in for the view's (a
         // screen of rows to spare on each side covers the difference)
-        let viewport = if view.viewport > 0.0 {
-            view.viewport
-        } else {
-            self.height
-        };
-        let slots = rows::plan_with_pinned(
-            &known,
-            SPACING,
-            view.scroll_offset,
-            viewport,
-            view.follow_tail,
-            self.find.pinned_row(),
-        );
-        let mut feed = iced::widget::keyed_column(std::iter::empty())
-            .spacing(SPACING)
-            .padding(Padding {
-                top: 10.0,
-                right: 14.0,
-                bottom: 18.0,
-                left: 12.0,
-            });
+        let viewport = if view.viewport > 0.0 { view.viewport } else { self.height };
+        let slots = rows::plan_with_pinned(&known, SPACING, view.scroll_offset, viewport, view.follow_tail, self.find.pinned_row());
+        let mut feed = iced::widget::keyed_column(std::iter::empty()).spacing(SPACING).padding(Padding { top: 10.0, right: 14.0, bottom: 18.0, left: 12.0 });
         let mut placed = BTreeSet::new();
         for slot in slots {
             match slot {
@@ -1049,19 +713,9 @@ impl App {
                         }
                     }
                     if let Some(end) = turn_end(last, items[last]) {
-                        row = row.push(
-                            container(
-                                selection::text(format!("· {end}"))
-                                    .size(style::SMALL)
-                                    .style(style::selectable(P.fg_dim)),
-                            )
-                            .padding([0, 8]),
-                        );
+                        row = row.push(container(selection::text(format!("· {end}")).size(style::SMALL).style(style::selectable(P.fg_dim))).padding([0, 8]));
                     }
-                    feed = feed.push(
-                        rows::key(&item.item_id),
-                        rows::measured(row, index, &item.item_id, signatures[index], &view.heights),
-                    );
+                    feed = feed.push(rows::key(&item.item_id), rows::measured(row, index, &item.item_id, signatures[index], &view.heights));
                 }
             }
         }
@@ -1070,17 +724,10 @@ impl App {
             placed.insert(question.question_id.as_str());
         }
         let mut next_row = entries.len();
-        for question in conversation
-            .questions
-            .values()
-            .filter(|q| !placed.contains(q.question_id.as_str()))
-        {
+        for question in conversation.questions.values().filter(|q| !placed.contains(q.question_id.as_str())) {
             let row_index = next_row;
             next_row += 1;
-            feed = feed.push(
-                rows::key(&format!("question {}", question.question_id)),
-                rows::scoped(row_index, self.question(view, question)),
-            );
+            feed = feed.push(rows::key(&format!("question {}", question.question_id)), rows::scoped(row_index, self.question(view, question)));
         }
         // the agent asks for a login: its card, after everything else
         if let Some(card) = self.login_card(view) {
@@ -1089,28 +736,26 @@ impl App {
         if let Some(error) = view.status.problem() {
             let row_index = next_row;
             next_row += 1;
-            feed = feed.push(
-                rows::key("problem"),
-                rows::scoped(row_index, note(error, P.error)),
-            );
+            feed = feed.push(rows::key("problem"), rows::scoped(row_index, note(error, P.error)));
         }
         if let Some(failed) = &view.failed {
             let row_index = next_row;
-            feed = feed.push(
-                rows::key("failed"),
-                rows::scoped(row_index, note(failed, P.error)),
-            );
+            feed = feed.push(rows::key("failed"), rows::scoped(row_index, note(failed, P.error)));
         }
         if self.vm_shown() && view.status.problem().into_iter().chain(view.failed.as_deref()).any(crate::vm_ui::storage_error) {
-            feed = feed.push(rows::key("storage"), column![
-                text("The VM has run out of storage. Check free space and clear unused build caches in Settings → System → Virtual machine.").size(style::SMALL).color(P.warning),
-                crate::settings_ui::quiet_button("Open VM storage", Some(Message::Vm(crate::vm_ui::Event::OpenStorage))),
-            ].spacing(6));
+            feed = feed.push(
+                rows::key("storage"),
+                column![
+                    text("The VM has run out of storage. Check free space and clear unused build caches in Settings → System → Virtual machine.")
+                        .size(style::SMALL)
+                        .color(P.warning),
+                    crate::settings_ui::quiet_button("Open VM storage", Some(Message::Vm(crate::vm_ui::Event::OpenStorage))),
+                ]
+                .spacing(6),
+            );
         }
         let feed: Element<'a, Message> = match self.layout.measure() {
-            Some(measure) => container(container(feed).max_width(measure))
-                .center_x(Fill)
-                .into(),
+            Some(measure) => container(container(feed).max_width(measure)).center_x(Fill).into(),
             None => feed.into(),
         };
         let scroll = scrollable(feed)
@@ -1122,11 +767,7 @@ impl App {
             .on_scroll(move |viewport| {
                 session::message(
                     &view.id,
-                    session::Event::Scrolled(
-                        viewport.absolute_offset_reversed().y,
-                        viewport.absolute_offset().y,
-                        viewport.bounds().height,
-                    ),
+                    session::Event::Scrolled(viewport.absolute_offset_reversed().y, viewport.absolute_offset().y, viewport.bounds().height),
                 )
             });
         // the scrollable stays the stack's first layer whether or not the Latest button is over it:
@@ -1137,21 +778,12 @@ impl App {
             layers = layers.push(
                 right(bar_tip(
                     keys::press(
-                        button(center(icons::glyph("chevron-down", 14.0, P.fg)))
-                            .width(28)
-                            .height(28)
-                            .padding(0)
-                            .style(style::floating),
+                        button(center(icons::glyph("chevron-down", 14.0, P.fg))).width(28).height(28).padding(0).style(style::floating),
                         session::message(&view.id, session::Event::Latest),
                     ),
                     "Latest",
                 ))
-                .padding(Padding {
-                    top: 0.0,
-                    right: 18.0,
-                    bottom: 12.0,
-                    left: 0.0,
-                })
+                .padding(Padding { top: 0.0, right: 18.0, bottom: 12.0, left: 0.0 })
                 .align_y(Alignment::End)
                 .height(Fill),
             );
@@ -1172,11 +804,7 @@ impl App {
 
     fn item<'a>(&'a self, view: &'a SessionView, item: &'a Item) -> Element<'a, Message> {
         let mut body = Column::new();
-        let empty_user = item.kind == "user"
-            && view
-                .rendered
-                .get(&item.item_id)
-                .is_none_or(|r| r.source.trim().is_empty());
+        let empty_user = item.kind == "user" && view.rendered.get(&item.item_id).is_none_or(|r| r.source.trim().is_empty());
         if !empty_user {
             body = body.push(self.item_body(view, item));
         }
@@ -1190,11 +818,7 @@ impl App {
                 body = body.push(crate::media::picture(&view.media, &view.id, key));
             }
         }
-        if let Some(submission) = item
-            .submission_id
-            .as_ref()
-            .and_then(|id| view.conversation.submissions.get(id))
-        {
+        if let Some(submission) = item.submission_id.as_ref().and_then(|id| view.conversation.submissions.get(id)) {
             for attachment in &submission.attachments {
                 if crate::media::is_image(attachment) {
                     let key = crate::media::key(attachment);
@@ -1202,11 +826,7 @@ impl App {
                         thumbs.push(key);
                     }
                 } else {
-                    body = body.push(
-                        text(crate::media::name(attachment))
-                            .size(style::SMALL)
-                            .color(P.fg_dim),
-                    );
+                    body = body.push(text(crate::media::name(attachment)).size(style::SMALL).color(P.fg_dim));
                 }
             }
         }
@@ -1218,16 +838,12 @@ impl App {
                     let width = (size.width * THUMBNAIL_SHARE).max(72.0);
                     let height = width * 52.0 / 72.0;
                     let photos = thumbs.iter().fold(row![].spacing(6), |photos, key| {
-                        photos.push(mouse_area(crate::media::thumbnail(&view.media, key, width, height))
-                            .on_press(Message::Media(crate::media::Event::Open(view.id.clone(), key.clone()))))
+                        photos.push(
+                            mouse_area(crate::media::thumbnail(&view.media, key, width, height))
+                                .on_press(Message::Media(crate::media::Event::Open(view.id.clone(), key.clone()))),
+                        )
                     });
-                    container(
-                        scrollable(photos)
-                            .direction(scrollable::Direction::Horizontal(style::bar()))
-                            .style(style::feed_scroll),
-                    )
-                    .padding([2, 14])
-                    .into()
+                    container(scrollable(photos).direction(scrollable::Direction::Horizontal(style::bar())).style(style::feed_scroll)).padding([2, 14]).into()
                 })
                 .height(Shrink),
             );
@@ -1239,23 +855,16 @@ impl App {
         if let Some(tool) = &item.tool {
             return self.tool(view, item, tool);
         }
-        let source = view
-            .rendered
-            .get(&item.item_id)
-            .map_or("", |r| r.source.as_str());
+        let source = view.rendered.get(&item.item_id).map_or("", |r| r.source.as_str());
         match item.kind.as_str() {
             // the person's own words: a framed box on the code background behind the accent rule
             "user" => ruled(
                 3.0,
                 alpha(P.accent, 0.9),
-                container(
-                    selection::text(source)
-                        .size(style::TEXT)
-                        .style(style::selectable_inherited),
-                )
-                .padding([10, 14])
-                .width(Fill)
-                .style(style::card_right(P.code_bg)),
+                container(selection::text(source).size(style::TEXT).style(style::selectable_inherited))
+                    .padding([10, 14])
+                    .width(Fill)
+                    .style(style::card_right(P.code_bg)),
             ),
             // the agent's reasoning: Markdown (Codex's summaries are bold
             // titles after blank lines), smaller, dimmed and in italics
@@ -1266,16 +875,11 @@ impl App {
                         container(markdown::view_with(
                             rendered.markdown.items(),
                             thought_settings(),
-                            &viewer::SillViewer {
-                                media: Some((&view.id, &view.media)),
-                            },
+                            &viewer::SillViewer { media: Some((&view.id, &view.media)) },
                         ))
                         .padding([0, 8])
                         .width(Fill)
-                        .style(|_| container::Style {
-                            text_color: Some(alpha(P.fg, 0.55)),
-                            ..container::Style::default()
-                        })
+                        .style(|_| container::Style { text_color: Some(alpha(P.fg, 0.55)), ..container::Style::default() })
                         .into()
                     };
                     if !is_long_thought(source) {
@@ -1283,28 +887,13 @@ impl App {
                     }
                     let open = view.open_tools.contains(&item.item_id);
                     let line = folded_thought(&view.id, &item.item_id, source, open);
-                    if open {
-                        Column::new().push(line).push(whole()).spacing(4).into()
-                    } else {
-                        line
-                    }
+                    if open { Column::new().push(line).push(whole()).spacing(4).into() } else { line }
                 }
                 None => space().into(),
             },
-            "note" => container(
-                selection::text(format!("· {source}"))
-                    .size(style::SMALL)
-                    .style(style::selectable(P.fg_dim)),
-            )
-            .padding([0, 8])
-            .into(),
+            "note" => container(selection::text(format!("· {source}")).size(style::SMALL).style(style::selectable(P.fg_dim))).padding([0, 8]).into(),
             "notice" => {
-                let severity = item
-                    .content
-                    .first()
-                    .and_then(|b| b.extra.get("severity"))
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("info");
+                let severity = item.content.first().and_then(|b| b.extra.get("severity")).and_then(|s| s.as_str()).unwrap_or("info");
                 let color = match severity {
                     "error" => P.error,
                     "warning" => P.warning,
@@ -1320,16 +909,12 @@ impl App {
             "plan" => plan(item),
             // agent text and anything newer: Markdown as the agent wrote it
             _ => match view.rendered.get(&item.item_id) {
-                Some(rendered) => container(markdown::view_with(
-                    rendered.markdown.items(),
-                    markdown_settings(),
-                    &viewer::SillViewer {
-                        media: Some((&view.id, &view.media)),
-                    },
-                ))
-                .padding([0, 8])
-                .width(Fill)
-                .into(),
+                Some(rendered) => {
+                    container(markdown::view_with(rendered.markdown.items(), markdown_settings(), &viewer::SillViewer { media: Some((&view.id, &view.media)) }))
+                        .padding([0, 8])
+                        .width(Fill)
+                        .into()
+                }
                 None => space().into(),
             },
         }
@@ -1337,50 +922,25 @@ impl App {
 
     /// A tool call: one quiet line — kind glyph, title, status mark — that opens to its output and
     /// diff (`.sill-tool`, `.sill-tool-line`, `.sill-tool-body`).
-    fn tool<'a>(
-        &'a self,
-        view: &'a SessionView,
-        item: &'a Item,
-        tool: &'a Tool,
-    ) -> Element<'a, Message> {
-        ruled(
-            2.0,
-            alpha(P.fg, 0.18),
-            self.tool_call(view, item, tool).width(Fill),
-        )
+    fn tool<'a>(&'a self, view: &'a SessionView, item: &'a Item, tool: &'a Tool) -> Element<'a, Message> {
+        ruled(2.0, alpha(P.fg, 0.18), self.tool_call(view, item, tool).width(Fill))
     }
 
     /// A tool call's row and, opened, its output; the rule beside it is its row's or its run's.
     /// The row is one line, or for a shell call that ran several commands a line for each
     /// (`tool_runs::lines`) with the kind glyph and the status mark on the first: still one
     /// call, with one status and one output.
-    fn tool_call<'a>(
-        &'a self,
-        view: &'a SessionView,
-        item: &'a Item,
-        tool: &'a Tool,
-    ) -> Column<'a, Message> {
+    fn tool_call<'a>(&'a self, view: &'a SessionView, item: &'a Item, tool: &'a Tool) -> Column<'a, Message> {
         let mut rows = Column::new();
         for (index, step) in crate::tool_runs::lines(tool).iter().enumerate() {
             let line = step_line(step, false);
-            let cells = if index == 0 {
-                row![kind_mark(&tool.kind), line, status_mark(&tool.status)]
-            } else {
-                row![space().width(KIND_MARK), line]
-            };
+            let cells = if index == 0 { row![kind_mark(&tool.kind), line, status_mark(&tool.status)] } else { row![space().width(KIND_MARK), line] };
             rows = rows.push(cells.spacing(6).align_y(Alignment::Center));
         }
-        let line = button(rows)
-            .padding([3, 6])
-            .width(Fill)
-            .style(style::row_button);
+        let line = button(rows).padding([3, 6]).width(Fill).style(style::row_button);
         let line = keys::press(line, session::message(&view.id, session::Event::ToggleTool(item.item_id.clone())));
         let body = Column::new().push(line);
-        if view.open_tools.contains(&item.item_id) {
-            tool_output(body, tool)
-        } else {
-            body
-        }
+        if view.open_tools.contains(&item.item_id) { tool_output(body, tool) } else { body }
     }
 
     /// A turn sill started for the person (`folds`): one pressable line with a chevron, what it
@@ -1435,93 +995,42 @@ impl App {
     /// group opens to its calls, indented under the name, each opening to its own output.
     fn tool_run<'a>(&'a self, view: &'a SessionView, run: Vec<&'a Item>) -> Element<'a, Message> {
         let groups = crate::tool_runs::groups(&run);
-        let count_width = groups
-            .iter()
-            .filter(|g| g.members.len() > 1)
-            .map(|g| text_width(&g.members.len().to_string(), style::SMALL))
-            .fold(0.0_f32, f32::max);
+        let count_width = groups.iter().filter(|g| g.members.len() > 1).map(|g| text_width(&g.members.len().to_string(), style::SMALL)).fold(0.0_f32, f32::max);
         let names: Vec<String> = groups.iter().map(|g| one_line(&g.name, 24)).collect();
-        let name_width = names
-            .iter()
-            .map(|name| text_width(name, style::SMALL))
-            .fold(0.0_f32, f32::max);
+        let name_width = names.iter().map(|name| text_width(name, style::SMALL)).fold(0.0_f32, f32::max);
         // the glyph and the count: what stands before the name's column
-        let lead = KIND_MARK
-            + if count_width > 0.0 {
-                6.0 + count_width
-            } else {
-                0.0
-            };
+        let lead = KIND_MARK + if count_width > 0.0 { 6.0 + count_width } else { 0.0 };
         let quiet = alpha(P.fg, 0.45);
         let mut block = Column::new();
         for (group, name) in groups.iter().zip(names) {
             let (first, first_tool) = group.members[0];
             let single = group.members.len() == 1;
-            let open = if single {
-                view.open_tools.contains(&first.item_id)
-            } else {
-                view.open_groups.contains(&first.item_id)
-            };
-            let mut cells = row![kind_mark(group.kind)]
-                .spacing(6)
-                .align_y(Alignment::Center);
+            let open = if single { view.open_tools.contains(&first.item_id) } else { view.open_groups.contains(&first.item_id) };
+            let mut cells = row![kind_mark(group.kind)].spacing(6).align_y(Alignment::Center);
             if count_width > 0.0 {
-                let count = if single {
-                    String::new()
-                } else {
-                    group.members.len().to_string()
-                };
-                cells = cells.push(
-                    text(count)
-                        .size(style::SMALL)
-                        .color(quiet)
-                        .width(count_width)
-                        .align_x(iced::alignment::Horizontal::Right),
-                );
+                let count = if single { String::new() } else { group.members.len().to_string() };
+                cells = cells.push(text(count).size(style::SMALL).color(quiet).width(count_width).align_x(iced::alignment::Horizontal::Right));
             }
-            let lines = if single {
-                crate::tool_runs::lines(first_tool)
-            } else {
-                Vec::new()
-            };
+            let lines = if single { crate::tool_runs::lines(first_tool) } else { Vec::new() };
             let content: Element<'a, Message> = if let [head, more @ ..] = lines.as_slice()
                 && !more.is_empty()
             {
-                let head = cells
-                    .push(step_line(head, true))
-                    .push(status_mark(group.status()));
+                let head = cells.push(step_line(head, true)).push(status_mark(group.status()));
                 more.iter()
                     .fold(Column::new().push(head), |rows, step| {
-                        rows.push(
-                            row![space().width(lead), step_line(step, true)]
-                                .spacing(6)
-                                .align_y(Alignment::Center),
-                        )
+                        rows.push(row![space().width(lead), step_line(step, true)].spacing(6).align_y(Alignment::Center))
                     })
                     .into()
             } else {
                 // the latest call's arguments; a group opened to its calls shows them there
-                let latest = if open && !single {
-                    String::new()
-                } else {
-                    one_line(&group.latest(), 140)
-                };
+                let latest = if open && !single { String::new() } else { one_line(&group.latest(), 140) };
                 // a single call's header is its only line, so Find searches it; a group's
                 // latest call is found among the calls inside it
                 let label = |content: String, color: Color| -> Element<'a, Message> {
                     if single {
-                        selection::text(content)
-                            .size(style::SMALL)
-                            .wrapping(text::Wrapping::None)
-                            .find_only()
-                            .style(style::selectable(color))
-                            .into()
+                        selection::text(content).size(style::SMALL).wrapping(text::Wrapping::None).find_only().style(style::selectable(color)).into()
                     } else {
-                        text(content)
-                            .size(style::SMALL)
-                            .color(color)
-                            .wrapping(text::Wrapping::None)
-                            .into()
+                        text(content).size(style::SMALL).color(color).wrapping(text::Wrapping::None).into()
                     }
                 };
                 cells
@@ -1535,24 +1044,13 @@ impl App {
             } else {
                 session::message(&view.id, session::Event::ToggleGroup(first.item_id.clone()))
             };
-            block = block.push(keys::press(
-                button(content)
-                    .padding([3, 6])
-                    .width(Fill)
-                    .style(style::row_button),
-                toggle,
-            ));
+            block = block.push(keys::press(button(content).padding([3, 6]).width(Fill).style(style::row_button), toggle));
             if open && single {
                 block = tool_output(block, first_tool);
             } else if open {
                 // each call's glyph under the group's name
                 for (item, tool) in &group.members {
-                    block = block.push(container(self.tool_call(view, item, tool)).padding(
-                        Padding {
-                            left: lead + 6.0,
-                            ..Padding::ZERO
-                        },
-                    ));
+                    block = block.push(container(self.tool_call(view, item, tool)).padding(Padding { left: lead + 6.0, ..Padding::ZERO }));
                 }
             }
         }
@@ -1563,34 +1061,19 @@ impl App {
     /// operation with its count, the latest action and a status mark; a group opens to a line for
     /// each action, and an action opens to its full request and result.
     fn host_run<'a>(&'a self, view: &'a SessionView, notices: Vec<&'a Item>) -> Element<'a, Message> {
-        let texts: Vec<(&str, &str)> = notices
-            .iter()
-            .filter_map(|item| Some((item.item_id.as_str(), crate::host_runs::host_text(item)?)))
-            .collect();
+        let texts: Vec<(&str, &str)> = notices.iter().filter_map(|item| Some((item.item_id.as_str(), crate::host_runs::host_text(item)?))).collect();
         let groups = crate::host_runs::groups(crate::host_runs::actions(&texts));
         let color = P.warning;
         let quiet = alpha(color, 0.7);
         let labels: Vec<String> = groups.iter().map(|g| crate::host_control::operation_label(&g.op)).collect();
-        let name_width = labels
-            .iter()
-            .map(|l| text_width(l, style::SMALL))
-            .fold(0.0_f32, f32::max);
-        let count_width = groups
-            .iter()
-            .filter(|g| g.actions.len() > 1)
-            .map(|g| text_width(&g.actions.len().to_string(), style::SMALL))
-            .fold(0.0_f32, f32::max);
+        let name_width = labels.iter().map(|l| text_width(l, style::SMALL)).fold(0.0_f32, f32::max);
+        let count_width = groups.iter().filter(|g| g.actions.len() > 1).map(|g| text_width(&g.actions.len().to_string(), style::SMALL)).fold(0.0_f32, f32::max);
         let action_line = |action: &crate::host_runs::Action<'a>, indent: f32| -> Element<'a, Message> {
             let line = row![
                 space().width(indent),
-                container(
-                    text(one_line(&crate::host_runs::summary(action), 140))
-                        .size(style::SMALL)
-                        .color(quiet)
-                        .wrapping(text::Wrapping::None),
-                )
-                .width(Fill)
-                .clip(true),
+                container(text(one_line(&crate::host_runs::summary(action), 140)).size(style::SMALL).color(quiet).wrapping(text::Wrapping::None),)
+                    .width(Fill)
+                    .clip(true),
                 status_mark(action.status()),
             ]
             .spacing(6)
@@ -1604,12 +1087,7 @@ impl App {
         let details = |action: &crate::host_runs::Action<'a>, indent: f32| -> Element<'a, Message> {
             let mut body = Column::new().spacing(4);
             if let Some(request) = action.request {
-                body = body.push(
-                    selection::text(format!("{} {request}", action.op))
-                        .font(MONO_FONT)
-                        .size(style::MONO)
-                        .style(style::selectable(P.fg)),
-                );
+                body = body.push(selection::text(format!("{} {request}", action.op)).font(MONO_FONT).size(style::MONO).style(style::selectable(P.fg)));
             }
             match action.outcome {
                 Some(crate::host_runs::Outcome::Done(result)) => {
@@ -1628,16 +1106,9 @@ impl App {
         for (group, label) in groups.iter().zip(labels) {
             let single = group.actions.len() == 1;
             let first = &group.actions[0];
-            let open = if single {
-                view.open_tools.contains(&first.key)
-            } else {
-                view.open_groups.contains(&first.key)
-            };
-            let latest = if open && !single {
-                String::new()
-            } else {
-                one_line(&crate::host_runs::summary(group.actions.last().expect("a group has actions")), 140)
-            };
+            let open = if single { view.open_tools.contains(&first.key) } else { view.open_groups.contains(&first.key) };
+            let latest =
+                if open && !single { String::new() } else { one_line(&crate::host_runs::summary(group.actions.last().expect("a group has actions")), 140) };
             let mut cells = row![text("HOST").size(style::TINY).color(color)].spacing(6).align_y(Alignment::Center);
             if count_width > 0.0 {
                 cells = cells.push(
@@ -1650,21 +1121,14 @@ impl App {
             }
             let cells = cells
                 .push(text(label).size(style::SMALL).color(color).width(name_width).wrapping(text::Wrapping::None))
-                .push(
-                    container(text(latest).size(style::SMALL).color(quiet).wrapping(text::Wrapping::None))
-                        .width(Fill)
-                        .clip(true),
-                )
+                .push(container(text(latest).size(style::SMALL).color(quiet).wrapping(text::Wrapping::None)).width(Fill).clip(true))
                 .push(status_mark(group.status()));
             let toggle = if single {
                 session::message(&view.id, session::Event::ToggleTool(first.key.clone()))
             } else {
                 session::message(&view.id, session::Event::ToggleGroup(first.key.clone()))
             };
-            block = block.push(keys::press(
-                button(cells).padding([3, 6]).width(Fill).style(style::row_button),
-                toggle,
-            ));
+            block = block.push(keys::press(button(cells).padding([3, 6]).width(Fill).style(style::row_button), toggle));
             let indent = 40.0 + count_width;
             if open && single {
                 block = block.push(details(first, indent));
@@ -1682,34 +1146,21 @@ impl App {
 
     /// A question: open, the card with the agent's options as buttons; answered, one line with
     /// the answer that opens to what was asked (`.sill-permission`, `.sill-answered-toggle`).
-    fn question<'a>(
-        &'a self,
-        view: &'a SessionView,
-        question: &'a Question,
-    ) -> Element<'a, Message> {
+    fn question<'a>(&'a self, view: &'a SessionView, question: &'a Question) -> Element<'a, Message> {
         let mut card = Column::new().spacing(8);
         if question.state == "open" {
-            card = card.push(
-                selection::text(&question.title)
-                    .size(style::TEXT)
-                    .style(style::selectable_inherited),
-            );
+            card = card.push(selection::text(&question.title).size(style::TEXT).style(style::selectable_inherited));
             card = asked(card, question);
             if question.fields.is_empty() {
                 let sending = view.answering.contains(&question.question_id);
                 let mut options = row![].spacing(8);
                 for option in &question.options {
                     options = options.push(keys::press_maybe(
-                        button(text(&option.title).size(style::TEXT))
-                            .padding([6, 12])
-                            .style(option_style(&option.kind)),
+                        button(text(&option.title).size(style::TEXT)).padding([6, 12]).style(option_style(&option.kind)),
                         (!sending).then(|| {
                             session::message(
                                 &view.id,
-                                session::Event::Answer {
-                                    question_id: question.question_id.clone(),
-                                    option_id: option.option_id.clone(),
-                                },
+                                session::Event::Answer { question_id: question.question_id.clone(), option_id: option.option_id.clone() },
                             )
                         }),
                     ));
@@ -1721,39 +1172,23 @@ impl App {
         } else {
             let open = view.open_answers.contains(&question.question_id);
             let outcome = match &question.answer {
-                Some(Answer::Permission { option_id }) => question
-                    .options
-                    .iter()
-                    .find(|o| &o.option_id == option_id)
-                    .map_or(option_id.as_str(), |o| o.title.as_str())
-                    .to_string(),
+                Some(Answer::Permission { option_id }) => {
+                    question.options.iter().find(|o| &o.option_id == option_id).map_or(option_id.as_str(), |o| o.title.as_str()).to_string()
+                }
                 Some(Answer::Cancel) => "cancelled".into(),
                 Some(Answer::Form { .. }) => "answered".into(),
                 None => question.state.clone(),
             };
-            card = card.push(
-                selection::text(format!("{} → {outcome}", question.title))
-                    .size(style::TEXT)
-                    .style(style::selectable_inherited),
-            );
+            card = card.push(selection::text(format!("{} → {outcome}", question.title)).size(style::TEXT).style(style::selectable_inherited));
             card = card.push(keys::press(
-                button(text(if open { "▾ hide" } else { "▸ show" }).size(style::TINY))
-                    .padding([0, 4])
-                    .style(style::quiet),
+                button(text(if open { "▾ hide" } else { "▸ show" }).size(style::TINY)).padding([0, 4]).style(style::quiet),
                 session::message(&view.id, session::Event::ToggleAnswered(question.question_id.clone())),
             ));
             if open {
                 card = asked(card, question);
             }
         }
-        ruled(
-            2.0,
-            P.warning,
-            container(card)
-                .padding([8, 10])
-                .width(Fill)
-                .style(style::card_right(alpha(P.warning, 0.10))),
-        )
+        ruled(2.0, P.warning, container(card).padding([8, 10]).width(Fill).style(style::card_right(alpha(P.warning, 0.10))))
     }
 
     // --- the composer ---------------------------------------------------------------------------
@@ -1763,23 +1198,15 @@ impl App {
     /// reach.
     fn composer_bar<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
         let has_session = !view.conversation.session_id.is_empty() || self.demo;
-        let sendable = view.annotation.is_none()
-            && !view.attachments_busy
-            && (!view.draft.text().trim().is_empty() || !view.attachments.is_empty());
+        let sendable = view.annotation.is_none() && !view.attachments_busy && (!view.draft.text().trim().is_empty() || !view.attachments.is_empty());
         let action: Element<'_, Message> = if view.conversation.busy() {
             stop_button(&view.id)
         } else {
             keys::press_maybe(
-                button(svg(icons::send()).width(12).height(12).style(
-                    move |theme, status| {
-                        // dark on the accent only when the button lights up: there is a prompt
-                        if sendable {
-                            style::send_arrow(theme, status)
-                        } else {
-                            style::send_arrow(theme, svg::Status::Idle)
-                        }
-                    },
-                ))
+                button(svg(icons::send()).width(12).height(12).style(move |theme, status| {
+                    // dark on the accent only when the button lights up: there is a prompt
+                    if sendable { style::send_arrow(theme, status) } else { style::send_arrow(theme, svg::Status::Idle) }
+                }))
                 .padding(3)
                 .style(style::send),
                 sendable.then(|| session::message(&view.id, session::Event::Send)),
@@ -1799,17 +1226,12 @@ impl App {
             },
         ))
         .style(style::quiet);
-        let shell = container(keys::press_maybe(
-            shell,
-            (has_session && view.annotation.is_none()).then(|| session::message(&view.id, session::Event::ToggleTerminal)),
-        ))
-        .id("terminal-button");
+        let shell =
+            container(keys::press_maybe(shell, (has_session && view.annotation.is_none()).then(|| session::message(&view.id, session::Event::ToggleTerminal))))
+                .id("terminal-button");
         let shell = mouse_area(shell);
-        let shell = if has_session && view.annotation.is_none() {
-            shell.on_right_press(session::message(&view.id, session::Event::ToggleHostTerminal))
-        } else {
-            shell
-        };
+        let shell =
+            if has_session && view.annotation.is_none() { shell.on_right_press(session::message(&view.id, session::Event::ToggleHostTerminal)) } else { shell };
         let shell = bar_tip(shell, "Left-click: jail terminal · Right-click: host terminal");
         // the agent's controls sideways-scrolling between the shell's button and the shield, which
         // stay in reach however narrow the window (Interface scale 150 % in Shelf mode); the
@@ -1838,34 +1260,19 @@ impl App {
         let can_attach = has_session && !view.attachments_busy && view.annotation.is_none();
         let attach = bar_tip(
             keys::press_maybe(
-                bar_button(icons::glyph(
-                    "plus",
-                    BAR_ICON,
-                    if can_attach {
-                        P.fg_dim
-                    } else {
-                        alpha(P.fg_dim, 0.4)
-                    },
-                ))
-                .style(style::quiet),
+                bar_button(icons::glyph("plus", BAR_ICON, if can_attach { P.fg_dim } else { alpha(P.fg_dim, 0.4) })).style(style::quiet),
                 can_attach.then_some(Message::Media(crate::media::Event::Choose)),
             ),
             "Attach files or images",
         );
-        let session = self
-            .all_sessions
-            .iter()
-            .find(|s| s.session_id == view.id && has_session);
+        let session = self.all_sessions.iter().find(|s| s.session_id == view.id && has_session);
         // the shield at the right, between the controls and Send (the person, 2026-11-08)
         let permissions = crate::permissions::indicator(view, session);
         let mut left = row![attach, shell].spacing(4).align_y(Alignment::Center);
         if let Some(desktop) = crate::desktop_view::indicator(view, session) {
             left = left.push(desktop);
         }
-        row![left, agent_controls, permissions, action]
-            .spacing(4)
-            .align_y(Alignment::Center)
-            .into()
+        row![left, agent_controls, permissions, action].spacing(4).align_y(Alignment::Center).into()
     }
 
     fn composer<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
@@ -1876,10 +1283,7 @@ impl App {
         }
         // the panel lays its two columns out by the width it actually gets
         let mut composer = composer
-            .push(
-                responsive(move |size| crate::permissions::panel(view, session, size.width < crate::permissions::NARROW))
-                    .height(Shrink),
-            )
+            .push(responsive(move |size| crate::permissions::panel(view, session, size.width < crate::permissions::NARROW)).height(Shrink))
             .push(crate::processes::panel(view))
             .push(self.network_prompt(view));
         if !view.attachments.is_empty() {
@@ -1888,37 +1292,19 @@ impl App {
                 let preview: Element<'_, Message> = if crate::media::is_image(attachment) {
                     crate::media::thumbnail(&view.media, &crate::media::key(attachment), 44.0, 34.0)
                 } else {
-                    container(
-                        text(one_line(crate::media::name(attachment), 24))
-                            .size(style::TINY)
-                            .color(P.fg_dim),
-                    )
-                    .padding([4, 6])
-                    .into()
+                    container(text(one_line(crate::media::name(attachment), 24)).size(style::TINY).color(P.fg_dim)).padding([4, 6]).into()
                 };
                 let remove = keys::press_maybe(
-                    button(text("×").size(style::SMALL).color(P.fg_dim))
-                        .padding([2, 4])
-                        .style(style::quiet),
-                    view.annotation.is_none().then_some(Message::Media(
-                        crate::media::Event::Remove(index),
-                    )),
+                    button(text("×").size(style::SMALL).color(P.fg_dim)).padding([2, 4]).style(style::quiet),
+                    view.annotation.is_none().then_some(Message::Media(crate::media::Event::Remove(index))),
                 );
                 let controls: Element<'_, Message> = if crate::media::is_image(attachment) {
-                    let available = view.annotation.is_none()
-                        && !view.attachments_busy
-                        && matches!(
-                            view.media.get(&crate::media::key(attachment)),
-                            Some(Some(Ok(_)))
-                        );
+                    let available =
+                        view.annotation.is_none() && !view.attachments_busy && matches!(view.media.get(&crate::media::key(attachment)), Some(Some(Ok(_))));
                     let pen = bar_tip(
                         keys::press_maybe(
-                            button(icons::glyph("pen", 11.0, P.fg_dim))
-                                .padding([2, 4])
-                                .style(style::quiet),
-                            available.then(|| Message::Annotation(
-                                crate::annotation::Event::Open(attachment.id.clone()),
-                            )),
+                            button(icons::glyph("pen", 11.0, P.fg_dim)).padding([2, 4]).style(style::quiet),
+                            available.then(|| Message::Annotation(crate::annotation::Event::Open(attachment.id.clone()))),
                         ),
                         "Annotate image",
                     );
@@ -1930,31 +1316,16 @@ impl App {
                 strip = if crate::media::is_image(attachment) {
                     strip.push(chip)
                 } else {
-                    strip.push(tooltip(
-                        chip,
-                        text(crate::media::name(attachment)).size(style::TINY),
-                        tooltip::Position::Top,
-                    ))
+                    strip.push(tooltip(chip, text(crate::media::name(attachment)).size(style::TINY), tooltip::Position::Top))
                 };
             }
-            composer = composer.push(
-                container(
-                    scrollable(strip)
-                        .direction(scrollable::Direction::Horizontal(style::bar()))
-                        .style(style::feed_scroll),
-                )
-                .padding([4, 12]),
-            );
+            composer = composer
+                .push(container(scrollable(strip).direction(scrollable::Direction::Horizontal(style::bar())).style(style::feed_scroll)).padding([4, 12]));
         }
         if view.attachments_busy {
             composer = composer.push(text("Preparing attachment…").size(style::SMALL));
         }
-        for submission in view
-            .conversation
-            .submissions
-            .values()
-            .filter(|s| s.held && s.outcome == "pending")
-        {
+        for submission in view.conversation.submissions.values().filter(|s| s.held && s.outcome == "pending") {
             composer = composer.push(held(&view.id, submission));
         }
         let mut queued = Column::new().spacing(4);
@@ -1964,52 +1335,27 @@ impl App {
             .conversation
             .submissions
             .values()
-            .filter(|s| {
-                s.delivery == "queued"
-                    && s.insertion == "pending"
-                    && s.outcome == "pending"
-                    && !s.held
-            })
+            .filter(|s| s.delivery == "queued" && s.insertion == "pending" && s.outcome == "pending" && !s.held)
             .collect();
         waiting.sort_by_key(|s| s.accepted_seq.parse::<u64>().unwrap_or(u64::MAX));
         for (index, submission) in waiting.into_iter().enumerate() {
             has_queued = true;
             queued = queued.push(
                 row![
-                    text(format!("Queued {}", index + 1))
-                        .size(style::TINY)
-                        .color(P.fg_dim),
-                    container(
-                        text(one_line(&submission.text, 120))
-                            .size(style::SMALL)
-                            .wrapping(text::Wrapping::None),
-                    )
-                    .width(Fill)
-                    .clip(true),
+                    text(format!("Queued {}", index + 1)).size(style::TINY).color(P.fg_dim),
+                    container(text(one_line(&submission.text, 120)).size(style::SMALL).wrapping(text::Wrapping::None),).width(Fill).clip(true),
                     tooltip(
                         keys::press(
-                            button(
-                                svg(icons::send())
-                                    .width(11)
-                                    .height(11)
-                                    .style(style::icon(alpha(P.fg, 0.6))),
-                            )
-                            .padding([3, 6])
-                            .style(style::quiet),
+                            button(svg(icons::send()).width(11).height(11).style(style::icon(alpha(P.fg, 0.6))),).padding([3, 6]).style(style::quiet),
                             session::message(&view.id, session::Event::SendNow(submission.submission_id.clone()))
                         ),
-                        container(
-                            text("Send now: stops the agent's turn and sends this first")
-                                .size(style::TINY),
-                        )
-                        .padding([3, 8])
-                        .style(style::fill(P.surface)),
+                        container(text("Send now: stops the agent's turn and sends this first").size(style::TINY),)
+                            .padding([3, 8])
+                            .style(style::fill(P.surface)),
                         tooltip::Position::Top,
                     ),
                     keys::press(
-                        button(icons::glyph("x", 12.0, alpha(P.fg, 0.6)))
-                            .padding([2, 6])
-                            .style(style::quiet),
+                        button(icons::glyph("x", 12.0, alpha(P.fg, 0.6))).padding([2, 6]).style(style::quiet),
                         session::message(&view.id, session::Event::Unqueue(submission.submission_id.clone()))
                     ),
                 ]
@@ -2020,10 +1366,7 @@ impl App {
         }
         if has_queued {
             composer = composer.push(column![
-                container(queued)
-                    .padding([3, 0])
-                    .width(Fill)
-                    .style(style::fill(alpha(P.accent, 0.05))),
+                container(queued).padding([3, 0]).width(Fill).style(style::fill(alpha(P.accent, 0.05))),
                 rule::horizontal(1).style(style::rule_style(P.border)),
                 space().height(4),
             ]);
@@ -2051,8 +1394,7 @@ impl App {
         };
         let bar = self.composer_bar(view);
         // the prompt folds away while the terminal is up in its place
-        let terminal = view.terminal.as_ref()
-            .filter(|_| view.terminal_shown && view.annotation.is_none());
+        let terminal = view.terminal.as_ref().filter(|_| view.terminal_shown && view.annotation.is_none());
         let input: Element<'_, Message> = match terminal {
             Some(pane) => self.terminal_pane(&view.id, pane, view.terminal_host),
             None => editor.into(),
@@ -2060,17 +1402,8 @@ impl App {
         // under the prompt the icons sit low (the prompt's own padding is above them); under the
         // terminal the bar is a strip of its own, the icons centred in it — the same height
         // (4 px more under the icons than at first: the row sat too low, the person, 2026-11-12)
-        let (top, bottom) = if terminal.is_some() {
-            (5.0, 5.0)
-        } else {
-            (4.0, 6.0)
-        };
-        composer = composer.push(input).push(container(bar).padding(Padding {
-            top,
-            right: 10.0,
-            bottom,
-            left: 10.0,
-        }));
+        let (top, bottom) = if terminal.is_some() { (5.0, 5.0) } else { (4.0, 6.0) };
+        composer = composer.push(input).push(container(bar).padding(Padding { top, right: 10.0, bottom, left: 10.0 }));
         // what the agent's workspaces would bring, above the prompt once its turn ends
         let mut column = Column::new();
         if let Some(shelf) = self.workspace_shelf(view) {
@@ -2082,26 +1415,19 @@ impl App {
             .push(column)
             .push(rule::horizontal(1).style(style::rule_style(P.border)))
             .push(container(composer).width(Fill).style(style::fill(P.surface)))
-        .into()
+            .into()
     }
 
     /// The jail shell under its caption: a rule and label in the success colour, the counterpart
     /// of the host shell's warning-coloured one.
-    fn terminal_pane<'a>(
-        &'a self,
-        session: &'a str,
-        pane: &'a crate::terminal::Pane,
-        host: bool,
-    ) -> Element<'a, Message> {
+    fn terminal_pane<'a>(&'a self, session: &'a str, pane: &'a crate::terminal::Pane, host: bool) -> Element<'a, Message> {
         use crate::terminal::Status;
         let mut caption = row![
-            text(if host {
-                "host · outside the jail · writes are not tracked"
+            text(if host { "host · outside the jail · writes are not tracked" } else { "jail · inside the session" }).size(style::TINY).color(if host {
+                P.warning
             } else {
-                "jail · inside the session"
-            })
-            .size(style::TINY)
-            .color(if host { P.warning } else { P.success }),
+                P.success
+            }),
             space().width(Fill),
         ]
         .spacing(8)
@@ -2109,13 +1435,10 @@ impl App {
         let body: Element<'_, Message> = match &pane.status {
             Status::Running => {
                 caption = caption.push(keys::press(
-                    button(text("End shell").size(style::TINY))
-                        .padding([0, 6])
-                        .style(style::quiet),
+                    button(text("End shell").size(style::TINY)).padding([0, 6]).style(style::quiet),
                     session::message(session, session::Event::EndTerminal),
                 ));
-                pane.view()
-                    .map(move |action| session::message(session, session::Event::TermAction(action)))
+                pane.view().map(move |action| session::message(session, session::Event::TermAction(action)))
             }
             Status::Opening => center(text("Opening the shell…").color(P.fg_dim)).into(),
             Status::Failed(error) => ended(session, format!("The shell could not be opened: {error}")),
@@ -2124,24 +1447,17 @@ impl App {
         let mut pane_column = column![
             rule::horizontal(1).style(style::rule_style(P.success)),
             container(caption).padding([2, 12]),
-            container(body)
-                .height(300)
-                .width(Fill)
-                .style(style::fill(P.bg)),
+            container(body).height(300).width(Fill).style(style::fill(P.bg)),
         ];
         // what was pasted, under the terminal and over the controls, shown whether or not the
         // program echoes it (a login's code)
         if let Some(pasted) = &pane.pasted {
             pane_column = pane_column.push(
                 container(
-                    text(format!(
-                        "Pasted {} characters: {}",
-                        pasted.chars().count(),
-                        one_line(pasted, 200)
-                    ))
-                    .size(style::TINY)
-                    .color(alpha(P.fg, 0.75))
-                    .wrapping(text::Wrapping::None),
+                    text(format!("Pasted {} characters: {}", pasted.chars().count(), one_line(pasted, 200)))
+                        .size(style::TINY)
+                        .color(alpha(P.fg, 0.75))
+                        .wrapping(text::Wrapping::None),
                 )
                 .width(Fill)
                 .clip(true)
@@ -2196,49 +1512,25 @@ pub(crate) const BAR_BUTTON: f32 = 22.0;
 pub(crate) const BAR_ICON: f32 = 14.0;
 
 /// A composer bar button: `content` centred in a [`BAR_BUTTON`] square.
-pub(crate) fn bar_button<'a>(
-    content: impl Into<Element<'a, Message>>,
-) -> iced::widget::Button<'a, Message> {
-    button(center(content))
-        .width(BAR_BUTTON)
-        .height(BAR_BUTTON)
-        .padding(0)
+pub(crate) fn bar_button<'a>(content: impl Into<Element<'a, Message>>) -> iced::widget::Button<'a, Message> {
+    button(center(content)).width(BAR_BUTTON).height(BAR_BUTTON).padding(0)
 }
 
 /// A composer bar button's tooltip, above it.
-pub(crate) fn bar_tip<'a>(
-    content: impl Into<Element<'a, Message>>,
-    tip: impl text::IntoFragment<'a>,
-) -> Element<'a, Message> {
-    tooltip(
-        content,
-        container(text(tip).size(style::SMALL))
-            .padding([4, 8])
-            .style(style::card(P.code_bg)),
-        tooltip::Position::Top,
-    )
-    .into()
+pub(crate) fn bar_tip<'a>(content: impl Into<Element<'a, Message>>, tip: impl text::IntoFragment<'a>) -> Element<'a, Message> {
+    tooltip(content, container(text(tip).size(style::SMALL)).padding([4, 8]).style(style::card(P.code_bg)), tooltip::Position::Top).into()
 }
 
 fn stop_button<'a>(session: &str) -> Element<'a, Message> {
     container(keys::press(
-        button(
-            svg(icons::stop())
-                .width(12)
-                .height(12)
-                .style(style::icon(P.error)),
-        )
-        .padding(3)
-        .style(style::tinted(P.error)),
+        button(svg(icons::stop()).width(12).height(12).style(style::icon(P.error))).padding(3).style(style::tinted(P.error)),
         session::message(session, session::Event::Stop),
     ))
     .id("stop")
     .into()
 }
 
-fn option_style(
-    kind: &str,
-) -> impl Fn(&Theme, iced::widget::button::Status) -> iced::widget::button::Style {
+fn option_style(kind: &str) -> impl Fn(&Theme, iced::widget::button::Status) -> iced::widget::button::Style {
     if kind.starts_with("allow") {
         style::solid(P.accent)
     } else if kind.starts_with("reject") {
@@ -2260,11 +1552,7 @@ fn form<'a>(view: &'a SessionView, question: &'a Question) -> Element<'a, Messag
         let mut block = Column::new().spacing(4);
         block = block.push(text(crate::forms::title(field)).size(style::SMALL));
         if !field.description.is_empty() {
-            block = block.push(
-                selection::text(&field.description)
-                    .size(style::TINY)
-                    .style(style::selectable(P.fg_dim)),
-            );
+            block = block.push(selection::text(&field.description).size(style::TINY).style(style::selectable(P.fg_dim)));
         }
         let edit = |edit: crate::forms::Edit| session::message(&view.id, session::Event::FormEdit(id(), edit));
         let input: Element<'a, Message> = match field.kind.as_str() {
@@ -2279,29 +1567,12 @@ fn form<'a>(view: &'a SessionView, question: &'a Question) -> Element<'a, Messag
                         (false, true) => "☑",
                         (false, false) => "☐",
                     };
-                    let label = if choice.title.is_empty() {
-                        &choice.value
-                    } else {
-                        &choice.title
-                    };
+                    let label = if choice.title.is_empty() { &choice.value } else { &choice.title };
                     choices = choices.push(keys::press(
-                        button(
-                            row![
-                                text(mark).size(style::SMALL).color(if picked {
-                                    P.accent
-                                } else {
-                                    P.fg_dim
-                                }),
-                                text(label).size(style::SMALL),
-                            ]
-                            .spacing(8),
-                        )
-                        .padding([2, 6])
-                        .style(style::row_button),
-                        edit(crate::forms::Edit::Pick {
-                            key: field.key.clone(),
-                            value: choice.value.clone(),
-                        }),
+                        button(row![text(mark).size(style::SMALL).color(if picked { P.accent } else { P.fg_dim }), text(label).size(style::SMALL),].spacing(8))
+                            .padding([2, 6])
+                            .style(style::row_button),
+                        edit(crate::forms::Edit::Pick { key: field.key.clone(), value: choice.value.clone() }),
                     ));
                 }
                 choices.into()
@@ -2310,51 +1581,25 @@ fn form<'a>(view: &'a SessionView, question: &'a Question) -> Element<'a, Messag
                 let on = entry.is_some_and(|e| e.on);
                 keys::press(
                     button(
-                        row![
-                            text(if on { "☑" } else { "☐" })
-                                .size(style::SMALL)
-                                .color(if on { P.accent } else { P.fg_dim }),
-                            text("yes").size(style::SMALL),
-                        ]
-                        .spacing(8),
+                        row![text(if on { "☑" } else { "☐" }).size(style::SMALL).color(if on { P.accent } else { P.fg_dim }), text("yes").size(style::SMALL),]
+                            .spacing(8),
                     )
                     .padding([2, 6])
                     .style(style::row_button),
-                    edit(crate::forms::Edit::Toggle {
-                        key: field.key.clone(),
-                    }),
+                    edit(crate::forms::Edit::Toggle { key: field.key.clone() }),
                 )
             }
             "text" | "number" => {
                 let key = field.key.clone();
-                iced::widget::text_input(
-                    if field.kind == "number" {
-                        "a number"
-                    } else {
-                        "optional"
-                    },
-                    entry.map_or("", |e| e.text.as_str()),
-                )
-                .size(style::SMALL)
-                .padding(6)
-                .on_input(move |value| {
-                    session::message(
-                        &view.id,
-                        session::Event::FormEdit(
-                            id(),
-                            crate::forms::Edit::Text {
-                                key: key.clone(),
-                                text: value,
-                            },
-                        ),
-                    )
-                })
-                .into()
+                iced::widget::text_input(if field.kind == "number" { "a number" } else { "optional" }, entry.map_or("", |e| e.text.as_str()))
+                    .size(style::SMALL)
+                    .padding(6)
+                    .on_input(move |value| {
+                        session::message(&view.id, session::Event::FormEdit(id(), crate::forms::Edit::Text { key: key.clone(), text: value }))
+                    })
+                    .into()
             }
-            other => text(format!("A {other} field cannot be answered here."))
-                .size(style::TINY)
-                .color(P.fg_dim)
-                .into(),
+            other => text(format!("A {other} field cannot be answered here.")).size(style::TINY).color(P.fg_dim).into(),
         };
         block = block.push(input);
         fields = fields.push(block);
@@ -2362,15 +1607,11 @@ fn form<'a>(view: &'a SessionView, question: &'a Question) -> Element<'a, Messag
     let answerable = crate::forms::answerable(question);
     let buttons = row![
         keys::press_maybe(
-            button(text("Submit").size(style::TEXT))
-                .padding([6, 12])
-                .style(style::solid(P.accent)),
+            button(text("Submit").size(style::TEXT)).padding([6, 12]).style(style::solid(P.accent)),
             (answerable && !sending).then(|| session::message(&view.id, session::Event::SubmitForm(id()))),
         ),
         keys::press_maybe(
-            button(text("Decline").size(style::TEXT))
-                .padding([6, 12])
-                .style(style::solid(P.fg_dim)),
+            button(text("Decline").size(style::TEXT)).padding([6, 12]).style(style::solid(P.fg_dim)),
             (!sending).then(|| session::message(&view.id, session::Event::DeclineForm(id()))),
         ),
     ]
@@ -2381,42 +1622,21 @@ fn form<'a>(view: &'a SessionView, question: &'a Question) -> Element<'a, Messag
 /// A prompt the daemon holds until the person decides (after a restart or a failure): send it
 /// after all, or drop it.
 fn held<'a>(session: &str, submission: &'a sill_proto::sfp::Submission) -> Element<'a, Message> {
-    let why = submission.hold_reason.as_ref().map_or_else(
-        || "held until you decide".to_string(),
-        |r| r.message.clone(),
-    );
-    let small = |label: &'static str, message: Message| {
-        keys::press(
-            button(text(label).size(style::TINY))
-                .padding([1, 6])
-                .style(style::quiet),
-            message,
-        )
-    };
+    let why = submission.hold_reason.as_ref().map_or_else(|| "held until you decide".to_string(), |r| r.message.clone());
+    let small = |label: &'static str, message: Message| keys::press(button(text(label).size(style::TINY)).padding([1, 6]).style(style::quiet), message);
     container(
         row![
             container(
                 column![
-                    text(one_line(&submission.text, 100))
-                        .size(style::SMALL)
-                        .wrapping(text::Wrapping::None),
-                    text(one_line(&format!("Held: {why}"), 110))
-                        .size(style::TINY)
-                        .color(P.warning)
-                        .wrapping(text::Wrapping::None),
+                    text(one_line(&submission.text, 100)).size(style::SMALL).wrapping(text::Wrapping::None),
+                    text(one_line(&format!("Held: {why}"), 110)).size(style::TINY).color(P.warning).wrapping(text::Wrapping::None),
                 ]
                 .spacing(2)
             )
             .width(Fill)
             .clip(true),
-            small(
-                "Send",
-                session::message(session, session::Event::ResumeHeld(submission.submission_id.clone()))
-            ),
-            small(
-                "Discard",
-                session::message(session, session::Event::DiscardHeld(submission.submission_id.clone()))
-            ),
+            small("Send", session::message(session, session::Event::ResumeHeld(submission.submission_id.clone()))),
+            small("Discard", session::message(session, session::Event::DiscardHeld(submission.submission_id.clone()))),
         ]
         .spacing(4)
         .align_y(Alignment::Center),
@@ -2441,18 +1661,11 @@ fn outbox<'a>(mut composer: Column<'a, Message>, view: &'a SessionView) -> Colum
                     text(format!(
                         "{}{}",
                         one_line(pending.text(), 100),
-                        if pending.submit.attachments.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" · {} attachment(s)", pending.submit.attachments.len())
-                        }
+                        if pending.submit.attachments.is_empty() { String::new() } else { format!(" · {} attachment(s)", pending.submit.attachments.len()) }
                     ))
                     .size(style::SMALL)
                     .wrapping(text::Wrapping::None),
-                    text(one_line(&said, 110))
-                        .size(style::TINY)
-                        .color(color)
-                        .wrapping(text::Wrapping::None),
+                    text(one_line(&said, 110)).size(style::TINY).color(color).wrapping(text::Wrapping::None),
                 ]
                 .spacing(2)
             )
@@ -2461,14 +1674,7 @@ fn outbox<'a>(mut composer: Column<'a, Message>, view: &'a SessionView) -> Colum
         ]
         .spacing(4)
         .align_y(Alignment::Center);
-        let small = |label: &'static str, message: Message| {
-            keys::press(
-                button(text(label).size(style::TINY))
-                    .padding([1, 6])
-                    .style(style::quiet),
-                message,
-            )
-        };
+        let small = |label: &'static str, message: Message| keys::press(button(text(label).size(style::TINY)).padding([1, 6]).style(style::quiet), message);
         match &pending.state {
             State::Failed(_) => {
                 line = line
@@ -2491,16 +1697,11 @@ fn outbox<'a>(mut composer: Column<'a, Message>, view: &'a SessionView) -> Colum
 
 /// The agent's ACP controls as dropdowns: its modes, then each of its options.
 fn controls(view: &SessionView) -> Vec<Element<'_, Message>> {
-    let Some(controls) = view
-        .conversation
-        .session
-        .as_ref()
-        .and_then(|s| s.controls.as_ref())
-    else {
+    let Some(controls) = view.conversation.session.as_ref().and_then(|s| s.controls.as_ref()) else {
         return vec![text("Loading controls…").size(CONTROL_TEXT).color(P.fg_dim).into()];
     };
-    let refreshing = controls.status == "loading" || controls.status == "restoring"
-        || matches!(view.status, Status::Connecting | Status::Reconnecting(_) | Status::Loading);
+    let refreshing =
+        controls.status == "loading" || controls.status == "restoring" || matches!(view.status, Status::Connecting | Status::Reconnecting(_) | Status::Loading);
     let mut out = vec![];
     if refreshing {
         // Plain labels have no pointer or keyboard handlers while the schema is stale.
@@ -2508,9 +1709,13 @@ fn controls(view: &SessionView) -> Vec<Element<'_, Message>> {
             out.push(control_label(&mode.title));
         }
         for option in &controls.options {
-            if option.category == "mode" && !controls.modes.is_empty() { continue; }
+            if option.category == "mode" && !controls.modes.is_empty() {
+                continue;
+            }
             let label = match &option.value {
-                sill_proto::sfp::ControlValue::Id { value } => option.choices.iter().find(|c| &c.value == value).map(|c| c.title.clone()).unwrap_or_else(|| value.clone()),
+                sill_proto::sfp::ControlValue::Id { value } => {
+                    option.choices.iter().find(|c| &c.value == value).map(|c| c.title.clone()).unwrap_or_else(|| value.clone())
+                }
                 sill_proto::sfp::ControlValue::Boolean { value } => if *value { "On" } else { "Off" }.into(),
             };
             out.push(control_label(&label));
@@ -2519,21 +1724,10 @@ fn controls(view: &SessionView) -> Vec<Element<'_, Message>> {
         return out;
     }
     if !controls.modes.is_empty() {
-        let picks: Vec<Pick> = controls
-            .modes
-            .iter()
-            .map(|m| Pick {
-                value: m.value.clone(),
-                title: m.title.clone(),
-                boolean: None,
-            })
-            .collect();
-        let selected = controls
-            .current_mode
-            .as_ref()
-            .map(|current| picks.iter().find(|p| &p.value == current).cloned().unwrap_or_else(|| Pick {
-                value: current.clone(), title: current.clone(), boolean: None,
-            }));
+        let picks: Vec<Pick> = controls.modes.iter().map(|m| Pick { value: m.value.clone(), title: m.title.clone(), boolean: None }).collect();
+        let selected = controls.current_mode.as_ref().map(|current| {
+            picks.iter().find(|p| &p.value == current).cloned().unwrap_or_else(|| Pick { value: current.clone(), title: current.clone(), boolean: None })
+        });
         out.push(control(picks, selected, move |pick| session::message(&view.id, session::Event::SetMode(pick))));
     }
     for option in &controls.options {
@@ -2544,40 +1738,24 @@ fn controls(view: &SessionView) -> Vec<Element<'_, Message>> {
         let (picks, selected) = match &option.value {
             sill_proto::sfp::ControlValue::Boolean { value } => {
                 let picks = vec![
-                    Pick {
-                        value: "false".into(),
-                        title: "Off".into(),
-                        boolean: Some(false),
-                    },
-                    Pick {
-                        value: "true".into(),
-                        title: "On".into(),
-                        boolean: Some(true),
-                    },
+                    Pick { value: "false".into(), title: "Off".into(), boolean: Some(false) },
+                    Pick { value: "true".into(), title: "On".into(), boolean: Some(true) },
                 ];
                 let selected = picks.iter().find(|p| p.boolean == Some(*value)).cloned();
                 (picks, selected)
             }
             sill_proto::sfp::ControlValue::Id { value } => {
-                let picks: Vec<Pick> = option
-                    .choices
-                    .iter()
-                    .map(|c| Pick {
-                        value: c.value.clone(),
-                        title: c.title.clone(),
-                        boolean: None,
-                    })
-                    .collect();
+                let picks: Vec<Pick> = option.choices.iter().map(|c| Pick { value: c.value.clone(), title: c.title.clone(), boolean: None }).collect();
                 let selected = Some(picks.iter().find(|p| &p.value == value).cloned().unwrap_or_else(|| Pick {
-                    value: value.clone(), title: if value.is_empty() { option.title.clone() } else { value.clone() }, boolean: None,
+                    value: value.clone(),
+                    title: if value.is_empty() { option.title.clone() } else { value.clone() },
+                    boolean: None,
                 }));
                 (picks, selected)
             }
         };
         let option_id = option.option_id.clone();
-        out.push(control(picks, selected, move |pick| {
-            session::message(&view.id, session::Event::SetOption(option_id.clone(), pick))
-        }));
+        out.push(control(picks, selected, move |pick| session::message(&view.id, session::Event::SetOption(option_id.clone(), pick))));
     }
     out
 }
@@ -2598,9 +1776,7 @@ fn context_ring<'a>(used: u64, size: u64) -> Element<'a, Message> {
     let share = (used as f32 / size as f32).clamp(0.0, 1.0);
     let percent = (used * 100 / size).min(100);
     let tip = format!("Context: {} of {} tokens ({percent}%)", thousands(used), thousands(size));
-    let ring = canvas(ContextRing { share })
-        .width(RING_SIZE + 2.0 * RING_PAD)
-        .height(BAR_BUTTON);
+    let ring = canvas(ContextRing { share }).width(RING_SIZE + 2.0 * RING_PAD).height(BAR_BUTTON);
     bar_tip(container(ring).id("context-ring"), tip)
 }
 
@@ -2628,14 +1804,7 @@ struct ContextRing {
 impl canvas::Program<Message> for ContextRing {
     type State = ();
 
-    fn draw(
-        &self,
-        _state: &(),
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: iced::mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
+    fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: iced::mouse::Cursor) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let center = iced::Point::new(bounds.width / 2.0, bounds.height / 2.0);
         let radius = RING_SIZE / 2.0 - RING_LINE / 2.0;
@@ -2646,22 +1815,12 @@ impl canvas::Program<Message> for ContextRing {
         } else {
             P.fg_dim
         };
-        let stroke = |color: Color| {
-            canvas::Stroke::default()
-                .with_width(RING_LINE)
-                .with_color(color)
-                .with_line_cap(canvas::LineCap::Butt)
-        };
+        let stroke = |color: Color| canvas::Stroke::default().with_width(RING_LINE).with_color(color).with_line_cap(canvas::LineCap::Butt);
         frame.stroke(&canvas::Path::circle(center, radius), stroke(alpha(P.fg, 0.14)));
         if self.share > 0.0 {
             let start = -std::f32::consts::FRAC_PI_2;
             let arc = canvas::Path::new(|path| {
-                path.arc(canvas::path::Arc {
-                    center,
-                    radius,
-                    start_angle: Radians(start),
-                    end_angle: Radians(start + self.share * std::f32::consts::TAU),
-                });
+                path.arc(canvas::path::Arc { center, radius, start_angle: Radians(start), end_angle: Radians(start + self.share * std::f32::consts::TAU) });
             });
             frame.stroke(&arc, stroke(color));
         }
@@ -2672,11 +1831,7 @@ impl canvas::Program<Message> for ContextRing {
 fn plan(item: &Item) -> Element<'_, Message> {
     let mut steps = Column::new().spacing(2);
     for block in &item.content {
-        let status = block
-            .extra
-            .get("status")
-            .and_then(|s| s.as_str())
-            .unwrap_or("pending");
+        let status = block.extra.get("status").and_then(|s| s.as_str()).unwrap_or("pending");
         let (glyph, color) = match status {
             "completed" => ("✓", alpha(P.fg, 0.5)),
             "in_progress" => ("◐", P.accent),
@@ -2685,18 +1840,12 @@ fn plan(item: &Item) -> Element<'_, Message> {
         steps = steps.push(
             row![
                 text(glyph).size(style::SMALL).color(color).width(16),
-                selection::text(block.text.as_deref().unwrap_or(""))
-                    .size(style::SMALL)
-                    .style(style::selectable_inherited),
+                selection::text(block.text.as_deref().unwrap_or("")).size(style::SMALL).style(style::selectable_inherited),
             ]
             .spacing(6),
         );
     }
-    ruled(
-        2.0,
-        alpha(P.fg, 0.18),
-        container(steps).padding([4, 10]).width(Fill),
-    )
+    ruled(2.0, alpha(P.fg, 0.18), container(steps).padding([4, 10]).width(Fill))
 }
 
 /// An agent control's label: a little smaller than captions, so mode, model and effort stay quiet.
@@ -2722,13 +1871,11 @@ fn control_label(label: &str) -> Element<'static, Message> {
         .into()
 }
 
-fn control<'a>(
-    picks: Vec<Pick>,
-    selected: Option<Pick>,
-    on_select: impl Fn(Pick) -> Message + 'a,
-) -> Element<'a, Message> {
+fn control<'a>(picks: Vec<Pick>, selected: Option<Pick>, on_select: impl Fn(Pick) -> Message + 'a) -> Element<'a, Message> {
     let label = selected.as_ref().map_or("Select…", |p| p.title.as_str());
-    if picks.is_empty() { return control_label(label); }
+    if picks.is_empty() {
+        return control_label(label);
+    }
     // a little under 80 % of the body text; room at the right for the caret
     let width = text_width(label, CONTROL_TEXT) + 6.0 + CARET_ROOM;
     let on_select = std::rc::Rc::new(on_select);
@@ -2737,37 +1884,22 @@ fn control<'a>(
     let current = selected.clone();
     // the menu reads as a menu, not the label's strip: as wide as its longest choice, roomier
     // rows in a little larger text, set apart from the control
-    let menu_width = picks
-        .iter()
-        .map(|p| text_width(&p.title, style::SMALL))
-        .fold(0.0, f32::max)
-        + 2.0 * MENU_SIDE
-        + 2.0;
+    let menu_width = picks.iter().map(|p| text_width(&p.title, style::SMALL)).fold(0.0, f32::max) + 2.0 * MENU_SIDE + 2.0;
     let list = pick_list(picks, selected, move |pick| select(pick))
         .menu_width(menu_width.max(120.0))
         .menu_padding([6.0, MENU_SIDE])
         .menu_text_size(style::SMALL)
         .menu_gap(6.0)
         .text_size(CONTROL_TEXT)
-        .padding(Padding {
-            top: CONTROL_PAD_Y,
-            bottom: CONTROL_PAD_Y,
-            left: 6.0,
-            right: CARET_ROOM,
-        })
+        .padding(Padding { top: CONTROL_PAD_Y, bottom: CONTROL_PAD_Y, left: 6.0, right: CARET_ROOM })
         .width(width)
         .handle(pick_list::Handle::None)
         .style(style::control)
         .menu_style(style::control_menu);
     // a thin chevron in place of iced's filled triangle, quieter than the label; an image over
     // the list's right edge, so a press still reaches the list
-    let caret = container(icons::glyph("chevron-down", 9.0, alpha(P.fg, 0.5)))
-        .padding(Padding {
-            right: 6.0,
-            ..Padding::ZERO
-        })
-        .align_right(width)
-        .center_y(Fill);
+    let caret =
+        container(icons::glyph("chevron-down", 9.0, alpha(P.fg, 0.5))).padding(Padding { right: 6.0, ..Padding::ZERO }).align_right(width).center_y(Fill);
     let list = stack![list, caret];
     // with the keyboard, Up and Down step through the choices (the menu is the pointer's)
     keys::focus(list)
@@ -2777,15 +1909,9 @@ fn control<'a>(
                 Key::Named(Named::ArrowDown) => 1,
                 _ => return None,
             };
-            let at = current
-                .as_ref()
-                .and_then(|c| choices.iter().position(|p| p == c))
-                .map_or(0, |i| i as isize);
+            let at = current.as_ref().and_then(|c| choices.iter().position(|p| p == c)).map_or(0, |i| i as isize);
             let next = (at + step).clamp(0, choices.len() as isize - 1) as usize;
-            choices
-                .get(next)
-                .filter(|p| Some(*p) != current.as_ref())
-                .map(|p| on_select(p.clone()))
+            choices.get(next).filter(|p| Some(*p) != current.as_ref()).map(|p| on_select(p.clone()))
         })
         .into()
 }
@@ -2796,9 +1922,7 @@ fn ended<'a>(session: &str, said: String) -> Element<'a, Message> {
         column![
             text(said).size(style::SMALL).color(P.fg_dim),
             keys::press(
-                button(text("Open a new shell").size(style::SMALL))
-                    .padding([4, 10])
-                    .style(style::quiet),
+                button(text("Open a new shell").size(style::SMALL)).padding([4, 10]).style(style::quiet),
                 session::message(session, session::Event::ReopenTerminal)
             ),
         ]
@@ -2851,10 +1975,7 @@ pub(crate) enum ListKey {
 /// Shift+Enter.
 pub(crate) fn list_keys(key_press: &text_editor::KeyPress, shifted: bool) -> Option<ListKey> {
     let modifiers = key_press.modifiers;
-    if !matches!(key_press.status, text_editor::Status::Focused { .. })
-        || modifiers.command()
-        || modifiers.alt()
-    {
+    if !matches!(key_press.status, text_editor::Status::Focused { .. }) || modifiers.command() || modifiers.alt() {
         return None;
     }
     match key_press.key {
@@ -2865,10 +1986,7 @@ pub(crate) fn list_keys(key_press: &text_editor::KeyPress, shifted: bool) -> Opt
 }
 
 /// Enter sends; Shift+Enter is a new line; everything else is the editor's own.
-pub(crate) fn enter_sends(
-    session: &str,
-    key_press: text_editor::KeyPress,
-) -> Option<text_editor::Binding<Message>> {
+pub(crate) fn enter_sends(session: &str, key_press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
     let custom = |event| Some(text_editor::Binding::Custom(session::message(session, event)));
     if let Some(redo) = history_shortcut(&key_press) {
         return custom(session::Event::PromptHistory(redo));
@@ -2877,9 +1995,7 @@ pub(crate) fn enter_sends(
         && key_press.modifiers.command()
         && matches!(key_press.status, text_editor::Status::Focused { .. })
     {
-        return Some(text_editor::Binding::Custom(Message::Media(
-            crate::media::Event::Paste,
-        )));
+        return Some(text_editor::Binding::Custom(Message::Media(crate::media::Event::Paste)));
     }
     // the window's shortcuts work from the prompt, and PageUp/PageDown page the conversation
     if let Some(message) = keys::from_text(&key_press.key, key_press.modifiers, true) {
@@ -2894,30 +2010,19 @@ pub(crate) fn enter_sends(
         }
         None => {}
     }
-    if matches!(key_press.key, Key::Named(Named::Enter))
-        && !key_press.modifiers.shift()
-        && matches!(key_press.status, text_editor::Status::Focused { .. })
-    {
+    if matches!(key_press.key, Key::Named(Named::Enter)) && !key_press.modifiers.shift() && matches!(key_press.status, text_editor::Status::Focused { .. }) {
         return custom(session::Event::Send);
     }
     text_editor::Binding::from_key_press(key_press)
 }
 
 /// The source reader's keys: Save and window shortcuts first, then the editor's own.
-pub(crate) fn reading_keys(
-    key_press: text_editor::KeyPress,
-) -> Option<text_editor::Binding<Message>> {
+pub(crate) fn reading_keys(key_press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
     if let Some(redo) = history_shortcut(&key_press) {
-        return Some(text_editor::Binding::Custom(Message::Files(
-            crate::files::Action::History(redo),
-        )));
+        return Some(text_editor::Binding::Custom(Message::Files(crate::files::Action::History(redo))));
     }
-    if key_press.modifiers.command()
-        && matches!(&key_press.key, iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("s"))
-    {
-        return Some(text_editor::Binding::Custom(Message::Files(
-            crate::files::Action::SaveFile,
-        )));
+    if key_press.modifiers.command() && matches!(&key_press.key, iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("s")) {
+        return Some(text_editor::Binding::Custom(Message::Files(crate::files::Action::SaveFile)));
     }
     if let Some(message) = keys::from_text(&key_press.key, key_press.modifiers, false) {
         return Some(text_editor::Binding::Custom(message));
@@ -2933,10 +2038,7 @@ pub(crate) fn markdown_settings() -> markdown::Settings {
     style.inline_code_color = P.fg;
     style.inline_code_font = MONO_FONT;
     style.code_block_font = MONO_FONT;
-    style.inline_code_highlight = Highlight {
-        background: P.code_bg.into(),
-        border: iced::Border::default(),
-    };
+    style.inline_code_highlight = Highlight { background: P.code_bg.into(), border: iced::Border::default() };
     let mut settings = markdown::Settings::with_text_size(style::TEXT, style);
     settings.h1_size = (style::TEXT * 1.45).into();
     settings.h2_size = (style::TEXT * 1.3).into();
@@ -2952,18 +2054,12 @@ pub(crate) fn markdown_settings() -> markdown::Settings {
 /// A thought's Markdown: the conversation's, a size smaller and in italics (`.sill-thought`).
 fn thought_settings() -> markdown::Settings {
     let mut style = markdown::Style::from_palette(style::theme().palette());
-    style.font = Font {
-        style: iced::font::Style::Italic,
-        ..Font::with_name(crate::fonts::SANS_FAMILY)
-    };
+    style.font = Font { style: iced::font::Style::Italic, ..Font::with_name(crate::fonts::SANS_FAMILY) };
     style.link_color = P.link;
     style.inline_code_color = alpha(P.fg, 0.7);
     style.inline_code_font = MONO_FONT;
     style.code_block_font = MONO_FONT;
-    style.inline_code_highlight = Highlight {
-        background: P.code_bg.into(),
-        border: iced::Border::default(),
-    };
+    style.inline_code_highlight = Highlight { background: P.code_bg.into(), border: iced::Border::default() };
     let mut settings = markdown::Settings::with_text_size(style::SMALL, style);
     settings.code_size = (style::MONO * 0.9).into();
     settings.spacing = (style::SMALL * 0.5).into();
@@ -2971,37 +2067,19 @@ fn thought_settings() -> markdown::Settings {
 }
 
 /// `content` behind a left rule `width` wide in `color`: how a block's kind is marked.
-pub(crate) fn ruled<'a>(
-    width: f32,
-    color: Color,
-    content: impl Into<Element<'a, Message>>,
-) -> Element<'a, Message> {
-    row![
-        rule::vertical(width).style(style::rule_style(color)),
-        content.into()
-    ]
-    .height(Shrink)
-    .into()
+pub(crate) fn ruled<'a>(width: f32, color: Color, content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    row![rule::vertical(width).style(style::rule_style(color)), content.into()].height(Shrink).into()
 }
 
 /// What a question asks, under its title: the description and the subject.
 fn asked<'a>(mut card: Column<'a, Message>, question: &'a Question) -> Column<'a, Message> {
     if let Some(description) = &question.description {
-        card = card.push(
-            selection::text(description)
-                .size(style::SMALL)
-                .style(style::selectable_inherited),
-        );
+        card = card.push(selection::text(description).size(style::SMALL).style(style::selectable_inherited));
     }
     if let Some(subject) = &question.subject
         && let Some(text) = &subject.text
     {
-        card = card.push(
-            selection::text(text)
-                .font(MONO_FONT)
-                .size(style::MONO)
-                .style(style::selectable(alpha(P.fg, 0.85))),
-        );
+        card = card.push(selection::text(text).font(MONO_FONT).size(style::MONO).style(style::selectable(alpha(P.fg, 0.85))));
     }
     card
 }
@@ -3013,16 +2091,10 @@ pub(crate) fn fold_key(first: &Item) -> String {
 
 /// Whether the agent is still at a folded turn: its turn runs, or its prompt waits for one.
 fn fold_running(conversation: &sill_client::conversation::Conversation, inside: &[&Item]) -> bool {
-    inside.iter().any(|item| {
-        item.turn_id.as_deref().is_some_and(|t| conversation.turn_pending(t))
-    }) || inside.last().is_some_and(|item| {
-        item.kind == "user"
-            && item
-                .submission_id
-                .as_ref()
-                .and_then(|id| conversation.submissions.get(id))
-                .is_some_and(|s| s.outcome == "pending")
-    })
+    inside.iter().any(|item| item.turn_id.as_deref().is_some_and(|t| conversation.turn_pending(t)))
+        || inside.last().is_some_and(|item| {
+            item.kind == "user" && item.submission_id.as_ref().and_then(|id| conversation.submissions.get(id)).is_some_and(|s| s.outcome == "pending")
+        })
 }
 
 /// An error or a notice: its colour as text, tint and rule (`.sill-error-note`).
@@ -3059,10 +2131,7 @@ fn folded_thought<'a>(session: &str, item_id: &str, source: &str, open: bool) ->
             container(
                 text(thought_line(source))
                     .size(style::SMALL)
-                    .font(Font {
-                        style: iced::font::Style::Italic,
-                        ..Font::with_name(crate::fonts::SANS_FAMILY)
-                    })
+                    .font(Font { style: iced::font::Style::Italic, ..Font::with_name(crate::fonts::SANS_FAMILY) })
                     .color(color)
                     .wrapping(text::Wrapping::None),
             )
@@ -3084,17 +2153,10 @@ fn folded_note<'a>(session: &str, item_id: &str, message: &'a str, color: Color,
     let line = button(
         row![
             text(if open { "▾" } else { "▸" }).size(style::SMALL).color(color).width(14),
-            container(
-                text(one_line(&crate::host_control::notice_summary(message), 160))
-                    .size(style::SMALL)
-                    .color(color)
-                    .wrapping(text::Wrapping::None),
-            )
-            .width(Fill)
-            .clip(true),
-            text(if message.starts_with("HOST ") { String::new() } else { format!("{} chars", message.len()) })
-                .size(style::TINY)
-                .color(alpha(color, 0.7)),
+            container(text(one_line(&crate::host_control::notice_summary(message), 160)).size(style::SMALL).color(color).wrapping(text::Wrapping::None),)
+                .width(Fill)
+                .clip(true),
+            text(if message.starts_with("HOST ") { String::new() } else { format!("{} chars", message.len()) }).size(style::TINY).color(alpha(color, 0.7)),
         ]
         .spacing(6)
         .align_y(Alignment::Center),
@@ -3114,14 +2176,10 @@ fn note<'a>(message: &'a str, color: Color) -> Element<'a, Message> {
     ruled(
         3.0,
         color,
-        container(
-            selection::text(message)
-                .size(style::SMALL)
-                .style(style::selectable(color)),
-        )
-        .padding([6, 12])
-        .width(Fill)
-        .style(style::card_right(alpha(color, 0.08))),
+        container(selection::text(message).size(style::SMALL).style(style::selectable(color)))
+            .padding([6, 12])
+            .width(Fill)
+            .style(style::card_right(alpha(color, 0.08))),
     )
 }
 
@@ -3142,33 +2200,15 @@ fn diff(diff: &str) -> Element<'_, Message> {
         } else {
             alpha(P.fg, 0.8)
         };
-        column = column.push(
-            selection::text(*line)
-                .font(MONO_FONT)
-                .size(style::MONO)
-                .style(style::selectable(color)),
-        );
+        column = column.push(selection::text(*line).font(MONO_FONT).size(style::MONO).style(style::selectable(color)));
     }
     if lines.len() > LIMIT {
-        column = column.push(
-            text(format!("… {} more lines", lines.len() - LIMIT))
-                .size(style::TINY)
-                .color(P.fg_dim),
-        );
+        column = column.push(text(format!("… {} more lines", lines.len() - LIMIT)).size(style::TINY).color(P.fg_dim));
     }
-    container(
-        container(column)
-            .padding([6, 10])
-            .style(style::card(P.code_bg)),
-    )
-    .padding(Padding {
-        top: 2.0,
-        right: 10.0,
-        bottom: 6.0,
-        left: 28.0,
-    })
-    .width(Fill)
-    .into()
+    container(container(column).padding([6, 10]).style(style::card(P.code_bg)))
+        .padding(Padding { top: 2.0, right: 10.0, bottom: 6.0, left: 28.0 })
+        .width(Fill)
+        .into()
 }
 
 /// The glyph for an ACP tool kind.
@@ -3176,12 +2216,7 @@ fn diff(diff: &str) -> Element<'_, Message> {
 const KIND_MARK: f32 = 16.0;
 
 fn kind_mark<'a>(kind: &str) -> Element<'a, Message> {
-    text(kind_glyph(kind))
-        .font(MONO_FONT)
-        .size(style::SMALL)
-        .color(alpha(P.fg, 0.6))
-        .width(KIND_MARK)
-        .into()
+    text(kind_glyph(kind)).font(MONO_FONT).size(style::SMALL).color(alpha(P.fg, 0.6)).width(KIND_MARK).into()
 }
 
 /// One line of a call's row: a command, or a call's whole text, with the operator that ends a
@@ -3190,21 +2225,14 @@ fn kind_mark<'a>(kind: &str) -> Element<'a, Message> {
 fn step_line<'a>(step: &crate::shell::Step<'_>, arguments_quiet: bool) -> Element<'a, Message> {
     let quiet = alpha(P.fg, 0.45);
     let part = |content: &str, color: Color| {
-        selection::text(content.to_owned())
-            .size(style::SMALL)
-            .wrapping(text::Wrapping::None)
-            .find_only()
-            .style(style::selectable(color))
+        selection::text(content.to_owned()).size(style::SMALL).wrapping(text::Wrapping::None).find_only().style(style::selectable(color))
     };
     let shown = one_line(step.text, 140);
     let gap = || space().width(word_gap());
     let mut line = row![];
     match shown.split_once(' ') {
         Some((word, arguments)) if arguments_quiet => {
-            line = line
-                .push(part(word, P.fg))
-                .push(gap())
-                .push(part(arguments.trim_start(), quiet));
+            line = line.push(part(word, P.fg)).push(gap()).push(part(arguments.trim_start(), quiet));
         }
         _ => line = line.push(part(&shown, P.fg)),
     }
@@ -3228,33 +2256,17 @@ fn word_gap() -> f32 {
 /// An opened tool call's output and diff under its line, or that it had none.
 fn tool_output<'a>(mut body: Column<'a, Message>, tool: &'a Tool) -> Column<'a, Message> {
     if !tool.detail.trim().is_empty() {
-        body = body.push(
-            container(
-                selection::text(tool.detail.trim_end())
-                    .font(MONO_FONT)
-                    .size(style::MONO)
-                    .style(style::selectable(alpha(P.fg, 0.8))),
-            )
-            .padding(Padding {
-                top: 4.0,
-                right: 10.0,
-                bottom: 6.0,
-                left: 28.0,
-            }),
-        );
+        body =
+            body.push(
+                container(selection::text(tool.detail.trim_end()).font(MONO_FONT).size(style::MONO).style(style::selectable(alpha(P.fg, 0.8))))
+                    .padding(Padding { top: 4.0, right: 10.0, bottom: 6.0, left: 28.0 }),
+            );
     }
     if !tool.diff.trim().is_empty() {
         body = body.push(diff(&tool.diff));
     }
     if tool.detail.trim().is_empty() && tool.diff.trim().is_empty() {
-        body = body.push(
-            container(text("No output.").size(style::TINY).color(P.fg_dim)).padding(Padding {
-                top: 2.0,
-                right: 10.0,
-                bottom: 4.0,
-                left: 28.0,
-            }),
-        );
+        body = body.push(container(text("No output.").size(style::TINY).color(P.fg_dim)).padding(Padding { top: 2.0, right: 10.0, bottom: 4.0, left: 28.0 }));
     }
     body
 }
@@ -3281,17 +2293,12 @@ fn status_mark<'a>(status: &str) -> Element<'a, Message> {
         "completed" => (r#"<path d="M2.5 6.5 5 9 9.5 3.5"/>"#, alpha(P.fg, 0.375)),
         "failed" => (r#"<path d="M3.5 3.5 8.5 8.5M8.5 3.5 3.5 8.5"/>"#, P.error),
         "inprogress" => (r#"<circle cx="6" cy="6" r="3"/>"#, P.accent),
-        _ => (
-            r#"<circle cx="6" cy="6" r="1.2" fill="black" stroke="none"/>"#,
-            alpha(P.fg, 0.3),
-        ),
+        _ => (r#"<circle cx="6" cy="6" r="1.2" fill="black" stroke="none"/>"#, alpha(P.fg, 0.3)),
     };
     let handle = svg::Handle::from_memory(format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="black" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">{shape}</svg>"#
     ).into_bytes());
-    container(svg(handle).width(12).height(12).style(style::icon(color)))
-        .padding([0, 2])
-        .into()
+    container(svg(handle).width(12).height(12).style(style::icon(color))).padding([0, 2]).into()
 }
 
 /// One line of at most `max` characters: newlines shown as ⏎, the rest cut with "…" (iced 0.14
@@ -3352,10 +2359,7 @@ pub(crate) fn dot<'a>(color: Color) -> Element<'a, Message> {
 /// The activity: its indicator, with the timer beside it when shown.
 fn activity_canvas<'a>(indicator: Indicator, clock: Option<Clock>) -> Element<'a, Message> {
     let width = clock.map_or(SPIN_SIZE, |c| c.width + CLOCK_GAP + SPIN_SIZE);
-    canvas(Busy { indicator, clock })
-        .width(width)
-        .height(22)
-        .into()
+    canvas(Busy { indicator, clock }).width(width).height(22).into()
 }
 
 /// Drawn every frame from the clock's time, so it turns smoothly without the window building a
@@ -3368,30 +2372,16 @@ struct Busy {
 impl Busy {
     /// Anything moving: the spinner, a ticking timer, or the timer still sliding out.
     fn moving(&self) -> bool {
-        matches!(self.indicator, Indicator::Spinner(_) | Indicator::Pulse(_))
-            || self
-                .clock
-                .is_some_and(|c| c.ticking || c.shown.elapsed() < CLOCK_SLIDE)
+        matches!(self.indicator, Indicator::Spinner(_) | Indicator::Pulse(_)) || self.clock.is_some_and(|c| c.ticking || c.shown.elapsed() < CLOCK_SLIDE)
     }
 }
 
 impl canvas::Program<Message> for Busy {
     type State = ();
 
-    fn update(
-        &self,
-        _state: &mut (),
-        event: &iced::Event,
-        _bounds: Rectangle,
-        _cursor: iced::mouse::Cursor,
-    ) -> Option<canvas::Action<Message>> {
+    fn update(&self, _state: &mut (), event: &iced::Event, _bounds: Rectangle, _cursor: iced::mouse::Cursor) -> Option<canvas::Action<Message>> {
         // only while something moves: an idle dot asks for no frames
-        (self.moving()
-            && matches!(
-                event,
-                iced::Event::Window(iced::window::Event::RedrawRequested(_))
-            ))
-        .then(|| {
+        (self.moving() && matches!(event, iced::Event::Window(iced::window::Event::RedrawRequested(_)))).then(|| {
             if matches!(self.indicator, Indicator::Pulse(_)) && self.clock.is_none() {
                 canvas::Action::request_redraw_at(Instant::now() + Duration::from_millis(50))
             } else {
@@ -3400,67 +2390,37 @@ impl canvas::Program<Message> for Busy {
         })
     }
 
-    fn draw(
-        &self,
-        _state: &(),
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: iced::mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
+    fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: iced::mouse::Cursor) -> Vec<canvas::Geometry> {
         let now = Instant::now();
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let center = iced::Point::new(bounds.width - SPIN_SIZE / 2.0, bounds.height / 2.0);
         let radius = SPIN_SIZE / 2.0 - SPIN_LINE;
-        let stroke = |color: Color| {
-            canvas::Stroke::default()
-                .with_width(SPIN_LINE)
-                .with_color(color)
-                .with_line_cap(canvas::LineCap::Round)
-        };
+        let stroke = |color: Color| canvas::Stroke::default().with_width(SPIN_LINE).with_color(color).with_line_cap(canvas::LineCap::Round);
         match self.indicator {
             Indicator::Spinner(color) => {
-                frame.stroke(
-                    &canvas::Path::circle(center, radius),
-                    stroke(alpha(color, 0.18)),
-                );
+                frame.stroke(&canvas::Path::circle(center, radius), stroke(alpha(color, 0.18)));
                 let turn = (spin_epoch().elapsed().as_micros() % 1_000_000) as f32 / 1_000_000.0;
                 let start = turn * std::f32::consts::TAU;
                 let arc = canvas::Path::new(|path| {
-                    path.arc(canvas::path::Arc {
-                        center,
-                        radius,
-                        start_angle: Radians(start),
-                        end_angle: Radians(start + SPIN_ARC),
-                    });
+                    path.arc(canvas::path::Arc { center, radius, start_angle: Radians(start), end_angle: Radians(start + SPIN_ARC) });
                 });
                 frame.stroke(&arc, stroke(alpha(color, 0.95)));
             }
             // the status square: 8 px, round
             Indicator::Pulse(color) => {
                 let phase = spin_epoch().elapsed().as_secs_f32() * std::f32::consts::TAU / 4.0;
-                frame.fill(
-                    &canvas::Path::circle(center, 4.0),
-                    alpha(color, 0.3 + 0.15 * (1.0 + phase.sin())),
-                );
+                frame.fill(&canvas::Path::circle(center, 4.0), alpha(color, 0.3 + 0.15 * (1.0 + phase.sin())));
             }
             Indicator::Dot(color) => frame.fill(&canvas::Path::circle(center, 4.0), color),
         }
         if let Some(shown_clock) = self.clock {
             // out from under the spinner: from its middle to its place, easing out, fading in
-            let t = (now
-                .saturating_duration_since(shown_clock.shown)
-                .as_secs_f32()
-                / CLOCK_SLIDE.as_secs_f32())
-            .clamp(0.0, 1.0);
+            let t = (now.saturating_duration_since(shown_clock.shown).as_secs_f32() / CLOCK_SLIDE.as_secs_f32()).clamp(0.0, 1.0);
             let eased = 1.0 - (1.0 - t).powi(3);
             let end = shown_clock.width;
             let from = bounds.width - SPIN_SIZE / 2.0;
             let x = from + (end - from) * eased;
-            let visible = Rectangle::new(
-                iced::Point::ORIGIN,
-                iced::Size::new(bounds.width - SPIN_SIZE - 1.0, bounds.height),
-            );
+            let visible = Rectangle::new(iced::Point::ORIGIN, iced::Size::new(bounds.width - SPIN_SIZE - 1.0, bounds.height));
             frame.with_clip(visible, |frame| {
                 frame.fill_text(canvas::Text {
                     content: clock(shown_clock.ms),
@@ -3490,18 +2450,12 @@ mod timer_tests {
     #[test]
     fn timer_slot_fits_every_digit_at_minutes_and_hours_boundaries() {
         crate::fonts::install();
-        for seconds in [
-            0u64, 599, 600, 1199, 1200, 3599, 3600, 35999, 36000, 359999, 360000,
-        ] {
+        for seconds in [0u64, 599, 600, 1199, 1200, 3599, 3600, 35999, 36000, 359999, 360000] {
             let ms = seconds * 1000;
             for delta in [0, 999] {
                 let shown = clock(ms + delta);
                 let actual = text_width_in_font(&shown, style::TEXT, MONO_FONT);
-                assert!(
-                    clock_width(ms) >= actual + 1.0,
-                    "{shown} clips in {} px (needs {actual})",
-                    clock_width(ms)
-                );
+                assert!(clock_width(ms) >= actual + 1.0, "{shown} clips in {} px (needs {actual})", clock_width(ms));
             }
         }
         assert!(clock_width(599000) < clock_width(600000));

@@ -107,7 +107,9 @@ pub struct AuthMethodInfo {
 pub struct Secret(pub String);
 
 impl std::fmt::Debug for Secret {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("Secret(…)") }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(…)")
+    }
 }
 
 /// Something sent along with a prompt (SPEC §3.2 attachments): a pasted screenshot, a chosen file.
@@ -180,13 +182,17 @@ mod stored_path {
     use base64::{Engine, engine::general_purpose::STANDARD};
     #[derive(Serialize, Deserialize, JsonSchema)]
     #[serde(untagged)]
-    pub enum Encoding { Text(String), Bytes { bytes_base64: String } }
+    pub enum Encoding {
+        Text(String),
+        Bytes { bytes_base64: String },
+    }
     pub fn serialize<S: serde::Serializer>(path: &PathBuf, serializer: S) -> Result<S::Ok, S::Error> {
         use std::os::unix::ffi::OsStrExt;
         match path.to_str() {
             Some(text) => Encoding::Text(text.into()),
             None => Encoding::Bytes { bytes_base64: STANDARD.encode(path.as_os_str().as_bytes()) },
-        }.serialize(serializer)
+        }
+        .serialize(serializer)
     }
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
         use std::os::unix::ffi::OsStringExt;
@@ -194,7 +200,9 @@ mod stored_path {
             Encoding::Text(text) => text.into_bytes(),
             Encoding::Bytes { bytes_base64 } => STANDARD.decode(bytes_base64).map_err(serde::de::Error::custom)?,
         };
-        if bytes.contains(&0) { return Err(serde::de::Error::custom("stored path contains NUL")); }
+        if bytes.contains(&0) {
+            return Err(serde::de::Error::custom("stored path contains NUL"));
+        }
         Ok(std::ffi::OsString::from_vec(bytes).into())
     }
 }
@@ -262,10 +270,17 @@ pub enum Entry {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum Command {
     /// `text` is what the agent gets (standing block and pin prefix included).
-    Prompt { text: String, attachments: Vec<Attachment>, entry: Option<Entry> },
+    Prompt {
+        text: String,
+        attachments: Vec<Attachment>,
+        entry: Option<Entry>,
+    },
     Authenticate(String),
     /// A method that takes an API key (`AuthMethodInfo::api_key`), with the key the person typed.
-    AuthenticateWithKey { method_id: String, key: Secret },
+    AuthenticateWithKey {
+        method_id: String,
+        key: Secret,
+    },
     RetrySession,
     SetMode(String),
     SetConfig(String, ConfigValue),
@@ -280,36 +295,89 @@ pub enum Command {
 /// frontend answered, every attached one gets [`Event::Resolved`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum Event {
-    Ready { session_id: String, resumed: bool, controls: Controls },
-    Capabilities { images: bool },
+    Ready {
+        session_id: String,
+        resumed: bool,
+        controls: Controls,
+    },
+    Capabilities {
+        images: bool,
+    },
     Controls(Controls),
     TurnStarted,
     UserText(String),
     Text(String),
     Thought(String),
-    ToolCall { id: String, title: String, kind: String, status: String, detail: Option<String>, diff: Option<String>, parent: Option<String> },
-    ToolCallUpdate { id: String, status: Option<String>, title: Option<String>, detail: Option<String>, diff: Option<String> },
-    SubagentText { parent: String, text: String },
-    PermissionRequest { request: u64, tool_call_id: String, title: String, options: Vec<PermissionOption> },
-    AutoAnswered { tool_call_id: String, title: String, allowed: bool },
-    Elicitation { request: u64, message: String, fields: Vec<FormField> },
+    ToolCall {
+        id: String,
+        title: String,
+        kind: String,
+        status: String,
+        detail: Option<String>,
+        diff: Option<String>,
+        parent: Option<String>,
+    },
+    ToolCallUpdate {
+        id: String,
+        status: Option<String>,
+        title: Option<String>,
+        detail: Option<String>,
+        diff: Option<String>,
+    },
+    SubagentText {
+        parent: String,
+        text: String,
+    },
+    PermissionRequest {
+        request: u64,
+        tool_call_id: String,
+        title: String,
+        options: Vec<PermissionOption>,
+    },
+    AutoAnswered {
+        tool_call_id: String,
+        title: String,
+        allowed: bool,
+    },
+    Elicitation {
+        request: u64,
+        message: String,
+        fields: Vec<FormField>,
+    },
     /// A question was answered (by this frontend or another): drop its dialog.
-    Resolved { request: u64 },
+    Resolved {
+        request: u64,
+    },
     Other(String),
-    Usage { used: u64, size: u64 },
-    AuthRequired { message: String, methods: Vec<AuthMethodInfo> },
+    Usage {
+        used: u64,
+        size: u64,
+    },
+    AuthRequired {
+        message: String,
+        methods: Vec<AuthMethodInfo>,
+    },
     Stopped(StopReason),
     Ended(Option<String>),
     /// The daemon ended the session (`sessions.end`): its row is written — or deleted, when
     /// nothing was asked in it — and its jail is stopping. Frontends drop the session.
-    SessionEnded { deleted: bool, reason: String },
+    SessionEnded {
+        deleted: bool,
+        reason: String,
+    },
     /// A line for the transcript's reader that sill wrote itself (the summary turn's mark).
     Note(String),
     /// A checkpoint summary (`sessions.checkpoint`) is in: the text as stored (None when the agent
     /// wrote nothing), and the name it gave the session if the first line was one.
-    Summarized { text: Option<String>, title: Option<String> },
+    Summarized {
+        text: Option<String>,
+        title: Option<String>,
+    },
     /// A prompt with what went with it (`UserText` stays for prompts without attachments).
-    UserMessage { text: String, attachments: Vec<UserAttachment> },
+    UserMessage {
+        text: String,
+        attachments: Vec<UserAttachment>,
+    },
     /// Images in the agent's message, by session upload (SFP `image` blocks that were kept).
     AgentImages(Vec<UserAttachment>),
     /// The agent's whole current plan; each replaces the turn's last.
@@ -328,10 +396,18 @@ pub struct UserAttachment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct PlanEntry { pub content: String, pub status: String, pub priority: String }
+pub struct PlanEntry {
+    pub content: String,
+    pub status: String,
+    pub priority: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AgentCommand { pub name: String, pub description: String, pub hint: Option<String> }
+pub struct AgentCommand {
+    pub name: String,
+    pub description: String,
+    pub hint: Option<String>,
+}
 
 /// The answer to a question: the chosen permission option (None = cancel), or the form's values
 /// (None = cancel).
@@ -346,11 +422,17 @@ pub enum Answer {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum SessionSet {
     Name(String),
-    Title { title: String, kind: String },
+    Title {
+        title: String,
+        kind: String,
+    },
     AutoAllow(bool),
     MemoryScope(String),
     Policy(String),
-    Summary { text: String, kind: String },
+    Summary {
+        text: String,
+        kind: String,
+    },
     /// The session's own agent settings (mode, model, options — SPEC §3.2).
     Settings(AgentSettings),
     /// An ended session comes back: `ended_at` cleared.

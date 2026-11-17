@@ -7,12 +7,17 @@
 //! - [`paths`]   — `~` expansion, globs, the escaped names used for upper trees
 
 pub mod acp;
-pub mod agents;
 pub mod agent_storage;
+pub mod agents;
+pub mod bus;
 pub mod changes;
 pub mod config;
+pub mod credentials;
 pub mod crosscheck;
+pub mod desktop;
+pub mod desktop_capture;
 pub mod frontend;
+pub mod gpu;
 pub mod history;
 pub mod instructions;
 pub mod jail;
@@ -20,11 +25,6 @@ pub mod keep;
 pub mod launcher;
 pub mod ledger;
 pub mod login;
-pub mod credentials;
-pub mod bus;
-pub mod gpu;
-pub mod desktop;
-pub mod desktop_capture;
 pub mod memory;
 pub mod mounts;
 pub mod paths;
@@ -36,13 +36,13 @@ pub mod registry;
 pub mod safe_fs;
 pub mod seccomp;
 pub mod session;
+pub mod sfp;
+pub mod sfp_client;
 pub mod shim;
 pub mod store;
 pub mod title;
 pub mod wire;
 pub mod workspace;
-pub mod sfp;
-pub mod sfp_client;
 
 pub mod operations;
 

@@ -65,21 +65,15 @@ pub fn begin() {
     let _ = DIR.set(dir.clone());
     sill_proto::transport::choose(
         "This Mac",
-        sill_proto::transport::BoxTarget {
-            host: setup::HOST.into(),
-            binary: setup::SILL.into(),
-            ssh_config: Some(dir.join("ssh_config")),
-        },
+        sill_proto::transport::BoxTarget { host: setup::HOST.into(), binary: setup::SILL.into(), ssh_config: Some(dir.join("ssh_config")) },
     );
-    let spawned = std::thread::Builder::new()
-        .name("sill-gui-vm".into())
-        .spawn(move || {
-            let Some(shared) = SHARED.get() else { return };
-            let _acting = shared.acting.lock().unwrap();
-            if let Err(said) = run(&dir) {
-                set(Phase::Failed(said));
-            }
-        });
+    let spawned = std::thread::Builder::new().name("sill-gui-vm".into()).spawn(move || {
+        let Some(shared) = SHARED.get() else { return };
+        let _acting = shared.acting.lock().unwrap();
+        if let Err(said) = run(&dir) {
+            set(Phase::Failed(said));
+        }
+    });
     if spawned.is_err() {
         set(Phase::Failed("Sill could not start its VM.".into()));
     }
@@ -91,11 +85,7 @@ fn run(dir: &std::path::Path) -> Result<(), String> {
     set(Phase::Checking);
     let problems = sill_vm::check(dir);
     if !problems.is_empty() {
-        return Err(problems
-            .iter()
-            .map(|p| format!("{} {}", p.what, p.fix))
-            .collect::<Vec<_>>()
-            .join("\n"));
+        return Err(problems.iter().map(|p| format!("{} {}", p.what, p.fix)).collect::<Vec<_>>().join("\n"));
     }
     let image = image_dir().ok_or("Sill's system image is missing from the app.")?;
     if !dir.join("system.raw").exists() {
@@ -110,22 +100,19 @@ fn run(dir: &std::path::Path) -> Result<(), String> {
     let vm = sill_vm::Vm::start(&config).map_err(|e| {
         let said = format!("{e:#}");
         if said.contains("entitlement") {
-            "This copy of Sill is not allowed to run virtual machines (it is not signed for it)."
-                .to_string()
+            "This copy of Sill is not allowed to run virtual machines (it is not signed for it).".to_string()
         } else {
             format!("Sill's VM did not start: {said}")
         }
     })?;
     let vm = Arc::new(vm);
-    let serve = sill_vm::serve_ssh(vm.clone(), &dir.join("ssh.sock"))
-        .map_err(|e| format!("Sill could not reach its VM: {e:#}"))?;
+    let serve = sill_vm::serve_ssh(vm.clone(), &dir.join("ssh.sock")).map_err(|e| format!("Sill could not reach its VM: {e:#}"))?;
     if let Some(shared) = SHARED.get() {
         *shared.vm.lock().unwrap() = Some(vm.clone());
         *shared.serve.lock().unwrap() = Some(serve);
         *shared.running.lock().unwrap() = Some((config.cpus, config.memory_gb));
     }
-    vm.wait_for_ssh(Duration::from_secs(180))
-        .map_err(|e| format!("Sill's VM started but does not answer: {e:#}"))?;
+    vm.wait_for_ssh(Duration::from_secs(180)).map_err(|e| format!("Sill's VM started but does not answer: {e:#}"))?;
     // the Mac folders pinned before, back at their paths before any session starts
     if let Err(e) = sync_folders(dir, &vm) {
         eprintln!("sill-gui: Mac folders: {e}");
@@ -162,9 +149,7 @@ fn wait_for_network(dir: &Path) -> Result<(), String> {
         "/usr/lib/systemd/systemd-networkd-wait-online --quiet --any --ipv4 \
          --operational-state=routable --timeout={NETWORK_WAIT_SECS}"
     );
-    guest(dir, &remote, "").map_err(|said| {
-        if said.is_empty() { format!("no network after {NETWORK_WAIT_SECS} s") } else { said }
-    })
+    guest(dir, &remote, "").map_err(|said| if said.is_empty() { format!("no network after {NETWORK_WAIT_SECS} s") } else { said })
 }
 
 /// The VM's make: sized for this Mac, with what Settings chose in its place.
@@ -218,10 +203,7 @@ pub fn connector() -> Connector {
     Arc::new(|| {
         let shared = SHARED.get().ok_or_else(|| anyhow::anyhow!("no VM"))?;
         let phase = shared.phase.lock().unwrap();
-        let (phase, _) = shared
-            .changed
-            .wait_timeout_while(phase, READY_WAIT, |phase| phase.moving())
-            .unwrap();
+        let (phase, _) = shared.changed.wait_timeout_while(phase, READY_WAIT, |phase| phase.moving()).unwrap();
         match &*phase {
             Phase::Ready => {}
             Phase::Failed(said) => anyhow::bail!("{said}"),
@@ -247,16 +229,14 @@ pub fn shut_down_on_signals() {
         // SAFETY: an async-signal-safe handler that only stores a flag
         unsafe { libc::signal(signal, on_signal as *const () as libc::sighandler_t) };
     }
-    let _ = std::thread::Builder::new()
-        .name("sill-gui-signals".into())
-        .spawn(|| {
-            while !ASKED.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            eprintln!("sill-gui: shutting the VM down");
-            shut_down();
-            std::process::exit(0);
-        });
+    let _ = std::thread::Builder::new().name("sill-gui-signals".into()).spawn(|| {
+        while !ASKED.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        eprintln!("sill-gui: shutting the VM down");
+        shut_down();
+        std::process::exit(0);
+    });
 }
 
 /// Shut the VM down at Quit: the guest is asked first and given a little while, then stopped.
@@ -293,9 +273,7 @@ fn stop_held(dir: &Path, shared: &Shared) -> Result<(), String> {
     let mut result = Ok(());
     if let Some(vm) = vm {
         let _ = sill_proto::boxlink::disconnect(setup::HOST);
-        result = vm
-            .shut_down(Duration::from_secs(15))
-            .map_err(|e| format!("Sill's VM did not stop: {e:#}"));
+        result = vm.shut_down(Duration::from_secs(15)).map_err(|e| format!("Sill's VM did not stop: {e:#}"));
         drop(vm);
     }
     // the SSH thread lets go of the VM, and with it the VM's disks and lock, at a connection
@@ -367,10 +345,7 @@ pub fn set_resources(chosen: Resources) -> Result<(), String> {
 }
 
 fn load_resources(dir: &Path) -> Resources {
-    std::fs::read(dir.join("resources.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    std::fs::read(dir.join("resources.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
 }
 
 /// What Settings shows of the VM: read from its directory, a few file sizes.
@@ -380,10 +355,7 @@ pub fn info() -> Option<Info> {
     // the space a disk takes on the Mac: they are sparse, so less than their size
     let used = |name: &str| std::fs::metadata(dir.join(name)).ok().map(|m| m.blocks() * 512);
     let automatic = sill_vm::Config::sized_for_this_mac(dir.clone());
-    let image = std::fs::read_to_string(dir.join("system.commit"))
-        .ok()
-        .map(|c| c.trim().chars().take(12).collect::<String>())
-        .filter(|c| !c.is_empty());
+    let image = std::fs::read_to_string(dir.join("system.commit")).ok().map(|c| c.trim().chars().take(12).collect::<String>()).filter(|c| !c.is_empty());
     Some(Info {
         dir: dir.clone(),
         image,
@@ -395,11 +367,7 @@ pub fn info() -> Option<Info> {
         chosen: load_resources(dir),
         automatic: (automatic.cpus, automatic.memory_gb),
         max: limits(),
-        folders: load_folders(dir)
-            .into_iter()
-            .enumerate()
-            .filter_map(|(slot, path)| path.map(|p| (slot, p.clone(), p.is_dir())))
-            .collect(),
+        folders: load_folders(dir).into_iter().enumerate().filter_map(|(slot, path)| path.map(|p| (slot, p.clone(), p.is_dir()))).collect(),
         slots: sill_vm::SHARE_SLOTS,
     })
 }
@@ -407,11 +375,7 @@ pub fn info() -> Option<Info> {
 /// Show the VM's folder in the Finder.
 pub fn reveal() -> Result<(), String> {
     let dir = DIR.get().ok_or("Sill's VM is not in use.")?;
-    std::process::Command::new("/usr/bin/open")
-        .arg(dir)
-        .spawn()
-        .map(drop)
-        .map_err(|e| format!("Could not open {}: {e}", dir.display()))
+    std::process::Command::new("/usr/bin/open").arg(dir).spawn().map(drop).map_err(|e| format!("Could not open {}: {e}", dir.display()))
 }
 
 /// Where the system image is: `SILL_VM_IMAGE`, the app bundle's resources (`Resources/vm`,
@@ -422,16 +386,13 @@ fn image_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(dir));
     }
     let exe = std::env::current_exe().ok()?;
-    let has_image =
-        |dir: &std::path::Path| dir.join("system.raw").exists() || dir.join("system.raw.gz").exists();
+    let has_image = |dir: &std::path::Path| dir.join("system.raw").exists() || dir.join("system.raw.gz").exists();
     if let Some(resources) = exe.parent().and_then(|macos| macos.parent()).map(|c| c.join("Resources/vm"))
         && has_image(&resources)
     {
         return Some(resources);
     }
-    exe.ancestors()
-        .map(|dir| dir.join("dist/mac-image"))
-        .find(|dir| has_image(dir))
+    exe.ancestors().map(|dir| dir.join("dist/mac-image")).find(|dir| has_image(dir))
 }
 
 /// Make the Mac folder `path` appear at the same path in the VM, for pinning it there; it stays
@@ -445,20 +406,12 @@ pub fn expose(path: &Path) -> Result<PathBuf, String> {
     let vm = shared.vm.lock().unwrap().clone().ok_or("Sill's VM is not running.")?;
     let path = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if !mac_folder(&path) {
-        return Err(format!(
-            "{} cannot be shared: only folders in a user's folder (/Users) or on a disk (/Volumes) can.",
-            path.display()
-        ));
+        return Err(format!("{} cannot be shared: only folders in a user's folder (/Users) or on a disk (/Volumes) can.", path.display()));
     }
     let mut folders = load_folders(dir);
     // inside a folder already shared, it is in the VM already
     if !folders.iter().flatten().any(|f| path.starts_with(f)) {
-        let slot = free_slot(&folders).ok_or_else(|| {
-            format!(
-                "Sill can share up to {} folders of this Mac with its VM.",
-                sill_vm::SHARE_SLOTS
-            )
-        })?;
+        let slot = free_slot(&folders).ok_or_else(|| format!("Sill can share up to {} folders of this Mac with its VM.", sill_vm::SHARE_SLOTS))?;
         if slot == folders.len() {
             folders.push(Some(path.clone()));
         } else {
@@ -466,8 +419,7 @@ pub fn expose(path: &Path) -> Result<PathBuf, String> {
         }
         save_folders(dir, &folders).map_err(|e| format!("Sill could not save its folders: {e}"))?;
         // the new folder's own slot: the others stay as they are
-        vm.share_slot(slot, Some(&path))
-            .map_err(|e| format!("Sill could not share {}: {e:#}", path.display()))?;
+        vm.share_slot(slot, Some(&path)).map_err(|e| format!("Sill could not share {}: {e:#}", path.display()))?;
     }
     mount_folders(dir, &folders)?;
     Ok(path)
@@ -482,18 +434,14 @@ pub fn unshare(path: &Path) -> Result<(), String> {
     // after a start, stop or restart under way: the folders are read and mounted at a start
     let _acting = shared.acting.lock().unwrap();
     let mut folders = load_folders(dir);
-    let slot = folders
-        .iter()
-        .position(|f| f.as_deref() == Some(path))
-        .ok_or_else(|| format!("{} is not shared.", path.display()))?;
+    let slot = folders.iter().position(|f| f.as_deref() == Some(path)).ok_or_else(|| format!("{} is not shared.", path.display()))?;
     let vm = shared.vm.lock().unwrap().clone();
     if let Some(vm) = vm {
         // in the guest first, so nothing there is left reading a share that went
         if phase() == Some(Phase::Ready) {
             unmount_folder(dir, path)?;
         }
-        vm.share_slot(slot, None)
-            .map_err(|e| format!("Sill could not unshare {}: {e:#}", path.display()))?;
+        vm.share_slot(slot, None).map_err(|e| format!("Sill could not unshare {}: {e:#}", path.display()))?;
     }
     folders[slot] = None;
     save_folders(dir, &trimmed(folders)).map_err(|e| format!("Sill could not save its folders: {e}"))
@@ -501,10 +449,7 @@ pub fn unshare(path: &Path) -> Result<(), String> {
 
 /// The first empty share slot, or the next one after the last if there is room.
 fn free_slot(folders: &[Option<PathBuf>]) -> Option<usize> {
-    folders
-        .iter()
-        .position(Option::is_none)
-        .or((folders.len() < sill_vm::SHARE_SLOTS).then_some(folders.len()))
+    folders.iter().position(Option::is_none).or((folders.len() < sill_vm::SHARE_SLOTS).then_some(folders.len()))
 }
 
 /// Without the empty slots at the end.
@@ -518,16 +463,12 @@ fn trimmed(mut folders: Vec<Option<PathBuf>>) -> Vec<Option<PathBuf>> {
 /// A folder of a Mac user's or on a Mac volume: nothing that could cover the guest's own.
 fn mac_folder(path: &Path) -> bool {
     let mut parts = path.components().skip(1);
-    matches!(parts.next(), Some(std::path::Component::Normal(top)) if top == "Users" || top == "Volumes")
-        && parts.next().is_some()
+    matches!(parts.next(), Some(std::path::Component::Normal(top)) if top == "Users" || top == "Volumes") && parts.next().is_some()
 }
 
 /// The shared folders by share slot, `null` for an empty one (a plain list of paths reads too).
 fn load_folders(dir: &Path) -> Vec<Option<PathBuf>> {
-    std::fs::read(dir.join("folders.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    std::fs::read(dir.join("folders.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
 }
 
 fn save_folders(dir: &Path, folders: &[Option<PathBuf>]) -> std::io::Result<()> {
@@ -544,9 +485,7 @@ fn sync_folders(dir: &Path, vm: &sill_vm::Vm) -> Result<(), String> {
         if present.is_none() && path.is_none() {
             continue;
         }
-        vm.share_slot(slot, present).map_err(|e| {
-            format!("Sill could not share {}: {e:#}", path.as_deref().unwrap_or(Path::new("")).display())
-        })?;
+        vm.share_slot(slot, present).map_err(|e| format!("Sill could not share {}: {e:#}", path.as_deref().unwrap_or(Path::new("")).display()))?;
     }
     mount_folders(dir, &folders)
 }
@@ -565,8 +504,7 @@ fn mount_folders(dir: &Path, folders: &[Option<PathBuf>]) -> Result<(), String> 
     if lines.is_empty() {
         return Ok(());
     }
-    as_root(dir, "mount", &lines)
-        .map_err(|said| format!("Sill could not put the folders in place in its VM: {}", older_image(said)))
+    as_root(dir, "mount", &lines).map_err(|said| format!("Sill could not put the folders in place in its VM: {}", older_image(said)))
 }
 
 /// Who the person's commits are by on the Mac: git's own answer (`user.name` and `user.email`,
@@ -647,10 +585,7 @@ fn watch_clock() {
 /// Set the VM's clock to the Mac's, by the guest's root helper (which leaves a clock within two
 /// seconds alone).
 fn sync_clock(dir: &Path) -> Result<(), String> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| "the Mac's clock is before 1970".to_string())?
-        .as_secs();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| "the Mac's clock is before 1970".to_string())?.as_secs();
     as_root(dir, "clock", &format!("{now}\n")).map_err(older_image)
 }
 
@@ -773,9 +708,7 @@ const MAC_REQUEST_MAX: u64 = 64 << 10;
 /// reach the port itself.
 fn serve_mac(dir: &Path, vm: &sill_vm::Vm) -> Result<(), String> {
     let mut secret = [0u8; 32];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut secret))
-        .map_err(|e| format!("no randomness: {e}"))?;
+    std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut secret)).map_err(|e| format!("no randomness: {e}"))?;
     let secret: String = secret.iter().map(|b| format!("{b:02x}")).collect();
     let mut child = std::process::Command::new("ssh")
         .arg("-F")
@@ -793,10 +726,7 @@ fn serve_mac(dir: &Path, vm: &sill_vm::Vm) -> Result<(), String> {
     }
     let out = child.wait_with_output().map_err(|e| format!("ssh: {e}"))?;
     if !out.status.success() {
-        return Err(format!(
-            "the daemon's secret could not be written: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        return Err(format!("the daemon's secret could not be written: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
     let secret = Arc::new(secret);
     watch_mac_processes();
@@ -822,15 +752,20 @@ fn answer_mac(stream: std::os::unix::net::UnixStream, secret: &str) -> Result<()
     let mut line = Vec::new();
     let mut chunk = [0; 4096];
     loop {
-        let left = read_until.checked_duration_since(std::time::Instant::now())
-            .ok_or("Mac request timed out")?;
+        let left = read_until.checked_duration_since(std::time::Instant::now()).ok_or("Mac request timed out")?;
         stream.set_read_timeout(Some(left)).map_err(|e| e.to_string())?;
         let n = stream.read(&mut chunk).map_err(|e| e.to_string())?;
-        if n == 0 { return Err("incomplete Mac request".into()); }
+        if n == 0 {
+            return Err("incomplete Mac request".into());
+        }
         let end = chunk[..n].iter().position(|b| *b == b'\n');
         line.extend_from_slice(&chunk[..end.map_or(n, |i| i + 1)]);
-        if line.len() as u64 > MAC_REQUEST_MAX { return Err("Mac request too large".into()); }
-        if end.is_some() { break; }
+        if line.len() as u64 > MAC_REQUEST_MAX {
+            return Err("Mac request too large".into());
+        }
+        if end.is_some() {
+            break;
+        }
     }
     let line = std::str::from_utf8(&line).map_err(|e| e.to_string())?;
     let (reply, picture) = match mac_request(line, secret, deadline) {
@@ -843,14 +778,18 @@ fn answer_mac(stream: std::os::unix::net::UnixStream, secret: &str) -> Result<()
     }
     let mut bytes = serde_json::to_vec(&head).map_err(|e| e.to_string())?;
     bytes.push(b'\n');
-    if let Some(picture) = picture { bytes.extend_from_slice(&picture); }
+    if let Some(picture) = picture {
+        bytes.extend_from_slice(&picture);
+    }
     let until = std::time::Instant::now() + Duration::from_secs(3);
     let mut pending = bytes.as_slice();
     while !pending.is_empty() {
         let left = until.checked_duration_since(std::time::Instant::now()).ok_or("Mac reply timed out")?;
         stream.set_write_timeout(Some(left)).map_err(|e| e.to_string())?;
         let n = stream.write(pending).map_err(|e| e.to_string())?;
-        if n == 0 { return Err("Mac reply disconnected".into()); }
+        if n == 0 {
+            return Err("Mac reply disconnected".into());
+        }
         pending = &pending[n..];
     }
     Ok(())
@@ -861,9 +800,7 @@ fn mac_request(line: &str, secret: &str, deadline: std::time::Instant) -> Result
     let request: Value = serde_json::from_str(line).map_err(|_| "not a request".to_string())?;
     let given = request["token"].as_str().unwrap_or_default();
     // the same time whatever the secret's first wrong byte
-    if given.len() != secret.len()
-        || given.bytes().zip(secret.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) != 0
-    {
+    if given.len() != secret.len() || given.bytes().zip(secret.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) != 0 {
         return Err("refused: not Sill's daemon".into());
     }
     let session = request["session"].as_str().ok_or("no session")?;
@@ -927,17 +864,12 @@ fn mac_request(line: &str, secret: &str, deadline: std::time::Instant) -> Result
     result["frame"] = json!(frame);
     result["width"] = json!(width);
     result["height"] = json!(height);
-    result["captured"] = json!(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs())
-    );
+    result["captured"] = json!(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()));
     Ok((json!({"result": result}), Some(png)))
 }
 
 /// Frames of the pictures taken, by id: what input is aimed in.
-static FRAMES: Mutex<std::collections::BTreeMap<String, crate::mac_input::Frame>> =
-    Mutex::new(std::collections::BTreeMap::new());
+static FRAMES: Mutex<std::collections::BTreeMap<String, crate::mac_input::Frame>> = Mutex::new(std::collections::BTreeMap::new());
 
 fn new_frame_id() -> String {
     let mut bytes = [0u8; 8];
@@ -982,9 +914,7 @@ pub fn person_answered(session: &str, active: Option<(u64, Option<String>)>, fai
         return;
     }
     match (active, asked) {
-        (Some((generation, since)), Some(operations)) => {
-            entry.granted = Some(Granted { generation, since, operations })
-        }
+        (Some((generation, since)), Some(operations)) => entry.granted = Some(Granted { generation, since, operations }),
         // an answer to something else than an Activate of this window: what stands, stands
         (Some(_), None) => {}
         (None, _) => {
@@ -1002,16 +932,18 @@ fn forget_grants() {
 /// The person switched `operation` on for `session` in this window: the activation of this
 /// generation, made at `since`.
 fn ticked(session: &str, generation: u64, since: Option<&str>, operation: &str) -> bool {
-    TICKED.lock().unwrap().get(session).and_then(|t| t.granted.as_ref()).is_some_and(|g| {
-        g.generation == generation && g.since.as_deref() == since && g.operations.iter().any(|op| op == operation)
-    })
+    TICKED
+        .lock()
+        .unwrap()
+        .get(session)
+        .and_then(|t| t.granted.as_ref())
+        .is_some_and(|g| g.generation == generation && g.since.as_deref() == since && g.operations.iter().any(|op| op == operation))
 }
 
 /// The session's Host control is active at this generation with `operation` granted: by the
 /// person in this window (`TICKED`) and in the daemon's answer (it checked too).
 fn granted(session: &str, generation: u64, operation: &str) -> Result<(), String> {
-    let not_ticked =
-        || format!("refused: {operation} was not switched on for this session in Sill's window at this generation");
+    let not_ticked = || format!("refused: {operation} was not switched on for this session in Sill's window at this generation");
     // nothing switched on here at this generation: refused without asking the daemon
     if !TICKED.lock().unwrap().get(session).and_then(|t| t.granted.as_ref()).is_some_and(|g| g.generation == generation) {
         return Err(not_ticked());
@@ -1065,9 +997,7 @@ fn mac_input(session: &str, generation: u64, args: &serde_json::Value, deadline:
     let actions = args["actions"].as_array().filter(|a| !a.is_empty() && a.len() <= 32).ok_or("1 to 32 actions")?;
     let frame = match args["frame"].as_str() {
         Some(id) => {
-            let frame = FRAMES.lock().unwrap().get(id).cloned().ok_or(
-                "no such frame: take a picture with `sill-mac screenshot` and aim in its frame",
-            )?;
+            let frame = FRAMES.lock().unwrap().get(id).cloned().ok_or("no such frame: take a picture with `sill-mac screenshot` and aim in its frame")?;
             if frame.session != session || frame.generation != generation {
                 return Err("that frame belongs to another session or grant: take a new picture".into());
             }
@@ -1088,7 +1018,9 @@ fn mac_input(session: &str, generation: u64, args: &serde_json::Value, deadline:
     let total = actions.len();
     let stop = |done: usize, why: &str| Ok(json!({"done": done, "of": total, "interrupted": why}));
     for (done, action) in actions.iter().enumerate() {
-        if std::time::Instant::now() >= deadline { return stop(done, "input deadline reached"); }
+        if std::time::Instant::now() >= deadline {
+            return stop(done, "input deadline reached");
+        }
         if done > 0 && granted(session, generation, "mac_input").is_err() {
             return stop(done, "Host control changed or was revoked");
         }
@@ -1104,11 +1036,7 @@ fn mac_input(session: &str, generation: u64, args: &serde_json::Value, deadline:
             let frame = frame.as_ref().ok_or("an action with a point needs a frame")?;
             // the target is still where the picture showed it
             let (_, now) = locate(&frame.target)?;
-            if (now.0 - frame.x).abs() > 0.5
-                || (now.1 - frame.y).abs() > 0.5
-                || (now.2 - frame.width).abs() > 0.5
-                || (now.3 - frame.height).abs() > 0.5
-            {
+            if (now.0 - frame.x).abs() > 0.5 || (now.1 - frame.y).abs() > 0.5 || (now.2 - frame.width).abs() > 0.5 || (now.3 - frame.height).abs() > 0.5 {
                 return Err("the target moved or changed size since the picture: take a new one".into());
             }
             let x = p[0].as_f64().ok_or("a point is [x, y]")?;
@@ -1158,18 +1086,20 @@ fn mac_input(session: &str, generation: u64, args: &serde_json::Value, deadline:
 fn watch_mac_processes() {
     static STARTED: std::sync::Once = std::sync::Once::new();
     STARTED.call_once(|| {
-        let _ = std::thread::Builder::new().name("sill-gui-mac-procs".into()).spawn(|| loop {
-            std::thread::sleep(Duration::from_secs(3));
-            for session in crate::mac_procs::sessions_running() {
-                let state: Result<sill_proto::host_control::State, _> = sill_proto::Client::connect()
-                    .and_then(|client| client.call("_sill/host_control.state", serde_json::json!({"session_id": session})));
-                // the daemon unreachable is not a revocation: only a clear answer stops them
-                if let Ok(state) = state
-                    && (!state.active
-                        || !state.operations.iter().any(|op| op == "mac_commands")
-                        || !ticked(&session, state.generation, state.since.as_deref(), "mac_commands"))
-                {
-                    crate::mac_procs::stop_session(&session);
+        let _ = std::thread::Builder::new().name("sill-gui-mac-procs".into()).spawn(|| {
+            loop {
+                std::thread::sleep(Duration::from_secs(3));
+                for session in crate::mac_procs::sessions_running() {
+                    let state: Result<sill_proto::host_control::State, _> =
+                        sill_proto::Client::connect().and_then(|client| client.call("_sill/host_control.state", serde_json::json!({"session_id": session})));
+                    // the daemon unreachable is not a revocation: only a clear answer stops them
+                    if let Ok(state) = state
+                        && (!state.active
+                            || !state.operations.iter().any(|op| op == "mac_commands")
+                            || !ticked(&session, state.generation, state.since.as_deref(), "mac_commands"))
+                    {
+                        crate::mac_procs::stop_session(&session);
+                    }
                 }
             }
         });
@@ -1189,10 +1119,7 @@ mod grant_tests {
         assert!(super::ticked(s, 4, at, "mac_view"));
         assert!(!super::ticked(s, 4, at, "mac_commands"), "only what was switched on");
         assert!(!super::ticked(s, 5, at, "mac_view"), "an activation made elsewhere has another generation");
-        assert!(
-            !super::ticked(s, 4, Some("1794560999"), "mac_view"),
-            "the same generation from a daemon started again is another activation"
-        );
+        assert!(!super::ticked(s, 4, Some("1794560999"), "mac_view"), "the same generation from a daemon started again is another activation");
         // a failed change leaves the grant; a revocation ends it
         super::person_asked(s, &["mac_view".into(), "mac_commands".into()]);
         super::person_answered(s, None, true);
@@ -1221,7 +1148,9 @@ mod transport_tests {
         // Progress more often than the socket timeout still cannot extend the total budget.
         let sender = std::thread::spawn(move || {
             for _ in 0..80 {
-                if peer.write_all(b" ").is_err() { break; }
+                if peer.write_all(b" ").is_err() {
+                    break;
+                }
                 std::thread::sleep(Duration::from_millis(100));
             }
         });

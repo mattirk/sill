@@ -201,18 +201,43 @@ mod tests {
     #[test]
     fn the_fix_request_names_who_found_what_and_where() {
         let run = Run {
-            run_id: "r".into(), workspace_id: "w".into(), session_id: "s".into(), state_tree: "t".into(), base: "b".into(),
-            state: "complete".into(), detail: String::new(),
-            reviewers: vec![Participant { reviewer: Reviewer { name: String::new(), agent: "codex".into(), options: BTreeMap::new() }, session_id: None, state: "complete".into(), summary: "Fine.".into(), activity: vec![], error: None }],
+            run_id: "r".into(),
+            workspace_id: "w".into(),
+            session_id: "s".into(),
+            state_tree: "t".into(),
+            base: "b".into(),
+            state: "complete".into(),
+            detail: String::new(),
+            reviewers: vec![Participant {
+                reviewer: Reviewer { name: String::new(), agent: "codex".into(), options: BTreeMap::new() },
+                session_id: None,
+                state: "complete".into(),
+                summary: "Fine.".into(),
+                activity: vec![],
+                error: None,
+            }],
             problems: vec![
-                Problem { id: "r0-p0".into(), reviewer_index: 0, title: "The test accepts too much.".into(), path: Some("src/jail.rs".into()), line: Some(12), detail: "A layer inside the state directory would pass.\nSeen by reading.".into() },
+                Problem {
+                    id: "r0-p0".into(),
+                    reviewer_index: 0,
+                    title: "The test accepts too much.".into(),
+                    path: Some("src/jail.rs".into()),
+                    line: Some(12),
+                    detail: "A layer inside the state directory would pass.\nSeen by reading.".into(),
+                },
                 Problem { id: "r0-p1".into(), reviewer_index: 0, title: "A comment is stale.".into(), path: None, line: None, detail: String::new() },
             ],
-            created_at: "1".into(), stale: false,
+            created_at: "1".into(),
+            stale: false,
         };
         let text = fix_request(&run);
         assert_eq!(text.lines().next(), Some("Fix the 2 problems codex found"));
-        assert!(text.contains("\n1. The test accepts too much.\n   Where: src/jail.rs:12\n   A layer inside the state directory would pass.\n   Seen by reading.\n"), "{text}");
+        assert!(
+            text.contains(
+                "\n1. The test accepts too much.\n   Where: src/jail.rs:12\n   A layer inside the state directory would pass.\n   Seen by reading.\n"
+            ),
+            "{text}"
+        );
         assert!(text.ends_with("\n2. A comment is stale.\n"), "{text}");
     }
 }

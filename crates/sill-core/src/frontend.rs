@@ -1,6 +1,6 @@
 //! Data operations performed on the daemon's host for a rendering frontend.
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
@@ -68,24 +68,41 @@ pub struct RegistryEntry {
     pub builtin_agent_id: Option<String>,
 }
 impl RegistryEntry {
-    pub fn how(&self)->Option<&str> { self.install_kind.as_deref() }
-    pub fn install_spec(&self)->&str { &self.install_spec }
-    pub fn package_name(&self)->Option<&str> {self.package_name.as_deref()}
+    pub fn how(&self) -> Option<&str> {
+        self.install_kind.as_deref()
+    }
+    pub fn install_spec(&self) -> &str {
+        &self.install_spec
+    }
+    pub fn package_name(&self) -> Option<&str> {
+        self.package_name.as_deref()
+    }
 }
-pub fn registry_trust(source:&str)->anyhow::Result<crate::registry::Trust> {
+pub fn registry_trust(source: &str) -> anyhow::Result<crate::registry::Trust> {
     match source {
-        "snapshot"=>Ok(crate::registry::Trust::Snapshot),
-        "live"=>Ok(crate::registry::Trust::Live),
-        _=>anyhow::bail!("unknown registry source: {source}"),
+        "snapshot" => Ok(crate::registry::Trust::Snapshot),
+        "live" => Ok(crate::registry::Trust::Live),
+        _ => anyhow::bail!("unknown registry source: {source}"),
     }
 }
 impl TryFrom<sill_proto::host::RegistryEntry> for RegistryEntry {
-    type Error=anyhow::Error;
-    fn try_from(value:sill_proto::host::RegistryEntry)->anyhow::Result<Self> {
-        Ok(Self {id:value.entry_id,name:value.name,version:value.version,description:value.description,
-            repository:value.repository,website:value.website,trust:registry_trust(&value.source)?,
-            newer:value.newer.map(|n|Self::try_from(*n).map(Box::new)).transpose()?,
-            install_kind:if value.installable {value.install_kind}else{None},install_spec:value.install_spec,package_name:value.package_name,has_icon:value.has_icon,builtin_agent_id:value.builtin_agent_id})
+    type Error = anyhow::Error;
+    fn try_from(value: sill_proto::host::RegistryEntry) -> anyhow::Result<Self> {
+        Ok(Self {
+            id: value.entry_id,
+            name: value.name,
+            version: value.version,
+            description: value.description,
+            repository: value.repository,
+            website: value.website,
+            trust: registry_trust(&value.source)?,
+            newer: value.newer.map(|n| Self::try_from(*n).map(Box::new)).transpose()?,
+            install_kind: if value.installable { value.install_kind } else { None },
+            install_spec: value.install_spec,
+            package_name: value.package_name,
+            has_icon: value.has_icon,
+            builtin_agent_id: value.builtin_agent_id,
+        })
     }
 }
 
@@ -94,14 +111,30 @@ mod tests {
     use super::*;
     #[test]
     fn registry_presentation_retains_daemon_platform_and_trust() {
-        let wire=sill_proto::host::RegistryEntry {entry_id:"test".into(),name:"Test".into(),version:"1".into(),source:"snapshot".into(),installable:true,
-            description:"Details".into(),repository:Some("https://example.com/source".into()),website:None,install_kind:Some("binary".into()),install_spec:"daemon-platform.tar.gz".into(),package_name:None,has_icon:false,builtin_agent_id:Some("codex".into()),tested:false,newer:None};
-        let entry=RegistryEntry::try_from(wire.clone()).unwrap();
-        assert_eq!(entry.trust,crate::registry::Trust::Snapshot);
-        assert_eq!(entry.how(),Some("binary"));
-        assert_eq!(entry.install_spec(),"daemon-platform.tar.gz");
-        assert_eq!(entry.builtin_agent_id.as_deref(),Some("codex"));
-        let mut unknown=wire;unknown.source="future".into();
+        let wire = sill_proto::host::RegistryEntry {
+            entry_id: "test".into(),
+            name: "Test".into(),
+            version: "1".into(),
+            source: "snapshot".into(),
+            installable: true,
+            description: "Details".into(),
+            repository: Some("https://example.com/source".into()),
+            website: None,
+            install_kind: Some("binary".into()),
+            install_spec: "daemon-platform.tar.gz".into(),
+            package_name: None,
+            has_icon: false,
+            builtin_agent_id: Some("codex".into()),
+            tested: false,
+            newer: None,
+        };
+        let entry = RegistryEntry::try_from(wire.clone()).unwrap();
+        assert_eq!(entry.trust, crate::registry::Trust::Snapshot);
+        assert_eq!(entry.how(), Some("binary"));
+        assert_eq!(entry.install_spec(), "daemon-platform.tar.gz");
+        assert_eq!(entry.builtin_agent_id.as_deref(), Some("codex"));
+        let mut unknown = wire;
+        unknown.source = "future".into();
         assert!(RegistryEntry::try_from(unknown).is_err());
     }
 }

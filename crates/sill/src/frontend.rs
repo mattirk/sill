@@ -10,8 +10,7 @@ use anyhow::{Context, Result, bail};
 /// installed beside this binary, else whichever is on PATH.
 pub fn gui_exe(dev: bool) -> PathBuf {
     if dev {
-        let candidate =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/sill-gui");
+        let candidate = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/sill-gui");
         if let Ok(c) = candidate.canonicalize()
             && c.is_file()
         {
@@ -28,9 +27,7 @@ pub fn gui_exe(dev: bool) -> PathBuf {
 
 /// A saved box selected for this command (`--box`, `SILL_BOX`), when it is not this machine.
 fn remote_box() -> Option<String> {
-    std::env::var("SILL_BOX")
-        .ok()
-        .filter(|name| !name.is_empty() && name != "local")
+    std::env::var("SILL_BOX").ok().filter(|name| !name.is_empty() && name != "local")
 }
 
 /// `sill gui [--hidden]`: sill-gui replaces this process, so the service's main process is the
@@ -62,9 +59,7 @@ fn gui_socket() -> PathBuf {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("sill-{}", rustix::process::getuid().as_raw()))
-        });
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("sill-{}", rustix::process::getuid().as_raw())));
     let name = match remote_box() {
         Some(name) => format!("gui-{name}.sock"),
         None => "gui.sock".into(),
@@ -76,8 +71,8 @@ fn gui_socket() -> PathBuf {
 fn gui_command(line: &str) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
     let path = gui_socket();
-    let mut stream = std::os::unix::net::UnixStream::connect(&path)
-        .with_context(|| format!("sill-gui is not running ({}); `sill gui` starts it", path.display()))?;
+    let mut stream =
+        std::os::unix::net::UnixStream::connect(&path).with_context(|| format!("sill-gui is not running ({}); `sill gui` starts it", path.display()))?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
     writeln!(stream, "{line}")?;
     let mut answer = String::new();
@@ -125,10 +120,11 @@ pub fn restart(hidden: bool, dev: bool, detached: bool, jails: bool) -> Result<(
         sill_proto::client::declare_capability("sill.permission_modes");
         // the operator's own restart: explicit, so `sill daemon autostart off` does not refuse it
         let client = sill_proto::Client::connect_or_start_explicit()?;
-        let running: Vec<_> = client.list_sessions()?.into_iter()
-            .filter(|s| s.running && s.ended_at.is_none()).collect();
+        let running: Vec<_> = client.list_sessions()?.into_iter().filter(|s| s.running && s.ended_at.is_none()).collect();
         running
-    } else { Vec::new() };
+    } else {
+        Vec::new()
+    };
     restart_daemon(dev)?;
     // one jail that cannot be started again does not keep the others, or the window, down
     let mut failed = Vec::new();
@@ -136,7 +132,8 @@ pub fn restart(hidden: bool, dev: bool, detached: bool, jails: bool) -> Result<(
         let client = sill_proto::Client::connect_or_start_explicit()?;
         for session in running {
             let key = sill_proto::sessions::SessionKey { session_id: session.session_id.clone() };
-            let restarted = client.call::<serde_json::Value>("_sill/sessions.stop", &key)
+            let restarted = client
+                .call::<serde_json::Value>("_sill/sessions.stop", &key)
                 .and_then(|_| client.call::<sill_proto::sessions::Started>("_sill/sessions.start", &key));
             match restarted {
                 Ok(_) => println!("jail {} restarted", session.session_id),
@@ -164,10 +161,7 @@ pub fn restart(hidden: bool, dev: bool, detached: bool, jails: bool) -> Result<(
     if let Ok(store) = sill_core::store::Store::open_default()
         && let Ok(sessions) = store.sessions()
     {
-        let pins: Vec<PathBuf> = sessions
-            .iter()
-            .flat_map(|s| store.pins(&s.id).unwrap_or_default())
-            .collect();
+        let pins: Vec<PathBuf> = sessions.iter().flat_map(|s| store.pins(&s.id).unwrap_or_default()).collect();
         if let Some(p) = sill_core::session::inside_any(&exe, &pins) {
             eprintln!("warning: {} is inside the pinned folder {} — the agent can write there", exe.display(), p.display());
         }
@@ -177,14 +171,9 @@ pub fn restart(hidden: bool, dev: bool, detached: bool, jails: bool) -> Result<(
     if hidden {
         cmd.arg("--hidden");
     }
-    let log = sill_core::store::default_path().ok().and_then(|p| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(p.with_file_name("gui.log"))
-            .ok()
-    });
+    let log = sill_core::store::default_path()
+        .ok()
+        .and_then(|p| std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(p.with_file_name("gui.log")).ok());
     cmd.stdin(std::process::Stdio::null());
     match log {
         Some(f) => {
@@ -204,8 +193,7 @@ pub fn restart(hidden: bool, dev: bool, detached: bool, jails: bool) -> Result<(
             Ok(())
         });
     }
-    cmd.spawn()
-        .with_context(|| format!("start {}", exe.display()))?;
+    cmd.spawn().with_context(|| format!("start {}", exe.display()))?;
     jails_done()
 }
 
@@ -213,8 +201,7 @@ pub fn restart(hidden: bool, dev: bool, detached: bool, jails: bool) -> Result<(
 /// (marked with `SILL_HOST_SHELL`) or anywhere in the daemon's or the window's unit cgroup?
 fn inside_sill() -> bool {
     std::env::var_os("SILL_HOST_SHELL").is_some()
-        || std::fs::read_to_string("/proc/self/cgroup")
-            .is_ok_and(|c| c.contains("sill.service") || c.contains("sill-gui.service"))
+        || std::fs::read_to_string("/proc/self/cgroup").is_ok_and(|c| c.contains("sill.service") || c.contains("sill-gui.service"))
 }
 
 /// Run `sill restart` again outside: in a transient scope of its own (not a unit's cgroup, so the
@@ -232,7 +219,9 @@ fn restart_detached(hidden: bool, dev: bool, jails: bool) -> Result<()> {
     if dev {
         args.push("--dev".into());
     }
-    if jails { args.push("--jails".into()); }
+    if jails {
+        args.push("--jails".into());
+    }
     let st = std::process::Command::new("systemd-run")
         .args(&args)
         .stdin(std::process::Stdio::null())

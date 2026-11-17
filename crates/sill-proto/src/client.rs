@@ -128,7 +128,10 @@ impl Client {
             }
             Err(e) => {
                 if !matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused)
-                    || std::env::var_os("SILL_NO_DAEMON_START").is_some() { return Err(e.into()); }
+                    || std::env::var_os("SILL_NO_DAEMON_START").is_some()
+                {
+                    return Err(e.into());
+                }
                 if std::env::var_os("SILL_SESSION").is_some() {
                     bail!("no sill daemon is reachable from inside a session");
                 }
@@ -149,7 +152,9 @@ impl Client {
         // repeated failures stops sill.socket too): starting a transient daemon beside them would
         // hide why — the person is sent to the journal instead
         if let Some(failed) = failed_unit() {
-            bail!("{failed} failed and systemd stopped trying; `journalctl --user -u sill` has why, then `systemctl --user reset-failed sill.socket sill.service && systemctl --user start sill.socket`");
+            bail!(
+                "{failed} failed and systemd stopped trying; `journalctl --user -u sill` has why, then `systemctl --user reset-failed sill.socket sill.service && systemctl --user start sill.socket`"
+            );
         }
         let mut why_bare = String::from("no systemd user instance");
         let unit_started = systemd_user_usable() && {
@@ -159,9 +164,30 @@ impl Client {
                 .stderr(std::process::Stdio::null())
                 .status();
             match std::process::Command::new("systemd-run")
-                 .args(["--user", "--unit", "sill-daemon", "--collect", "--quiet", "--service-type=notify",
-                    "-p", "Slice=app.slice", "-p", "KillMode=process", "-p", "NotifyAccess=main", "-p", "WatchdogSec=90",
-                    "-p", "Restart=on-failure", "-p", "RestartSec=2", "-p", "StartLimitIntervalSec=60", "-p", "StartLimitBurst=10"])
+                .args([
+                    "--user",
+                    "--unit",
+                    "sill-daemon",
+                    "--collect",
+                    "--quiet",
+                    "--service-type=notify",
+                    "-p",
+                    "Slice=app.slice",
+                    "-p",
+                    "KillMode=process",
+                    "-p",
+                    "NotifyAccess=main",
+                    "-p",
+                    "WatchdogSec=90",
+                    "-p",
+                    "Restart=on-failure",
+                    "-p",
+                    "RestartSec=2",
+                    "-p",
+                    "StartLimitIntervalSec=60",
+                    "-p",
+                    "StartLimitBurst=10",
+                ])
                 .args(["--setenv=HOME", "--setenv=USER", "--setenv=TERM", "--setenv=LANG"])
                 .arg("--")
                 .arg(&exe)
@@ -218,18 +244,23 @@ impl Client {
     }
 
     fn initialize_within(&self, timeout: Duration) -> Result<crate::initialize::Initialized> {
-        let result: crate::initialize::Initialized = self.call_within(
-            crate::initialize::METHOD,
-            crate::initialize::Initialize {
-                protocols: vec![crate::initialize::PROTOCOL_ID.into()],
-                client: crate::initialize::Peer { name: "sill".into(), version: env!("CARGO_PKG_VERSION").into() },
-                // this build implements every capability it knows of, except the ones that
-                // describe a frontend's own contract and were not declared by this program
-                capabilities: crate::initialize::CAPABILITIES.iter()
-                    .filter(|c| !crate::initialize::FRONTEND_DECLARED.contains(&c.name) || DECLARED.lock().unwrap().contains(c.name))
-                    .map(|c| (c.name.to_string(), c.version)).collect(),
-            }, timeout,
-        ).context("SFP initialization failed")?;
+        let result: crate::initialize::Initialized = self
+            .call_within(
+                crate::initialize::METHOD,
+                crate::initialize::Initialize {
+                    protocols: vec![crate::initialize::PROTOCOL_ID.into()],
+                    client: crate::initialize::Peer { name: "sill".into(), version: env!("CARGO_PKG_VERSION").into() },
+                    // this build implements every capability it knows of, except the ones that
+                    // describe a frontend's own contract and were not declared by this program
+                    capabilities: crate::initialize::CAPABILITIES
+                        .iter()
+                        .filter(|c| !crate::initialize::FRONTEND_DECLARED.contains(&c.name) || DECLARED.lock().unwrap().contains(c.name))
+                        .map(|c| (c.name.to_string(), c.version))
+                        .collect(),
+                },
+                timeout,
+            )
+            .context("SFP initialization failed")?;
         if result.protocol != crate::initialize::PROTOCOL_ID {
             bail!("daemon selected unsupported protocol {}; explicitly update/restart it", result.protocol);
         }
@@ -266,13 +297,19 @@ impl Client {
     pub fn over(stream: UnixStream) -> Result<Client> {
         let reader = stream.try_clone()?;
         let close = stream.try_clone()?;
-        Self::over_io(reader, stream, move || { let _ = close.shutdown(std::net::Shutdown::Both); })
+        Self::over_io(reader, stream, move || {
+            let _ = close.shutdown(std::net::Shutdown::Both);
+        })
     }
 
     /// Build a client over any duplex pipe. `interrupt` must unblock both halves (close a socket
     /// or terminate its transport child); it runs on timeout and when the client is dropped.
     pub fn over_io<R, W, F>(reader: R, mut writer: W, interrupt: F) -> Result<Client>
-    where R: Read + Send + 'static, W: Write + Send + 'static, F: Fn() + Send + Sync + 'static {
+    where
+        R: Read + Send + 'static,
+        W: Write + Send + 'static,
+        F: Fn() + Send + Sync + 'static,
+    {
         let pending: Pending = Arc::default();
         let closed = Arc::new(AtomicBool::new(false));
         let interrupt: Arc<dyn Fn() + Send + Sync> = Arc::new(interrupt);
@@ -294,7 +331,9 @@ impl Client {
                             });
                         }
                     }
-                    (None, Some(method)) => { let _ = ntx.send((method, msg.params.unwrap_or(Value::Null))); }
+                    (None, Some(method)) => {
+                        let _ = ntx.send((method, msg.params.unwrap_or(Value::Null)));
+                    }
                     _ => {}
                 }
             }
@@ -311,13 +350,24 @@ impl Client {
                 if c3.load(Ordering::Acquire) || Instant::now() >= out.deadline {
                     break;
                 }
-                if writer.write_all(&out.line).and_then(|()| writer.flush()).is_err() { break; }
+                if writer.write_all(&out.line).and_then(|()| writer.flush()).is_err() {
+                    break;
+                }
             }
             c3.store(true, Ordering::Release);
             i3();
             fail_pending(&p3, "writing to the daemon: connection closed");
         })?;
-        Ok(Client { writer: wtx, interrupt, closed, next_id: AtomicU64::new(1), pending, notifications: Mutex::new(nrx), capabilities: Mutex::default(), remote: false })
+        Ok(Client {
+            writer: wtx,
+            interrupt,
+            closed,
+            next_id: AtomicU64::new(1),
+            pending,
+            notifications: Mutex::new(nrx),
+            capabilities: Mutex::default(),
+            remote: false,
+        })
     }
 
     /// Connect over the system SSH client. It owns authentication, host verification, proxies
@@ -327,14 +377,22 @@ impl Client {
     pub fn ssh(host: &str, binary: &str) -> Result<Client> {
         crate::boxlink::ensure(host)?;
         let mut cmd = crate::transport::ssh_command(host, binary)?;
-        let mut child = cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().context("starting ssh to the sill box")?;
+        let mut child = cmd
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("starting ssh to the sill box")?;
         let reader = child.stdout.take().context("ssh stdout")?;
         let writer = child.stdin.take().context("ssh stdin")?;
         let said = crate::boxlink::capture(child.stderr.take().context("ssh stderr")?);
         let child = Arc::new(Mutex::new(child));
         let stop = child.clone();
         let mut client = Self::over_io(reader, writer, move || {
-            if let Ok(mut c) = stop.lock() { let _ = c.kill(); let _ = c.wait(); }
+            if let Ok(mut c) = stop.lock() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
         })?;
         client.remote = true;
         if let Err(error) = client.initialize_within(SSH_INIT_TIMEOUT) {
@@ -343,7 +401,11 @@ impl Client {
             std::thread::sleep(Duration::from_millis(50));
             let said = said.lock().unwrap().clone();
             crate::boxlink::session_failed(host, &said);
-            let said = said.lines().map(str::trim).rfind(|l| !l.is_empty()).map(|l| format!("SSH said: {l}"))
+            let said = said
+                .lines()
+                .map(str::trim)
+                .rfind(|l| !l.is_empty())
+                .map(|l| format!("SSH said: {l}"))
                 .unwrap_or_else(|| format!("SSH said nothing; check the remote executable {binary} and the daemon on the box"));
             return Err(error).with_context(|| format!("box {host} did not start a Sill connection. {said}"));
         }
@@ -361,17 +423,23 @@ impl Client {
     /// at once or not at all.
     pub fn call_within<T: DeserializeOwned>(&self, method: &str, params: impl Serialize, timeout: Duration) -> Result<T> {
         let deadline = Instant::now() + timeout;
-        if self.closed.load(Ordering::Acquire) { return lost("the daemon closed the connection"); }
+        if self.closed.load(Ordering::Acquire) {
+            return lost("the daemon closed the connection");
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let req = Request::new(Some(id), method, serde_json::to_value(params)?);
         let mut line = serde_json::to_vec(&req)?;
         line.push(b'\n');
-        if line.len() > crate::initialize::MAX_MESSAGE_BYTES { bail!("request exceeds max_message_bytes"); }
+        if line.len() > crate::initialize::MAX_MESSAGE_BYTES {
+            bail!("request exceeds max_message_bytes");
+        }
         let (tx, rx) = channel();
         self.pending.lock().unwrap().insert(id, tx);
         let mut out = Outbound { line, deadline };
         loop {
-            if Instant::now() >= deadline { return self.timed_out(id, method, timeout); }
+            if Instant::now() >= deadline {
+                return self.timed_out(id, method, timeout);
+            }
             match self.writer.try_send(out) {
                 Ok(()) => break,
                 Err(TrySendError::Disconnected(_)) => {
@@ -400,11 +468,16 @@ impl Client {
         (self.interrupt)();
         fail_pending(&self.pending, "the daemon closed the connection after a call timed out");
         if self.remote {
-            return lost(format!("the box's daemon did not answer {method} in {} s; if it stays that way, `sill restart` on the box starts a fresh one, sessions survive it", timeout.as_secs_f64()));
+            return lost(format!(
+                "the box's daemon did not answer {method} in {} s; if it stays that way, `sill restart` on the box starts a fresh one, sessions survive it",
+                timeout.as_secs_f64()
+            ));
         }
-        lost(format!("the daemon did not answer {method} in {} s: it is stuck; `sill restart` (or `systemctl --user restart sill`) starts a fresh one, sessions survive it", timeout.as_secs_f64()))
+        lost(format!(
+            "the daemon did not answer {method} in {} s: it is stuck; `sill restart` (or `systemctl --user restart sill`) starts a fresh one, sessions survive it",
+            timeout.as_secs_f64()
+        ))
     }
-
 }
 
 /// The first of `sill.socket`, `sill.service` in the failed state, if any (`is-failed` exits 0
@@ -435,9 +508,10 @@ fn systemd_user_usable() -> bool {
         .unwrap_or(false)
 }
 
-
 impl Drop for Client {
-    fn drop(&mut self) { (self.interrupt)(); }
+    fn drop(&mut self) {
+        (self.interrupt)();
+    }
 }
 
 fn fail_pending(pending: &Pending, message: &str) {

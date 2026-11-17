@@ -1,7 +1,5 @@
 //! The file drawer: its toolbar, the tree of pinned folders and the Changes list.
-use iced::widget::{
-    Column, button, column, container, responsive, row, rule, scrollable, space, text,
-};
+use iced::widget::{Column, button, column, container, responsive, row, rule, scrollable, space, text};
 use iced::{Alignment, Element, Fill, Font, Padding, Shrink};
 use sill_proto::sessions::HostPath;
 
@@ -9,9 +7,10 @@ use sill_client::files::{Change, FilesState as State, key, name, relative};
 
 use super::ui::{action, glyph_action, msg, short, tip};
 use crate::{
-    App, Message, SessionView, keys,
-    style::{self, P},
+    App, Message, SessionView,
     files::Action,
+    keys,
+    style::{self, P},
 };
 
 impl App {
@@ -24,11 +23,7 @@ impl App {
             if state.diff_mode {
                 glyph_action("list-tree", "The file tree", Action::DiffMode(false))
             } else {
-                glyph_action(
-                    "git-compare",
-                    "What changed: the repositories' changed files",
-                    Action::DiffMode(true),
-                )
+                glyph_action("git-compare", "What changed: the repositories' changed files", Action::DiffMode(true))
             },
         ]
         .align_y(Alignment::Center)
@@ -36,23 +31,10 @@ impl App {
         // no spacing: rows carry their own, so the indent guides run on unbroken
         let mut body = Column::new().width(Fill);
         if let Some(error) = &state.error {
-            body = body.push(
-                column![
-                    text(error).size(style::TINY).color(P.error),
-                    action("Dismiss", Action::DismissError)
-                ]
-                .padding(8),
-            );
+            body = body.push(column![text(error).size(style::TINY).color(P.error), action("Dismiss", Action::DismissError)].padding(8));
         }
         if state.roots.is_empty() {
-            body = body.push(
-                container(
-                    text("Nothing pinned. Browse below and use + to pin a folder or file.")
-                        .size(style::SMALL)
-                        .color(P.fg_dim),
-                )
-                .padding(10),
-            );
+            body = body.push(container(text("Nothing pinned. Browse below and use + to pin a folder or file.").size(style::SMALL).color(P.fg_dim)).padding(10));
         }
         if state.diff_mode {
             body = diff_list(body, state, &view.workspaces);
@@ -64,10 +46,7 @@ impl App {
                     global_heading = true;
                 }
                 let dir = root.metadata.as_ref().is_some_and(|m| m.directory);
-                body = body.push(node(
-                    state, hovered, &root.path, dir, 0, !root.global,
-                    view.workspaces.workspace_of(&root.path).is_some(),
-                ));
+                body = body.push(node(state, hovered, &root.path, dir, 0, !root.global, view.workspaces.workspace_of(&root.path).is_some()));
                 if let Some(error) = &root.error {
                     body = body.push(text(error).size(style::TINY).color(P.error));
                 }
@@ -86,9 +65,7 @@ impl App {
         }
         let close = tip(
             keys::press(
-                button(crate::icons::glyph("chevron-right", 13.0, style::alpha(P.fg, 0.35)))
-                    .padding([5, 7])
-                    .style(style::quiet),
+                button(crate::icons::glyph("chevron-right", 13.0, style::alpha(P.fg, 0.35))).padding([5, 7]).style(style::quiet),
                 msg(Action::ToggleDrawer),
             ),
             "Close drawer".into(),
@@ -108,37 +85,17 @@ impl App {
     }
 }
 
-
 fn caption(value: &str) -> Element<'_, Message> {
-    container(text(value).size(style::TINY).color(P.fg_dim))
-        .padding(Padding {
-            top: 5.0,
-            bottom: 5.0,
-            left: 4.0,
-            right: 10.0,
-        })
-        .into()
+    container(text(value).size(style::TINY).color(P.fg_dim)).padding(Padding { top: 5.0, bottom: 5.0, left: 4.0, right: 10.0 }).into()
 }
 
 /// One tree row: indent guides, the kind's glyph (in the
 /// accent when pinned), the name coloured by what git says of it, a repository root's branch
 /// (or `workspace`) at the end, and the pin button while the pointer is over the row.
-fn node<'a>(
-    state: &'a State,
-    hovered: Option<&str>,
-    path: &'a HostPath,
-    directory: bool,
-    depth: usize,
-    pinned: bool,
-    workspace: bool,
-) -> Element<'a, Message> {
+fn node<'a>(state: &'a State, hovered: Option<&str>, path: &'a HostPath, directory: bool, depth: usize, pinned: bool, workspace: bool) -> Element<'a, Message> {
     let expanded = state.expanded.contains(key(path));
-    let active = state
-        .reader
-        .as_ref()
-        .is_some_and(|f| key(&f.path) == key(path));
-    let muted =
-        name(path).starts_with('.') || matches!(name(path), "target" | "node_modules" | "build");
+    let active = state.reader.as_ref().is_some_and(|f| key(&f.path) == key(path));
+    let muted = name(path).starts_with('.') || matches!(name(path), "target" | "node_modules" | "build");
     let color = match state.change(path) {
         Some(Change::Changed | Change::Below) => P.warning,
         Some(Change::New) => P.success,
@@ -147,28 +104,11 @@ fn node<'a>(
         None => P.fg,
     };
     let glyph = crate::icons::for_path(name(path), directory, expanded);
-    let glyph_color = if pinned {
-        P.accent
-    } else {
-        style::alpha(P.fg, if muted { 0.35 } else { 0.7 })
-    };
-    let event = if directory {
-        Action::Toggle(path.clone())
-    } else {
-        Action::Open {
-            path: path.clone(),
-            repo: None,
-        }
-    };
+    let glyph_color = if pinned { P.accent } else { style::alpha(P.fg, if muted { 0.35 } else { 0.7 }) };
+    let event = if directory { Action::Toggle(path.clone()) } else { Action::Open { path: path.clone(), repo: None } };
     let mut label = row![
         crate::icons::glyph(glyph, 14.0, glyph_color),
-        text(short(
-            name(path),
-            30_usize.saturating_sub(depth * 2).max(10)
-        ))
-        .size(style::TEXT)
-        .color(color)
-        .wrapping(text::Wrapping::None),
+        text(short(name(path), 30_usize.saturating_sub(depth * 2).max(10))).size(style::TEXT).color(color).wrapping(text::Wrapping::None),
     ]
     .spacing(7)
     .align_y(Alignment::Center);
@@ -182,47 +122,27 @@ fn node<'a>(
     {
         hover.push_str(&format!("\ngit {}", repo.head));
         let head = &repo.head;
-        label = label.push(responsive(move |size| {
-            let value = if workspace {
-                "workspace".to_string()
-            } else {
-                format!("git {head}")
-            };
-            let mono = Font::with_name(crate::fonts::MONO_FAMILY);
-            let mut limit = value.chars().count();
-            let mut shown = value.clone();
-            while limit > 0 && crate::ui::text_width_in_font(&shown, style::TINY, mono) > size.width {
-                limit -= 1;
-                shown = if limit == 0 {
-                    String::new()
-                } else {
-                    short(&value, limit)
-                };
-            }
-            container(text(shown)
-                .size(style::TINY)
-                .font(mono)
-                .color(style::alpha(P.accent, 0.9))
-                .wrapping(text::Wrapping::None))
-                .align_right(Fill)
-                .into()
-        }).height(Shrink));
+        label = label.push(
+            responsive(move |size| {
+                let value = if workspace { "workspace".to_string() } else { format!("git {head}") };
+                let mono = Font::with_name(crate::fonts::MONO_FAMILY);
+                let mut limit = value.chars().count();
+                let mut shown = value.clone();
+                while limit > 0 && crate::ui::text_width_in_font(&shown, style::TINY, mono) > size.width {
+                    limit -= 1;
+                    shown = if limit == 0 { String::new() } else { short(&value, limit) };
+                }
+                container(text(shown).size(style::TINY).font(mono).color(style::alpha(P.accent, 0.9)).wrapping(text::Wrapping::None)).align_right(Fill).into()
+            })
+            .height(Shrink),
+        );
     } else {
         label = label.push(space().width(Fill));
     }
     let button = keys::press(
         button(label)
-            .padding(Padding {
-                top: 3.0,
-                bottom: 3.0,
-                left: 4.0,
-                right: 6.0,
-            })
-            .style(if active {
-                style::row_selected
-            } else {
-                style::row_button
-            })
+            .padding(Padding { top: 3.0, bottom: 3.0, left: 4.0, right: 6.0 })
+            .style(if active { style::row_selected } else { style::row_button })
             .width(Fill),
         msg(event),
     );
@@ -231,10 +151,7 @@ fn node<'a>(
     for _ in 0..depth.min(12) {
         line = line.push(
             container(rule::vertical(1).style(style::rule_style(style::alpha(P.fg, 0.14))))
-                .padding(Padding {
-                    left: 8.0,
-                    ..Padding::ZERO
-                })
+                .padding(Padding { left: 8.0, ..Padding::ZERO })
                 .width(15)
                 // the row's whole height, so one row's guide meets the next one's
                 .height(Fill),
@@ -244,23 +161,13 @@ fn node<'a>(
     line = line.push(tip(button, hover));
     // the pin keeps its place while hidden, so the names do not move when it shows
     line = line.push(if show_pin {
-        glyph_action(
-            "plus",
-            "Pin: mount it in the jail",
-            Action::Pin {
-                path: path.clone(),
-                on: true,
-            },
-        )
+        glyph_action("plus", "Pin: mount it in the jail", Action::Pin { path: path.clone(), on: true })
     } else {
         Element::from(space().width(27))
     });
-    let line = iced::widget::mouse_area(container(line).padding(Padding {
-        left: 4.0,
-        ..Padding::ZERO
-    }))
-    .on_enter(msg(Action::Hover(row_key.to_string())))
-    .on_exit(msg(Action::Unhover(row_key.to_string())));
+    let line = iced::widget::mouse_area(container(line).padding(Padding { left: 4.0, ..Padding::ZERO }))
+        .on_enter(msg(Action::Hover(row_key.to_string())))
+        .on_exit(msg(Action::Unhover(row_key.to_string())));
     line.into()
 }
 
@@ -294,9 +201,7 @@ fn diff_list<'a>(mut body: Column<'a, Message>, state: &'a State, workspaces: &c
         // tree does: its folder is the tree's to name and its generated branch says nothing.
         let header: Element<'a, Message> = if workspaces.workspace_of(&root.path).is_some() {
             row![
-                container(section(summary_label(repo)).wrapping(text::Wrapping::None))
-                    .width(Fill)
-                    .clip(true),
+                container(section(summary_label(repo)).wrapping(text::Wrapping::None)).width(Fill).clip(true),
                 text("workspace")
                     .size(style::TINY)
                     .font(Font::with_name(crate::fonts::MONO_FAMILY))
@@ -309,23 +214,14 @@ fn diff_list<'a>(mut body: Column<'a, Message>, state: &'a State, workspaces: &c
         } else {
             let head = if repo.head.is_empty() { String::new() } else { format!("  git {}", repo.head) };
             row![
-                container(section(format!("{}{head}", name(base))).wrapping(text::Wrapping::None))
-                    .width(Fill)
-                    .clip(true),
+                container(section(format!("{}{head}", name(base))).wrapping(text::Wrapping::None)).width(Fill).clip(true),
                 section(summary_label(repo)).wrapping(text::Wrapping::None),
             ]
             .spacing(6)
             .into()
         };
-        body = body.push(tip(
-            container(header).width(Fill).padding(Padding {
-                top: 8.0,
-                bottom: 2.0,
-                left: 4.0,
-                right: 10.0,
-            }),
-            format!("{}\n{totals}", base.display),
-        ));
+        body = body
+            .push(tip(container(header).width(Fill).padding(Padding { top: 8.0, bottom: 2.0, left: 4.0, right: 10.0 }), format!("{}\n{totals}", base.display)));
         // a workspace starts from HEAD: what is only in the person's checkout is not listed here
         if let Some(apart) = workspaces.checkout_only(&root.path) {
             body = body.push(note(&apart, style::alpha(P.fg, 0.5)));
@@ -335,35 +231,19 @@ fn diff_list<'a>(mut body: Column<'a, Message>, state: &'a State, workspaces: &c
         }
         let open = state.reader.as_ref().filter(|r| r.repo.is_some());
         for entry in &repo.entries {
-            body = body.push(diff_row(
-                state,
-                entry,
-                base,
-                open.is_some_and(|r| key(&r.path) == key(&entry.path)),
-            ));
+            body = body.push(diff_row(state, entry, base, open.is_some_and(|r| key(&r.path) == key(&entry.path))));
         }
         if repo.truncated {
-            body = body.push(note(
-                &format!("past {} files the counts are not read", repo.counts.len()),
-                P.fg_dim,
-            ));
+            body = body.push(note(&format!("past {} files the counts are not read", repo.counts.len()), P.fg_dim));
         }
     }
     if !any && !state.repos.values().any(|r| r.pending.is_some() && !r.read) {
-        body = body.push(note(
-            "No pinned git repository here: pin a repository's folder (+ on its row) to see its diff.",
-            P.fg_dim,
-        ));
+        body = body.push(note("No pinned git repository here: pin a repository's folder (+ on its row) to see its diff.", P.fg_dim));
     }
     body
 }
 
-fn diff_row<'a>(
-    state: &'a State,
-    entry: &'a sill_proto::discovery::StatusEntry,
-    base: &'a HostPath,
-    selected: bool,
-) -> Element<'a, Message> {
+fn diff_row<'a>(state: &'a State, entry: &'a sill_proto::discovery::StatusEntry, base: &'a HostPath, selected: bool) -> Element<'a, Message> {
     let mono = Font::with_name(crate::fonts::MONO_FAMILY);
     let (letter, color, what) = match entry.status.as_str() {
         "?" => ("N", P.success, "new: untracked in git"),
@@ -374,68 +254,34 @@ fn diff_row<'a>(
         other => (other, P.warning, "changed"),
     };
     let mut line = row![
-        tip(
-            text(letter)
-                .size(style::TINY)
-                .font(mono)
-                .color(color)
-                .width(12),
-            what.into()
-        ),
-        container(
-            text(name(&entry.path))
-                .size(style::TEXT)
-                .wrapping(text::Wrapping::None)
-        )
-        .width(Fill)
-        .clip(true),
+        tip(text(letter).size(style::TINY).font(mono).color(color).width(12), what.into()),
+        container(text(name(&entry.path)).size(style::TEXT).wrapping(text::Wrapping::None)).width(Fill).clip(true),
     ]
     .spacing(8)
     .align_y(Alignment::Center);
-    let counts = state
-        .repos
-        .values()
-        .find_map(|r| r.counts.get(key(&entry.path)));
+    let counts = state.repos.values().find_map(|r| r.counts.get(key(&entry.path)));
     match counts {
         Some(Some((added, removed))) => {
             for (n, sign, color) in [(added, "+", P.success), (removed, "−", P.error)] {
                 if *n > 0 {
-                    line = line.push(
-                        text(format!("{sign}{n}"))
-                            .size(style::SMALL)
-                            .font(mono)
-                            .color(color),
-                    );
+                    line = line.push(text(format!("{sign}{n}")).size(style::SMALL).font(mono).color(color));
                 }
             }
         }
         Some(None) => {
-            line = line.push(tip(
-                text("—").size(style::SMALL).color(style::alpha(P.fg, 0.5)),
-                "no line counts: binary, too large, or past the first files".into(),
-            ));
+            line = line
+                .push(tip(text("—").size(style::SMALL).color(style::alpha(P.fg, 0.5)), "no line counts: binary, too large, or past the first files".into()));
         }
         None => {}
     }
     tip(
         keys::press(
-            button(line)
-                .padding(Padding {
-                    top: 3.0,
-                    bottom: 3.0,
-                    left: 12.0,
-                    right: 10.0,
-                })
-                .width(Fill)
-                .style(if selected {
-                    style::row_selected
-                } else {
-                    style::row_button
-                }),
-            msg(Action::Open {
-                path: entry.path.clone(),
-                repo: Some(base.clone()),
+            button(line).padding(Padding { top: 3.0, bottom: 3.0, left: 12.0, right: 10.0 }).width(Fill).style(if selected {
+                style::row_selected
+            } else {
+                style::row_button
             }),
+            msg(Action::Open { path: entry.path.clone(), repo: Some(base.clone()) }),
         ),
         relative(&entry.path, base),
     )
@@ -444,21 +290,14 @@ fn diff_row<'a>(
 /// `9 files · +12 −3 ?9`, or `clean`.
 fn summary_label(repo: &sill_client::files::Repo) -> String {
     let files = repo.entries.len();
-    let untracked = repo
-        .summary
-        .rsplit_once('?')
-        .map(|(_, n)| n.trim().to_string())
-        .unwrap_or_default();
+    let untracked = repo.summary.rsplit_once('?').map(|(_, n)| n.trim().to_string()).unwrap_or_default();
     let Some((added, removed)) = &repo.lines else {
         return format!("{files} files · counts unavailable");
     };
     if files == 0 && added == "0" && removed == "0" && matches!(untracked.as_str(), "" | "0") {
         return "clean".into();
     }
-    let mut label = format!(
-        "{files} file{} · +{added} −{removed}",
-        if files == 1 { "" } else { "s" }
-    );
+    let mut label = format!("{files} file{} · +{added} −{removed}", if files == 1 { "" } else { "s" });
     if !matches!(untracked.as_str(), "" | "0") {
         label.push_str(&format!(" ?{untracked}"));
     }
@@ -466,37 +305,16 @@ fn summary_label(repo: &sill_client::files::Repo) -> String {
 }
 
 fn note<'a>(value: &str, color: iced::Color) -> Element<'a, Message> {
-    container(text(value.to_string()).size(style::TINY).color(color))
-        .padding(Padding {
-            top: 5.0,
-            bottom: 5.0,
-            left: 4.0,
-            right: 12.0,
-        })
-        .into()
+    container(text(value.to_string()).size(style::TINY).color(color)).padding(Padding { top: 5.0, bottom: 5.0, left: 4.0, right: 12.0 }).into()
 }
 
-fn children<'a>(
-    mut body: Column<'a, Message>,
-    state: &'a State,
-    hovered: Option<&'a str>,
-    path: &'a HostPath,
-    depth: usize,
-) -> Column<'a, Message> {
+fn children<'a>(mut body: Column<'a, Message>, state: &'a State, hovered: Option<&'a str>, path: &'a HostPath, depth: usize) -> Column<'a, Message> {
     if depth > 24 {
         return body.push(caption("Open this folder by path to browse deeper."));
     }
     if let Some(dir) = state.directories.get(key(path)) {
         for entry in &dir.entries {
-            body = body.push(node(
-                state,
-                hovered,
-                &entry.path,
-                entry.metadata.directory,
-                depth,
-                state.pinned(&entry.path),
-                false,
-            ));
+            body = body.push(node(state, hovered, &entry.path, entry.metadata.directory, depth, state.pinned(&entry.path), false));
             if entry.metadata.directory && state.expanded.contains(key(&entry.path)) {
                 body = children(body, state, hovered, &entry.path, depth + 1);
             }

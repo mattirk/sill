@@ -27,10 +27,7 @@ pub struct Rect {
 
 impl Rect {
     pub fn center(&self) -> (i32, i32) {
-        (
-            self.x + (self.width / 2) as i32,
-            self.y + (self.height / 2) as i32,
-        )
+        (self.x + (self.width / 2) as i32, self.y + (self.height / 2) as i32)
     }
 
     fn right(&self) -> i32 {
@@ -55,24 +52,13 @@ impl Rect {
     /// Where the two overlap, if they do.
     pub fn intersect(&self, other: &Rect) -> Option<Rect> {
         let (x0, y0) = (self.x.max(other.x), self.y.max(other.y));
-        let (x1, y1) = (
-            self.right().min(other.right()),
-            self.bottom().min(other.bottom()),
-        );
-        (x1 > x0 && y1 > y0).then(|| Rect {
-            x: x0,
-            y: y0,
-            width: (x1 - x0) as u32,
-            height: (y1 - y0) as u32,
-        })
+        let (x1, y1) = (self.right().min(other.right()), self.bottom().min(other.bottom()));
+        (x1 > x0 && y1 > y0).then(|| Rect { x: x0, y: y0, width: (x1 - x0) as u32, height: (y1 - y0) as u32 })
     }
 
     /// The same place and size but for the pixel or two a window manager rounds.
     pub fn near(&self, other: &Rect) -> bool {
-        (self.x - other.x).abs() <= 2
-            && (self.y - other.y).abs() <= 2
-            && self.width.abs_diff(other.width) <= 2
-            && self.height.abs_diff(other.height) <= 2
+        (self.x - other.x).abs() <= 2 && (self.y - other.y).abs() <= 2 && self.width.abs_diff(other.width) <= 2 && self.height.abs_diff(other.height) <= 2
     }
 }
 
@@ -90,11 +76,7 @@ pub struct Display {
 /// says so, `_GTK_WORKAREAS`; else one over all, `_NET_WORKAREA`), the part that overlaps it most;
 /// its whole bounds when none does.
 pub fn usable(bounds: Rect, areas: &[Rect]) -> Rect {
-    areas
-        .iter()
-        .filter_map(|area| bounds.intersect(area))
-        .max_by_key(|r| r.width as u64 * r.height as u64)
-        .unwrap_or(bounds)
+    areas.iter().filter_map(|area| bounds.intersect(area)).max_by_key(|r| r.width as u64 * r.height as u64).unwrap_or(bounds)
 }
 
 /// Size limits the window manager is asked to hold, device pixels.
@@ -115,18 +97,12 @@ pub struct Target {
 /// The desktop's main display: the one it marks primary, else the first. Not the one under the
 /// pointer.
 pub fn main_display(displays: &[Display]) -> Option<&Display> {
-    displays
-        .iter()
-        .find(|d| d.primary)
-        .or_else(|| displays.first())
+    displays.iter().find(|d| d.primary).or_else(|| displays.first())
 }
 
 /// The display `point` is on, else the nearest one.
 pub fn display_at(displays: &[Display], point: (i32, i32)) -> Option<&Display> {
-    displays
-        .iter()
-        .find(|d| d.bounds.contains(point))
-        .or_else(|| displays.iter().min_by_key(|d| d.bounds.distance(point)))
+    displays.iter().find(|d| d.bounds.contains(point)).or_else(|| displays.iter().min_by_key(|d| d.bounds.distance(point)))
 }
 
 fn part(length: u32, share: f32) -> u32 {
@@ -135,10 +111,7 @@ fn part(length: u32, share: f32) -> u32 {
 
 /// A share as kept: finite, within `low..=high`; else `fallback`.
 fn share(value: Option<f32>, fallback: f32, low: f32, high: f32) -> f32 {
-    value
-        .filter(|s| s.is_finite())
-        .unwrap_or(fallback)
-        .clamp(low, high)
+    value.filter(|s| s.is_finite()).unwrap_or(fallback).clamp(low, high)
 }
 
 /// Where the window goes in `mode` with these displays; `None` without any.
@@ -148,27 +121,13 @@ pub fn target(mode: Mode, settings: &Settings, displays: &[Display]) -> Option<T
         let work = main.work;
         return Some(Target {
             display: main.name.clone(),
-            rect: Rect {
-                width: part(work.width, settings.shelf_share_on(&main.name)),
-                ..work
-            },
+            rect: Rect { width: part(work.width, settings.shelf_share_on(&main.name)), ..work },
             // the height is the usable area's, held there: the right corners change the width
-            limits: Some(Limits {
-                min: (part(work.width, SHELF_MIN), work.height),
-                max: (part(work.width, SHELF_MAX), work.height),
-            }),
+            limits: Some(Limits { min: (part(work.width, SHELF_MIN), work.height), max: (part(work.width, SHELF_MAX), work.height) }),
         });
     }
-    let display = settings
-        .display
-        .as_deref()
-        .and_then(|name| displays.iter().find(|d| d.name == name))
-        .unwrap_or(main);
-    let prefs = settings
-        .displays
-        .get(&display.name)
-        .cloned()
-        .unwrap_or_default();
+    let display = settings.display.as_deref().and_then(|name| displays.iter().find(|d| d.name == name)).unwrap_or(main);
+    let prefs = settings.displays.get(&display.name).cloned().unwrap_or_default();
     let work = display.work;
     let width = part(work.width, share(prefs.work_width, WORK_SHARE, 0.05, 1.0));
     let height = part(work.height, share(prefs.work_height, 1.0, 0.05, 1.0));
@@ -177,12 +136,7 @@ pub fn target(mode: Mode, settings: &Settings, displays: &[Display]) -> Option<T
     let y = work.y + part(work.height, share(prefs.work_y, 0.0, 0.0, 1.0)) as i32;
     Some(Target {
         display: display.name.clone(),
-        rect: Rect {
-            x: x.min(work.right() - width as i32).max(work.x),
-            y: y.min(work.bottom() - height as i32).max(work.y),
-            width,
-            height,
-        },
+        rect: Rect { x: x.min(work.right() - width as i32).max(work.x), y: y.min(work.bottom() - height as i32).max(work.y), width, height },
         limits: None,
     })
 }
@@ -285,11 +239,7 @@ impl Controller {
     /// Without waiting: for tests, which do not sleep.
     #[cfg(test)]
     pub fn immediate() -> Self {
-        Self {
-            quiet: Duration::ZERO,
-            settle: Duration::ZERO,
-            ..Self::default()
-        }
+        Self { quiet: Duration::ZERO, settle: Duration::ZERO, ..Self::default() }
     }
 
     fn quiet(&self, now: Instant) -> bool {
@@ -299,10 +249,7 @@ impl Controller {
     /// Read often: settling after a placement, a change waiting to hold still, or the window
     /// just resized or moved.
     pub fn busy(&self, now: Instant) -> bool {
-        self.quiet(now)
-            || self.recheck
-            || self.pending.is_some()
-            || self.stirred_until.is_some_and(|until| now < until)
+        self.quiet(now) || self.recheck || self.pending.is_some() || self.stirred_until.is_some_and(|until| now < until)
     }
 
     /// The window says it was resized or moved.
@@ -323,13 +270,7 @@ impl Controller {
 
     /// The displays and the shown window as read now, and where the window belongs with these
     /// displays: what to do about it.
-    pub fn observe(
-        &mut self,
-        displays: Vec<Display>,
-        window: Option<Rect>,
-        target: Option<&Target>,
-        now: Instant,
-    ) -> Step {
+    pub fn observe(&mut self, displays: Vec<Display>, window: Option<Rect>, target: Option<&Target>, now: Instant) -> Step {
         if window.is_some() {
             self.seen = window;
         }
@@ -404,59 +345,27 @@ mod tests {
     use super::*;
 
     fn rect(x: i32, y: i32, width: u32, height: u32) -> Rect {
-        Rect {
-            x,
-            y,
-            width,
-            height,
-        }
+        Rect { x, y, width, height }
     }
 
     /// A laptop at the left and a primary external display at its right with a 40 px panel at
     /// the bottom.
     fn two() -> Vec<Display> {
         vec![
-            Display {
-                name: "eDP-1".into(),
-                primary: false,
-                bounds: rect(0, 0, 1920, 1200),
-                work: rect(0, 0, 1920, 1200),
-            },
-            Display {
-                name: "DP-1".into(),
-                primary: true,
-                bounds: rect(1920, 0, 2560, 1440),
-                work: rect(1920, 0, 2560, 1400),
-            },
+            Display { name: "eDP-1".into(), primary: false, bounds: rect(0, 0, 1920, 1200), work: rect(0, 0, 1920, 1200) },
+            Display { name: "DP-1".into(), primary: true, bounds: rect(1920, 0, 2560, 1440), work: rect(1920, 0, 2560, 1400) },
         ]
     }
 
     #[test]
     fn the_usable_area_is_the_work_area_over_the_display() {
         let bounds = rect(1920, 0, 2560, 1440);
-        assert_eq!(
-            usable(bounds, &[]),
-            bounds,
-            "no work area: the whole display"
-        );
+        assert_eq!(usable(bounds, &[]), bounds, "no work area: the whole display");
         // one work area over every display (_NET_WORKAREA)
-        assert_eq!(
-            usable(bounds, &[rect(0, 0, 4480, 1400)]),
-            rect(1920, 0, 2560, 1400)
-        );
+        assert_eq!(usable(bounds, &[rect(0, 0, 4480, 1400)]), rect(1920, 0, 2560, 1400));
         // one per display (_GTK_WORKAREAS): the one on this display
-        assert_eq!(
-            usable(
-                bounds,
-                &[rect(0, 32, 1920, 1168), rect(1920, 0, 2560, 1400)]
-            ),
-            rect(1920, 0, 2560, 1400)
-        );
-        assert_eq!(
-            usable(bounds, &[rect(0, 0, 1920, 1200)]),
-            bounds,
-            "none over it"
-        );
+        assert_eq!(usable(bounds, &[rect(0, 32, 1920, 1168), rect(1920, 0, 2560, 1400)]), rect(1920, 0, 2560, 1400));
+        assert_eq!(usable(bounds, &[rect(0, 0, 1920, 1200)]), bounds, "none over it");
     }
 
     #[test]
@@ -465,47 +374,17 @@ mod tests {
         let mut settings = Settings::default();
         let t = target(Mode::Shelf, &settings, &displays).unwrap();
         assert_eq!(t.display, "DP-1", "the primary, not the first");
-        assert_eq!(
-            t.rect,
-            rect(1920, 0, 896, 1400),
-            "35 % of 2560, panel excluded"
-        );
-        assert_eq!(
-            t.limits,
-            Some(Limits {
-                min: (384, 1400),
-                max: (1024, 1400)
-            }),
-            "15–40 % wide, the height held"
-        );
+        assert_eq!(t.rect, rect(1920, 0, 896, 1400), "35 % of 2560, panel excluded");
+        assert_eq!(t.limits, Some(Limits { min: (384, 1400), max: (1024, 1400) }), "15–40 % wide, the height held");
         // dragged wider on this display: kept for it, the other keeps the default
-        assert!(remember(
-            Mode::Shelf,
-            &mut settings,
-            &displays,
-            rect(1920, 0, 768, 1400)
-        ));
-        assert_eq!(
-            target(Mode::Shelf, &settings, &displays)
-                .unwrap()
-                .rect
-                .width,
-            768
-        );
+        assert!(remember(Mode::Shelf, &mut settings, &displays, rect(1920, 0, 768, 1400)));
+        assert_eq!(target(Mode::Shelf, &settings, &displays).unwrap().rect.width, 768);
         let mut laptop = displays.clone();
         laptop[0].primary = true;
         laptop[1].primary = false;
-        assert_eq!(
-            target(Mode::Shelf, &settings, &laptop).unwrap().rect,
-            rect(0, 0, 672, 1200)
-        );
+        assert_eq!(target(Mode::Shelf, &settings, &laptop).unwrap().rect, rect(0, 0, 672, 1200));
         // past the bounds: held to them
-        remember(
-            Mode::Shelf,
-            &mut settings,
-            &displays,
-            rect(1920, 0, 2000, 1400),
-        );
+        remember(Mode::Shelf, &mut settings, &displays, rect(1920, 0, 2000, 1400));
         assert_eq!(settings.displays["DP-1"].shelf_width, Some(SHELF_MAX));
         // without a display there is nowhere to go
         assert_eq!(target(Mode::Shelf, &settings, &[]), None);
@@ -520,32 +399,18 @@ mod tests {
         assert_eq!(first.rect, rect(1920, 0, 1280, 1400));
         assert_eq!(first.limits, None);
         // moved to the laptop and sized there
-        assert!(remember(
-            Mode::Drawer,
-            &mut settings,
-            &displays,
-            rect(480, 300, 960, 600)
-        ));
+        assert!(remember(Mode::Drawer, &mut settings, &displays, rect(480, 300, 960, 600)));
         assert_eq!(settings.display.as_deref(), Some("eDP-1"));
         let t = target(Mode::Full, &settings, &displays).unwrap();
-        assert_eq!(
-            (t.display.as_str(), t.rect),
-            ("eDP-1", rect(480, 300, 960, 600))
-        );
+        assert_eq!((t.display.as_str(), t.rect), ("eDP-1", rect(480, 300, 960, 600)));
         // the laptop's display gone: on the main display, its own size, the laptop's kept
         let external = vec![displays[1].clone()];
         let t = target(Mode::Drawer, &settings, &external).unwrap();
-        assert_eq!(
-            (t.display.as_str(), t.rect),
-            ("DP-1", rect(1920, 0, 1280, 1400))
-        );
+        assert_eq!((t.display.as_str(), t.rect), ("DP-1", rect(1920, 0, 1280, 1400)));
         assert_eq!(settings.display.as_deref(), Some("eDP-1"));
         assert!(settings.displays.contains_key("eDP-1"));
         // back: where it was
-        assert_eq!(
-            target(Mode::Drawer, &settings, &displays).unwrap().rect,
-            rect(480, 300, 960, 600)
-        );
+        assert_eq!(target(Mode::Drawer, &settings, &displays).unwrap().rect, rect(480, 300, 960, 600));
     }
 
     #[test]
@@ -553,12 +418,7 @@ mod tests {
         let displays = two();
         let mut settings = Settings::default();
         // half off the laptop's left edge, its centre still on it
-        remember(
-            Mode::Drawer,
-            &mut settings,
-            &displays,
-            rect(-400, 800, 1000, 600),
-        );
+        remember(Mode::Drawer, &mut settings, &displays, rect(-400, 800, 1000, 600));
         let t = target(Mode::Drawer, &settings, &displays).unwrap();
         assert_eq!(t.rect, rect(0, 600, 1000, 600), "inside the usable area");
         // a place kept far right: the window still ends at the display's edge
@@ -567,13 +427,7 @@ mod tests {
         assert_eq!(t.rect.x + t.rect.width as i32, 1920);
         // a hand-edited share that is no number
         settings.displays.get_mut("eDP-1").unwrap().work_width = Some(f32::NAN);
-        assert_eq!(
-            target(Mode::Drawer, &settings, &displays)
-                .unwrap()
-                .rect
-                .width,
-            960
-        );
+        assert_eq!(target(Mode::Drawer, &settings, &displays).unwrap().rect.width, 960);
     }
 
     #[test]
@@ -584,46 +438,24 @@ mod tests {
         let mut c = Controller::default();
         let placed = rect(1920, 0, 896, 1400);
         c.placed(displays.clone(), Some(placed), t0);
-        let target = Target {
-            display: "DP-1".into(),
-            rect: placed,
-            limits: None,
-        };
+        let target = Target { display: "DP-1".into(), rect: placed, limits: None };
         // the window manager moves it while settling: not the person
         let moved = rect(1950, 30, 896, 1370);
-        assert_eq!(
-            c.observe(displays.clone(), Some(moved), Some(&target), at(100)),
-            Step::Nothing
-        );
+        assert_eq!(c.observe(displays.clone(), Some(moved), Some(&target), at(100)), Step::Nothing);
         assert!(c.busy(at(100)));
         // the quiet over and still elsewhere: put back, once
-        assert_eq!(
-            c.observe(displays.clone(), Some(moved), Some(&target), at(900)),
-            Step::Place
-        );
+        assert_eq!(c.observe(displays.clone(), Some(moved), Some(&target), at(900)), Step::Place);
         c.placed(displays.clone(), Some(placed), at(900));
         // kept elsewhere again (a tiling window manager): taken as it is, not fought
-        assert_eq!(
-            c.observe(displays.clone(), Some(moved), Some(&target), at(1800)),
-            Step::Nothing
-        );
-        assert_eq!(
-            c.observe(displays.clone(), Some(moved), Some(&target), at(2200)),
-            Step::Keep(moved)
-        );
+        assert_eq!(c.observe(displays.clone(), Some(moved), Some(&target), at(1800)), Step::Nothing);
+        assert_eq!(c.observe(displays.clone(), Some(moved), Some(&target), at(2200)), Step::Keep(moved));
         assert!(!c.busy(at(2200)));
         // a 1 px rounding is the same place
         let mut c = Controller::default();
         c.placed(displays.clone(), Some(placed), t0);
         let rounded = rect(1921, 0, 895, 1400);
-        assert_eq!(
-            c.observe(displays.clone(), Some(rounded), Some(&target), at(900)),
-            Step::Nothing
-        );
-        assert_eq!(
-            c.observe(displays, Some(rounded), Some(&target), at(1500)),
-            Step::Nothing
-        );
+        assert_eq!(c.observe(displays.clone(), Some(rounded), Some(&target), at(900)), Step::Nothing);
+        assert_eq!(c.observe(displays, Some(rounded), Some(&target), at(1500)), Step::Nothing);
     }
 
     #[test]
@@ -634,31 +466,18 @@ mod tests {
         let mut c = Controller::default();
         let placed = rect(1920, 0, 896, 1400);
         c.placed(displays.clone(), Some(placed), t0);
-        let target = Target {
-            display: "DP-1".into(),
-            rect: placed,
-            limits: None,
-        };
+        let target = Target { display: "DP-1".into(), rect: placed, limits: None };
         let _ = c.observe(displays.clone(), Some(placed), Some(&target), at(900));
         // dragging: each new width waits
         for (ms, width) in [(1000, 920), (1200, 980), (1400, 1000)] {
             let r = rect(1920, 0, width, 1400);
-            assert_eq!(
-                c.observe(displays.clone(), Some(r), Some(&target), at(ms)),
-                Step::Nothing
-            );
+            assert_eq!(c.observe(displays.clone(), Some(r), Some(&target), at(ms)), Step::Nothing);
         }
         assert!(c.busy(at(1500)));
         let dragged = rect(1920, 0, 1000, 1400);
-        assert_eq!(
-            c.observe(displays.clone(), Some(dragged), Some(&target), at(1800)),
-            Step::Keep(dragged)
-        );
+        assert_eq!(c.observe(displays.clone(), Some(dragged), Some(&target), at(1800)), Step::Keep(dragged));
         // kept: no longer a change
-        assert_eq!(
-            c.observe(displays.clone(), Some(dragged), Some(&target), at(2000)),
-            Step::Nothing
-        );
+        assert_eq!(c.observe(displays.clone(), Some(dragged), Some(&target), at(2000)), Step::Nothing);
         // hidden mid-drag: kept at once
         let wider = rect(1920, 0, 1010, 1400);
         let _ = c.observe(displays.clone(), Some(wider), Some(&target), at(2100));
@@ -666,31 +485,10 @@ mod tests {
         assert_eq!(c.flush(None, at(2200)), None, "and only once");
         // a display change: the window manager's moves are not the person's, and the window goes
         // where it belongs
-        let _ = c.observe(
-            displays.clone(),
-            Some(rect(1920, 0, 1100, 1400)),
-            Some(&target),
-            at(2300),
-        );
+        let _ = c.observe(displays.clone(), Some(rect(1920, 0, 1100, 1400)), Some(&target), at(2300));
         let laptop = vec![displays[0].clone()];
-        let elsewhere = Target {
-            display: "eDP-1".into(),
-            rect: rect(0, 0, 672, 1200),
-            limits: None,
-        };
-        assert_eq!(
-            c.observe(
-                laptop.clone(),
-                Some(rect(0, 0, 1100, 1200)),
-                Some(&elsewhere),
-                at(2400)
-            ),
-            Step::Place
-        );
-        assert_eq!(
-            c.flush(Some(rect(0, 0, 1100, 1200)), at(2500)),
-            None,
-            "settling"
-        );
+        let elsewhere = Target { display: "eDP-1".into(), rect: rect(0, 0, 672, 1200), limits: None };
+        assert_eq!(c.observe(laptop.clone(), Some(rect(0, 0, 1100, 1200)), Some(&elsewhere), at(2400)), Step::Place);
+        assert_eq!(c.flush(Some(rect(0, 0, 1100, 1200)), at(2500)), None, "settling");
     }
 }

@@ -52,11 +52,7 @@ impl Config {
     pub fn sized_for_this_mac(dir: PathBuf) -> Self {
         let cpus = std::thread::available_parallelism().map_or(2, |n| n.get() / 2);
         let memory_gb = requirements::memory_bytes().map_or(2, |bytes| bytes / 4 / (1 << 30));
-        Self {
-            dir,
-            cpus: cpus.clamp(2, 8),
-            memory_gb: memory_gb.clamp(2, 8),
-        }
+        Self { dir, cpus: cpus.clamp(2, 8), memory_gb: memory_gb.clamp(2, 8) }
     }
 }
 

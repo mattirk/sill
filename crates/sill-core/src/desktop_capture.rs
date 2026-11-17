@@ -120,9 +120,7 @@ pub fn capture(socket: &Path) -> Result<Raw> {
     let qh = queue.handle();
     let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).context("no wl_shm")?;
     let output: wl_output::WlOutput = globals.bind(&qh, 1..=4, ()).context("the test desktop has no output")?;
-    let factory: WestonCaptureV1 = globals
-        .bind(&qh, 1..=2, ())
-        .context("the test desktop offers no capture (Weston started without --debug?)")?;
+    let factory: WestonCaptureV1 = globals.bind(&qh, 1..=2, ()).context("the test desktop offers no capture (Weston started without --debug?)")?;
     let source = factory.create(&output, weston_capture_v1::Source::Framebuffer, &qh, ());
     let mut state = State::default();
     let result = (|| {

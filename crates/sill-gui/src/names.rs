@@ -19,11 +19,7 @@ pub struct Editor {
 }
 impl App {
     pub(crate) fn session_name<'a>(&'a self, id: &str, fallback: &'a str) -> &'a str {
-        self.all_sessions
-            .iter()
-            .find(|s| s.session_id == id)
-            .and_then(|s| s.name.as_deref())
-            .unwrap_or(fallback)
+        self.all_sessions.iter().find(|s| s.session_id == id).and_then(|s| s.name.as_deref()).unwrap_or(fallback)
     }
     pub(crate) fn name_event(&mut self, event: Event) -> Task<Message> {
         match event {
@@ -35,13 +31,7 @@ impl App {
                     return Task::none();
                 };
                 let text = self.session_name(&id, &tab.title).to_owned();
-                self.name_editor = Some(Editor {
-                    id,
-                    text,
-                    token: sill_client::request_id("name"),
-                    pending: false,
-                    error: None,
-                });
+                self.name_editor = Some(Editor { id, text, token: sill_client::request_id("name"), pending: false, error: None });
                 operation::focus("session-name").chain(operation::select_all("session-name"))
             }
             Event::Input(text) => {
@@ -56,10 +46,7 @@ impl App {
                     return Task::none();
                 };
                 let text = e.text.trim().to_owned();
-                if text.is_empty()
-                    || text.chars().count() > 80
-                    || text.chars().any(char::is_control)
-                {
+                if text.is_empty() || text.chars().count() > 80 || text.chars().any(char::is_control) {
                     e.error = Some("Use 1–80 characters without control characters".into());
                     return Task::none();
                 }
@@ -71,19 +58,11 @@ impl App {
                 let token = e.token.clone();
                 blocking(
                     move || {
-                        let outcome = actions.call(
-                            "_sill/sessions.update",
-                            json!({"session_id":id,"change":{"type":"name","text":text}}),
-                        );
+                        let outcome = actions.call("_sill/sessions.update", json!({"session_id":id,"change":{"type":"name","text":text}}));
                         let result = if outcome.is_done() {
                             Ok(())
                         } else {
-                            Err(outcome
-                                .problem()
-                                .unwrap_or(
-                                    "Outcome unknown; check the session name before retrying",
-                                )
-                                .to_owned())
+                            Err(outcome.problem().unwrap_or("Outcome unknown; check the session name before retrying").to_owned())
                         };
                         (token, id, text, result)
                     },
@@ -108,11 +87,7 @@ impl App {
                     }
                 }
                 let list = self.list();
-                if self.details.as_ref().is_some_and(|p| p.id == id) {
-                    Task::batch([list, self.details_load(id)])
-                } else {
-                    list
-                }
+                if self.details.as_ref().is_some_and(|p| p.id == id) { Task::batch([list, self.details_load(id)]) } else { list }
             }
         }
     }

@@ -10,7 +10,11 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, Ordering}, mpsc};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc,
+};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -68,16 +72,24 @@ struct Script {
     check_key_at_prompt: bool,
 }
 
-fn agent_method() -> Value { json!({"id": "browser", "name": "Browser"}) }
-fn terminal_method() -> Value { json!({"type": "terminal", "id": "cli-login", "name": "Terminal login", "args": ["--login"]}) }
-fn key_method() -> Value { json!({"id": "api-key", "name": "API key", "_meta": {"api-key": {"provider": "google"}}}) }
+fn agent_method() -> Value {
+    json!({"id": "browser", "name": "Browser"})
+}
+fn terminal_method() -> Value {
+    json!({"type": "terminal", "id": "cli-login", "name": "Terminal login", "args": ["--login"]})
+}
+fn key_method() -> Value {
+    json!({"id": "api-key", "name": "API key", "_meta": {"api-key": {"provider": "google"}}})
+}
 
 fn read(reader: &mut BufReader<UnixStream>) -> Option<Value> {
     let mut line = String::new();
     (reader.read_line(&mut line).ok()? > 0).then(|| serde_json::from_str(&line).unwrap())
 }
 
-fn send(writer: &mut UnixStream, message: Value) -> bool { writeln!(writer, "{message}").is_ok() }
+fn send(writer: &mut UnixStream, message: Value) -> bool {
+    writeln!(writer, "{message}").is_ok()
+}
 
 /// One connection from the relay: a control connection (presence, status) or the agent's ACP.
 fn serve(stream: UnixStream, script: Script, credential: PathBuf, observed: mpsc::Sender<String>) {
@@ -92,7 +104,9 @@ fn serve(stream: UnixStream, script: Script, credential: PathBuf, observed: mpsc
             } else {
                 json!({"ok": true})
             };
-            if !send(&mut writer, response) { return; }
+            if !send(&mut writer, response) {
+                return;
+            }
         }
         return;
     }
@@ -107,14 +121,22 @@ fn serve(stream: UnixStream, script: Script, credential: PathBuf, observed: mpsc
             continue;
         }
         let reply = match method {
-            "initialize" => Ok(json!({"protocolVersion": 1, "agentCapabilities": {"loadSession": false, "promptCapabilities": {"image": false}}, "authMethods": script.methods})),
+            "initialize" => Ok(
+                json!({"protocolVersion": 1, "agentCapabilities": {"loadSession": false, "promptCapabilities": {"image": false}}, "authMethods": script.methods}),
+            ),
             "session/new" if script.asks == Ask::AtOpen && !logged_in && !(script.check_key_at_prompt && key_sent) => Err(auth_required.clone()),
             "session/new" => Ok(json!({"sessionId": "login-session"})),
             "authenticate" if message["params"]["methodId"] == "api-key" && script.key.is_some() => {
                 let (shape, expected) = script.key.unwrap();
                 let meta = &message["params"]["_meta"]["api-key"];
-                let given = match shape { Shape::Text => meta.as_str(), Shape::Object => meta["apiKey"].as_str() };
-                let other_shape = match shape { Shape::Text => meta.is_object(), Shape::Object => meta.is_string() };
+                let given = match shape {
+                    Shape::Text => meta.as_str(),
+                    Shape::Object => meta["apiKey"].as_str(),
+                };
+                let other_shape = match shape {
+                    Shape::Text => meta.is_object(),
+                    Shape::Object => meta.is_string(),
+                };
                 let _ = observed.send(format!("key {}", given.unwrap_or("-")));
                 if given == Some(expected) {
                     key_accepted = true;
@@ -148,7 +170,10 @@ fn serve(stream: UnixStream, script: Script, credential: PathBuf, observed: mpsc
                     std::thread::sleep(Duration::from_millis(200));
                 }
                 if logged_in {
-                    send(&mut writer, json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "login-session", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": format!("answer to {marker}")}}}}));
+                    send(
+                        &mut writer,
+                        json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "login-session", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": format!("answer to {marker}")}}}}),
+                    );
                     Ok(json!({"stopReason": "end_turn"}))
                 } else if script.check_key_at_prompt {
                     Err(json!({"code": -32603, "message": "API key not valid. Please pass a valid API key."}))
@@ -158,12 +183,16 @@ fn serve(stream: UnixStream, script: Script, credential: PathBuf, observed: mpsc
             }
             _ => Ok(json!({})),
         };
-        if method != "session/prompt" { let _ = observed.send(method.to_string()); }
+        if method != "session/prompt" {
+            let _ = observed.send(method.to_string());
+        }
         let response = match reply {
             Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
             Err(error) => json!({"jsonrpc": "2.0", "id": id, "error": error}),
         };
-        if !send(&mut writer, response) { break; }
+        if !send(&mut writer, response) {
+            break;
+        }
     }
     // the agent's connection is gone: its process holds nothing any more
     let _ = observed.send("closed".into());
@@ -186,22 +215,36 @@ struct Fixture {
 impl Fixture {
     fn environment(dir: &Path) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_sill"));
-        command.env("XDG_RUNTIME_DIR", dir.join("run")).env("XDG_STATE_HOME", dir.join("state"))
-            .env("XDG_CONFIG_HOME", dir.join("config")).env("HOME", dir.join("home"))
+        command
+            .env("XDG_RUNTIME_DIR", dir.join("run"))
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("XDG_CONFIG_HOME", dir.join("config"))
+            .env("HOME", dir.join("home"))
             .env("SILL_LAUNCHER", "direct")
-            .env_remove("SILL_SESSION").env_remove("SILL_BOX").env_remove("INVOCATION_ID")
-            .env_remove("LISTEN_PID").env_remove("LISTEN_FDS").env_remove("NOTIFY_SOCKET")
-            .stdin(Stdio::null()).stdout(Stdio::null());
+            .env_remove("SILL_SESSION")
+            .env_remove("SILL_BOX")
+            .env_remove("INVOCATION_ID")
+            .env_remove("LISTEN_PID")
+            .env_remove("LISTEN_FDS")
+            .env_remove("NOTIFY_SOCKET")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null());
         command
     }
 
-    fn new(script: Script) -> Self { Self::start(script, &[], None) }
+    fn new(script: Script) -> Self {
+        Self::start(script, &[], None)
+    }
 
     /// `env`: for the relay, where the agent loop runs (`SILL_SESSION_OPEN_TIMEOUT_MS`).
-    fn with_relay_env(script: Script, env: &[(&str, &str)]) -> Self { Self::start(script, env, None) }
+    fn with_relay_env(script: Script, env: &[(&str, &str)]) -> Self {
+        Self::start(script, env, None)
+    }
 
     /// The person typed `key` for `method` in an earlier session: sill kept it.
-    fn with_saved_key(script: Script, method: &str, key: &str) -> Self { Self::start(script, &[], Some((method, key))) }
+    fn with_saved_key(script: Script, method: &str, key: &str) -> Self {
+        Self::start(script, &[], Some((method, key)))
+    }
 
     fn start(script: Script, env: &[(&str, &str)], saved_key: Option<(&str, &str)>) -> Self {
         let dir = scratch("login");
@@ -236,9 +279,17 @@ impl Fixture {
                 }
             })
         };
-        let relay = Self::environment(&dir).envs(env.iter().copied()).args(["daemon", "relay", "--session", &session, "--socket"])
-            .arg(runtime.join("relay.sock")).arg("--agent-socket").arg(runtime.join("shim.sock"))
-            .arg("--cwd").arg(dir.join("home")).stderr(std::fs::File::create(dir.join("relay.log")).unwrap()).spawn().unwrap();
+        let relay = Self::environment(&dir)
+            .envs(env.iter().copied())
+            .args(["daemon", "relay", "--session", &session, "--socket"])
+            .arg(runtime.join("relay.sock"))
+            .arg("--agent-socket")
+            .arg(runtime.join("shim.sock"))
+            .arg("--cwd")
+            .arg(dir.join("home"))
+            .stderr(std::fs::File::create(dir.join("relay.log")).unwrap())
+            .spawn()
+            .unwrap();
         let mut waited = Instant::now();
         while !runtime.join("relay.sock").exists() {
             assert!(waited.elapsed() < WAIT, "the relay did not come up");
@@ -253,7 +304,9 @@ impl Fixture {
         let fixture = Self { dir, session, credential, daemon, relay, launcher, shutdown, shim: Some(shim), observed };
         // adopted: the session has its public journal
         waited = Instant::now();
-        while !fixture.database().is_some_and(|db| db.query_row("SELECT count(*) FROM sfp_sessions WHERE session_id=?1", [&fixture.session], |r| r.get::<_, i64>(0)).unwrap_or(0) == 1) {
+        while !fixture.database().is_some_and(|db| {
+            db.query_row("SELECT count(*) FROM sfp_sessions WHERE session_id=?1", [&fixture.session], |r| r.get::<_, i64>(0)).unwrap_or(0) == 1
+        }) {
             assert!(waited.elapsed() < WAIT, "the daemon did not adopt the session; {}", fixture.logs());
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -291,9 +344,13 @@ impl Fixture {
     }
 
     /// What the person did in the agent's login terminal: its login file is there now.
-    fn terminal_login(&self) { std::fs::write(&self.credential, "token").unwrap(); }
+    fn terminal_login(&self) {
+        std::fs::write(&self.credential, "token").unwrap();
+    }
 
-    fn saved_key(&self, method: &str) -> PathBuf { self.dir.join("state/sill/keys/claude").join(method) }
+    fn saved_key(&self, method: &str) -> PathBuf {
+        self.dir.join("state/sill/keys/claude").join(method)
+    }
 
     /// Files under sill's state, the logs included, that contain `secret` — not counting the saved
     /// key itself or the daemon's staged copy of its own binary.
@@ -301,9 +358,14 @@ impl Fixture {
         fn walk(dir: &Path, skip: &[PathBuf], secret: &[u8], out: &mut Vec<PathBuf>) {
             for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
                 let p = e.path();
-                if skip.iter().any(|s| p.starts_with(s)) { continue; }
-                if p.is_dir() && !p.is_symlink() { walk(&p, skip, secret, out); }
-                else if std::fs::read(&p).is_ok_and(|b| b.windows(secret.len()).any(|w| w == secret)) { out.push(p); }
+                if skip.iter().any(|s| p.starts_with(s)) {
+                    continue;
+                }
+                if p.is_dir() && !p.is_symlink() {
+                    walk(&p, skip, secret, out);
+                } else if std::fs::read(&p).is_ok_and(|b| b.windows(secret.len()).any(|w| w == secret)) {
+                    out.push(p);
+                }
             }
         }
         let mut out = vec![];
@@ -314,12 +376,19 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = self.daemon.kill(); let _ = self.daemon.wait();
-        let _ = self.relay.kill(); let _ = self.relay.wait();
-        let _ = self.launcher.kill(); let _ = self.launcher.wait();
+        let _ = self.daemon.kill();
+        let _ = self.daemon.wait();
+        let _ = self.relay.kill();
+        let _ = self.relay.wait();
+        let _ = self.launcher.kill();
+        let _ = self.launcher.wait();
         self.shutdown.store(true, Ordering::Relaxed);
-        if let Some(shim) = self.shim.take() { let _ = shim.join(); }
-        if !std::thread::panicking() { let _ = std::fs::remove_dir_all(&self.dir); }
+        if let Some(shim) = self.shim.take() {
+            let _ = shim.join();
+        }
+        if !std::thread::panicking() {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 }
 
@@ -348,7 +417,9 @@ impl Frontend {
         let mut wait = wait;
         while let Ok((method, params)) = notifications.recv_timeout(wait) {
             wait = Duration::from_millis(20);
-            if method != "_sill/session.event" { continue; }
+            if method != "_sill/session.event" {
+                continue;
+            }
             let event: sill_proto::sfp::SessionEvent = serde_json::from_value(params).unwrap();
             let shown = self.view.accept(event).expect("the frontend's view stays in sync");
             self.shown.extend(shown);
@@ -369,7 +440,9 @@ impl Frontend {
     }
 
     /// The frontend showed an event like that at any point.
-    fn showed(&self, matches: impl Fn(&Event) -> bool) -> bool { self.shown.iter().any(matches) }
+    fn showed(&self, matches: impl Fn(&Event) -> bool) -> bool {
+        self.shown.iter().any(matches)
+    }
 
     fn login_card(&mut self, fixture: &Fixture) -> (String, Vec<String>) {
         match self.wait_for(fixture, "the login card", |e| matches!(e, Event::AuthRequired { .. })) {
@@ -388,7 +461,9 @@ impl Frontend {
     }
 
     fn submit(&self, marker: &str) -> Value {
-        self.client.call("_sill/sessions.submit", json!({"session_id": self.session, "submission_id": marker, "text": format!("{marker} please"), "attachments": []})).unwrap()
+        self.client
+            .call("_sill/sessions.submit", json!({"session_id": self.session, "submission_id": marker, "text": format!("{marker} please"), "attachments": []}))
+            .unwrap()
     }
 
     fn submission(&self, marker: &str) -> Value {
@@ -404,7 +479,9 @@ impl Frontend {
     }
 }
 
-fn script(asks: Ask, methods: Value) -> Script { Script { asks, methods, failing: Arc::new(Mutex::new(0)), key: None, lenient: false, check_key_at_prompt: false } }
+fn script(asks: Ask, methods: Value) -> Script {
+    Script { asks, methods, failing: Arc::new(Mutex::new(0)), key: None, lenient: false, check_key_at_prompt: false }
+}
 
 /// An agent whose `api-key` method takes `key` in `shape`; a Gemini-like one (`Text`) accepts the
 /// other shape without reading it, as Gemini CLI does.
@@ -502,7 +579,11 @@ fn a_prompt_queued_during_a_failing_turn_is_held_and_resumable_from_the_card() {
     frontend.login_card_closes(&fixture);
     fixture.never("prompt PROMPT-HELD", Duration::from_millis(200));
     frontend.resume("PROMPT-HELD");
-    frontend.wait_for(&fixture, "the held prompt card closing", |e| matches!(e, Event::Other(t) if t.starts_with("sill:held-resolved:") && t.contains("PROMPT-HELD")));
+    frontend.wait_for(
+        &fixture,
+        "the held prompt card closing",
+        |e| matches!(e, Event::Other(t) if t.starts_with("sill:held-resolved:") && t.contains("PROMPT-HELD")),
+    );
     fixture.expect("prompt PROMPT-HELD");
     frontend.answer(&fixture, "PROMPT-HELD");
 }
@@ -563,7 +644,9 @@ fn an_api_key_typed_into_the_card_reaches_the_agent_in_its_shape() {
         let Event::AuthRequired { methods, .. } = card else { unreachable!() };
         assert_eq!(methods[0].api_key.as_deref(), Some("google"), "the card knows to ask for a key");
         frontend.control(json!({"type": "authenticate", "method_id": "api-key", "api_key": "sk-typed-1234"}));
-        if shape == Shape::Object { fixture.expect("key -"); }
+        if shape == Shape::Object {
+            fixture.expect("key -");
+        }
         fixture.expect("key sk-typed-1234");
         frontend.login_card_closes(&fixture);
         frontend.submit("PROMPT-ONE");
@@ -659,7 +742,9 @@ fn resetting_an_agent_stops_its_sessions_then_removes_its_home_and_keys() {
 
 /// What `sill login fakelogin` sees: a home with the fake agent's definition, sill's state with its
 /// install (the adapter and a helper program under tools/), and the agent's existing sill home.
-struct HostLogin { dir: PathBuf }
+struct HostLogin {
+    dir: PathBuf,
+}
 
 impl HostLogin {
     fn new(fail: bool) -> Self {
@@ -676,7 +761,9 @@ impl HostLogin {
         std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o755)).unwrap();
         let definition = format!(
             "id = \"fakelogin\"\nname = \"Fake login\"\ncommand = [\"{adapter}\"]\nhome_paths = [{{path = \"~/.fakelogin\", kind = \"directory\"}}]\nlogin_files = [\".fakelogin/auth.json\"]\nhome_env = \"FAKE_HOME\"\nhost_login = [\"browser\"]\n\n[env]\nFAKE_HELPER = \"{helper}\"\nFAKE_HELPER_PID = \"{pid}\"\n{fail}",
-            adapter = adapter.display(), helper = tools.join("helper").display(), pid = dir.join("helper.pid").display(),
+            adapter = adapter.display(),
+            helper = tools.join("helper").display(),
+            pid = dir.join("helper.pid").display(),
             fail = if fail { "FAKE_FAIL = \"1\"\n" } else { "" },
         );
         std::fs::write(dir.join("home/.config/sill/agents/fakelogin.toml"), definition).unwrap();
@@ -688,14 +775,24 @@ impl HostLogin {
     }
 
     fn run(&self) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_sill")).arg("login").arg("fakelogin")
-            .env("HOME", self.dir.join("home")).env("XDG_STATE_HOME", self.dir.join("state"))
-            .env("XDG_CONFIG_HOME", self.dir.join("config")).env("XDG_RUNTIME_DIR", self.dir.join("run"))
-            .env_remove("SILL_SESSION").env_remove("SILL_BOX").env_remove("BROWSER")
-            .stdin(Stdio::null()).output().unwrap()
+        Command::new(env!("CARGO_BIN_EXE_sill"))
+            .arg("login")
+            .arg("fakelogin")
+            .env("HOME", self.dir.join("home"))
+            .env("XDG_STATE_HOME", self.dir.join("state"))
+            .env("XDG_CONFIG_HOME", self.dir.join("config"))
+            .env("XDG_RUNTIME_DIR", self.dir.join("run"))
+            .env_remove("SILL_SESSION")
+            .env_remove("SILL_BOX")
+            .env_remove("BROWSER")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
     }
 
-    fn own(&self, file: &str) -> PathBuf { self.dir.join("state/sill/agents/fakelogin/.fakelogin").join(file) }
+    fn own(&self, file: &str) -> PathBuf {
+        self.dir.join("state/sill/agents/fakelogin/.fakelogin").join(file)
+    }
 
     /// Is the adapter's helper gone? It runs in the login jail's own process namespace, so it is
     /// found from here by its arguments: the login's home is among them.
@@ -709,15 +806,21 @@ impl HostLogin {
 
     fn leftovers(&self) -> Vec<String> {
         let mut out = vec![];
-        if self.dir.join("state/sill/login/fakelogin").exists() { out.push("the login scratch (a credential)".into()); }
-        if self.dir.join("home/.fakelogin").exists() { out.push("a ~/.fakelogin on the host".into()); }
+        if self.dir.join("state/sill/login/fakelogin").exists() {
+            out.push("the login scratch (a credential)".into());
+        }
+        if self.dir.join("home/.fakelogin").exists() {
+            out.push("a ~/.fakelogin on the host".into());
+        }
         out
     }
 }
 
 impl Drop for HostLogin {
     fn drop(&mut self) {
-        if !std::thread::panicking() { let _ = std::fs::remove_dir_all(&self.dir); }
+        if !std::thread::panicking() {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 }
 
@@ -781,7 +884,8 @@ fn a_host_login_propagates_to_existing_ghost_session_homes() {
             .args(["--ignored", "--exact", "a_host_login_propagates_to_existing_ghost_session_homes", "--nocapture"])
             .env("SILL_GHOST_LOGIN_TEST_CHILD", &login.dir)
             .env("XDG_STATE_HOME", login.dir.join("state"))
-            .status().unwrap();
+            .status()
+            .unwrap();
         assert!(status.success());
         return;
     };
@@ -795,7 +899,8 @@ fn a_host_login_propagates_to_existing_ghost_session_homes() {
     env_agent.env.insert("XDG_STATE_HOME".into(), login.dir.join("state").display().to_string());
     // Run `run_into` with `ghost` as an existing ghost session's agent home copy.
 
-    sill_core::login::run_into(&env_agent, &home, &[(ghost.clone(), sill_core::credentials::Rules::for_agent(&env_agent).unwrap())], "browser", |_| {}).unwrap();
+    sill_core::login::run_into(&env_agent, &home, &[(ghost.clone(), sill_core::credentials::Rules::for_agent(&env_agent).unwrap())], "browser", |_| {})
+        .unwrap();
     assert_eq!(std::fs::read_to_string(sill_core::session::agent_home(&home, "fakelogin").join(".fakelogin/auth.json")).unwrap(), "token");
     assert_eq!(std::fs::read_to_string(ghost.join(".fakelogin/auth.json")).unwrap(), "token", "the ghost home got the new login");
     assert_eq!(std::fs::read_to_string(ghost.join(".fakelogin/state.sqlite")).unwrap(), "ghost history", "the ghost's history is untouched");

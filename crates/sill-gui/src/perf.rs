@@ -32,11 +32,7 @@ pub(crate) fn long(n: usize) -> App {
     conversation.session = demo::conversation().session;
     for i in 0..n {
         let mut next = match i % 4 {
-            0 => item(
-                i,
-                "user",
-                "Please look at the next part and explain what changed.",
-            ),
+            0 => item(i, "user", "Please look at the next part and explain what changed."),
             1 => item(i, "tool", ""),
             _ => item(i, "agent", PROSE),
         };
@@ -69,16 +65,9 @@ impl Screen {
     fn new() -> Self {
         use iced::advanced::renderer::Headless;
         let settings = crate::snapshots::settings();
-        let renderer = crate::tests::block_on(<iced::Renderer as Headless>::new(
-            settings.default_font,
-            settings.default_text_size,
-            None,
-        ))
-        .expect("a headless renderer");
-        Self {
-            renderer,
-            cache: Some(iced_runtime::user_interface::Cache::default()),
-        }
+        let renderer =
+            crate::tests::block_on(<iced::Renderer as Headless>::new(settings.default_font, settings.default_text_size, None)).expect("a headless renderer");
+        Self { renderer, cache: Some(iced_runtime::user_interface::Cache::default()) }
     }
 
     /// One frame, split: the view built, laid out (`UserInterface::build`), and drawn.
@@ -87,20 +76,13 @@ impl Screen {
         let element = app.view();
         let built = start.elapsed();
         let start = Instant::now();
-        let mut ui = iced_runtime::UserInterface::build(
-            element,
-            iced::Size::new(720.0, 860.0),
-            self.cache.take().unwrap_or_default(),
-            &mut self.renderer,
-        );
+        let mut ui = iced_runtime::UserInterface::build(element, iced::Size::new(720.0, 860.0), self.cache.take().unwrap_or_default(), &mut self.renderer);
         let laid = start.elapsed();
         let start = Instant::now();
         ui.draw(
             &mut self.renderer,
             &crate::style::theme(),
-            &iced::advanced::renderer::Style {
-                text_color: crate::style::P.fg,
-            },
+            &iced::advanced::renderer::Style { text_color: crate::style::P.fg },
             iced::mouse::Cursor::Unavailable,
         );
         let drawn = start.elapsed();
@@ -109,18 +91,11 @@ impl Screen {
     }
 
     fn frame(&mut self, app: &App) {
-        let mut ui = iced_runtime::UserInterface::build(
-            app.view(),
-            iced::Size::new(720.0, 860.0),
-            self.cache.take().unwrap_or_default(),
-            &mut self.renderer,
-        );
+        let mut ui = iced_runtime::UserInterface::build(app.view(), iced::Size::new(720.0, 860.0), self.cache.take().unwrap_or_default(), &mut self.renderer);
         ui.draw(
             &mut self.renderer,
             &crate::style::theme(),
-            &iced::advanced::renderer::Style {
-                text_color: crate::style::P.fg,
-            },
+            &iced::advanced::renderer::Style { text_color: crate::style::P.fg },
             iced::mouse::Cursor::Unavailable,
         );
         self.cache = Some(ui.into_cache());
@@ -140,19 +115,14 @@ fn time(mut work: impl FnMut()) -> Duration {
 fn image_discovery_without_images() {
     for n in [250, 1000, 2000, 8000] {
         let mut app = long(n);
-        app.actions = Some(sill_client::actions::Actions::new(std::sync::Arc::new(
-            || anyhow::bail!("no image fetch expected"),
-        )));
+        app.actions = Some(sill_client::actions::Actions::new(std::sync::Arc::new(|| anyhow::bail!("no image fetch expected"))));
         let start = Instant::now();
         for _ in 0..1000 {
             let task = app.load_media("demo");
             assert!(task.units() == 0, "no-image transcript does not fetch");
             let _ = std::hint::black_box(task);
         }
-        println!(
-            "{n:>5} items: no-image discovery scan {:?} per lane update",
-            start.elapsed() / 1000
-        );
+        println!("{n:>5} items: no-image discovery scan {:?} per lane update", start.elapsed() / 1000);
     }
 }
 
@@ -171,11 +141,7 @@ fn cost_of_a_long_conversation() {
                     session_id: "demo".into(),
                     subscription_id: "demo-subscription".into(),
                     seq: (view.conversation.seq + 1).to_string(),
-                    event: Event::ItemTextAppended {
-                        item_id: last.clone(),
-                        block_id: "text".into(),
-                        text: format!(" more {k}"),
-                    },
+                    event: Event::ItemTextAppended { item_id: last.clone(), block_id: "text".into(), text: format!(" more {k}") },
                 };
                 assert!(view.accept(event));
             }
@@ -186,11 +152,7 @@ fn cost_of_a_long_conversation() {
             for _ in 0..20 {
                 for item in view.conversation.items().values() {
                     let source = item_text(item);
-                    std::hint::black_box(
-                        view.rendered
-                            .get(&item.item_id)
-                            .is_some_and(|r| r.source == source),
-                    );
+                    std::hint::black_box(view.rendered.get(&item.item_id).is_some_and(|r| r.source == source));
                 }
             }
         }) / 20;
@@ -209,11 +171,7 @@ fn cost_of_a_long_conversation() {
                 session_id: "demo".into(),
                 subscription_id: "demo-subscription".into(),
                 seq: (view.conversation.seq + 1).to_string(),
-                event: Event::ItemTextAppended {
-                    item_id: last.clone(),
-                    block_id: "text".into(),
-                    text: format!(" frame {k}"),
-                },
+                event: Event::ItemTextAppended { item_id: last.clone(), block_id: "text".into(), text: format!(" frame {k}") },
             };
             view.accept(event);
             warm += time(|| screen.frame(&app));
@@ -223,13 +181,7 @@ fn cost_of_a_long_conversation() {
         {
             let view = app.views.get_mut("demo").unwrap();
             view.follow_tail = false;
-            view.scroll_offset = view
-                .heights
-                .borrow()
-                .values()
-                .map(|(_, h)| h + 12.0)
-                .sum::<f32>()
-                / 2.0;
+            view.scroll_offset = view.heights.borrow().values().map(|(_, h)| h + 12.0).sum::<f32>() / 2.0;
         }
         let middle = time(|| screen.frame(&app));
         println!("{n:>5} items: a frame scrolled to the middle {middle:>9.2?}");
@@ -240,12 +192,7 @@ fn cost_of_a_long_conversation() {
             laid += l;
             drawn += d;
         }
-        println!(
-            "{n:>5} items: a warm frame is view {:>9.2?}, layout {:>9.2?}, draw {:>9.2?}",
-            built / frames,
-            laid / frames,
-            drawn / frames
-        );
+        println!("{n:>5} items: a warm frame is view {:>9.2?}, layout {:>9.2?}, draw {:>9.2?}", built / frames, laid / frames, drawn / frames);
         let snapshot = time(|| app.views.get_mut("demo").unwrap().rebuild());
         println!(
             "{n:>5} items: per event {now:>9.2?} (before the change {before:>9.2?}); frame cold \

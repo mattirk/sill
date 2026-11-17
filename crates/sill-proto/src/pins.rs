@@ -1,7 +1,7 @@
 //! Pins identify exact absolute paths on the daemon host. Lists are live keyset pages.
+use crate::sessions::HostPath;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use crate::sessions::HostPath;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -12,13 +12,23 @@ pub struct List {
     pub limit: Option<u16>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Page { pub pins: Vec<HostPath>, pub next: Option<HostPath> }
+pub struct Page {
+    pub pins: Vec<HostPath>,
+    pub next: Option<HostPath>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct GlobalPin { pub path: HostPath }
+pub struct GlobalPin {
+    pub path: HostPath,
+}
 /// `pins.add`'s result: the canonical path pinned (open, unlike the request).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Pinned { pub path: HostPath }
+pub struct Pinned {
+    pub path: HostPath,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SessionPin { pub session_id: String, pub path: HostPath }
+pub struct SessionPin {
+    pub session_id: String,
+    pub path: HostPath,
+}

@@ -18,9 +18,7 @@ pub const CHUNKS: &[&str] = &[
 
 /// Wall-clock milliseconds, for the demo's working interval.
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 fn session(activity: &str, question: Option<&str>) -> SessionState {
@@ -58,11 +56,7 @@ fn item(id: &str, seq: &str, kind: &str, text: &str) -> Item {
         submission_id: None,
         agent_generation_id: "demo-generation".into(),
         kind: kind.into(),
-        content: if text.is_empty() {
-            vec![]
-        } else {
-            vec![Content::text(text)]
-        },
+        content: if text.is_empty() { vec![] } else { vec![Content::text(text)] },
         tool: None,
     }
 }
@@ -83,48 +77,20 @@ fn tool(title: &str, kind: &str, status: &str, detail: &str, diff: &str) -> Tool
 pub fn conversation() -> Conversation {
     let mut view = Conversation::new("demo", "demo-subscription", 3);
     view.session = Some(session("working", None));
-    view.insert_item(item(
-        "user",
-        "1",
-        "user",
-        "Make the send arrow a little smaller and show me the change.",
-    ));
+    view.insert_item(item("user", "1", "user", "Make the send arrow a little smaller and show me the change."));
     let mut shell = item("tool", "2", "tool", "");
-    shell.tool = Some(tool(
-        "rg -n 'SEND_SIZE' crates/sill-gui/src",
-        "execute",
-        "completed",
-        "crates/sill-gui/src/icons.rs:18:const SEND_SIZE: f32 = 1.1;",
-        "",
-    ));
+    shell.tool = Some(tool("rg -n 'SEND_SIZE' crates/sill-gui/src", "execute", "completed", "crates/sill-gui/src/icons.rs:18:const SEND_SIZE: f32 = 1.1;", ""));
     view.insert_item(shell);
-    view.insert_item(item(
-        "agent",
-        "3",
-        "agent",
-        "The arrow's size is one rule in the stylesheet.\n\n",
-    ));
+    view.insert_item(item("agent", "3", "agent", "The arrow's size is one rule in the stylesheet.\n\n"));
     view
 }
 
 fn event(seq: u64, event: Event) -> SessionEvent {
-    SessionEvent {
-        session_id: "demo".into(),
-        subscription_id: "demo-subscription".into(),
-        seq: seq.to_string(),
-        event,
-    }
+    SessionEvent { session_id: "demo".into(), subscription_id: "demo-subscription".into(), seq: seq.to_string(), event }
 }
 
 pub fn append(seq: u64, text: &str) -> SessionEvent {
-    event(
-        seq,
-        Event::ItemTextAppended {
-            item_id: "agent".into(),
-            block_id: "text".into(),
-            text: text.into(),
-        },
-    )
+    event(seq, Event::ItemTextAppended { item_id: "agent".into(), block_id: "text".into(), text: text.into() })
 }
 
 fn question(state: &str, answer: Option<&str>) -> Question {
@@ -142,7 +108,8 @@ fn question(state: &str, answer: Option<&str>) -> Question {
     .expect("valid synthetic question")
 }
 
-const DIFF: &str = "@@ -17,3 +17,3 @@\n /// The send arrow's size, relative to the composer's text.\n-const SEND_SIZE: f32 = 1.1;\n+const SEND_SIZE: f32 = 1.0;\n";
+const DIFF: &str =
+    "@@ -17,3 +17,3 @@\n /// The send arrow's size, relative to the composer's text.\n-const SEND_SIZE: f32 = 1.1;\n+const SEND_SIZE: f32 = 1.0;\n";
 
 /// After the last chunk: the edit, its question, the session waiting on it.
 pub fn waiting(seq: u64) -> Vec<SessionEvent> {
@@ -150,18 +117,8 @@ pub fn waiting(seq: u64) -> Vec<SessionEvent> {
     edit.tool = Some(tool("Edit conversation.rs", "edit", "pending", "", DIFF));
     vec![
         event(seq, Event::ItemCreated { item: edit }),
-        event(
-            seq + 1,
-            Event::QuestionUpdated {
-                question: question("open", None),
-            },
-        ),
-        event(
-            seq + 2,
-            Event::SessionUpdated {
-                session: session("waiting", Some("demo-question")),
-            },
-        ),
+        event(seq + 1, Event::QuestionUpdated { question: question("open", None) }),
+        event(seq + 2, Event::SessionUpdated { session: session("waiting", Some("demo-question")) }),
     ]
 }
 
@@ -169,46 +126,18 @@ pub fn waiting(seq: u64) -> Vec<SessionEvent> {
 pub fn answered(seq: u64, option: &str) -> Vec<SessionEvent> {
     let allowed = option != "reject";
     let mut events = vec![
-        event(
-            seq,
-            Event::QuestionUpdated {
-                question: question("answered", Some(option)),
-            },
-        ),
+        event(seq, Event::QuestionUpdated { question: question("answered", Some(option)) }),
         event(
             seq + 1,
             Event::ItemPatched {
                 item_id: "edit".into(),
-                set: ItemPatch {
-                    content: None,
-                    tool: Some(tool(
-                        "Edit conversation.rs",
-                        "edit",
-                        if allowed { "completed" } else { "failed" },
-                        "",
-                        DIFF,
-                    )),
-                },
+                set: ItemPatch { content: None, tool: Some(tool("Edit conversation.rs", "edit", if allowed { "completed" } else { "failed" }, "", DIFF)) },
             },
         ),
     ];
-    let reply = if allowed {
-        "Done: the send arrow is now `1em`; the button keeps its size."
-    } else {
-        "Understood — I left `conversation.rs` as it was."
-    };
-    events.push(event(
-        seq + 2,
-        Event::ItemCreated {
-            item: item("reply", &(seq + 2).to_string(), "agent", reply),
-        },
-    ));
-    events.push(event(
-        seq + 3,
-        Event::SessionUpdated {
-            session: session("idle", None),
-        },
-    ));
+    let reply = if allowed { "Done: the send arrow is now `1em`; the button keeps its size." } else { "Understood — I left `conversation.rs` as it was." };
+    events.push(event(seq + 2, Event::ItemCreated { item: item("reply", &(seq + 2).to_string(), "agent", reply) }));
+    events.push(event(seq + 3, Event::SessionUpdated { session: session("idle", None) }));
     events
 }
 
@@ -216,22 +145,10 @@ pub fn answered(seq: u64, option: &str) -> Vec<SessionEvent> {
 pub fn prompt(seq: u64, text: &str) -> Vec<SessionEvent> {
     let id = format!("prompt-{seq}");
     vec![
-        event(
-            seq,
-            Event::ItemCreated {
-                item: item(&id, &seq.to_string(), "user", text),
-            },
-        ),
+        event(seq, Event::ItemCreated { item: item(&id, &seq.to_string(), "user", text) }),
         event(
             seq + 1,
-            Event::ItemCreated {
-                item: item(
-                    &format!("{id}-note"),
-                    &(seq + 1).to_string(),
-                    "note",
-                    "The demo has no agent: nothing answers this prompt.",
-                ),
-            },
+            Event::ItemCreated { item: item(&format!("{id}-note"), &(seq + 1).to_string(), "note", "The demo has no agent: nothing answers this prompt.") },
         ),
     ]
 }
@@ -241,38 +158,20 @@ fn path(path: &str) -> HostPath {
 }
 
 fn metadata(directory: bool) -> admin::FileMetadata {
-    admin::FileMetadata {
-        file: !directory,
-        directory,
-        symlink: false,
-        target: None,
-        length: "150".into(),
-        readonly: false,
-    }
+    admin::FileMetadata { file: !directory, directory, symlink: false, target: None, length: "150".into(), readonly: false }
 }
 
 /// The demo's files: one pinned project with a few folders, a Markdown file and a diff.
 pub fn files(request: &Request) -> Result<Data, String> {
     Ok(match request {
         Request::Roots => Data::Roots {
-            roots: vec![Root {
-                path: path("/home/demo/project"),
-                global: false,
-                metadata: Some(metadata(true)),
-                error: None,
-            }],
+            roots: vec![Root { path: path("/home/demo/project"), global: false, metadata: Some(metadata(true)), error: None }],
             home: path("/home/demo"),
         },
         Request::Directory { path: dir, .. } => {
             let entries = match dir.display.as_str() {
                 "/home/demo" => vec![("project", true)],
-                "/home/demo/project" => vec![
-                    ("src", true),
-                    ("docs", true),
-                    ("README.md", false),
-                    ("Cargo.toml", false),
-                    (".gitignore", false),
-                ],
+                "/home/demo/project" => vec![("src", true), ("docs", true), ("README.md", false), ("Cargo.toml", false), (".gitignore", false)],
                 "/home/demo/project/src" => vec![("main.rs", false)],
                 "/home/demo/project/docs" => vec![("guide.md", false)],
                 _ => vec![],
@@ -280,19 +179,13 @@ pub fn files(request: &Request) -> Result<Data, String> {
             Data::Directory(admin::FilesPage {
                 entries: entries
                     .into_iter()
-                    .map(|(entry, directory)| admin::FileEntry {
-                        path: path(&format!("{}/{entry}", dir.display)),
-                        metadata: metadata(directory),
-                    })
+                    .map(|(entry, directory)| admin::FileEntry { path: path(&format!("{}/{entry}", dir.display)), metadata: metadata(directory) })
                     .collect(),
                 next: None,
             })
         }
         Request::Inspect(at) => Data::Metadata(metadata(!name(at).contains('.'))),
-        Request::File {
-            path: file,
-            repo: Some(_),
-        } => Data::File(format!(
+        Request::File { path: file, repo: Some(_) } => Data::File(format!(
             "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n@@ -1,3 +1,4 @@\n # Sill\n-A conversation preview.\n+A place to work with your agents.\n+Files and diffs stay with each session.\n",
             name(file)
         )),
@@ -305,22 +198,13 @@ pub fn files(request: &Request) -> Result<Data, String> {
             root: Some(repo.clone()),
             head: "main".into(),
             entries: vec![
-                discovery::StatusEntry {
-                    path: path("/home/demo/project/README.md"),
-                    status: "M".into(),
-                },
-                discovery::StatusEntry {
-                    path: path("/home/demo/project/src/main.rs"),
-                    status: "?".into(),
-                },
+                discovery::StatusEntry { path: path("/home/demo/project/README.md"), status: "M".into() },
+                discovery::StatusEntry { path: path("/home/demo/project/src/main.rs"), status: "?".into() },
             ],
             summary: "+12 −3  ?1".into(),
             lines: Some(("12".into(), "3".into())),
             counts: if *counts {
-                vec![
-                    (path("/home/demo/project/README.md"), Some((12, 3))),
-                    (path("/home/demo/project/src/main.rs"), Some((3, 0))),
-                ]
+                vec![(path("/home/demo/project/README.md"), Some((12, 3))), (path("/home/demo/project/src/main.rs"), Some((3, 0)))]
             } else {
                 vec![]
             },
@@ -335,11 +219,7 @@ pub fn files(request: &Request) -> Result<Data, String> {
 /// The demo's Changes page: the pinned project's own changes, the session's writes outside it
 /// (one changed on the host meanwhile), and an earlier keep that can be undone.
 pub fn changes() -> Vec<sill_proto::changes::Entry> {
-    let written = (std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-        - 25 * 60)
-        .to_string();
+    let written = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) - 25 * 60).to_string();
     let overlay = |file: &str, kind: &str, conflict: bool| {
         serde_json::json!({"type":"overlay", "session_id":"demo", "title":"witty-willow",
             "ghost": false, "agent_state": false, "path": path(file), "kind": kind,

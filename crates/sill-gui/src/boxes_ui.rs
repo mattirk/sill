@@ -43,11 +43,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             // a window on a saved box names its host in the top bar from the start
-            saved: if current().is_some() {
-                transport::list().map_err(|e| format!("{e:#}"))
-            } else {
-                Ok(BTreeMap::new())
-            },
+            saved: if current().is_some() { transport::list().map_err(|e| format!("{e:#}")) } else { Ok(BTreeMap::new()) },
             address: String::new(),
             name: String::new(),
             binary: String::new(),
@@ -127,13 +123,7 @@ fn open_window(name: Option<&str>) -> Result<(), String> {
 /// other windows' and commands' connections to that host, which a failed add must not end.
 ///
 /// `in_use`: this window works on `host`, so a failed sign-in stays on its band.
-fn add(
-    name: String,
-    host: String,
-    binary: String,
-    prompter: boxlink::Prompter,
-    in_use: bool,
-) -> Result<Added, String> {
+fn add(name: String, host: String, binary: String, prompter: boxlink::Prompter, in_use: bool) -> Result<Added, String> {
     let made = match boxlink::sign_in(&host, Some(prompter)) {
         Ok(made) => made,
         Err(error) => {
@@ -198,9 +188,7 @@ impl App {
                     return Task::none();
                 }
                 if state.saved.as_ref().is_ok_and(|saved| saved.contains_key(&name)) {
-                    state.said = Some(Err(format!(
-                        "A box named {name} is already saved: remove it first, or give this one another name."
-                    )));
+                    state.said = Some(Err(format!("A box named {name} is already saved: remove it first, or give this one another name.")));
                     return Task::none();
                 }
                 let binary = match state.binary.trim() {
@@ -215,10 +203,7 @@ impl App {
                 state.adding = true;
                 state.armed_remove = None;
                 state.said = Some(Ok(format!("Signing in to {host}…")));
-                return blocking(
-                    move || add(name, host, binary, prompter, in_use),
-                    |result| Message::Boxes(Event::Added(result)),
-                );
+                return blocking(move || add(name, host, binary, prompter, in_use), |result| Message::Boxes(Event::Added(result)));
             }
             Event::Added(result) => {
                 state.adding = false;
@@ -265,9 +250,7 @@ impl App {
             }
             Event::Disconnected(name, result) => {
                 state.disconnecting.remove(&name);
-                state.said = Some(result.map(|()| {
-                    format!("Disconnected from {name}: the next window on it signs in again.")
-                }));
+                state.said = Some(result.map(|()| format!("Disconnected from {name}: the next window on it signs in again.")));
             }
             Event::Remove(name) => {
                 if state.armed_remove.as_deref() != Some(name.as_str()) {
@@ -275,11 +258,8 @@ impl App {
                     return Task::none();
                 }
                 state.armed_remove = None;
-                state.said = Some(
-                    transport::remove(&name)
-                        .map(|()| format!("Removed {name}. Its sessions go on running on the box."))
-                        .map_err(|e| format!("{e:#}")),
-                );
+                state.said =
+                    Some(transport::remove(&name).map(|()| format!("Removed {name}. Its sessions go on running on the box.")).map_err(|e| format!("{e:#}")));
                 state.saved = transport::list().map_err(|e| format!("{e:#}"));
             }
         }
@@ -293,11 +273,7 @@ impl App {
         let live = !self.demo;
         let mut rows = Vec::new();
         let local_note = if cfg!(target_os = "macos") { "Sill's own virtual machine" } else { "The daemon on this computer" };
-        rows.push(line(
-            this_machine().to_string(),
-            local_note.to_string(),
-            opener(current.is_none(), live.then(|| event(Event::Open(None)))),
-        ));
+        rows.push(line(this_machine().to_string(), local_note.to_string(), opener(current.is_none(), live.then(|| event(Event::Open(None))))));
         match &state.saved {
             Err(why) => rows.push(note(why.clone(), P.error)),
             Ok(saved) => {
@@ -316,10 +292,7 @@ impl App {
                             if busy { "Disconnecting…" } else { "Disconnect" },
                             (live && !here && !busy).then(|| event(Event::Disconnect(name.clone()))),
                         ),
-                        quiet_button(
-                            if armed { "Remove?" } else { "Remove" },
-                            (live && !here).then(|| event(Event::Remove(name.clone()))),
-                        ),
+                        quiet_button(if armed { "Remove?" } else { "Remove" }, (live && !here).then(|| event(Event::Remove(name.clone()))),),
                     ]
                     .spacing(8)
                     .align_y(Alignment::Center);
@@ -330,10 +303,7 @@ impl App {
         let host = state.address.trim();
         let name_hint = if host.is_empty() { "server".to_string() } else { transport::default_name(host) };
         let field = |label: &'static str, input: Element<'static, Message>| -> Element<'static, Message> {
-            row![text(label).size(style::SMALL).color(P.fg_dim).width(110), input]
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .into()
+            row![text(label).size(style::SMALL).color(P.fg_dim).width(110), input].spacing(8).align_y(Alignment::Center).into()
         };
         let input = |hint: &str, value: &str, on: fn(String) -> Event| -> Element<'static, Message> {
             let mut input = text_input(hint, value).size(style::SMALL).padding(7);
@@ -346,12 +316,7 @@ impl App {
             field("SSH address", input("user@192.168.1.50 or an SSH alias", &state.address, Event::Address)),
             field("Name", input(&name_hint, &state.name, Event::Name)),
             field("Sill on the box", input(DEFAULT_BINARY, &state.binary, Event::Binary)),
-            row![
-                quiet_button(
-                    if state.adding { "Adding…" } else { "Add box" },
-                    (live && !state.adding && !host.is_empty()).then(|| event(Event::Add)),
-                ),
-            ],
+            row![quiet_button(if state.adding { "Adding…" } else { "Add box" }, (live && !state.adding && !host.is_empty()).then(|| event(Event::Add)),),],
         ]
         .spacing(8);
         rows.push(
@@ -381,18 +346,9 @@ impl App {
     /// The top bar's mark of a window on a saved box: its name, opening this card.
     pub(crate) fn box_chip(&self) -> Option<Element<'_, Message>> {
         let name = current()?;
-        let host = self
-            .boxes
-            .saved
-            .as_ref()
-            .ok()
-            .and_then(|saved| saved.get(&name))
-            .map(|t| t.host.clone())
-            .unwrap_or_default();
+        let host = self.boxes.saved.as_ref().ok().and_then(|saved| saved.get(&name)).map(|t| t.host.clone()).unwrap_or_default();
         let chip = crate::keys::press(
-            iced::widget::button(text(name.clone()).size(style::TINY).color(P.accent))
-                .padding([3, 8])
-                .style(style::quiet),
+            iced::widget::button(text(name.clone()).size(style::TINY).color(P.accent)).padding([3, 8]).style(style::quiet),
             event(Event::Show),
         );
         Some(
@@ -419,26 +375,16 @@ fn opener(here: bool, open: Option<Message>) -> Element<'static, Message> {
 /// A row: the box's name over a dim line, its controls on the right.
 fn line<'a>(title: String, sub: String, control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     container(
-        row![
-            column![
-                text(title).size(style::TEXT).color(P.fg),
-                text(sub).size(style::SMALL).color(P.fg_dim),
-            ]
-            .spacing(3)
-            .width(Fill),
-            control.into(),
-        ]
-        .spacing(16)
-        .align_y(Alignment::Center),
+        row![column![text(title).size(style::TEXT).color(P.fg), text(sub).size(style::SMALL).color(P.fg_dim),].spacing(3).width(Fill), control.into(),]
+            .spacing(16)
+            .align_y(Alignment::Center),
     )
     .padding([12, 16])
     .into()
 }
 
 fn note<'a>(said: String, color: iced::Color) -> Element<'a, Message> {
-    Column::new()
-        .push(container(text(said).size(style::SMALL).color(color)).padding([10, 16]))
-        .into()
+    Column::new().push(container(text(said).size(style::SMALL).color(color)).padding([10, 16])).into()
 }
 
 #[cfg(test)]
@@ -464,10 +410,7 @@ mod tests {
     #[test]
     fn a_saved_name_is_not_overwritten_and_remove_asks_twice() {
         let (mut app, _) = App::new(true, None);
-        app.boxes.saved = Ok(BTreeMap::from([(
-            "server".to_string(),
-            BoxTarget { host: "me@server".into(), binary: DEFAULT_BINARY.into(), ssh_config: None },
-        )]));
+        app.boxes.saved = Ok(BTreeMap::from([("server".to_string(), BoxTarget { host: "me@server".into(), binary: DEFAULT_BINARY.into(), ssh_config: None })]));
         let _ = app.boxes_event(Event::Address("me@other".into()));
         let _ = app.boxes_event(Event::Name("server".into()));
         let _ = app.boxes_event(Event::Add);

@@ -52,12 +52,10 @@ impl Probe {
 
 pub(crate) fn find(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(program))
-        .find(|candidate| {
-            use std::os::unix::fs::PermissionsExt;
-            candidate.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })
+    std::env::split_paths(&path).map(|dir| dir.join(program)).find(|candidate| {
+        use std::os::unix::fs::PermissionsExt;
+        candidate.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    })
 }
 
 fn probe_now() -> Probe {
@@ -107,13 +105,7 @@ pub fn scale() -> u32 {
 
 /// `Xft.dpi` from `xrdb -query` (a read of the display's resource database, two seconds at most).
 fn xft_dpi() -> Option<f64> {
-    let mut child = Command::new(find("xrdb")?)
-        .arg("-query")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+    let mut child = Command::new(find("xrdb")?).arg("-query").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
     let deadline = Instant::now() + Duration::from_secs(2);
     while child.try_wait().ok()?.is_none() {
         if Instant::now() > deadline {
@@ -125,10 +117,7 @@ fn xft_dpi() -> Option<f64> {
     }
     let mut out = String::new();
     std::io::Read::read_to_string(child.stdout.as_mut()?, &mut out).ok()?;
-    out.lines()
-        .find_map(|l| l.strip_prefix("Xft.dpi:"))
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .filter(|dpi| *dpi > 0.0)
+    out.lines().find_map(|l| l.strip_prefix("Xft.dpi:")).and_then(|v| v.trim().parse::<f64>().ok()).filter(|dpi| *dpi > 0.0)
 }
 
 /// A running test desktop. Dropping it stops Weston (and its Xwayland and shell) and removes its
@@ -230,8 +219,7 @@ impl Desktop {
         // Weston made it a moment ago: it must be our own socket, not something left in /tmp
         let ours = {
             use std::os::unix::fs::{FileTypeExt, MetadataExt};
-            std::fs::symlink_metadata(&x11_socket)
-                .is_ok_and(|m| m.file_type().is_socket() && m.uid() == rustix::process::getuid().as_raw())
+            std::fs::symlink_metadata(&x11_socket).is_ok_and(|m| m.file_type().is_socket() && m.uid() == rustix::process::getuid().as_raw())
         };
         if !ours {
             let _ = stop_group(&mut child);
@@ -260,10 +248,7 @@ impl Desktop {
 
     /// Host path → jail path of the desktop's two sockets.
     pub fn jail_binds(&self, uid: u32) -> Vec<(PathBuf, PathBuf)> {
-        vec![
-            (self.wayland_socket.clone(), PathBuf::from(format!("/run/user/{uid}/{WAYLAND_SOCKET}"))),
-            (self.x11_socket.clone(), self.x11_socket.clone()),
-        ]
+        vec![(self.wayland_socket.clone(), PathBuf::from(format!("/run/user/{uid}/{WAYLAND_SOCKET}"))), (self.x11_socket.clone(), self.x11_socket.clone())]
     }
 }
 
@@ -356,11 +341,7 @@ fn x11_display(log: &Path) -> Option<u32> {
 /// The last lines of Weston's log, or of what it wrote before logging started.
 fn tail(log: &Path) -> String {
     let text = std::fs::read_to_string(log).unwrap_or_default();
-    let text = if text.trim().is_empty() {
-        std::fs::read_to_string(log.with_file_name("stderr.log")).unwrap_or_default()
-    } else {
-        text
-    };
+    let text = if text.trim().is_empty() { std::fs::read_to_string(log.with_file_name("stderr.log")).unwrap_or_default() } else { text };
     let lines: Vec<&str> = text.lines().rev().take(6).collect();
     let tail: Vec<&str> = lines.into_iter().rev().collect();
     if tail.is_empty() { "no log".into() } else { tail.join(" | ") }

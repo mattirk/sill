@@ -30,10 +30,7 @@ pub enum Route {
     /// On the daemon's host: [`host_login`], then the session starts again.
     Host,
     /// In a terminal of the session's jail: this command and environment.
-    Terminal {
-        argv: Vec<String>,
-        env: BTreeMap<String, String>,
-    },
+    Terminal { argv: Vec<String>, env: BTreeMap<String, String> },
     /// The agent's own `authenticate`, no key.
     Agent,
 }
@@ -42,8 +39,7 @@ pub enum Route {
 /// explicitly choose host execution; a method with a terminal command runs it in the jail;
 /// the rest is the agent's own.
 pub fn route(agent: &Definition, method: &AuthMethod) -> Route {
-    if agent.host_login.contains(&method.method_id)
-    {
+    if agent.host_login.contains(&method.method_id) {
         return Route::Host;
     }
     match &method.terminal {
@@ -71,20 +67,9 @@ pub fn prepare(client: &Client, session_id: &str) -> Result<(Definition, bool)> 
         #[serde(default)]
         policy_changed: bool,
     }
-    let session: Session = client.call(
-        "_sill/sessions.get",
-        SessionKey {
-            session_id: session_id.into(),
-        },
-    )?;
-    let agent: Definition = client
-        .call(
-            "_sill/agents.get",
-            AgentKey {
-                agent_id: session.agent.clone(),
-            },
-        )
-        .with_context(|| format!("reading agent {}", session.agent))?;
+    let session: Session = client.call("_sill/sessions.get", SessionKey { session_id: session_id.into() })?;
+    let agent: Definition =
+        client.call("_sill/agents.get", AgentKey { agent_id: session.agent.clone() }).with_context(|| format!("reading agent {}", session.agent))?;
     anyhow::ensure!(agent.home_paths.is_some(), "agent {} needs directory setup before login", agent.id);
     let restart_first = session.running && session.policy_changed;
     if restart_first {
@@ -97,32 +82,25 @@ pub fn prepare(client: &Client, session_id: &str) -> Result<(Definition, bool)> 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostEvent {
     /// The daemon runs it: the operation [`cancel`] stops.
-    Started { operation_id: String },
+    Started {
+        operation_id: String,
+    },
     Line(String),
     /// A page to open in the person's browser on this machine. When the daemon is on another
     /// machine, the page's loopback callback here is already relayed to it.
-    OpenUrl { url: String },
+    OpenUrl {
+        url: String,
+    },
 }
 
 /// Run `method` of `agent_id` on the daemon's host, telling `progress` what it reports; `Ok`
 /// once the login completed. A lost stream leaves the outcome unknown: an error that says so.
 /// With the daemon on another machine (a box), a page's loopback callback port is relayed from
 /// this machine's loopback for as long as the login runs.
-pub fn host_login(
-    client: &Client,
-    agent_id: &str,
-    method_id: &str,
-    mut progress: impl FnMut(HostEvent),
-) -> Result<()> {
+pub fn host_login(client: &Client, agent_id: &str, method_id: &str, mut progress: impl FnMut(HostEvent)) -> Result<()> {
     use std::io::BufRead;
-    let job: JobStream = client.call(
-        "_sill/agents.login",
-        AgentLogin {
-            operation_id: Some(crate::request_id("login")),
-            agent_id: agent_id.into(),
-            method_id: method_id.into(),
-        },
-    )?;
+    let job: JobStream = client
+        .call("_sill/agents.login", AgentLogin { operation_id: Some(crate::request_id("login")), agent_id: agent_id.into(), method_id: method_id.into() })?;
     let Some(token) = job.token else {
         // a job already known by this identity: its receipt, without its output
         return match job.operation.state {
@@ -148,29 +126,20 @@ pub fn host_login(
         match serde_json::from_str::<Progress>(&line?)? {
             Progress::Completed { .. } => return Ok(()),
             Progress::Failed { message, .. } => bail!("{message}"),
-            Progress::Status { text } | Progress::Stderr { text } | Progress::Output { text } => {
-                progress(HostEvent::Line(text))
-            }
+            Progress::Status { text } | Progress::Stderr { text } | Progress::Output { text } => progress(HostEvent::Line(text)),
             Progress::OpenUrl { url, callback_port } => {
                 relay_callback(client, &mut relays, callback_port, &operation_id)?;
                 progress(HostEvent::OpenUrl { url })
             }
         }
     }
-    bail!(
-        "the login's connection closed before it finished; check whether it worked before trying again"
-    )
+    bail!("the login's connection closed before it finished; check whether it worked before trying again")
 }
 
 /// With the daemon on another machine, relay a login page's loopback `port` here to the daemon
 /// host's, once per port, for as long as `relays` lives. A port in use here cancels the login: its
 /// page could never call back.
-pub(crate) fn relay_callback(
-    client: &Client,
-    relays: &mut Vec<crate::processes::Bridge>,
-    port: Option<u16>,
-    operation_id: &str,
-) -> Result<()> {
+pub(crate) fn relay_callback(client: &Client, relays: &mut Vec<crate::processes::Bridge>, port: Option<u16>, operation_id: &str) -> Result<()> {
     let Some(port) = port else { return Ok(()) };
     let remote = sill_proto::transport::selected().ok().flatten().is_some();
     if !remote || relays.iter().any(|r| r.url().ends_with(&format!(":{port}"))) {
@@ -193,36 +162,27 @@ pub(crate) fn relay_callback(
 fn callback_opener(operation_id: String) -> crate::processes::Opener {
     std::sync::Arc::new(move || {
         let client = Client::connect()?;
-        let opened: sill_proto::host::HostStream = client.call(
-            "_sill/streams.login_callback",
-            sill_proto::host::OperationKey { operation_id: operation_id.clone() },
-        )?;
+        let opened: sill_proto::host::HostStream =
+            client.call("_sill/streams.login_callback", sill_proto::host::OperationKey { operation_id: operation_id.clone() })?;
         sill_proto::transport::open_stream(&opened.token)
     })
 }
 
 /// Stop a running host login (`_sill/operations.cancel`); it fails with code `cancelled`.
 pub fn cancel(client: &Client, operation_id: &str) -> Result<()> {
-    let _: sill_proto::Empty = client.call(
-        "_sill/operations.cancel",
-        sill_proto::host::OperationKey { operation_id: operation_id.into() },
-    )?;
+    let _: sill_proto::Empty = client.call("_sill/operations.cancel", sill_proto::host::OperationKey { operation_id: operation_id.into() })?;
     Ok(())
 }
 
 /// The running login a `busy` refusal of `_sill/agents.login` names, to cancel it by.
 pub fn busy_login(error: &anyhow::Error) -> Option<String> {
     let data = error.downcast_ref::<sill_proto::rpc::Error>()?.data.as_ref()?;
-    (data.get("code")?.as_str()? == "busy")
-        .then(|| data.pointer("/details/operation_id")?.as_str().map(str::to_owned))
-        .flatten()
+    (data.get("code")?.as_str()? == "busy").then(|| data.pointer("/details/operation_id")?.as_str().map(str::to_owned)).flatten()
 }
 
 /// Start the session's jail again, with the login the host wrote bound in.
 pub fn restart(client: &Client, session_id: &str) -> Result<()> {
-    let key = SessionKey {
-        session_id: session_id.into(),
-    };
+    let key = SessionKey { session_id: session_id.into() };
     let _: serde_json::Value = client.call("_sill/sessions.stop", &key)?;
     let _: serde_json::Value = client.call("_sill/sessions.start", &key)?;
     Ok(())
@@ -255,17 +215,10 @@ mod tests {
         assert_eq!(route(&curated, &method("chatgpt", None)), Route::Host);
         assert_eq!(route(&curated, &method("api-key", None)), Route::Agent);
         assert_eq!(
-            route(
-                &curated,
-                &method("claude-ai-login", Some(&["--cli", "auth", "login"]))
-            ),
+            route(&curated, &method("claude-ai-login", Some(&["--cli", "auth", "login"]))),
             Route::Terminal {
-                argv: ["agent", "--acp", "--cli", "auth", "login"]
-                    .map(String::from)
-                    .into(),
-                env: [("A", "1"), ("B", "2")]
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .into(),
+                argv: ["agent", "--acp", "--cli", "auth", "login"].map(String::from).into(),
+                env: [("A", "1"), ("B", "2")].map(|(k, v)| (k.to_string(), v.to_string())).into(),
             }
         );
         // No directory declaration can implicitly grant a host login route.

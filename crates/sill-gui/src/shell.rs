@@ -20,10 +20,7 @@ pub struct Step<'a> {
 
 /// Words that open or continue a compound command: a line with one where a command starts is
 /// not divided.
-const RESERVED: &[&str] = &[
-    "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac",
-    "select", "function", "coproc", "[[",
-];
+const RESERVED: &[&str] = &["if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac", "select", "function", "coproc", "[["];
 
 /// The commands of `line` in the order the shell runs them, or `None` when the line holds
 /// something this does not read.
@@ -51,8 +48,7 @@ pub fn steps(line: &str) -> Option<Vec<Step<'_>>> {
                 }
                 // `! command` and `time command`: the command is still to come
                 command_next = word == b"!" || word == b"time";
-            } else if command_next && byte != b'\n' && byte != b';' && byte != b'&' && byte != b'|'
-            {
+            } else if command_next && byte != b'\n' && byte != b';' && byte != b'&' && byte != b'|' {
                 command_next = false;
             }
         }
@@ -67,10 +63,7 @@ pub fn steps(line: &str) -> Option<Vec<Step<'_>>> {
             b')' => return None,
             b'#' if was_word_start => {
                 // a comment, to the end of its line
-                at = bytes[at..]
-                    .iter()
-                    .position(|b| *b == b'\n')
-                    .map_or(bytes.len(), |end| at + end);
+                at = bytes[at..].iter().position(|b| *b == b'\n').map_or(bytes.len(), |end| at + end);
             }
             b'<' if bytes[at..].starts_with(b"<<<") => at += 3,
             b'<' if bytes[at..].starts_with(b"<<") => return None,
@@ -98,8 +91,7 @@ pub fn steps(line: &str) -> Option<Vec<Step<'_>>> {
                 } else {
                     // a lone `&`: a redirection (`2>&1`, `&>file`) or a job put in the
                     // background, which this leaves on its line
-                    let redirection =
-                        (at > 0 && matches!(bytes[at - 1], b'>' | b'<')) || rest.starts_with(b"&>");
+                    let redirection = (at > 0 && matches!(bytes[at - 1], b'>' | b'<')) || rest.starts_with(b"&>");
                     command_next = !redirection;
                     at += 1;
                 }
@@ -135,10 +127,7 @@ pub fn steps(line: &str) -> Option<Vec<Step<'_>>> {
 
 /// The unquoted word at `at`, to the next blank or operator character.
 fn bare_word(bytes: &[u8], at: usize) -> &[u8] {
-    let end = bytes[at..]
-        .iter()
-        .position(|b| b.is_ascii_whitespace() || b";&|()<>".contains(b))
-        .map_or(bytes.len(), |end| at + end);
+    let end = bytes[at..].iter().position(|b| b.is_ascii_whitespace() || b";&|()<>".contains(b)).map_or(bytes.len(), |end| at + end);
     &bytes[at..end]
 }
 
@@ -229,12 +218,7 @@ mod tests {
     use super::*;
 
     fn texts(line: &str) -> Option<Vec<String>> {
-        steps(line).map(|steps| {
-            steps
-                .iter()
-                .map(|step| format!("{}{}", step.text, step.operator))
-                .collect()
-        })
+        steps(line).map(|steps| steps.iter().map(|step| format!("{}{}", step.text, step.operator)).collect())
     }
 
     fn lines(parts: &[&str]) -> Option<Vec<String>> {
@@ -243,31 +227,15 @@ mod tests {
 
     #[test]
     fn commands_end_where_the_shell_ends_them() {
-        assert_eq!(
-            texts("sed -n 1,2p a && sed -n 3,4p b"),
-            lines(&["sed -n 1,2p a &&", "sed -n 3,4p b"])
-        );
+        assert_eq!(texts("sed -n 1,2p a && sed -n 3,4p b"), lines(&["sed -n 1,2p a &&", "sed -n 3,4p b"]));
         assert_eq!(
             texts("git for-each-ref | head -20; echo \"--- remotes:\"; git remote -v"),
-            lines(&[
-                "git for-each-ref | head -20;",
-                "echo \"--- remotes:\";",
-                "git remote -v"
-            ])
+            lines(&["git for-each-ref | head -20;", "echo \"--- remotes:\";", "git remote -v"])
         );
-        assert_eq!(
-            texts("make || echo failed"),
-            lines(&["make ||", "echo failed"])
-        );
-        assert_eq!(
-            texts("pwd\nls -la\n\ngit status"),
-            lines(&["pwd", "ls -la", "git status"])
-        );
+        assert_eq!(texts("make || echo failed"), lines(&["make ||", "echo failed"]));
+        assert_eq!(texts("pwd\nls -la\n\ngit status"), lines(&["pwd", "ls -la", "git status"]));
         // an operator at the end of a line carries on to the next
-        assert_eq!(
-            texts("cargo build &&\n  cargo test"),
-            lines(&["cargo build &&", "cargo test"])
-        );
+        assert_eq!(texts("cargo build &&\n  cargo test"), lines(&["cargo build &&", "cargo test"]));
         assert_eq!(texts("ls;"), lines(&["ls;"]));
         assert_eq!(texts("a&&b ;c"), lines(&["a&&", "b ;", "c"]));
         assert_eq!(texts("  ls -la  "), lines(&["ls -la"]));
@@ -297,14 +265,8 @@ mod tests {
         ] {
             assert_eq!(texts(whole), lines(&[whole]), "{whole}");
         }
-        assert_eq!(
-            texts("grep \"a;b\" f; sed 's/;/,/' g"),
-            lines(&["grep \"a;b\" f;", "sed 's/;/,/' g"])
-        );
-        assert_eq!(
-            texts("ls # one; two\npwd"),
-            lines(&["ls # one; two", "pwd"])
-        );
+        assert_eq!(texts("grep \"a;b\" f; sed 's/;/,/' g"), lines(&["grep \"a;b\" f;", "sed 's/;/,/' g"]));
+        assert_eq!(texts("ls # one; two\npwd"), lines(&["ls # one; two", "pwd"]));
     }
 
     #[test]
@@ -359,34 +321,22 @@ mod tests {
                 }
                 assert!(!step.text.is_empty(), "{line:?}: an empty step");
             }
-            assert!(
-                line[at..].trim().is_empty(),
-                "{line:?}: text dropped at the end"
-            );
-            let dense =
-                |text: &str| -> String { text.chars().filter(|c| !c.is_whitespace()).collect() };
+            assert!(line[at..].trim().is_empty(), "{line:?}: text dropped at the end");
+            let dense = |text: &str| -> String { text.chars().filter(|c| !c.is_whitespace()).collect() };
             assert_eq!(dense(&joined), dense(line));
         }
         // lines made of the characters that matter to a shell, and a few that do not
         let alphabet: Vec<char> = "ab ;;&&||\n\t'\"`$(){}<>#\\!é→=-".chars().collect();
         let mut seed: u64 = 0x5EED_1E55;
         let mut next = move || {
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             (seed >> 33) as usize
         };
         for _ in 0..20_000 {
-            let line: String = (0..next() % 24)
-                .map(|_| alphabet[next() % alphabet.len()])
-                .collect();
+            let line: String = (0..next() % 24).map(|_| alphabet[next() % alphabet.len()]).collect();
             check(&line);
         }
-        for line in [
-            "Run the tests; then report",
-            "List files in current directory",
-            "sed -n 1,2p a && sed -n 3,4p b ; echo ----; grep x \"a;b\" | head",
-        ] {
+        for line in ["Run the tests; then report", "List files in current directory", "sed -n 1,2p a && sed -n 3,4p b ; echo ----; grep x \"a;b\" | head"] {
             check(line);
         }
     }

@@ -28,8 +28,8 @@ mod procs;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::FromRawFd;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -56,28 +56,52 @@ struct Hello {
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Request {
     /// Start the agent process. Fails if one is running.
-    Spawn { argv: Vec<String>, #[serde(default)] env: BTreeMap<String, String>, cwd: Option<PathBuf> },
+    Spawn {
+        argv: Vec<String>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+        cwd: Option<PathBuf>,
+    },
     Status,
     /// How many frontends the daemon has attached to this session (docs/daemon.md §3.6): the agent
     /// stream is the daemon's and always connected, so this is what "nobody watching" means for
     /// the idle rule; the stream dropping (a dead daemon) still counts as nobody.
-    Attached { frontends: u32 },
+    Attached {
+        frontends: u32,
+    },
     /// SIGTERM the agent's process group, SIGKILL after `grace_ms`.
-    Kill { #[serde(default = "default_grace")] grace_ms: u64 },
+    Kill {
+        #[serde(default = "default_grace")]
+        grace_ms: u64,
+    },
     /// Restore a path from the host view (SPEC §4.4 revert).
-    Revert { path: PathBuf },
+    Revert {
+        path: PathBuf,
+    },
     /// Open a regular image in the jail and return its read-only fd via SCM_RIGHTS.
-    OpenImage { path_bytes: Vec<u8> },
+    OpenImage {
+        path_bytes: Vec<u8>,
+    },
     /// Managed processes (docs/tasks.md §2.4): what the jail's `sill-proc` can do, for the daemon.
     ProcList,
     /// What runs in the jail now, classed (`activity.rs`).
     Activity,
     /// Stop a command tree the agent started (its root's pid, as the activity report names it).
-    StopCommand { pid: u32 },
-    ProcTail { name: String, #[serde(default = "default_lines")] lines: usize },
-    ProcStop { name: String },
+    StopCommand {
+        pid: u32,
+    },
+    ProcTail {
+        name: String,
+        #[serde(default = "default_lines")]
+        lines: usize,
+    },
+    ProcStop {
+        name: String,
+    },
     ProcStopAll,
-    ProcDismiss { name: String },
+    ProcDismiss {
+        name: String,
+    },
     /// Open a pty inside the jail and run `argv` on it (the person's shell, SPEC §3.1). The reply
     /// line carries the pty master as an SCM_RIGHTS fd, so the client must read it with recvmsg.
     OpenPty {
@@ -220,8 +244,7 @@ fn main() -> Result<()> {
     }
     // CLOEXEC alone cannot prevent same-UID children stealing private descriptors with
     // pidfd_getfd or ptrace. Protect the supervisor before any threads or children start.
-    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
-        .context("protect shim descriptors")?;
+    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable).context("protect shim descriptors")?;
     // --forward 127.0.0.1:3128=/.sill/proxy.sock : TCP → Unix forwarder for the session proxy (SPEC §4.8)
     while let Some(i) = args.iter().position(|a| a == "--forward") {
         if i + 1 >= args.len() {
@@ -570,11 +593,7 @@ fn spawn_agent(argv: Vec<String>, env: BTreeMap<String, String>, cwd: Option<Pat
     }
     let Some((prog, rest)) = argv.split_first() else { bail!("empty argv") };
     let mut cmd = Command::new(prog);
-    cmd.args(rest)
-        .envs(&env)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.args(rest).envs(&env).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
@@ -691,9 +710,7 @@ fn idle_monitor(shared: Shared, timeout: std::time::Duration) {
         let idle = {
             let mut st = shared.0.lock().unwrap();
             reap(&mut st);
-            st.child.is_some()
-                && (!st.relay_connected || st.frontends == Some(0))
-                && st.last_activity.map(|t| t.elapsed() >= timeout).unwrap_or(false)
+            st.child.is_some() && (!st.relay_connected || st.frontends == Some(0)) && st.last_activity.map(|t| t.elapsed() >= timeout).unwrap_or(false)
         };
         if idle {
             eprintln!("sill-shim: agent idle for {}s with nobody attached, stopping it", timeout.as_secs());

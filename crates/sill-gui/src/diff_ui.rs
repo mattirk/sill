@@ -20,14 +20,8 @@ pub(crate) fn numbered_diff(source: &str) -> Vec<(Option<usize>, Option<usize>, 
             if !untracked && line.starts_with("@@ ") {
                 let mut words = line.split_whitespace();
                 words.next();
-                let start = |s: &str| {
-                    s.get(1..)
-                        .and_then(|s| s.split(',').next())
-                        .and_then(|s| s.parse().ok())
-                };
-                if let (Some(a), Some(b)) =
-                    (words.next().and_then(start), words.next().and_then(start))
-                {
+                let start = |s: &str| s.get(1..).and_then(|s| s.split(',').next()).and_then(|s| s.parse().ok());
+                if let (Some(a), Some(b)) = (words.next().and_then(start), words.next().and_then(start)) {
                     old = a;
                     new = b;
                     hunk = true;
@@ -64,21 +58,14 @@ pub(crate) fn numbered_diff(source: &str) -> Vec<(Option<usize>, Option<usize>, 
 /// colours, hunk headers in the accent, the file headers bold.
 pub(crate) fn diff_rows<'a>(source: &'a str, path: &str) -> Column<'a, Message> {
     let mono = Font::with_name(crate::fonts::MONO_FAMILY);
-    let bold = Font {
-        weight: iced::font::Weight::Bold,
-        ..mono
-    };
+    let bold = Font { weight: iced::font::Weight::Bold, ..mono };
     let highlighted = crate::syntax::diff(source, path);
     let lines = numbered_diff(source);
     let digits = lines.len().max(1).to_string().len();
     let gutter = style::MONO * 0.62 * digits as f32 + 6.0;
     let mut rows = Column::new();
     for (index, (old, new, line)) in lines.into_iter().enumerate() {
-        let file_header = ["diff ", "--- ", "+++ "]
-            .iter()
-            .any(|p| line.starts_with(p))
-            && old.is_none()
-            && new.is_none();
+        let file_header = ["diff ", "--- ", "+++ "].iter().any(|p| line.starts_with(p)) && old.is_none() && new.is_none();
         let (color, font) = if old.is_none() && new.is_some() {
             (P.success, mono)
         } else if old.is_some() && new.is_none() {
@@ -106,10 +93,7 @@ pub(crate) fn diff_rows<'a>(source: &'a str, path: &str) -> Column<'a, Message> 
         if end < line.len() || spans.is_empty() {
             spans.push(iced::widget::text::Span::new(&line[end..]).color(color));
         }
-        let content = selection::rich_text(spans)
-            .size(style::MONO)
-            .font(font)
-            .style(style::selectable(color));
+        let content = selection::rich_text(spans).size(style::MONO).font(font).style(style::selectable(color));
         let background = if old.is_none() && new.is_some() {
             style::alpha(P.success, 0.08)
         } else if old.is_some() && new.is_none() {
@@ -119,12 +103,7 @@ pub(crate) fn diff_rows<'a>(source: &'a str, path: &str) -> Column<'a, Message> 
         };
         rows = rows.push(
             row![
-                text((index + 1).to_string())
-                    .size(style::MONO)
-                    .font(mono)
-                    .color(P.fg_dim)
-                    .width(gutter)
-                    .align_x(iced::alignment::Horizontal::Right),
+                text((index + 1).to_string()).size(style::MONO).font(mono).color(P.fg_dim).width(gutter).align_x(iced::alignment::Horizontal::Right),
                 container(content).style(style::fill(background)),
             ]
             .spacing(12),

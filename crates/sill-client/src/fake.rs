@@ -16,9 +16,7 @@ pub struct Peer {
 impl Peer {
     /// The next request; it must be `method`.
     pub fn expect(&mut self, method: &str) -> Value {
-        let request = self
-            .next()
-            .unwrap_or_else(|| panic!("no request, expected {method}"));
+        let request = self.next().unwrap_or_else(|| panic!("no request, expected {method}"));
         assert_eq!(request["method"], method, "{request}");
         request
     }
@@ -60,21 +58,13 @@ pub fn pair() -> (Client, Peer) {
     let (socket, peer) = UnixStream::pair().unwrap();
     peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let reader = BufReader::new(peer.try_clone().unwrap());
-    (
-        Client::over(socket).unwrap(),
-        Peer {
-            reader,
-            writer: peer,
-        },
-    )
+    (Client::over(socket).unwrap(), Peer { reader, writer: peer })
 }
 
 /// A connector handing out one prepared client per connection; with none left it fails, as a
 /// daemon that is down does.
 pub fn connector(clients: Vec<Client>) -> crate::Connector {
-    let clients = Arc::new(Mutex::new(
-        clients.into_iter().map(Some).collect::<Vec<_>>(),
-    ));
+    let clients = Arc::new(Mutex::new(clients.into_iter().map(Some).collect::<Vec<_>>()));
     Arc::new(move || {
         let mut all = clients.lock().unwrap();
         match all.iter_mut().find_map(Option::take) {

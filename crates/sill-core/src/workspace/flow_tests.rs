@@ -156,7 +156,10 @@ fn commit_all_commits_the_uncommitted_work_as_the_person() {
     write(&c.path.join("target/big"), "build output\n");
     let before = git(&c.path, &["rev-parse", "HEAD"]);
     assert!(commit_all(&c.path, &c.branch, "Tidy the reader", "Pat Person", "pat@example.org").unwrap());
-    assert_eq!(git(&c.path, &["log", "-1", "--format=%an <%ae>|%cn <%ce>|%s|%P"]), format!("Pat Person <pat@example.org>|Pat Person <pat@example.org>|Tidy the reader|{before}"));
+    assert_eq!(
+        git(&c.path, &["log", "-1", "--format=%an <%ae>|%cn <%ce>|%s|%P"]),
+        format!("Pat Person <pat@example.org>|Pat Person <pat@example.org>|Tidy the reader|{before}")
+    );
     assert_eq!(git(&c.path, &["status", "--porcelain"]), "", "the workspace is clean against its new commit");
     assert_eq!(git(&c.path, &["ls-tree", "-r", "--name-only", "HEAD"]), ".gitignore\nf1.txt\nf2.txt\nnew.txt", "ignored build output is not committed");
     assert!(c.path.join("target/big").exists());

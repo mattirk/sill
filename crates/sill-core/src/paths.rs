@@ -33,7 +33,9 @@ pub fn mask_root(pattern: &str, home: &Path) -> PathBuf {
     let expanded = expand_home(pattern, home);
     let mut root = PathBuf::new();
     for part in expanded.components() {
-        if part.as_os_str().to_string_lossy().contains(['*', '?', '[']) { break; }
+        if part.as_os_str().to_string_lossy().contains(['*', '?', '[']) {
+            break;
+        }
         root.push(part);
     }
     root
@@ -46,9 +48,7 @@ pub fn layer_name(mount_point: &Path) -> std::ffi::OsString {
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     let bytes = mount_point.as_os_str().as_bytes();
     let trimmed = bytes.iter().position(|b| *b != b'/').map(|i| &bytes[i..]).unwrap_or_default();
-    if trimmed.is_empty() { "root".into() } else {
-        std::ffi::OsString::from_vec(trimmed.iter().map(|b| if *b == b'/' { b'%' } else { *b }).collect())
-    }
+    if trimmed.is_empty() { "root".into() } else { std::ffi::OsString::from_vec(trimmed.iter().map(|b| if *b == b'/' { b'%' } else { *b }).collect()) }
 }
 
 /// Whether `child` is `parent` or lies below it.
@@ -60,8 +60,7 @@ pub fn is_under(child: &Path, parent: &Path) -> bool {
 /// including non-UTF-8 suffixes, without interpreting the state base as a glob.
 pub fn is_sill_backup(path: &Path, state_base: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
-    path.strip_prefix(state_base).ok().and_then(|p| p.components().next())
-        .is_some_and(|c| c.as_os_str().as_bytes().starts_with(b"sill.bak-"))
+    path.strip_prefix(state_base).ok().and_then(|p| p.components().next()).is_some_and(|c| c.as_os_str().as_bytes().starts_with(b"sill.bak-"))
 }
 
 /// Enumerate legacy backups at launch; unreadable state must not silently omit masks.
@@ -74,7 +73,9 @@ pub fn sill_backups(state_base: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for entry in entries {
         let path = entry?.path();
-        if is_sill_backup(&path, state_base) { paths.push(path); }
+        if is_sill_backup(&path, state_base) {
+            paths.push(path);
+        }
     }
     paths.sort();
     Ok(paths)

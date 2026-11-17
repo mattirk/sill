@@ -12,8 +12,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
-use objc2::{AnyThread, DefinedClass};
 use objc2::rc::Retained;
+use objc2::{AnyThread, DefinedClass};
 use objc2_foundation::{NSArray, NSData, NSError, NSObject, NSObjectProtocol, NSString, NSURL};
 use objc2_virtualization::*;
 
@@ -86,7 +86,10 @@ objc2::define_class!(
             let accept = self.ivars().accept.clone();
             let spawned = std::thread::Builder::new()
                 .name("sill-vm-accepted".into())
-                .spawn(move || { let _permit = permit; accept(stream); })
+                .spawn(move || {
+                    let _permit = permit;
+                    accept(stream);
+                })
                 .is_ok();
             objc2::runtime::Bool::new(spawned)
         }
@@ -97,8 +100,7 @@ struct ConnectionPermit(Arc<std::sync::atomic::AtomicUsize>);
 impl ConnectionPermit {
     #[allow(deprecated)] // fetch_update supports our Rust 1.90 minimum; try_update is newer.
     fn acquire(active: Arc<std::sync::atomic::AtomicUsize>) -> Option<Self> {
-        active.fetch_update(std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire, |n| (n < 32).then_some(n + 1)).ok()?;
+        active.fetch_update(std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire, |n| (n < 32).then_some(n + 1)).ok()?;
         Some(Self(active))
     }
 }
@@ -146,13 +148,7 @@ impl Vm {
         queue.exec_sync(move || {
             let (configuration, bound, out) = (&configuration, &bound, &out);
             // SAFETY: the machine is made on, and bound to, this queue
-            let machine = unsafe {
-                VZVirtualMachine::initWithConfiguration_queue(
-                    VZVirtualMachine::alloc(),
-                    &configuration.0,
-                    &bound.0,
-                )
-            };
+            let machine = unsafe { VZVirtualMachine::initWithConfiguration_queue(VZVirtualMachine::alloc(), &configuration.0, &bound.0) };
             let done = RcBlock::new(move |error: *mut NSError| {
                 // SAFETY: the framework passes a valid error or none
                 let _ = tx.send(unsafe { error.as_ref() }.map(said));
@@ -169,12 +165,7 @@ impl Vm {
             Ok(Some(error)) => bail!("the VM did not start: {error}"),
             Err(_) => bail!("the VM did not start within {} s", WAIT.as_secs()),
         }
-        Ok(Self {
-            machine: OnQueue(machine),
-            queue,
-            _lock: lock,
-            listeners: std::sync::Mutex::new(Vec::new()),
-        })
+        Ok(Self { machine: OnQueue(machine), queue, _lock: lock, listeners: std::sync::Mutex::new(Vec::new()) })
     }
 
     pub fn state(&self) -> State {
@@ -262,25 +253,19 @@ impl Vm {
             };
             // SAFETY: the configuration's only socket device is a virtio one
             let device: Retained<VZVirtioSocketDevice> = unsafe { Retained::cast_unchecked(device) };
-            let done = RcBlock::new(
-                move |connection: *mut VZVirtioSocketConnection, error: *mut NSError| {
-                    // SAFETY: the framework passes a valid connection or a valid error
-                    let result = match unsafe { (connection.as_ref(), error.as_ref()) } {
-                        (Some(connection), _) => {
-                            // the connection closes its own descriptor when it goes: keep a copy
-                            let fd = unsafe { libc::dup(connection.fileDescriptor()) };
-                            if fd < 0 {
-                                Err(std::io::Error::last_os_error().to_string())
-                            } else {
-                                Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-                            }
-                        }
-                        (None, Some(error)) => Err(said(error)),
-                        (None, None) => Err("no connection".into()),
-                    };
-                    let _ = tx.send(result);
-                },
-            );
+            let done = RcBlock::new(move |connection: *mut VZVirtioSocketConnection, error: *mut NSError| {
+                // SAFETY: the framework passes a valid connection or a valid error
+                let result = match unsafe { (connection.as_ref(), error.as_ref()) } {
+                    (Some(connection), _) => {
+                        // the connection closes its own descriptor when it goes: keep a copy
+                        let fd = unsafe { libc::dup(connection.fileDescriptor()) };
+                        if fd < 0 { Err(std::io::Error::last_os_error().to_string()) } else { Ok(unsafe { OwnedFd::from_raw_fd(fd) }) }
+                    }
+                    (None, Some(error)) => Err(said(error)),
+                    (None, None) => Err("no connection".into()),
+                };
+                let _ = tx.send(result);
+            });
             // SAFETY: on the machine's queue
             unsafe { device.connectToPort_completionHandler(port, &done) };
         });
@@ -313,8 +298,7 @@ impl Vm {
             unsafe {
                 let devices = machine.0.directorySharingDevices();
                 *out.0 = if slot < devices.count() {
-                    let device: Retained<VZVirtioFileSystemDevice> =
-                        Retained::cast_unchecked(devices.objectAtIndex(slot));
+                    let device: Retained<VZVirtioFileSystemDevice> = Retained::cast_unchecked(devices.objectAtIndex(slot));
                     device.setShare(share.0.as_deref());
                     Ok(())
                 } else {
@@ -388,22 +372,20 @@ pub fn serve_ssh(vm: Arc<Vm>, path: &Path) -> Result<std::thread::JoinHandle<()>
     let listener = UnixListener::bind(path).with_context(|| path.display().to_string())?;
     std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     let path = path.to_path_buf();
-    Ok(std::thread::Builder::new()
-        .name("sill-vm-ssh".into())
-        .spawn(move || {
-            for client in listener.incoming() {
-                let Ok(client) = client else { continue };
-                if Arc::strong_count(&vm) == 1 && vm.state() == State::Stopped {
-                    break;
-                }
-                let guest = match vm.connect(crate::SSH_PORT) {
-                    Ok(guest) => guest,
-                    Err(_) => continue, // the client sees its connection close
-                };
-                relay(client, guest);
+    Ok(std::thread::Builder::new().name("sill-vm-ssh".into()).spawn(move || {
+        for client in listener.incoming() {
+            let Ok(client) = client else { continue };
+            if Arc::strong_count(&vm) == 1 && vm.state() == State::Stopped {
+                break;
             }
-            let _ = std::fs::remove_file(path);
-        })?)
+            let guest = match vm.connect(crate::SSH_PORT) {
+                Ok(guest) => guest,
+                Err(_) => continue, // the client sees its connection close
+            };
+            relay(client, guest);
+        }
+        let _ = std::fs::remove_file(path);
+    })?)
 }
 
 /// Carry bytes both ways until either side is done.
@@ -427,12 +409,8 @@ fn relay(a: UnixStream, b: UnixStream) {
     let (Ok(a2), Ok(b2)) = (a.try_clone(), b.try_clone()) else {
         return;
     };
-    let _ = std::thread::Builder::new()
-        .name("sill-vm-relay".into())
-        .spawn(pair(a, b2));
-    let _ = std::thread::Builder::new()
-        .name("sill-vm-relay".into())
-        .spawn(pair(b, a2));
+    let _ = std::thread::Builder::new().name("sill-vm-relay".into()).spawn(pair(a, b2));
+    let _ = std::thread::Builder::new().name("sill-vm-relay".into()).spawn(pair(b, a2));
 }
 
 /// The directory is this process's VM: a second process starting the same disks is refused here,
@@ -440,11 +418,7 @@ fn relay(a: UnixStream, b: UnixStream) {
 fn lock(dir: &Path) -> Result<std::fs::File> {
     use std::os::fd::AsRawFd;
     std::fs::create_dir_all(dir)?;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join("lock"))?;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("lock"))?;
     // SAFETY: a valid descriptor
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         bail!("the VM in {} is already running", dir.display());
@@ -507,10 +481,7 @@ fn configuration(config: &Config) -> Result<Retained<VZVirtualMachineConfigurati
                 VZDiskImageSynchronizationMode::Full,
             )
             .map_err(|e| anyhow!("{}: {}", path.display(), said(&e)))?;
-            let device = VZVirtioBlockDeviceConfiguration::initWithAttachment(
-                VZVirtioBlockDeviceConfiguration::alloc(),
-                &attachment,
-            );
+            let device = VZVirtioBlockDeviceConfiguration::initWithAttachment(VZVirtioBlockDeviceConfiguration::alloc(), &attachment);
             if let Some(id) = id {
                 device.setBlockDeviceIdentifier(&NSString::from_str(id));
             }
@@ -536,12 +507,8 @@ fn configuration(config: &Config) -> Result<Retained<VZVirtualMachineConfigurati
         net.setMACAddress(&mac);
 
         let console = VZVirtioConsoleDeviceSerialPortConfiguration::new();
-        let log = VZFileSerialPortAttachment::initWithURL_append_error(
-            VZFileSerialPortAttachment::alloc(),
-            &url(&dir.join("console.log")),
-            false,
-        )
-        .map_err(|e| anyhow!("{}", said(&e)))?;
+        let log = VZFileSerialPortAttachment::initWithURL_append_error(VZFileSerialPortAttachment::alloc(), &url(&dir.join("console.log")), false)
+            .map_err(|e| anyhow!("{}", said(&e)))?;
         console.setAttachment(Some(&log));
 
         let machine = VZVirtualMachineConfiguration::new();
@@ -564,15 +531,9 @@ fn configuration(config: &Config) -> Result<Retained<VZVirtualMachineConfigurati
             })
             .collect();
         machine.setDirectorySharingDevices(&NSArray::from_retained_slice(&slots));
-        machine.setSocketDevices(&NSArray::from_retained_slice(&[Retained::into_super(
-            VZVirtioSocketDeviceConfiguration::new(),
-        )]));
-        machine.setEntropyDevices(&NSArray::from_retained_slice(&[Retained::into_super(
-            VZVirtioEntropyDeviceConfiguration::new(),
-        )]));
-        machine
-            .validateWithError()
-            .map_err(|e| anyhow!("the VM's configuration: {}", said(&e)))?;
+        machine.setSocketDevices(&NSArray::from_retained_slice(&[Retained::into_super(VZVirtioSocketDeviceConfiguration::new())]));
+        machine.setEntropyDevices(&NSArray::from_retained_slice(&[Retained::into_super(VZVirtioEntropyDeviceConfiguration::new())]));
+        machine.validateWithError().map_err(|e| anyhow!("the VM's configuration: {}", said(&e)))?;
         Ok(machine)
     }
 }
@@ -582,8 +543,7 @@ fn mac_address(path: &Path) -> Result<Retained<VZMACAddress>> {
     // SAFETY: the framework's address, from its own string form or new
     unsafe {
         if let Ok(text) = std::fs::read_to_string(path)
-            && let Some(address) =
-                VZMACAddress::initWithString(VZMACAddress::alloc(), &NSString::from_str(text.trim()))
+            && let Some(address) = VZMACAddress::initWithString(VZMACAddress::alloc(), &NSString::from_str(text.trim()))
         {
             return Ok(address);
         }
@@ -598,10 +558,7 @@ fn identity(path: &Path) -> Result<Retained<VZGenericMachineIdentifier>> {
     // SAFETY: the framework's identifier, from its own data representation or new
     unsafe {
         if let Ok(bytes) = std::fs::read(path)
-            && let Some(id) = VZGenericMachineIdentifier::initWithDataRepresentation(
-                VZGenericMachineIdentifier::alloc(),
-                &NSData::with_bytes(&bytes),
-            )
+            && let Some(id) = VZGenericMachineIdentifier::initWithDataRepresentation(VZGenericMachineIdentifier::alloc(), &NSData::with_bytes(&bytes))
         {
             return Ok(id);
         }

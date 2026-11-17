@@ -18,10 +18,7 @@ const MACOS_MAJOR: u32 = 13;
 pub fn check(dir: &Path) -> Vec<Problem> {
     let mut problems = Vec::new();
     if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        problems.push(Problem {
-            what: "Sill needs a Mac with Apple silicon (M1 or later).".into(),
-            fix: "Use Sill on such a Mac, or on Linux.".into(),
-        });
+        problems.push(Problem { what: "Sill needs a Mac with Apple silicon (M1 or later).".into(), fix: "Use Sill on such a Mac, or on Linux.".into() });
         return problems;
     }
     if let Some(major) = macos_major()
@@ -43,10 +40,7 @@ pub fn check(dir: &Path) -> Vec<Problem> {
         && bytes < MEMORY_GB << 30
     {
         problems.push(Problem {
-            what: format!(
-                "Sill needs a Mac with at least {MEMORY_GB} GB of memory; this one has {} GB.",
-                bytes >> 30
-            ),
+            what: format!("Sill needs a Mac with at least {MEMORY_GB} GB of memory; this one has {} GB.", bytes >> 30),
             fix: "Use Sill on a Mac with more memory.".into(),
         });
     }
@@ -54,10 +48,7 @@ pub fn check(dir: &Path) -> Vec<Problem> {
         && free < DISK_GB << 30
     {
         problems.push(Problem {
-            what: format!(
-                "Sill needs {DISK_GB} GB of free disk space; {} GB is free.",
-                free >> 30
-            ),
+            what: format!("Sill needs {DISK_GB} GB of free disk space; {} GB is free.", free >> 30),
             fix: "Free some space, for example by emptying the Trash.".into(),
         });
     }
@@ -74,21 +65,11 @@ fn macos_major() -> Option<u32> {
     let mut buf = [0u8; 32];
     let mut len = buf.len();
     // SAFETY: a valid name, and a buffer with its length
-    let ok = unsafe {
-        libc::sysctlbyname(
-            c"kern.osproductversion".as_ptr(),
-            buf.as_mut_ptr().cast(),
-            &mut len,
-            std::ptr::null_mut(),
-            0,
-        )
-    } == 0;
+    let ok = unsafe { libc::sysctlbyname(c"kern.osproductversion".as_ptr(), buf.as_mut_ptr().cast(), &mut len, std::ptr::null_mut(), 0) } == 0;
     if !ok {
         return None;
     }
-    let text = std::str::from_utf8(&buf[..len])
-        .ok()?
-        .trim_end_matches('\0');
+    let text = std::str::from_utf8(&buf[..len]).ok()?.trim_end_matches('\0');
     text.split('.').next()?.parse().ok()
 }
 
@@ -97,15 +78,7 @@ fn sysctl_u64(name: &std::ffi::CStr) -> Option<u64> {
     let mut value = 0u64;
     let mut len = std::mem::size_of::<u64>();
     // SAFETY: a valid name, and room for a u64
-    let ok = unsafe {
-        libc::sysctlbyname(
-            name.as_ptr(),
-            (&mut value as *mut u64).cast(),
-            &mut len,
-            std::ptr::null_mut(),
-            0,
-        )
-    } == 0;
+    let ok = unsafe { libc::sysctlbyname(name.as_ptr(), (&mut value as *mut u64).cast(), &mut len, std::ptr::null_mut(), 0) } == 0;
     ok.then_some(value)
 }
 

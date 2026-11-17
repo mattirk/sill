@@ -71,7 +71,10 @@ impl std::fmt::Display for Unavailable {
         let Self { host, detail, .. } = self;
         match self.problem {
             Problem::SignIn => write!(f, "box {host} needs a sign-in ({detail}): use Sign in in the window, or run `sill box add {host}` in a terminal"),
-            Problem::HostKey => write!(f, "SSH does not trust the host key of box {host} ({detail}): sign in to answer SSH's question, or check it with `ssh {host}` in a terminal; nothing retries by itself"),
+            Problem::HostKey => write!(
+                f,
+                "SSH does not trust the host key of box {host} ({detail}): sign in to answer SSH's question, or check it with `ssh {host}` in a terminal; nothing retries by itself"
+            ),
             Problem::Offline | Problem::Other => {
                 write!(f, "box {host} is unreachable ({detail})")?;
                 match self.retry_in {
@@ -139,7 +142,10 @@ fn show(host: &str, change: impl FnOnce(&mut Shown)) {
 impl Link {
     fn connected(&mut self, host: &str) {
         *self = Link { verified: Some(Instant::now()), ..Link::default() };
-        show(host, |s| { s.problem = None; s.retry_at = None; });
+        show(host, |s| {
+            s.problem = None;
+            s.retry_at = None;
+        });
     }
 
     fn failed(&mut self, host: &str, problem: Problem, detail: String) -> anyhow::Error {
@@ -155,14 +161,19 @@ impl Link {
         };
         self.problem = Some((problem, detail));
         let (problem, retry_at) = (self.problem.clone(), self.retry_at);
-        show(host, |s| { s.problem = problem; s.retry_at = retry_at; });
+        show(host, |s| {
+            s.problem = problem;
+            s.retry_at = retry_at;
+        });
         self.unavailable(host)
     }
 
     fn unavailable(&self, host: &str) -> anyhow::Error {
         let (problem, detail) = self.problem.clone().unwrap_or((Problem::Other, "no shared SSH connection".into()));
         anyhow::Error::new(Unavailable {
-            host: host.to_string(), problem, detail,
+            host: host.to_string(),
+            problem,
+            detail,
             retry_in: self.retry_at.map(|at| at.saturating_duration_since(Instant::now())),
         })
     }
@@ -181,11 +192,7 @@ pub fn status() -> Option<Status> {
     let now = Instant::now();
     SHOWN.lock().unwrap().iter().find_map(|(host, shown)| {
         let (problem, detail) = shown.problem.clone()?;
-        Some(Status {
-            host: host.clone(), problem, detail,
-            retry_in: shown.retry_at.map(|at| at.saturating_duration_since(now)),
-            signing_in: shown.signing_in,
-        })
+        Some(Status { host: host.clone(), problem, detail, retry_in: shown.retry_at.map(|at| at.saturating_duration_since(now)), signing_in: shown.signing_in })
     })
 }
 
@@ -195,7 +202,9 @@ pub fn status() -> Option<Status> {
 pub fn ensure(host: &str) -> Result<()> {
     let link = link(host);
     let mut link = link.lock().unwrap();
-    if link.verified.is_some_and(|at| at.elapsed() < FRESH) { return Ok(()); }
+    if link.verified.is_some_and(|at| at.elapsed() < FRESH) {
+        return Ok(());
+    }
     if check(host)? {
         link.connected(host);
         return Ok(());
@@ -213,7 +222,10 @@ pub fn ensure(host: &str) -> Result<()> {
         return Ok(());
     }
     match start_master(host, Mode::Batch) {
-        Ok(()) => { link.connected(host); Ok(()) }
+        Ok(()) => {
+            link.connected(host);
+            Ok(())
+        }
         Err((problem, detail)) => Err(link.failed(host, problem, detail)),
     }
 }
@@ -231,9 +243,15 @@ pub fn sign_in(host: &str, prompter: Option<Prompter>) -> Result<bool> {
             link.connected(host);
             return Ok(false);
         }
-        let mode = match prompter { Some(prompter) => Mode::Ask(prompter), None => Mode::Terminal };
+        let mode = match prompter {
+            Some(prompter) => Mode::Ask(prompter),
+            None => Mode::Terminal,
+        };
         match start_master(host, mode) {
-            Ok(()) => { link.connected(host); Ok(true) }
+            Ok(()) => {
+                link.connected(host);
+                Ok(true)
+            }
             Err((problem, detail)) => Err(link.failed(host, problem, detail)),
         }
     })();
@@ -257,7 +275,9 @@ pub fn session_failed(host: &str, said: &str) {
     let link = link(host);
     let mut link = link.lock().unwrap();
     link.verified = None;
-    if check(host).unwrap_or(false) { return; }
+    if check(host).unwrap_or(false) {
+        return;
+    }
     if let Some(problem) = classify(said) {
         let _ = link.failed(host, problem, last_line(said));
     }
@@ -278,8 +298,11 @@ pub fn disconnect(host: &str) -> Result<()> {
 /// rebuilt master needs the person.
 pub fn unattended(host: &str) -> Result<bool> {
     let mut command = crate::transport::ssh_program(host);
-    command.args(["-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ConnectTimeout=10", "--", host, "true"])
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    command
+        .args(["-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ConnectTimeout=10", "--", host, "true"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     let mut child = command.spawn().context("starting ssh")?;
     Ok(wait(&mut child, Some(BATCH_DEADLINE), None).is_some_and(|status| status.success()))
 }
@@ -305,9 +328,14 @@ fn control(host: &str) -> Result<Command> {
 }
 
 fn check(host: &str) -> Result<bool> {
-    Ok(control(host)?.args(["-O", "check", "--", host])
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-        .status().context("starting ssh")?.success())
+    Ok(control(host)?
+        .args(["-O", "check", "--", host])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("starting ssh")?
+        .success())
 }
 
 /// One master start at a time across processes (a window and a CLI command, two windows).
@@ -330,14 +358,32 @@ enum Mode {
 fn start_master(host: &str, mode: Mode) -> Result<(), (Problem, String)> {
     let other = |e: anyhow::Error| (Problem::Other, format!("{e:#}"));
     let mut command = control(host).map_err(other)?;
-    command.args(["-T", "-o", "ControlMaster=yes", "-o", &format!("ControlPersist={PERSIST_SECS}"),
-        "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=8",
-        "-o", if matches!(mode, Mode::Batch) { "BatchMode=yes" } else { "BatchMode=no" }]);
+    command.args([
+        "-T",
+        "-o",
+        "ControlMaster=yes",
+        "-o",
+        &format!("ControlPersist={PERSIST_SECS}"),
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=8",
+        "-o",
+        if matches!(mode, Mode::Batch) { "BatchMode=yes" } else { "BatchMode=no" },
+    ]);
     command.args(["--", host, "true"]);
     if matches!(mode, Mode::Terminal) {
-        let status = command.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
-            .status().map_err(|e| other(anyhow::Error::new(e).context("starting ssh")))?;
-        if !status.success() { return Err((Problem::Other, format!("SSH authentication or connection failed ({status}); see SSH's message above"))); }
+        let status = command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(|e| other(anyhow::Error::new(e).context("starting ssh")))?;
+        if !status.success() {
+            return Err((Problem::Other, format!("SSH authentication or connection failed ({status}); see SSH's message above")));
+        }
         return verify(host);
     }
     // stderr to a file, not a pipe: nothing can keep a pipe's end open behind our back
@@ -383,7 +429,9 @@ fn verify(host: &str) -> Result<(), (Problem, String)> {
 fn wait(child: &mut Child, deadline: Option<Duration>, cancelled: Option<&AtomicBool>) -> Option<std::process::ExitStatus> {
     let deadline = deadline.map(|d| Instant::now() + d);
     loop {
-        if let Ok(Some(status)) = child.try_wait() { return Some(status); }
+        if let Ok(Some(status)) = child.try_wait() {
+            return Some(status);
+        }
         if deadline.is_some_and(|at| Instant::now() >= at) || cancelled.is_some_and(|c| c.load(Ordering::Acquire)) {
             let _ = child.kill();
             let _ = child.wait();
@@ -400,8 +448,20 @@ pub fn classify(said: &str) -> Option<Problem> {
         Some(Problem::HostKey)
     } else if has(&["Permission denied", "Too many authentication failures", "No more authentication methods", "passphrase", "Authentication failed"]) {
         Some(Problem::SignIn)
-    } else if has(&["Connection timed out", "Connection refused", "No route to host", "Network is unreachable", "Could not resolve hostname",
-        "Connection closed by", "Connection reset", "kex_exchange_identification", "Broken pipe", "Operation timed out", "Timeout, server", "timed out"]) {
+    } else if has(&[
+        "Connection timed out",
+        "Connection refused",
+        "No route to host",
+        "Network is unreachable",
+        "Could not resolve hostname",
+        "Connection closed by",
+        "Connection reset",
+        "kex_exchange_identification",
+        "Broken pipe",
+        "Operation timed out",
+        "Timeout, server",
+        "timed out",
+    ]) {
         Some(Problem::Offline)
     } else {
         None
@@ -462,18 +522,24 @@ impl Asking {
         let (stopped, host) = (stop.clone(), host.to_string());
         std::thread::Builder::new().name("sill-askpass".into()).spawn(move || {
             for stream in listener.incoming() {
-                if stopped.load(Ordering::Acquire) { break; }
+                if stopped.load(Ordering::Acquire) {
+                    break;
+                }
                 let Ok(stream) = stream else { continue };
                 let (prompter, cancelled, host) = (prompter.clone(), cancelled.clone(), host.clone());
                 let _ = std::thread::Builder::new().name("sill-askpass-question".into()).spawn(move || {
                     let mut line = String::new();
                     let Ok(mut writer) = stream.try_clone() else { return };
-                    if BufReader::new(stream).read_line(&mut line).is_err() { return; }
+                    if BufReader::new(stream).read_line(&mut line).is_err() {
+                        return;
+                    }
                     let Ok(mut prompt) = serde_json::from_str::<Prompt>(&line) else { return };
                     prompt.host = host;
                     // one Cancel ends the sign-in: SSH would otherwise ask for the next method
                     let answer = if cancelled.load(Ordering::Acquire) { None } else { prompter(prompt.clone()) };
-                    if answer.is_none() && prompt.kind != PromptKind::Notice { cancelled.store(true, Ordering::Release); }
+                    if answer.is_none() && prompt.kind != PromptKind::Notice {
+                        cancelled.store(true, Ordering::Release);
+                    }
                     if let Ok(mut reply) = serde_json::to_vec(&Answer { answer }) {
                         reply.push(b'\n');
                         let _ = writer.write_all(&reply);
@@ -539,7 +605,10 @@ mod tests {
         assert_eq!(classify("ssh: connect to host 10.0.0.140 port 22: No route to host"), Some(Problem::Offline));
         assert_eq!(classify("ssh: Could not resolve hostname box: Name or service not known"), Some(Problem::Offline));
         assert_eq!(classify("@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @\nHost key verification failed."), Some(Problem::HostKey));
-        assert_eq!(classify("No ED25519 host key is known for 10.0.0.140 and you have requested strict checking.\nHost key verification failed."), Some(Problem::HostKey));
+        assert_eq!(
+            classify("No ED25519 host key is known for 10.0.0.140 and you have requested strict checking.\nHost key verification failed."),
+            Some(Problem::HostKey)
+        );
         assert_eq!(classify("sh: 1: sill: not found"), None);
         assert_eq!(last_line("Warning: something\nbox: Permission denied (publickey).\n\n"), "box: Permission denied (publickey).");
     }

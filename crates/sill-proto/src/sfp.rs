@@ -1,10 +1,13 @@
 //! SFP conversation records. These are independent of ACP and of the stored transcript format.
-use std::collections::BTreeMap;
-use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct Cursor { pub session_id: String, pub seq: String }
+pub struct Cursor {
+    pub session_id: String,
+    pub seq: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionState {
@@ -52,14 +55,23 @@ pub struct AgentCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct ControlChoice { pub value: String, pub title: String }
+pub struct ControlChoice {
+    pub value: String,
+    pub title: String,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum ControlValue { Id { value: String }, Boolean { value: bool } }
+pub enum ControlValue {
+    Id { value: String },
+    Boolean { value: bool },
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ControlOption {
-    pub option_id: String, pub title: String, pub category: String,
-    pub value: ControlValue, pub choices: Vec<ControlChoice>,
+    pub option_id: String,
+    pub title: String,
+    pub category: String,
+    pub value: ControlValue,
+    pub choices: Vec<ControlChoice>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionControls {
@@ -68,23 +80,39 @@ pub struct SessionControls {
     pub status: String,
     #[serde(default)]
     pub error: Option<String>,
-    pub current_mode: Option<String>, pub modes: Vec<ControlChoice>, pub options: Vec<ControlOption>,
+    pub current_mode: Option<String>,
+    pub modes: Vec<ControlChoice>,
+    pub options: Vec<ControlOption>,
 }
-fn controls_ready() -> String { "ready".into() }
+fn controls_ready() -> String {
+    "ready".into()
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct Authentication { pub message: String, pub methods: Vec<AuthMethod> }
+pub struct Authentication {
+    pub message: String,
+    pub methods: Vec<AuthMethod>,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AuthMethod {
-    pub method_id: String, pub title: String, pub description: Option<String>, pub terminal: Option<AuthTerminal>,
+    pub method_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub terminal: Option<AuthTerminal>,
     /// The method takes an API key the person types: the provider the agent names (`google`,
     /// `openai`), empty when it names none. Send it with `authenticate`'s `api_key`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct AuthTerminal { pub args: Vec<String>, pub env: BTreeMap<String, String> }
+pub struct AuthTerminal {
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct Usage { pub used: String, pub size: String }
+pub struct Usage {
+    pub used: String,
+    pub size: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Content {
@@ -142,7 +170,11 @@ pub struct ItemPatch {
     #[schemars(with = "Tool")]
     pub tool: Option<Tool>,
 }
-fn present<'de, D, T>(d: D) -> Result<Option<T>, D::Error> where D: serde::Deserializer<'de>, T: Deserialize<'de> {
+fn present<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
     T::deserialize(d).map(Some)
 }
 
@@ -161,7 +193,10 @@ pub struct Turn {
     pub purpose: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct Reason { pub code: String, pub message: String }
+pub struct Reason {
+    pub code: String,
+    pub message: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -205,12 +240,23 @@ pub struct Submission {
     pub purpose: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct SubmissionKey { pub session_id: String, pub submission_id: String }
+pub struct SubmissionKey {
+    pub session_id: String,
+    pub submission_id: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct PermissionOption { pub option_id: String, pub title: String, pub kind: String }
+pub struct PermissionOption {
+    pub option_id: String,
+    pub title: String,
+    pub kind: String,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct Choice { pub value: String, pub title: String, pub description: String }
+pub struct Choice {
+    pub value: String,
+    pub title: String,
+    pub description: String,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FormField {
     pub key: String,
@@ -260,14 +306,22 @@ pub struct AnswerQuestion {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum Event {
-    #[serde(rename = "item.created")] ItemCreated { item: Item },
-    #[serde(rename = "item.patched")] ItemPatched { item_id: String, set: ItemPatch },
-    #[serde(rename = "item.text_appended")] ItemTextAppended { item_id: String, block_id: String, text: String },
-    #[serde(rename = "item.removed")] ItemRemoved { item_id: String, reason: Reason },
-    #[serde(rename = "session.updated")] SessionUpdated { session: SessionState },
-    #[serde(rename = "turn.updated")] TurnUpdated { turn: Turn },
-    #[serde(rename = "submission.updated")] SubmissionUpdated { submission: Submission },
-    #[serde(rename = "question.updated")] QuestionUpdated { question: Question },
+    #[serde(rename = "item.created")]
+    ItemCreated { item: Item },
+    #[serde(rename = "item.patched")]
+    ItemPatched { item_id: String, set: ItemPatch },
+    #[serde(rename = "item.text_appended")]
+    ItemTextAppended { item_id: String, block_id: String, text: String },
+    #[serde(rename = "item.removed")]
+    ItemRemoved { item_id: String, reason: Reason },
+    #[serde(rename = "session.updated")]
+    SessionUpdated { session: SessionState },
+    #[serde(rename = "turn.updated")]
+    TurnUpdated { turn: Turn },
+    #[serde(rename = "submission.updated")]
+    SubmissionUpdated { submission: Submission },
+    #[serde(rename = "question.updated")]
+    QuestionUpdated { question: Question },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -279,7 +333,10 @@ pub enum Record {
     Question { question: Question },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct StoredEvent { pub seq: String, pub event: Event }
+pub struct StoredEvent {
+    pub seq: String,
+    pub event: Event,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionEvent {
     pub session_id: String,
@@ -288,7 +345,11 @@ pub struct SessionEvent {
     pub event: Event,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Attach { pub session_id: String, #[serde(default)] pub since: Option<Cursor> }
+pub struct Attach {
+    pub session_id: String,
+    #[serde(default)]
+    pub since: Option<Cursor>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum Attached {
@@ -296,12 +357,22 @@ pub enum Attached {
     Snapshot { subscription_id: String, snapshot: SnapshotLease },
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SnapshotLease { pub token: String, pub at: Cursor, pub expires_at: String }
+pub struct SnapshotLease {
+    pub token: String,
+    pub at: Cursor,
+    pub expires_at: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SnapshotRequest { pub token: String, #[serde(default)] pub page: Option<String> }
+pub struct SnapshotRequest {
+    pub token: String,
+    #[serde(default)]
+    pub page: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SnapshotPage {
-    pub at: Cursor, pub records: Vec<Record>, pub next_page: Option<String>,
+    pub at: Cursor,
+    pub records: Vec<Record>,
+    pub next_page: Option<String>,
     /// A large record's JSON is delivered in consecutive UTF-8 fragments. No ordinary
     /// records are interleaved. Concatenate through `last` before decoding the record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -310,49 +381,89 @@ pub struct SnapshotPage {
     pub expires_at: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct RecordFragment { pub record: String, pub offset: String, pub json: String, pub last: bool }
+pub struct RecordFragment {
+    pub record: String,
+    pub offset: String,
+    pub json: String,
+    pub last: bool,
+}
 
 #[derive(Default)]
-pub struct SnapshotDecoder { pending: Option<(String, String)> }
+pub struct SnapshotDecoder {
+    pending: Option<(String, String)>,
+}
 impl SnapshotDecoder {
     pub fn records(&mut self, page: &SnapshotPage) -> Result<Vec<Record>, String> {
         if let Some(f) = &page.fragment {
-            if !page.records.is_empty() { return Err("fragment interleaved with records".into()); }
+            if !page.records.is_empty() {
+                return Err("fragment interleaved with records".into());
+            }
             let (id, data) = self.pending.get_or_insert_with(|| (f.record.clone(), String::new()));
-            if id != &f.record || f.offset != data.len().to_string() { return Err("noncontiguous record fragment".into()); }
-            if data.len().saturating_add(f.json.len()) > 64 * 1024 * 1024 { return Err("record exceeds 64 MiB".into()); }
+            if id != &f.record || f.offset != data.len().to_string() {
+                return Err("noncontiguous record fragment".into());
+            }
+            if data.len().saturating_add(f.json.len()) > 64 * 1024 * 1024 {
+                return Err("record exceeds 64 MiB".into());
+            }
             data.push_str(&f.json);
             if f.last {
                 let record = serde_json::from_str(data).map_err(|e| format!("invalid fragmented record: {e}"))?;
                 self.pending = None;
                 return Ok(vec![record]);
             }
-            if page.next_page.is_none() { return Err("incomplete fragmented record".into()); }
+            if page.next_page.is_none() {
+                return Err("incomplete fragmented record".into());
+            }
             Ok(vec![])
         } else {
-            if self.pending.is_some() { return Err("incomplete fragmented record".into()); }
+            if self.pending.is_some() {
+                return Err("incomplete fragmented record".into());
+            }
             Ok(page.records.clone())
         }
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Detach { pub session_id: String, pub subscription_id: String }
+pub struct Detach {
+    pub session_id: String,
+    pub subscription_id: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag="type", rename_all="snake_case")]
-pub enum ConfigValue { Id { value:String }, Bool { value:bool } }
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ConfigValue {
+    Id { value: String },
+    Bool { value: bool },
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag="type", rename_all="snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Control {
     /// `api_key`: for a method marked `api_key`. The daemon keeps it where the agent's jail cannot
     /// read it and answers the agent's next login request with it; it is never journaled.
-    Authenticate { method_id:String, #[serde(default, skip_serializing_if = "Option::is_none")] api_key:Option<crate::wire::Secret> }, RetrySession,
-    SetMode { mode_id:String }, SetConfig { option_id:String, value:ConfigValue },
+    Authenticate {
+        method_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_key: Option<crate::wire::Secret>,
+    },
+    RetrySession,
+    SetMode {
+        mode_id: String,
+    },
+    SetConfig {
+        option_id: String,
+        value: ConfigValue,
+    },
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SessionControl { pub session_id:String, pub control:Control }
+pub struct SessionControl {
+    pub session_id: String,
+    pub control: Control,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct CancelTurn { pub session_id:String, pub turn_id:String }
+pub struct CancelTurn {
+    pub session_id: String,
+    pub turn_id: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -364,24 +475,34 @@ pub struct UploadCreate {
     pub data_base64: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct UploadCreated { pub upload_id: String }
+pub struct UploadCreated {
+    pub upload_id: String,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct UploadGet { pub session_id: String, pub upload_id: String }
+pub struct UploadGet {
+    pub session_id: String,
+    pub upload_id: String,
+}
 /// An upload's immutable bytes. Submissions reference attachments by upload ID, so snapshots
 /// never carry attachment data; a frontend fetches what it displays.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct Upload { pub upload_id: String, pub name: String, pub mime: String, pub data_base64: String }
+pub struct Upload {
+    pub upload_id: String,
+    pub name: String,
+    pub mime: String,
+    pub data_base64: String,
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn patch_schema_and_decoder_agree_on_omission_and_null() {
-        let schema=serde_json::to_value(schemars::schema_for!(ItemPatch)).unwrap();
-        assert_eq!(schema["properties"]["content"]["type"],"array");
+        let schema = serde_json::to_value(schemars::schema_for!(ItemPatch)).unwrap();
+        assert_eq!(schema["properties"]["content"]["type"], "array");
         assert!(schema.get("required").is_none());
-        assert_eq!(serde_json::from_str::<ItemPatch>("{}").unwrap(),ItemPatch::default());
+        assert_eq!(serde_json::from_str::<ItemPatch>("{}").unwrap(), ItemPatch::default());
         assert!(serde_json::from_str::<ItemPatch>(r#"{"content":null}"#).is_err());
         assert!(serde_json::from_str::<ItemPatch>(r#"{"tool":null}"#).is_err());
     }
@@ -392,14 +513,27 @@ mod snapshot_decoder_tests {
     use super::*;
     #[test]
     fn fragments_reject_gaps_interleaving_and_incomplete_final_pages() {
-        let mut page=SnapshotPage{expires_at:None,at:Cursor{session_id:"s".into(),seq:"0".into()},records:vec![],next_page:Some("1".into()),fragment:Some(RecordFragment{record:"0".into(),offset:"0".into(),json:"🦀".into(),last:false})};
-        let mut decoder=SnapshotDecoder::default();assert!(decoder.records(&page).unwrap().is_empty());
-        page.fragment.as_mut().unwrap().offset="1".into();assert!(decoder.records(&page).is_err());
-        page.fragment.as_mut().unwrap().offset="4".into();page.next_page=None;assert!(decoder.records(&page).is_err());
-        page.fragment=None;assert!(decoder.records(&page).is_err());
+        let mut page = SnapshotPage {
+            expires_at: None,
+            at: Cursor { session_id: "s".into(), seq: "0".into() },
+            records: vec![],
+            next_page: Some("1".into()),
+            fragment: Some(RecordFragment { record: "0".into(), offset: "0".into(), json: "🦀".into(), last: false }),
+        };
+        let mut decoder = SnapshotDecoder::default();
+        assert!(decoder.records(&page).unwrap().is_empty());
+        page.fragment.as_mut().unwrap().offset = "1".into();
+        assert!(decoder.records(&page).is_err());
+        page.fragment.as_mut().unwrap().offset = "4".into();
+        page.next_page = None;
+        assert!(decoder.records(&page).is_err());
+        page.fragment = None;
+        assert!(decoder.records(&page).is_err());
     }
 }
 
 /// Cancellation acknowledges a request, never proof that the agent stopped.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct CancellationRequested { pub requested: bool }
+pub struct CancellationRequested {
+    pub requested: bool,
+}

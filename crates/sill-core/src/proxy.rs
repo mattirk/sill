@@ -96,16 +96,83 @@ pub fn valid_hostname(host: &str) -> bool {
 /// suffix list is thousands of lines and changes monthly; a name whose parent is not here still
 /// gets a wildcard only when that parent has two labels or more.
 const PUBLIC_SUFFIXES: &[&str] = &[
-    "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "ltd.uk", "plc.uk", "net.uk", "sch.uk", "nhs.uk",
-    "com.au", "net.au", "org.au", "edu.au", "gov.au", "id.au",
-    "co.jp", "ne.jp", "or.jp", "ac.jp", "go.jp", "co.kr", "or.kr", "co.in", "net.in", "org.in",
-    "co.nz", "net.nz", "org.nz", "co.za", "org.za", "co.il", "org.il", "co.id", "or.id",
-    "com.br", "net.br", "org.br", "com.cn", "net.cn", "org.cn", "com.hk", "com.sg", "com.tw", "com.mx", "com.ar", "com.tr", "com.ua",
+    "co.uk",
+    "org.uk",
+    "ac.uk",
+    "gov.uk",
+    "me.uk",
+    "ltd.uk",
+    "plc.uk",
+    "net.uk",
+    "sch.uk",
+    "nhs.uk",
+    "com.au",
+    "net.au",
+    "org.au",
+    "edu.au",
+    "gov.au",
+    "id.au",
+    "co.jp",
+    "ne.jp",
+    "or.jp",
+    "ac.jp",
+    "go.jp",
+    "co.kr",
+    "or.kr",
+    "co.in",
+    "net.in",
+    "org.in",
+    "co.nz",
+    "net.nz",
+    "org.nz",
+    "co.za",
+    "org.za",
+    "co.il",
+    "org.il",
+    "co.id",
+    "or.id",
+    "com.br",
+    "net.br",
+    "org.br",
+    "com.cn",
+    "net.cn",
+    "org.cn",
+    "com.hk",
+    "com.sg",
+    "com.tw",
+    "com.mx",
+    "com.ar",
+    "com.tr",
+    "com.ua",
     // hosting where every tenant has a sibling name: a wildcard would allow every tenant
-    "github.io", "gitlab.io", "herokuapp.com", "vercel.app", "netlify.app", "pages.dev", "workers.dev",
-    "web.app", "firebaseapp.com", "azurewebsites.net", "cloudfront.net", "amazonaws.com", "s3.amazonaws.com",
-    "appspot.com", "run.app", "fly.dev", "onrender.com", "railway.app", "ngrok.io", "ngrok-free.app", "ngrok.app",
-    "trycloudflare.com", "blogspot.com", "wordpress.com", "github.dev", "repl.co", "glitch.me", "surge.sh",
+    "github.io",
+    "gitlab.io",
+    "herokuapp.com",
+    "vercel.app",
+    "netlify.app",
+    "pages.dev",
+    "workers.dev",
+    "web.app",
+    "firebaseapp.com",
+    "azurewebsites.net",
+    "cloudfront.net",
+    "amazonaws.com",
+    "s3.amazonaws.com",
+    "appspot.com",
+    "run.app",
+    "fly.dev",
+    "onrender.com",
+    "railway.app",
+    "ngrok.io",
+    "ngrok-free.app",
+    "ngrok.app",
+    "trycloudflare.com",
+    "blogspot.com",
+    "wordpress.com",
+    "github.dev",
+    "repl.co",
+    "glitch.me",
+    "surge.sh",
 ];
 
 /// The wildcard the frontend may offer for a refused name: `*.<parent>` when the name has three
@@ -258,7 +325,12 @@ pub fn serve(listener: UnixListener, rules: Rules, log: impl Fn(&str) + Send + S
 
 /// Session grants live outside the jail. Reload on each new connection; existing tunnels keep
 /// their original decision. Never grant access around an offline policy.
-pub fn serve_with_session_grants(listener: UnixListener, rules: Rules, grants: Option<std::path::PathBuf>, log: impl Fn(&str) + Send + Sync + 'static) -> Result<()> {
+pub fn serve_with_session_grants(
+    listener: UnixListener,
+    rules: Rules,
+    grants: Option<std::path::PathBuf>,
+    log: impl Fn(&str) + Send + Sync + 'static,
+) -> Result<()> {
     let rules = Arc::new(rules);
     let log = Arc::new(log);
     let active = Arc::new(AtomicUsize::new(0));
@@ -291,7 +363,9 @@ pub fn serve_with_session_grants(listener: UnixListener, rules: Rules, grants: O
             continue;
         }
         let mut connection_rules = (*rules).clone();
-        if let Some(path) = &grants { load_session_grants(&mut connection_rules, path); }
+        if let Some(path) = &grants {
+            load_session_grants(&mut connection_rules, path);
+        }
         let (rules, thread_log, counted) = (connection_rules, log.clone(), active.clone());
         let spawned = std::thread::Builder::new().name("sill-proxy-conn".into()).spawn(move || {
             struct Done(Arc<AtomicUsize>);
@@ -315,12 +389,20 @@ pub fn serve_with_session_grants(listener: UnixListener, rules: Rules, grants: O
 /// Bounded, regular, non-symlink input only. Failure keeps the base rules.
 fn load_session_grants(rules: &mut Rules, path: &std::path::Path) {
     use std::os::unix::fs::OpenOptionsExt;
-    if rules.mode == NetMode::None { return; }
-    let Ok(file) = std::fs::OpenOptions::new().read(true)
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32).open(path) else { return };
-    if !file.metadata().is_ok_and(|m| m.is_file() && m.len() <= 131072) { return; }
+    if rules.mode == NetMode::None {
+        return;
+    }
+    let Ok(file) = std::fs::OpenOptions::new().read(true).custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32).open(path)
+    else {
+        return;
+    };
+    if !file.metadata().is_ok_and(|m| m.is_file() && m.len() <= 131072) {
+        return;
+    }
     let mut text = String::new();
-    if file.take(131073).read_to_string(&mut text).is_err() || text.len() > 131072 { return; }
+    if file.take(131073).read_to_string(&mut text).is_err() || text.len() > 131072 {
+        return;
+    }
     for host in text.lines().take(128) {
         let name = host.rsplit_once(':').filter(|(_, p)| p.parse::<u16>().is_ok()).map(|(h, _)| h).unwrap_or(host);
         if valid_hostname(name) && !host.contains('*') && host.len() <= 1024 {
@@ -461,10 +543,7 @@ fn split_host_port(s: &str, default_port: u16) -> Result<(String, u16)> {
 }
 
 fn respond(client: &mut UnixStream, status: &str, body: &str) -> std::io::Result<()> {
-    let msg = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
+    let msg = format!("HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
     client.write_all(msg.as_bytes())?;
     client.shutdown(Shutdown::Both)
 }
@@ -551,10 +630,7 @@ mod tests {
     fn addresses_are_tried_ipv6_and_ipv4_in_turn_without_repeats() {
         let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
         let resolved = [ip("2a06::1"), ip("2a06::2"), ip("104.18.32.47"), ip("2a06::1"), ip("172.64.155.209")];
-        assert_eq!(
-            super::interleaved(&resolved),
-            [ip("2a06::1"), ip("104.18.32.47"), ip("2a06::2"), ip("172.64.155.209")]
-        );
+        assert_eq!(super::interleaved(&resolved), [ip("2a06::1"), ip("104.18.32.47"), ip("2a06::2"), ip("172.64.155.209")]);
         let v4_first = [ip("1.1.1.1"), ip("2606::1")];
         assert_eq!(super::interleaved(&v4_first), [ip("1.1.1.1"), ip("2606::1")]);
         assert!(super::interleaved(&[]).is_empty());
@@ -611,7 +687,9 @@ mod tests {
         for ok in ["api.anthropic.com", "localhost", "a-b.example", "10.0.0.1", "::1", "x.y.z.example.org"] {
             assert!(valid_hostname(ok), "{ok}");
         }
-        for bad in ["*", "*.example.com", "", "exa mple.com", "ex\u{202e}ample.com", "-a.example.com", "a..b", "a.example.com.", "a_b.example.com", "ünïcode.example"] {
+        for bad in
+            ["*", "*.example.com", "", "exa mple.com", "ex\u{202e}ample.com", "-a.example.com", "a..b", "a.example.com.", "a_b.example.com", "ünïcode.example"]
+        {
             assert!(!valid_hostname(bad), "{bad:?}");
         }
         assert_eq!(wildcard_offer("api.example.com").as_deref(), Some("*.example.com"));
@@ -685,13 +763,52 @@ mod tests {
 
     #[test]
     fn reserved_ranges_are_local() {
-        for a in ["0.0.0.0", "0.1.2.3", "127.0.0.1", "10.1.1.1", "172.16.0.1", "192.168.0.1", "169.254.1.1", "100.64.0.1", "192.0.0.8", "198.18.0.1", "198.19.255.255", "240.0.0.1", "255.255.255.255", "224.0.0.1"] {
+        for a in [
+            "0.0.0.0",
+            "0.1.2.3",
+            "127.0.0.1",
+            "10.1.1.1",
+            "172.16.0.1",
+            "192.168.0.1",
+            "169.254.1.1",
+            "100.64.0.1",
+            "192.0.0.8",
+            "198.18.0.1",
+            "198.19.255.255",
+            "240.0.0.1",
+            "255.255.255.255",
+            "224.0.0.1",
+        ] {
             assert!(is_local(ip(a)), "{a}");
         }
-        for a in ["::1", "::", "fe80::1", "fc00::1", "fd12::1", "ff02::1", "::ffff:10.0.0.1", "::ffff:127.0.0.1", "64:ff9b::7f00:1", "64:ff9b::a00:1", "2002:a00:1::1", "2002:c0a8:1::1"] {
+        for a in [
+            "::1",
+            "::",
+            "fe80::1",
+            "fc00::1",
+            "fd12::1",
+            "ff02::1",
+            "::ffff:10.0.0.1",
+            "::ffff:127.0.0.1",
+            "64:ff9b::7f00:1",
+            "64:ff9b::a00:1",
+            "2002:a00:1::1",
+            "2002:c0a8:1::1",
+        ] {
             assert!(is_local(ip(a)), "{a}");
         }
-        for a in ["8.8.8.8", "93.184.216.34", "198.17.0.1", "198.20.0.1", "100.63.0.1", "100.128.0.1", "2606:4700::1111", "64:ff9b::808:808", "2002:808:808::1", "::ffff:8.8.8.8"] {
+        for a in [
+            "8.8.8.8",
+            "93.184.216.34",
+            "198.17.0.1",
+            "198.20.0.1",
+            "100.63.0.1",
+            "100.128.0.1",
+            "2606:4700::1111",
+            "64:ff9b::808:808",
+            "2002:808:808::1",
+            "::ffff:8.8.8.8",
+        ] {
             assert!(!is_local(ip(a)), "{a}");
         }
     }

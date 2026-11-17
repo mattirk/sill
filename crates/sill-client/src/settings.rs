@@ -12,24 +12,11 @@ use sill_proto::{Client, Empty};
 pub type Request = (&'static str, Value);
 
 /// Auto-revert, minutes: 0 never (`AUTO_REVERT_CHOICES`).
-pub const AUTO_REVERT: &[(u32, &str)] = &[
-    (0, "never"),
-    (10, "10 minutes"),
-    (30, "30 minutes"),
-    (60, "1 hour"),
-    (240, "4 hours"),
-    (1440, "1 day"),
-];
+pub const AUTO_REVERT: &[(u32, &str)] = &[(0, "never"), (10, "10 minutes"), (30, "30 minutes"), (60, "1 hour"), (240, "4 hours"), (1440, "1 day")];
 pub const AUTO_REVERT_DEFAULT: u32 = 1440;
 
 /// Earlier sessions a new agent is told about.
-pub const RECALL: &[(u32, &str)] = &[
-    (0, "none"),
-    (1, "1 session"),
-    (3, "3 sessions"),
-    (5, "5 sessions"),
-    (10, "10 sessions"),
-];
+pub const RECALL: &[(u32, &str)] = &[(0, "none"), (1, "1 session"), (3, "3 sessions"), (5, "5 sessions"), (10, "10 sessions")];
 pub const RECALL_DEFAULT: u32 = 3;
 
 /// Compaction and retention durations: the setting's text and its label, in days for ordering.
@@ -85,19 +72,10 @@ pub fn read(client: &Client) -> anyhow::Result<Snapshot> {
     let mut global_pins = Vec::new();
     let mut after = None;
     loop {
-        let page: pins::Page = client.call(
-            "_sill/pins.list",
-            pins::List {
-                session_id: None,
-                after: after.clone(),
-                limit: Some(64),
-            },
-        )?;
+        let page: pins::Page = client.call("_sill/pins.list", pins::List { session_id: None, after: after.clone(), limit: Some(64) })?;
         global_pins.extend(page.pins);
         anyhow::ensure!(
-            page.next.is_none()
-                || page.next.as_ref().map(|p| &p.bytes_base64)
-                    != after.as_ref().map(|p: &HostPath| &p.bytes_base64),
+            page.next.is_none() || page.next.as_ref().map(|p| &p.bytes_base64) != after.as_ref().map(|p: &HostPath| &p.bytes_base64),
             "pin listing did not advance"
         );
         after = page.next;
@@ -107,37 +85,19 @@ pub fn read(client: &Client) -> anyhow::Result<Snapshot> {
     }
     let active_hours = client
         .has_capability("sill.usage")
-        .then(|| {
-            client.call::<sill_proto::admin::ActiveTime>(
-                "_sill/usage.active_time",
-                sill_proto::admin::ActiveTimeQuery { days: ACTIVE_DAYS },
-            )
-        })
+        .then(|| client.call::<sill_proto::admin::ActiveTime>("_sill/usage.active_time", sill_proto::admin::ActiveTimeQuery { days: ACTIVE_DAYS }))
         .and_then(Result::ok)
         .map(|time| time.hours);
-    Ok(Snapshot {
-        settings,
-        instructions: instructions.text,
-        global_pins,
-        active_hours,
-    })
+    Ok(Snapshot { settings, instructions: instructions.text, global_pins, active_hours })
 }
 
 /// One setting changed.
 pub fn patch(change: SettingChange) -> Request {
-    (
-        "_sill/settings.patch",
-        json!(SettingsPatch {
-            changes: vec![change]
-        }),
-    )
+    ("_sill/settings.patch", json!(SettingsPatch { changes: vec![change] }))
 }
 
 pub fn set_instructions(text: &str) -> Request {
-    (
-        "_sill/settings.instructions.set",
-        json!(Text { text: text.into() }),
-    )
+    ("_sill/settings.instructions.set", json!(Text { text: text.into() }))
 }
 
 pub fn add_global_pin(path: HostPath) -> Request {
@@ -181,11 +141,7 @@ pub fn days(value: Option<&str>, default: u32) -> u32 {
 
 /// The choice nearest `value` in `choices` (a setting edited by hand may sit between them).
 pub fn nearest<T>(choices: &[T], value: i64, of: impl Fn(&T) -> i64) -> usize {
-    choices
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, c)| (of(c) - value).abs())
-        .map_or(0, |(i, _)| i)
+    choices.iter().enumerate().min_by_key(|(_, c)| (of(c) - value).abs()).map_or(0, |(i, _)| i)
 }
 
 #[cfg(test)]
@@ -202,13 +158,7 @@ mod tests {
         assert_eq!(days(None, 30), 30);
         assert_eq!(days(Some("soon"), 30), 30);
         // an hand-edited 45 days shows as the nearest choice, a month
-        assert_eq!(
-            DURATIONS[nearest(DURATIONS, 45, |d| d.2 as i64)].1,
-            "a month"
-        );
-        assert_eq!(
-            AUTO_REVERT[nearest(AUTO_REVERT, AUTO_REVERT_DEFAULT as i64, |c| c.0 as i64)].1,
-            "1 day"
-        );
+        assert_eq!(DURATIONS[nearest(DURATIONS, 45, |d| d.2 as i64)].1, "a month");
+        assert_eq!(AUTO_REVERT[nearest(AUTO_REVERT, AUTO_REVERT_DEFAULT as i64, |c| c.0 as i64)].1, "1 day");
     }
 }

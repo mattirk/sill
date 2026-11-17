@@ -27,11 +27,7 @@ impl Entry {
         self.registry.tested
     }
     pub fn selector(&self) -> api::EntryKey {
-        api::EntryKey {
-            entry_id: self.registry.entry_id.clone(),
-            version: self.registry.version.clone(),
-            source: self.registry.source.clone(),
-        }
+        api::EntryKey { entry_id: self.registry.entry_id.clone(), version: self.registry.version.clone(), source: self.registry.source.clone() }
     }
 }
 
@@ -45,13 +41,7 @@ pub fn load(client: &Client) -> Result<Catalog> {
     let mut definitions = BTreeMap::new();
     let mut after = None;
     loop {
-        let page: api::Page = client.call(
-            "_sill/agents.list",
-            api::List {
-                after,
-                limit: Some(128),
-            },
-        )?;
+        let page: api::Page = client.call("_sill/agents.list", api::List { after, limit: Some(128) })?;
         for d in page.agents {
             definitions.insert(d.id.clone(), d);
         }
@@ -64,63 +54,24 @@ pub fn load(client: &Client) -> Result<Catalog> {
     let mut refresh_due = false;
     let mut after = None;
     loop {
-        let page: host::RegistryPage = client.call(
-            "_sill/registry.list",
-            host::RegistryList {
-                after: after.clone(),
-                limit: Some(128),
-            },
-        )?;
+        let page: host::RegistryPage = client.call("_sill/registry.list", host::RegistryList { after: after.clone(), limit: Some(128) })?;
         if after.is_none() {
-            let fetched = page
-                .fetched_at
-                .as_deref()
-                .and_then(|s| s.parse::<u64>().ok());
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            let fetched = page.fetched_at.as_deref().and_then(|s| s.parse::<u64>().ok());
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
             refresh_due = fetched.is_none_or(|f| now.saturating_sub(f) > 6 * 3600);
         }
         for registry in page.entries {
-            let id = registry
-                .builtin_agent_id
-                .as_deref()
-                .unwrap_or(&registry.entry_id);
+            let id = registry.builtin_agent_id.as_deref().unwrap_or(&registry.entry_id);
             let definition = definitions.get(id).cloned();
-            let installed: api::Installation = client.call(
-                "_sill/registry.installed",
-                api::AgentKey {
-                    agent_id: registry.entry_id.clone(),
-                },
-            )?;
+            let installed: api::Installation = client.call("_sill/registry.installed", api::AgentKey { agent_id: registry.entry_id.clone() })?;
             let available = if let Some(d) = &definition {
-                client
-                    .call::<api::Available>(
-                        "_sill/agents.available",
-                        api::AgentKey {
-                            agent_id: d.id.clone(),
-                        },
-                    )?
-                    .path
-                    .is_some()
+                client.call::<api::Available>("_sill/agents.available", api::AgentKey { agent_id: d.id.clone() })?.path.is_some()
             } else {
                 false
             };
-            let mut entry = Entry {
-                registry,
-                installed: installed.installed,
-                definition,
-                available,
-                discovery: None,
-            };
+            let mut entry = Entry { registry, installed: installed.installed, definition, available, discovery: None };
             if entry.needs_setup() && client.has_capability("sill.agent_setup") {
-                let found: api::Discovered = client.call(
-                    "_sill/agents.discovered",
-                    api::AgentKey {
-                        agent_id: entry.registry.entry_id.clone(),
-                    },
-                )?;
+                let found: api::Discovered = client.call("_sill/agents.discovered", api::AgentKey { agent_id: entry.registry.entry_id.clone() })?;
                 entry.discovery = found.discovery;
             }
             entries.push(entry);
@@ -131,10 +82,7 @@ pub fn load(client: &Client) -> Result<Catalog> {
         }
     }
     entries.sort_by_key(|e| e.registry.name.to_lowercase());
-    Ok(Catalog {
-        entries,
-        refresh_due,
-    })
+    Ok(Catalog { entries, refresh_due })
 }
 
 pub fn refresh(client: &Client) -> Result<()> {
@@ -143,11 +91,7 @@ pub fn refresh(client: &Client) -> Result<()> {
 }
 
 /// Never replay an install after stream loss: report its durable receipt instead.
-pub fn install(
-    client: &Client,
-    entry: &host::RegistryEntry,
-    progress: impl FnMut(String),
-) -> Result<()> {
+pub fn install(client: &Client, entry: &host::RegistryEntry, progress: impl FnMut(String)) -> Result<()> {
     let operation_id = crate::request_id("install");
     run_job(
         client,
@@ -177,11 +121,7 @@ pub fn discover(client: &Client, agent_id: &str, method_id: Option<&str>, progre
         client,
         "Directory probe",
         "_sill/agents.discover",
-        host::AgentDiscover {
-            operation_id: Some(operation_id.clone()),
-            agent_id: agent_id.to_string(),
-            method_id: method_id.map(str::to_string),
-        },
+        host::AgentDiscover { operation_id: Some(operation_id.clone()), agent_id: agent_id.to_string(), method_id: method_id.map(str::to_string) },
         operation_id,
         progress,
     )
@@ -203,12 +143,15 @@ pub fn set_up(definition: &api::Definition, discovery: &api::Discovery, unticked
             initial_content: if p.kind == api::HomePathKind::File { p.initial_content.clone() } else { None },
         })
         .collect();
-    let roots: Vec<String> = chosen.iter().filter(|p| p.kind == api::HomePathKind::Directory).map(|p| format!("{}/", p.path.trim_start_matches("~/"))).collect();
+    let roots: Vec<String> =
+        chosen.iter().filter(|p| p.kind == api::HomePathKind::Directory).map(|p| format!("{}/", p.path.trim_start_matches("~/"))).collect();
     d.login_files = discovery.login_files.iter().filter(|f| roots.iter().any(|r| f.starts_with(r))).cloned().collect();
     if let Some(m) = &discovery.login_method {
         let name = discovery.auth_methods.iter().find(|a| &a.id == m).map(|a| a.name.to_lowercase()).unwrap_or_default();
         let lower = m.to_lowercase();
-        if (lower.contains("oauth") || lower.contains("browser") || name.contains("log in") || name.contains("login") || name.contains("sign in")) && !d.host_login.contains(m) {
+        if (lower.contains("oauth") || lower.contains("browser") || name.contains("log in") || name.contains("login") || name.contains("sign in"))
+            && !d.host_login.contains(m)
+        {
             d.host_login.push(m.clone());
         }
     }
@@ -221,21 +164,11 @@ pub const OPEN_PREFIX: &str = "Open in your browser: ";
 
 /// A host job with tagged progress: start it, follow its stream, and on stream loss read the
 /// durable receipt instead of retrying.
-fn run_job(
-    client: &Client,
-    what: &str,
-    method: &str,
-    params: impl serde::Serialize,
-    operation_id: String,
-    mut progress: impl FnMut(String),
-) -> Result<()> {
-    let job: host::JobStream = client
-        .call(method, params)
-        .with_context(|| format!("{what} operation {operation_id}; refresh before retrying"))?;
+fn run_job(client: &Client, what: &str, method: &str, params: impl serde::Serialize, operation_id: String, mut progress: impl FnMut(String)) -> Result<()> {
+    let job: host::JobStream = client.call(method, params).with_context(|| format!("{what} operation {operation_id}; refresh before retrying"))?;
     if let Some(token) = job.token {
-        let stream = sill_proto::transport::open_stream(&token).with_context(|| {
-            format!("{what} operation {operation_id}; progress unavailable, refresh before retrying")
-        })?;
+        let stream = sill_proto::transport::open_stream(&token)
+            .with_context(|| format!("{what} operation {operation_id}; progress unavailable, refresh before retrying"))?;
         struct Stop(std::sync::Arc<dyn Fn() + Send + Sync>);
         impl Drop for Stop {
             fn drop(&mut self) {
@@ -248,9 +181,7 @@ fn run_job(
         for line in std::io::BufReader::new(stream.reader).lines() {
             let Ok(line) = line else { break };
             match serde_json::from_str::<host::Progress>(&line)? {
-                host::Progress::Status { text }
-                | host::Progress::Output { text }
-                | host::Progress::Stderr { text } => progress(text),
+                host::Progress::Status { text } | host::Progress::Output { text } | host::Progress::Stderr { text } => progress(text),
                 host::Progress::OpenUrl { url, callback_port } => {
                     crate::login::relay_callback(client, &mut relays, callback_port, &job.operation.operation_id)?;
                     progress(format!("{OPEN_PREFIX}{url}"))
@@ -260,12 +191,7 @@ fn run_job(
             }
         }
     }
-    let receipt: host::Operation = client.call(
-        "_sill/operations.get",
-        host::OperationKey {
-            operation_id: operation_id.clone(),
-        },
-    )?;
+    let receipt: host::Operation = client.call("_sill/operations.get", host::OperationKey { operation_id: operation_id.clone() })?;
     if receipt.state == host::OperationState::Completed {
         return Ok(());
     }
@@ -278,14 +204,7 @@ pub fn domain_pattern(input: &str) -> Option<String> {
     let (host, port) = if let Some(rest) = pattern.strip_prefix('[') {
         let (host, tail) = rest.split_once(']')?;
         host.parse::<std::net::Ipv6Addr>().ok()?;
-        (
-            host,
-            if tail.is_empty() {
-                None
-            } else {
-                Some(tail.strip_prefix(':')?)
-            },
-        )
+        (host, if tail.is_empty() { None } else { Some(tail.strip_prefix(':')?) })
     } else if pattern.parse::<std::net::IpAddr>().is_ok() {
         (pattern.as_str(), None)
     } else {
@@ -308,9 +227,7 @@ pub fn domain_pattern(input: &str) -> Option<String> {
                     && label.len() <= 63
                     && !label.starts_with('-')
                     && !label.ends_with('-')
-                    && label
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
             }));
     valid.then_some(pattern)
 }
@@ -321,35 +238,11 @@ mod tests {
     use serde_json::json;
     #[test]
     fn domain_patterns_reject_urls_and_preserve_explicit_scope() {
-        for input in [
-            "example.com",
-            "*.example.com",
-            "example.com:8443",
-            "example.com:*",
-            "[::1]:8080",
-            "::1",
-        ] {
+        for input in ["example.com", "*.example.com", "example.com:8443", "example.com:*", "[::1]:8080", "::1"] {
             assert_eq!(domain_pattern(input).as_deref(), Some(input));
         }
-        assert_eq!(
-            domain_pattern("  GOOGLE.com  ").as_deref(),
-            Some("google.com")
-        );
-        for input in [
-            "",
-            "https://google.com",
-            "google.com/path",
-            "a,b",
-            "*.com/",
-            "a:0",
-            "a:65536",
-            "a:",
-            "a:abc",
-            "bad\nname",
-            "-bad.com",
-            "a..com",
-            "*",
-        ] {
+        assert_eq!(domain_pattern("  GOOGLE.com  ").as_deref(), Some("google.com"));
+        for input in ["", "https://google.com", "google.com/path", "a,b", "*.com/", "a:0", "a:65536", "a:", "a:abc", "bad\nname", "-bad.com", "a..com", "*"] {
             assert_eq!(domain_pattern(input), None, "{input}");
         }
     }
@@ -361,9 +254,12 @@ mod tests {
             let req = peer.expect("_sill/registry.install");
             let id = req["params"]["operation_id"].as_str().unwrap().to_owned();
             assert_eq!(req["params"]["allow_unreviewed"], true);
-            peer.reply(&req, json!({"token":null,"operation":{
-                "operation_id":id,"method":"_sill/registry.install","state":"running","agent_id":null,"code":null
-            }}));
+            peer.reply(
+                &req,
+                json!({"token":null,"operation":{
+                    "operation_id":id,"method":"_sill/registry.install","state":"running","agent_id":null,"code":null
+                }}),
+            );
             let req = peer.expect("_sill/operations.get");
             assert_eq!(req["params"]["operation_id"], id);
             peer.reply(&req, json!({"operation_id":id,"method":"_sill/registry.install","state":"completed","agent_id":"example","code":null}));
@@ -414,7 +310,5 @@ mod tests {
 /// Icons are fetched and cached by the daemon; paths never refer to the frontend host.
 pub fn icon(client: &Client, selector: api::EntryKey) -> Result<Option<Vec<u8>>> {
     let icon: api::Icon = client.call("_sill/registry.icon", selector)?;
-    icon.bytes_base64
-        .map(|b| sill_proto::admin::decode_bytes(&b))
-        .transpose()
+    icon.bytes_base64.map(|b| sill_proto::admin::decode_bytes(&b)).transpose()
 }

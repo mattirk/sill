@@ -97,12 +97,7 @@ pub struct RemoveNote {
     pub text: String,
 }
 impl crate::Client {
-    pub fn memory_text(
-        &self,
-        session_id: String,
-        format: Format,
-        grep: Option<String>,
-    ) -> anyhow::Result<String> {
+    pub fn memory_text(&self, session_id: String, format: Format, grep: Option<String>) -> anyhow::Result<String> {
         let mut text = String::new();
         let mut offset = None;
         let mut fingerprint = None;
@@ -125,12 +120,7 @@ impl crate::Client {
             offset = page.next;
             fingerprint = Some(page.fingerprint);
             if offset.is_none() {
-                let _: anyhow::Result<crate::Empty> = self.call(
-                    "_sill/memory.text.close",
-                    TextClose {
-                        snapshot_id: page.snapshot_id,
-                    },
-                );
+                let _: anyhow::Result<crate::Empty> = self.call("_sill/memory.text.close", TextClose { snapshot_id: page.snapshot_id });
                 return Ok(text);
             }
         }

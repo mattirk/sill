@@ -14,12 +14,7 @@ fn invalid(text: impl ToString) -> anyhow::Error {
     Error::invalid_params(text.to_string()).into()
 }
 fn domain(code: &'static str, text: impl ToString) -> anyhow::Error {
-    sill_core::sfp::DomainError {
-        code,
-        message: text.to_string(),
-        details: None,
-    }
-    .into()
+    sill_core::sfp::DomainError { code, message: text.to_string(), details: None }.into()
 }
 fn args<T: DeserializeOwned>(p: Value) -> Result<T> {
     serde_json::from_value(p).map_err(invalid)
@@ -59,16 +54,7 @@ fn metadata(p: &Path) -> Result<api::FileMetadata> {
     let m = fs::symlink_metadata(p).map_err(io)?;
     // Resolve relative link targets against the parent, preserving exact bytes.
     let target = if m.is_symlink() {
-        fs::read_link(p)
-            .ok()
-            .map(|t| {
-                if t.is_absolute() {
-                    t
-                } else {
-                    p.parent().unwrap_or(Path::new("/")).join(t)
-                }
-            })
-            .map(|p| HostPath::from_path(&p))
+        fs::read_link(p).ok().map(|t| if t.is_absolute() { t } else { p.parent().unwrap_or(Path::new("/")).join(t) }).map(|p| HostPath::from_path(&p))
     } else {
         None
     };
@@ -86,13 +72,8 @@ fn list(a: api::FilesList) -> Result<api::FilesPage> {
     let n = limit(a.limit)?;
     let root = path(&a.path)?;
     let after = a.after.as_ref().map(path).transpose()?;
-    if after
-        .as_ref()
-        .is_some_and(|p| p.parent() != Some(root.as_path()))
-    {
-        return Err(invalid(
-            "cursor must name a direct child of the listed directory",
-        ));
+    if after.as_ref().is_some_and(|p| p.parent() != Some(root.as_path())) {
+        return Err(invalid("cursor must name a direct child of the listed directory"));
     }
     // A bounded ordered set: scanning a huge directory never allocates all its entries.
     let mut names = std::collections::BTreeSet::new();
@@ -114,10 +95,7 @@ fn list(a: api::FilesList) -> Result<api::FilesPage> {
     let mut entries = Vec::new();
     for p in names {
         match metadata(&p) {
-            Ok(metadata) => entries.push(api::FileEntry {
-                path: HostPath::from_path(&p),
-                metadata,
-            }),
+            Ok(metadata) => entries.push(api::FileEntry { path: HostPath::from_path(&p), metadata }),
             Err(e) if !p.exists() => {
                 let _ = e;
             }
@@ -139,25 +117,12 @@ fn read(a: api::FileRead) -> Result<api::FileBytes> {
 
 fn read_open_file(mut f: fs::File, offset: &str, length: Option<u32>, expected_revision: Option<String>) -> Result<api::FileBytes> {
     use std::os::unix::fs::MetadataExt;
-    let offset = offset
-        .parse::<u64>()
-        .map_err(|_| invalid("offset must be a decimal u64"))?;
+    let offset = offset.parse::<u64>().map_err(|_| invalid("offset must be a decimal u64"))?;
     let n = length.unwrap_or(api::FILE_CHUNK_BYTES as u32) as usize;
     if n == 0 || n > api::FILE_CHUNK_BYTES {
         return Err(invalid("length must be 1–1048576"));
     }
-    let revision_of = |m: &fs::Metadata| {
-        format!(
-            "{}:{}:{}:{}:{}:{}:{}",
-            m.dev(),
-            m.ino(),
-            m.len(),
-            m.mtime(),
-            m.mtime_nsec(),
-            m.ctime(),
-            m.ctime_nsec()
-        )
-    };
+    let revision_of = |m: &fs::Metadata| format!("{}:{}:{}:{}:{}:{}:{}", m.dev(), m.ino(), m.len(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec());
     let meta = f.metadata().map_err(io)?;
     let revision = revision_of(&meta);
     if expected_revision.as_ref().is_some_and(|r| r != &revision) {
@@ -168,37 +133,18 @@ fn read_open_file(mut f: fs::File, offset: &str, length: Option<u32>, expected_r
     }
     f.seek(SeekFrom::Start(offset)).map_err(io)?;
     let mut bytes = Vec::new();
-    (&mut f)
-        .take(n as u64)
-        .read_to_end(&mut bytes)
-        .map_err(io)?;
-    let next = offset
-        .checked_add(bytes.len() as u64)
-        .ok_or_else(|| invalid("offset overflow"))?;
+    (&mut f).take(n as u64).read_to_end(&mut bytes).map_err(io)?;
+    let next = offset.checked_add(bytes.len() as u64).ok_or_else(|| invalid("offset overflow"))?;
     if revision_of(&f.metadata().map_err(io)?) != revision {
-        return Err(domain(
-            "invalid_cursor",
-            "file changed while reading; restart reading",
-        ));
+        return Err(domain("invalid_cursor", "file changed while reading; restart reading"));
     }
-    Ok(api::FileBytes {
-        bytes_base64: api::encode_bytes(&bytes),
-        next_offset: next.to_string(),
-        eof: bytes.len() < n || next >= meta.len(),
-        revision,
-    })
+    Ok(api::FileBytes { bytes_base64: api::encode_bytes(&bytes), next_offset: next.to_string(), eof: bytes.len() < n || next >= meta.len(), revision })
 }
 fn session(hub: &Hub, id: &str) -> Result<()> {
     if !sill_core::session::valid_id(id) {
         return Err(invalid("invalid session_id"));
     }
-    hub.with_store(|s| {
-        if s.session_exact(id)?.is_some() {
-            Ok(())
-        } else {
-            Err(domain("not_found", "session not found"))
-        }
-    })
+    hub.with_store(|s| if s.session_exact(id)?.is_some() { Ok(()) } else { Err(domain("not_found", "session not found")) })
 }
 fn policy_text_bound(text: &str) -> Result<()> {
     if text.len() > api::TEXT_BYTES {
@@ -207,31 +153,45 @@ fn policy_text_bound(text: &str) -> Result<()> {
     Ok(())
 }
 fn valid_policy_name(name: &str) -> Result<()> {
-    if name.is_empty() || name.len() > 128 || name == "." || name == ".."
-        || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b)) {
+    if name.is_empty() || name.len() > 128 || name == "." || name == ".." || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b)) {
         return Err(invalid("policy name must contain 1–128 ASCII letters, digits, dots, underscores or hyphens"));
     }
     Ok(())
 }
 fn policy_view(view: &str, session_id: &str, name: &str, r: sill_core::session::Resolution) -> Result<api::PolicyView> {
-    let permissions = r.policy.permissions.states(&r.policy.network, &r.session_permissions).into_iter().map(|state| api::PermissionState {
-        capability: state.capability.into(), allowed: state.allowed, default_enabled: state.default_enabled,
-        requested: state.requested, blocked: state.blocked, source: state.source.into(),
-        effective: state.effective, available: state.available, reason: state.reason,
-    }).collect();
-    let session_hosts = r.session_hosts.iter()
+    let permissions = r
+        .policy
+        .permissions
+        .states(&r.policy.network, &r.session_permissions)
+        .into_iter()
+        .map(|state| api::PermissionState {
+            capability: state.capability.into(),
+            allowed: state.allowed,
+            default_enabled: state.default_enabled,
+            requested: state.requested,
+            blocked: state.blocked,
+            source: state.source.into(),
+            effective: state.effective,
+            available: state.available,
+            reason: state.reason,
+        })
+        .collect();
+    let session_hosts = r
+        .session_hosts
+        .iter()
         .map(|host| api::SessionHostGrant { host: host.clone(), applied: true, reason: String::new() })
-        .chain(r.blocked_session_hosts.iter().map(|host| api::SessionHostGrant {
-            host: host.clone(), applied: false, reason: r.session_hosts_reason.clone(),
-        }))
+        .chain(r.blocked_session_hosts.iter().map(|host| api::SessionHostGrant { host: host.clone(), applied: false, reason: r.session_hosts_reason.clone() }))
         .collect();
     Ok(api::PolicyView {
         filesystem: r.filesystem.as_ref().map(|p| p.view.clone()),
         permissions,
         session_hosts,
-        view: view.into(), session_id: session_id.into(), name: name.into(),
+        view: view.into(),
+        session_id: session_id.into(),
+        name: name.into(),
         text: Some(toml::to_string_pretty(&r.policy)?),
-        fingerprint: Some(r.fingerprint), diagnostics: vec![],
+        fingerprint: Some(r.fingerprint),
+        diagnostics: vec![],
     })
 }
 fn install_policy(home: &Path, name: &str, text: &str, replace: bool) -> Result<()> {
@@ -242,9 +202,13 @@ fn install_policy(home: &Path, name: &str, text: &str, replace: bool) -> Result<
     fs::create_dir_all(&dir).map_err(io)?;
     let target = dir.join(format!("{name}.toml"));
     if let Ok(meta) = fs::symlink_metadata(&target) {
-        if !meta.is_file() || meta.is_symlink() { return Err(domain("conflict", "existing policy is not a regular file")); }
+        if !meta.is_file() || meta.is_symlink() {
+            return Err(domain("conflict", "existing policy is not a regular file"));
+        }
         if !replace {
-            if fs::read_to_string(&target).ok().as_deref() == Some(text) { return Ok(()); }
+            if fs::read_to_string(&target).ok().as_deref() == Some(text) {
+                return Ok(());
+            }
             return Err(domain("conflict", "policy exists; use --replace to replace it"));
         }
     }
@@ -253,8 +217,13 @@ fn install_policy(home: &Path, name: &str, text: &str, replace: bool) -> Result<
         let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp).map_err(io)?;
         file.write_all(text.as_bytes()).map_err(io)?;
         file.sync_all().map_err(io)?;
-        if replace { fs::rename(&temp, &target).map_err(io)?; }
-        else { fs::hard_link(&temp, &target).map_err(|e| if e.kind() == std::io::ErrorKind::AlreadyExists { domain("conflict", "policy exists; inspect before replacing") } else { io(e) })?; }
+        if replace {
+            fs::rename(&temp, &target).map_err(io)?;
+        } else {
+            fs::hard_link(&temp, &target).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists { domain("conflict", "policy exists; inspect before replacing") } else { io(e) }
+            })?;
+        }
         fs::File::open(&dir).and_then(|f| f.sync_all()).map_err(io)?;
         Ok(())
     })();
@@ -271,18 +240,23 @@ fn pictures() -> &'static std::sync::Mutex<std::collections::HashMap<String, std
 fn session_hosts(session_id: &str) -> Result<std::collections::BTreeSet<String>> {
     use std::os::unix::fs::OpenOptionsExt;
     let path = sill_core::shim::runtime_dir(session_id)?.join("session-allowed-hosts");
-    let file = match fs::OpenOptions::new().read(true)
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32).open(path) {
+    let file = match fs::OpenOptions::new().read(true).custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32).open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
         Err(e) => return Err(io(e)),
     };
-    if !file.metadata()?.is_file() { return Err(domain("unsupported", "host grants must be a regular file")); }
+    if !file.metadata()?.is_file() {
+        return Err(domain("unsupported", "host grants must be a regular file"));
+    }
     let mut text = String::new();
     file.take((128 * 1025 + 1) as u64).read_to_string(&mut text).map_err(io)?;
-    if text.len() > 128 * 1025 { return Err(domain("limit_exceeded", "session host grants exceed bound")); }
+    if text.len() > 128 * 1025 {
+        return Err(domain("limit_exceeded", "session host grants exceed bound"));
+    }
     let hosts: std::collections::BTreeSet<String> = text.lines().map(str::to_owned).collect();
-    if hosts.len() > 128 { return Err(domain("limit_exceeded", "at most 128 session host grants")); }
+    if hosts.len() > 128 {
+        return Err(domain("limit_exceeded", "at most 128 session host grants"));
+    }
     Ok(hosts)
 }
 static SESSION_HOSTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -290,14 +264,18 @@ fn remember_session_host(session_id: &str, host: &str) -> Result<()> {
     let _guard = SESSION_HOSTS.lock().unwrap();
     let mut hosts = session_hosts(session_id)?;
     hosts.insert(host.into());
-    if hosts.len() > 128 { return Err(domain("limit_exceeded", "at most 128 session host grants")); }
+    if hosts.len() > 128 {
+        return Err(domain("limit_exceeded", "at most 128 session host grants"));
+    }
     write_session_hosts(session_id, &hosts)
 }
 /// Revoke hosts approved during this run for new proxy connections. True when there were any:
 /// tunnels already open keep going until the jail is rebuilt.
 fn clear_session_hosts(session_id: &str) -> Result<bool> {
     let _guard = SESSION_HOSTS.lock().unwrap();
-    if session_hosts(session_id)?.is_empty() { return Ok(false); }
+    if session_hosts(session_id)?.is_empty() {
+        return Ok(false);
+    }
     write_session_hosts(session_id, &Default::default())?;
     Ok(true)
 }
@@ -331,9 +309,14 @@ fn preview(hub: &Hub, session_id: &str) -> Result<api::PolicyView> {
         Ok(resolved) => policy_view("preview", session_id, &row.policy, resolved)?,
         Err(e) => api::PolicyView {
             filesystem: None,
-            view: "preview".into(), session_id: session_id.into(), name: row.policy,
-            permissions: vec![], session_hosts: vec![], text: None,
-            fingerprint: None, diagnostics: vec![format!("{e:#}")],
+            view: "preview".into(),
+            session_id: session_id.into(),
+            name: row.policy,
+            permissions: vec![],
+            session_hosts: vec![],
+            text: None,
+            fingerprint: None,
+            diagnostics: vec![format!("{e:#}")],
         },
     })
 }
@@ -341,27 +324,42 @@ fn preview(hub: &Hub, session_id: &str) -> Result<api::PolicyView> {
 /// Without launch evidence a running jail is never reported as current.
 fn permissions_changed(hub: &Hub, session_id: &str, live_revoked: bool) -> Result<api::PermissionsChanged> {
     let preview = preview(hub, session_id)?;
-    let restart_required = sill_core::session::is_running(session_id) && (live_revoked
-        || match sill_core::session::policy_snapshot(session_id)? {
-            Some(launch) => {
-                if launch.filesystem.as_ref().map(|p| &p.view.rules) != preview.filesystem.as_ref().map(|p| &p.rules) { return Ok(api::PermissionsChanged { preview, restart_required: true }); }
-                let (choices, hosts) = hub.with_store(|store| Ok((store.permission_choices(session_id)?, store.network_hosts(session_id)?)))?;
-                sill_core::session::grants_outdated(&launch, &choices, &hosts)
-            }
-            None => true,
-        });
+    let restart_required = sill_core::session::is_running(session_id)
+        && (live_revoked
+            || match sill_core::session::policy_snapshot(session_id)? {
+                Some(launch) => {
+                    if launch.filesystem.as_ref().map(|p| &p.view.rules) != preview.filesystem.as_ref().map(|p| &p.rules) {
+                        return Ok(api::PermissionsChanged { preview, restart_required: true });
+                    }
+                    let (choices, hosts) = hub.with_store(|store| Ok((store.permission_choices(session_id)?, store.network_hosts(session_id)?)))?;
+                    sill_core::session::grants_outdated(&launch, &choices, &hosts)
+                }
+                None => true,
+            });
     Ok(api::PermissionsChanged { preview, restart_required })
 }
 
 const PERMISSION_MODES: &str = "sill.permission_modes";
 fn worker_mutation(method: &str) -> bool {
-    matches!(method,
-        "_sill/sessions.update" | "_sill/sessions.start" | "_sill/sessions.reset"
-        | "_sill/sessions.pin" | "_sill/sessions.unpin" | "_sill/sessions.submit"
-        | "_sill/sessions.control" | "_sill/submissions.resume" | "_sill/submissions.send_now"
-        | "_sill/questions.answer" | "_sill/permissions.set" | "_sill/permissions.apply_development"
-        | "_sill/permissions.restore_defaults" | "_sill/policy.allow_host" | "_sill/policy.save_host"
-        | "_sill/host_control.activate")
+    matches!(
+        method,
+        "_sill/sessions.update"
+            | "_sill/sessions.start"
+            | "_sill/sessions.reset"
+            | "_sill/sessions.pin"
+            | "_sill/sessions.unpin"
+            | "_sill/sessions.submit"
+            | "_sill/sessions.control"
+            | "_sill/submissions.resume"
+            | "_sill/submissions.send_now"
+            | "_sill/questions.answer"
+            | "_sill/permissions.set"
+            | "_sill/permissions.apply_development"
+            | "_sill/permissions.restore_defaults"
+            | "_sill/policy.allow_host"
+            | "_sill/policy.save_host"
+            | "_sill/host_control.activate"
+    )
 }
 
 /// The daemon side of "clients without the permission-modes capability support Default only"
@@ -376,19 +374,30 @@ pub(super) fn frontend_gate(hub: &Hub, conn: &super::Conn, method: &str, params:
     if worker_mutation(method) && params.get("session_id").and_then(Value::as_str).is_some_and(|id| hub.crosscheck_worker(id)) {
         return Err(Error::domain("permission_denied", "Crosscheck workers are controlled by their run; open Crosscheck to stop or rerun it"));
     }
-    if conn.has_capability(PERMISSION_MODES) { return Ok(()); }
+    if conn.has_capability(PERMISSION_MODES) {
+        return Ok(());
+    }
     let missing = |message: String| {
         let mut error = Error::domain("unsupported", message);
         error.data.as_mut().unwrap()["details"] = json!({"capability": PERMISSION_MODES});
         error
     };
     match method {
-        "_sill/permissions.set" | "_sill/permissions.apply_development" | "_sill/permissions.restore_defaults" | "_sill/policy.save_host"
-        | "_sill/host_control.activate" | "_sill/host_control.revoke" =>
-            return Err(missing("permission changes need a frontend that shows permission state".into())),
-        "_sill/sessions.submit" | "_sill/sessions.start" | "_sill/sessions.control" | "_sill/submissions.resume"
-        | "_sill/submissions.send_now" | "_sill/questions.answer" | "_sill/policy.allow_host"
-        | "_sill/sessions.pin" | "_sill/sessions.unpin" => {}
+        "_sill/permissions.set"
+        | "_sill/permissions.apply_development"
+        | "_sill/permissions.restore_defaults"
+        | "_sill/policy.save_host"
+        | "_sill/host_control.activate"
+        | "_sill/host_control.revoke" => return Err(missing("permission changes need a frontend that shows permission state".into())),
+        "_sill/sessions.submit"
+        | "_sill/sessions.start"
+        | "_sill/sessions.control"
+        | "_sill/submissions.resume"
+        | "_sill/submissions.send_now"
+        | "_sill/questions.answer"
+        | "_sill/policy.allow_host"
+        | "_sill/sessions.pin"
+        | "_sill/sessions.unpin" => {}
         _ => return Ok(()),
     }
     // Malformed parameters are the method's own error.
@@ -402,7 +411,9 @@ pub(super) fn frontend_gate(hub: &Hub, conn: &super::Conn, method: &str, params:
 fn session_uses_modes(hub: &Hub, id: &str) -> Result<bool> {
     let Some(row) = hub.with_store(|store| store.session_exact(id))? else { return Ok(false) };
     if sill_core::session::is_running(id) {
-        if let Some(launch) = sill_core::session::policy_snapshot(id)? { return Ok(launch.policy.permissions.uses_modes()); }
+        if let Some(launch) = sill_core::session::policy_snapshot(id)? {
+            return Ok(launch.policy.permissions.uses_modes());
+        }
     }
     let (pins, workspace) = hub.with_store(|store| Ok((store.jail_pins(id)?, store.workspace_mask(id)?)))?;
     Ok(sill_core::session::next_build(&row, &sill_core::changes::home()?, &pins, &workspace)?.policy.permissions.uses_modes())
@@ -469,9 +480,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             if a.since.as_deref() == Some(shot.revision.as_str()) {
                 // the frontend shows this already: no encoding, nothing to read
                 let (width, height) = (shot.width(), shot.height());
-                return bounded(api::DesktopFrame {
-                    revision: shot.revision, changed: false, width, height, scale, size: "0".into(),
-                });
+                return bounded(api::DesktopFrame { revision: shot.revision, changed: false, width, height, scale, size: "0".into() });
             }
             let picture = shot.picture().map_err(|e| domain("operation_failed", format!("{e:#}")))?;
             let frame = api::DesktopFrame {
@@ -488,7 +497,11 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
         "_sill/desktop.read" => {
             let a: api::DesktopRead = args(p)?;
             session(hub, &a.session_id)?;
-            let picture = pictures().lock().unwrap().get(&a.session_id).cloned()
+            let picture = pictures()
+                .lock()
+                .unwrap()
+                .get(&a.session_id)
+                .cloned()
                 .filter(|p| p.revision == a.revision)
                 .ok_or_else(|| domain("conflict", "that picture was replaced or is gone; capture again"))?;
             let offset: usize = a.offset.parse().map_err(|_| invalid("offset must be a decimal u64"))?;
@@ -508,25 +521,19 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
         "_sill/files.image" => {
             let a: api::SessionImage = args(p)?;
             session(hub, &a.session_id)?;
-            let image = super::frontend::open_session_image(
-                hub,
-                &a.session_id,
-                &path(&a.path)?,
-                &sill_core::changes::home()?,
-            ).map_err(|e| match e.downcast::<std::io::Error>() {
-                Ok(e) => io(e),
-                Err(e) => domain("operation_failed", format!("{e:#}")),
-            })?
-            .ok_or_else(|| domain("not_found", "image not visible in session"))?;
+            let image = super::frontend::open_session_image(hub, &a.session_id, &path(&a.path)?, &sill_core::changes::home()?)
+                .map_err(|e| match e.downcast::<std::io::Error>() {
+                    Ok(e) => io(e),
+                    Err(e) => domain("operation_failed", format!("{e:#}")),
+                })?
+                .ok_or_else(|| domain("not_found", "image not visible in session"))?;
             bounded(read_open_file(image, &a.offset, a.length, a.revision)?)
         }
         "_sill/policy.denied" => bounded(denied(hub, args(p)?)?),
         "_sill/policy.quiet_host" => {
             let a: api::NetworkHost = args(p)?;
             session(hub, &a.session_id)?;
-            let host = a.host.rsplit_once(':')
-                .filter(|(_, port)| port.parse::<u16>().is_ok())
-                .map_or(a.host.as_str(), |(name, _)| name);
+            let host = a.host.rsplit_once(':').filter(|(_, port)| port.parse::<u16>().is_ok()).map_or(a.host.as_str(), |(name, _)| name);
             if !sill_core::proxy::valid_hostname(host) {
                 return Err(invalid("a concrete hostname is required"));
             }
@@ -537,7 +544,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 }
             })?;
             Ok(json!({}))
-        },
+        }
         "_sill/policy.remember_denied" | "_sill/policy.allow_host" => {
             let a: api::NetworkHost = args(p)?;
             session(hub, &a.session_id)?;
@@ -554,7 +561,9 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 let row = hub.with_store(|s| s.session_exact(&a.session_id))?.ok_or_else(|| domain("not_found", "session not found"))?;
                 let name = a.host.rsplit_once(':').filter(|(_, port)| port.parse::<u16>().is_ok()).map(|(name, _)| name).unwrap_or(&a.host);
                 let name = name.strip_prefix("*.").unwrap_or(name);
-                if a.host.contains('*') || !sill_core::proxy::valid_hostname(name) { return Err(invalid("session approvals require a concrete hostname")); }
+                if a.host.contains('*') || !sill_core::proxy::valid_hostname(name) {
+                    return Err(invalid("session approvals require a concrete hostname"));
+                }
                 let home = sill_core::changes::home()?;
                 let running = sill_core::session::is_running(&a.session_id);
                 let snapshot = if running { sill_core::session::policy_snapshot(&a.session_id)? } else { None };
@@ -572,7 +581,9 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                     return Err(domain("permission_denied", "additional hosts are forbidden by the launch policy"));
                 }
                 hub.with_store(|store| store.allow_network_host(&a.session_id, &a.host))?;
-                if running { remember_session_host(&a.session_id, &a.host)?; }
+                if running {
+                    remember_session_host(&a.session_id, &a.host)?;
+                }
                 bounded(api::AllowedHost { agent_name: "this session".into(), live: running })
             }
         }
@@ -582,13 +593,19 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 return Err(invalid("invalid host"));
             }
             let row = hub.with_store(|s| s.session_exact(&a.session_id))?.ok_or_else(|| domain("not_found", "session not found"))?;
-            if row.ghost { return Err(domain("permission_denied", "ghost sessions do not change future-session defaults")); }
+            if row.ghost {
+                return Err(domain("permission_denied", "ghost sessions do not change future-session defaults"));
+            }
             let name = a.host.rsplit_once(':').filter(|(_, port)| port.parse::<u16>().is_ok()).map(|(name, _)| name).unwrap_or(&a.host);
-            if !sill_core::proxy::valid_hostname(name.strip_prefix("*.").unwrap_or(name)) { return Err(invalid("invalid host pattern")); }
+            if !sill_core::proxy::valid_hostname(name.strip_prefix("*.").unwrap_or(name)) {
+                return Err(invalid("invalid host pattern"));
+            }
             let home = sill_core::changes::home()?;
             let mut agent = sill_core::agents::load(&home)?.remove(&row.agent).ok_or_else(|| domain("not_found", "unknown agent"))?;
             if !agent.domains.contains(&a.host) {
-                if agent.domains.len() >= 256 { return Err(domain("limit_exceeded", "at most 256 agent network defaults")); }
+                if agent.domains.len() >= 256 {
+                    return Err(domain("limit_exceeded", "at most 256 agent network defaults"));
+                }
                 agent.domains.push(a.host.clone());
                 sill_core::agents::save_override(&home, &agent)?;
             }
@@ -597,7 +614,9 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
         "_sill/permissions.set" => {
             let a: api::PermissionChoice = args(p)?;
             let (row, pins) = session_with_pins(hub, &a.session_id)?;
-            if row.ghost { return Err(domain("permission_denied", "ghost sessions support Default only")); }
+            if row.ghost {
+                return Err(domain("permission_denied", "ghost sessions support Default only"));
+            }
             if sill_core::permissions::Permissions::default().rule(&a.capability).is_none() {
                 return Err(invalid("unknown capability"));
             }
@@ -622,7 +641,9 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             // all or nothing; what each one would say alone is the refusal's reason.
             let a: sill_proto::sessions::SessionKey = args(p)?;
             let (row, pins) = session_with_pins(hub, &a.session_id)?;
-            if row.ghost { return Err(domain("permission_denied", "ghost sessions support Default only")); }
+            if row.ghost {
+                return Err(domain("permission_denied", "ghost sessions support Default only"));
+            }
             let group = sill_core::permissions::DEVELOPMENT_CAPABILITIES;
             let base = sill_core::session::next_build_base(&row, &sill_core::changes::home()?, &pins)?;
             let mut choices = hub.with_store(|store| store.permission_choices(&a.session_id))?;
@@ -677,8 +698,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let path = path(&a.path)?;
             sill_core::safe_fs::replace_file(
                 path.parent().ok_or_else(|| invalid("path has no parent"))?,
-                path.file_name()
-                    .ok_or_else(|| invalid("path has no filename"))?,
+                path.file_name().ok_or_else(|| invalid("path has no filename"))?,
                 &bytes,
             )?;
             Ok(json!({}))
@@ -718,9 +738,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
         }
         "_sill/settings.instructions.get" => {
             let _: sill_proto::Empty = args(p)?;
-            bounded(sill_proto::Text {
-                text: sill_core::instructions::load_global(),
-            })
+            bounded(sill_proto::Text { text: sill_core::instructions::load_global() })
         }
         "_sill/settings.instructions.set" => {
             let a: api::Text = args(p)?;
@@ -736,11 +754,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             if a.after.as_ref().is_some_and(|s| s.len() > 4096) {
                 return Err(invalid("policy cursor too long"));
             }
-            let (names, more) = sill_core::policy::available_page(
-                &sill_core::changes::home()?,
-                a.after.as_deref(),
-                n,
-            );
+            let (names, more) = sill_core::policy::available_page(&sill_core::changes::home()?, a.after.as_deref(), n);
             let next = if more { names.last().cloned() } else { None };
             bounded(api::Names { names, next })
         }
@@ -750,10 +764,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 return Err(invalid("invalid policy name"));
             }
             let policy = sill_core::policy::Policy::load(&a.name, &sill_core::changes::home()?)?;
-            bounded(api::PolicyEntry {
-                name: a.name,
-                text: toml::to_string_pretty(&policy)?,
-            })
+            bounded(api::PolicyEntry { name: a.name, text: toml::to_string_pretty(&policy)? })
         }
         "_sill/policy.preview" => {
             let a: sill_proto::sessions::SessionKey = args(p)?;
@@ -764,7 +775,11 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let a: sill_proto::sessions::SessionKey = args(p)?;
             session(hub, &a.session_id)?;
             let snapshot = sill_core::session::policy_snapshot(&a.session_id)?
-                .map(|r| { let name = r.policy.name.clone(); policy_view("launch", &a.session_id, &name, r) }).transpose()?;
+                .map(|r| {
+                    let name = r.policy.name.clone();
+                    policy_view("launch", &a.session_id, &name, r)
+                })
+                .transpose()?;
             bounded(api::PolicySnapshot { snapshot, warnings: sill_core::session::launch_warnings(&a.session_id)? })
         }
         "_sill/policy.check" => {
@@ -787,41 +802,48 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let a: api::ProcessesList = args(p)?;
             let n = limit(a.limit)?;
             session(hub, &a.session_id)?;
-            let mut procs = sill_core::shim::Control::connect(&sill_core::session::socket_path(
-                &a.session_id,
-            )?).and_then(|mut c| c.proc_list()).unwrap_or_default();
+            let mut procs =
+                sill_core::shim::Control::connect(&sill_core::session::socket_path(&a.session_id)?).and_then(|mut c| c.proc_list()).unwrap_or_default();
             procs.sort_by(|a, b| a.name.cmp(&b.name));
             let mut processes: Vec<api::Process> = procs
-                    .into_iter()
-                    .map(|p| api::Process {
-                        state: if p.running() {
-                            "running"
-                        } else if p.exit_code().is_some() {
-                            "exited"
-                        } else if p.state.as_str() == Some("stopped") {
-                            "stopped"
-                        } else {
-                            "unknown"
-                        }
-                        .into(),
-                        exit_code: p.exit_code(),
-                        name: p.name,
-                        argv: p.argv,
-                        cwd: HostPath::from_path(&p.cwd),
-                        port: p.port,
-                        pid: p.pid,
-                        started: p.started.to_string(),
-                        last_line: p.last_line,
-                        location: "jail".into(),
-                        kept: false,
-                    })
-                    .collect();
+                .into_iter()
+                .map(|p| api::Process {
+                    state: if p.running() {
+                        "running"
+                    } else if p.exit_code().is_some() {
+                        "exited"
+                    } else if p.state.as_str() == Some("stopped") {
+                        "stopped"
+                    } else {
+                        "unknown"
+                    }
+                    .into(),
+                    exit_code: p.exit_code(),
+                    name: p.name,
+                    argv: p.argv,
+                    cwd: HostPath::from_path(&p.cwd),
+                    port: p.port,
+                    pid: p.pid,
+                    started: p.started.to_string(),
+                    last_line: p.last_line,
+                    location: "jail".into(),
+                    kept: false,
+                })
+                .collect();
             processes.extend(hub.with_store(|s| s.host_processes(&a.session_id))?.into_iter().map(|p| api::Process {
-                name: format!("host:{}", p.id), argv: p.argv, cwd: HostPath::from_path(&p.cwd), port: None,
-                pid: p.pid, started: p.started.to_string(), state: p.state, exit_code: p.exit_code,
-                last_line: String::new(), location: "host".into(), kept: p.kept,
+                name: format!("host:{}", p.id),
+                argv: p.argv,
+                cwd: HostPath::from_path(&p.cwd),
+                port: None,
+                pid: p.pid,
+                started: p.started.to_string(),
+                state: p.state,
+                exit_code: p.exit_code,
+                last_line: String::new(),
+                location: "host".into(),
+                kept: p.kept,
             }));
-            processes.sort_by(|a,b| a.name.cmp(&b.name));
+            processes.sort_by(|a, b| a.name.cmp(&b.name));
             processes.retain(|p| a.after.as_ref().is_none_or(|after| p.name > *after));
             let next = (processes.len() > n).then(|| processes[n - 1].name.clone());
             processes.truncate(n);
@@ -836,32 +858,31 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             }
             if let Some(id) = a.name.strip_prefix("host:") {
                 let found = hub.with_store(|s| Ok(s.host_processes(&a.session_id)?.iter().any(|p| p.id == id)))?;
-                if !found { return Err(invalid("host process not found")); }
+                if !found {
+                    return Err(invalid("host process not found"));
+                }
                 use std::io::{Read, Seek};
                 let path = super::host_bridge::host_log(&a.session_id, id)?;
                 let mut file = std::fs::File::open(path)?;
                 let size = file.metadata()?.len();
                 file.seek(std::io::SeekFrom::Start(size.saturating_sub(1024 * 1024)))?;
-                let mut bytes = Vec::new(); file.take(1024 * 1024).read_to_end(&mut bytes)?;
+                let mut bytes = Vec::new();
+                file.take(1024 * 1024).read_to_end(&mut bytes)?;
                 let text = String::from_utf8_lossy(&bytes);
                 let lines: Vec<_> = text.lines().collect();
                 return bounded(sill_proto::Text { text: lines[lines.len().saturating_sub(n as usize)..].join("\n") });
             }
             bounded(sill_proto::Text {
-                text: sill_core::shim::Control::connect(&sill_core::session::socket_path(
-                    &a.session_id,
-                )?)?
-                .proc_tail(&a.name, n as usize)?,
+                text: sill_core::shim::Control::connect(&sill_core::session::socket_path(&a.session_id)?)?.proc_tail(&a.name, n as usize)?,
             })
         }
         "_sill/procs.running" => {
             let a: sill_proto::sessions::SessionKey = args(p)?;
             session(hub, &a.session_id)?;
             // no jail to ask is nothing running, not an error
-            let report = sill_core::shim::Control::connect(&sill_core::session::socket_path(&a.session_id)?)
-                .and_then(|mut c| c.activity())
-                .unwrap_or_default();
-            let process = |t: sill_core::shim::Tree| api::JailProcess { pid: t.pid, argv: t.argv, started_ms: t.started_ms, count: t.count, name: t.name, port: t.port };
+            let report = sill_core::shim::Control::connect(&sill_core::session::socket_path(&a.session_id)?).and_then(|mut c| c.activity()).unwrap_or_default();
+            let process =
+                |t: sill_core::shim::Tree| api::JailProcess { pid: t.pid, argv: t.argv, started_ms: t.started_ms, count: t.count, name: t.name, port: t.port };
             bounded(api::JailProcesses {
                 commands: report.commands.into_iter().map(process).collect(),
                 services: report.services.into_iter().map(process).collect(),
@@ -894,9 +915,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 super::host_bridge::publish(hub, &a.session_id);
                 return Ok(json!({}));
             }
-            let mut c = sill_core::shim::Control::connect(&sill_core::session::socket_path(
-                &a.session_id,
-            )?)?;
+            let mut c = sill_core::shim::Control::connect(&sill_core::session::socket_path(&a.session_id)?)?;
             if m.ends_with("stop") {
                 c.proc_stop(&a.name)?;
             } else {
@@ -913,16 +932,8 @@ fn denied(hub: &Hub, a: api::DeniedList) -> Result<api::NetworkDenied> {
     use std::os::unix::fs::OpenOptionsExt;
     let n = limit(a.limit)?;
     session(hub, &a.session_id)?;
-    let after: Option<(u8, String)> = a
-        .after
-        .as_ref()
-        .map(|s| serde_json::from_str(s))
-        .transpose()
-        .map_err(invalid)?;
-    if after
-        .as_ref()
-        .is_some_and(|(kind, host)| *kind > 2 || host.len() > 4096)
-    {
+    let after: Option<(u8, String)> = a.after.as_ref().map(|s| serde_json::from_str(s)).transpose().map_err(invalid)?;
+    if after.as_ref().is_some_and(|(kind, host)| *kind > 2 || host.len() > 4096) {
         return Err(invalid("invalid denial cursor"));
     }
     let mut keys = std::collections::BTreeSet::new();
@@ -939,9 +950,7 @@ fn denied(hub: &Hub, a: api::DeniedList) -> Result<api::NetworkDenied> {
     for (kind, name) in [(0, "denied"), (1, "denied.answered")] {
         let file = match std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(
-                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
-            )
+            .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
             .open(runtime.join(name))
         {
             Ok(f) => f,
@@ -949,10 +958,7 @@ fn denied(hub: &Hub, a: api::DeniedList) -> Result<api::NetworkDenied> {
             Err(e) => return Err(io(e)),
         };
         if !file.metadata()?.is_file() {
-            return Err(domain(
-                "unsupported",
-                "network denial log is not a regular file",
-            ));
+            return Err(domain("unsupported", "network denial log is not a regular file"));
         }
         let mut reader = std::io::BufReader::new(file);
         loop {
@@ -970,14 +976,9 @@ fn denied(hub: &Hub, a: api::DeniedList) -> Result<api::NetworkDenied> {
             }
         }
     }
-    let row = hub.with_store(|s| {
-        Ok(s.session_exact(&a.session_id)?
-            .ok_or_else(|| domain("not_found", "session not found"))?)
-    })?;
+    let row = hub.with_store(|s| Ok(s.session_exact(&a.session_id)?.ok_or_else(|| domain("not_found", "session not found"))?))?;
     let home = sill_core::changes::home()?;
-    let quiet = sill_core::policy::Policy::load(&row.policy, &home)
-        .map(|p| p.network.quiet)
-        .unwrap_or_else(|_| sill_core::policy::quiet_default());
+    let quiet = sill_core::policy::Policy::load(&row.policy, &home).map(|p| p.network.quiet).unwrap_or_else(|_| sill_core::policy::quiet_default());
     for host in quiet.into_iter().chain(sill_core::config::load().network_quiet_hosts) {
         if host.len() > 4096 {
             return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(4096), "quiet host exceeds 4096 bytes"));
@@ -988,22 +989,9 @@ fn denied(hub: &Hub, a: api::DeniedList) -> Result<api::NetworkDenied> {
     if more {
         keys.pop_last();
     }
-    let next = if more {
-        keys.last().map(serde_json::to_string).transpose()?
-    } else {
-        None
-    };
-    let agent_name = sill_core::agents::load(&home)?
-        .get(&row.agent)
-        .map(|a| a.name.clone())
-        .unwrap_or(row.agent);
-    let mut out = api::NetworkDenied {
-        next,
-        hosts: vec![],
-        answered: vec![],
-        quiet: vec![],
-        agent_name,
-    };
+    let next = if more { keys.last().map(serde_json::to_string).transpose()? } else { None };
+    let agent_name = sill_core::agents::load(&home)?.get(&row.agent).map(|a| a.name.clone()).unwrap_or(row.agent);
+    let mut out = api::NetworkDenied { next, hosts: vec![], answered: vec![], quiet: vec![], agent_name };
     for (kind, host) in keys {
         match kind {
             0 => out.hosts.push(host),

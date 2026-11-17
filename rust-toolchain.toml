@@ -1,0 +1,8 @@
+# One Rust for every build of this repository — the jail, the VM, the Mac and CI — so that
+# `cargo fmt --all --check` means the same everywhere (rustfmt's output changes between releases).
+# Bump it deliberately, with scripts/dev-jail.sh and the workflows' toolchain step, and re-run
+# `cargo fmt --all` in the same change.
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
