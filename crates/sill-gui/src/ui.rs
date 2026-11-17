@@ -82,14 +82,7 @@ impl App {
                 // beside the conversation's scrollbar and composer; the grip to drag it is on the
                 // drawer's side of the line, over its edge, so the drawer's own separators still
                 // meet the line (the person, 2026-11-13: no gap before the line)
-                let line = if self.layout.dragging { P.accent } else { P.border };
-                beside = beside.push(
-                    container(stack![
-                        row![rule::vertical(1).style(style::rule_style(line)), self.file_drawer(view)],
-                        container(self.drawer_grip(false)).padding(Padding { left: 1.0, ..Padding::ZERO }),
-                    ])
-                    .width(width + layout::HANDLE),
-                );
+                beside = beside.push(self.edged_drawer(self.file_drawer(view), width));
             }
             let mut page = stack![beside];
             if let Drawer::Over(width) = placement {
@@ -101,8 +94,8 @@ impl App {
                 page = page.push(row![
                     mouse_area(container(space()).width(Fill).height(Fill).style(style::fill(alpha(Color::BLACK, 0.25))))
                         .on_press(Message::Files(crate::files::Action::ToggleDrawer)),
-                    self.drawer_grip(true),
-                    container(drawer).width(width).height(Fill).style(style::fill(P.bg)),
+                    // the same edge as beside: no strip of its own between the two
+                    container(self.edged_drawer(drawer, width)).height(Fill).style(style::fill(P.bg)),
                 ]);
             }
             column![page.height(Fill)].height(Fill).into()
@@ -187,19 +180,16 @@ impl App {
         keys::annotation_shortcuts(keys::window_shortcuts(layers, &self.settings.shortcuts, self.find.shown, self.terminal_focused()), annotating)
     }
 
-    /// The drawer's edge: flush with its horizontal separators. The wider drag target
-    /// extends toward the conversation so it leaves no gap at any separator junction.
-    /// The grip between the conversation and the drawer; `lined` draws the drawer's edge in
-    /// it (the drawer over the conversation), else the drawer draws its own.
-    fn drawer_grip(&self, lined: bool) -> Element<'_, Message> {
+    /// The drawer `width` wide with its edge: the line is the drawer's own left side, flush with
+    /// its horizontal separators, and the grip to drag it lies unseen over that side, so nothing
+    /// stands between the conversation and the line.
+    fn edged_drawer<'a>(&'a self, drawer: Element<'a, Message>, width: f32) -> Element<'a, Message> {
         let line = if self.layout.dragging { P.accent } else { P.border };
-        let strip: Element<'_, Message> = if lined { rule::vertical(1).style(style::rule_style(line)).into() } else { space().into() };
-        // lined, it stands between the two with the window's background; else it lies over the
-        // drawer's edge, unseen
-        let grip = container(strip).align_right(layout::HANDLE).height(Fill);
-        mouse_area(if lined { grip.style(style::fill(P.bg)) } else { grip })
+        let grip = mouse_area(container(space()).width(layout::HANDLE).height(Fill))
             .interaction(iced::mouse::Interaction::ResizingHorizontally)
-            .on_press(Message::Layout(layout::Action::DragStart))
+            .on_press(Message::Layout(layout::Action::DragStart));
+        container(stack![row![rule::vertical(1).style(style::rule_style(line)), drawer], container(grip).padding(Padding { left: 1.0, ..Padding::ZERO })])
+            .width(width + layout::HANDLE)
             .into()
     }
 
