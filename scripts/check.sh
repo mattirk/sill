@@ -30,6 +30,11 @@ if [ "$(uname -s)" = Linux ] && [ "$*" = --workspace ] && rustup target list --i
     step cargo clippy --locked --target aarch64-apple-darwin -p sill-gui -p sill-vm -p sill-client -p sill-proto --all-targets -- -D warnings
 fi
 step python3 packaging/test_release.py
-# One test at a time, as CI has always run them; SILL_TEST_THREADS overrides it.
-step cargo test --locked "$@" -- --test-threads="${SILL_TEST_THREADS:-1}"
+# Tests run in parallel, as many at once as the machine has cores. SILL_TEST_THREADS=1 runs them
+# one at a time: for telling a test that fails from one that fails only beside others.
+if [ -n "${SILL_TEST_THREADS:-}" ]; then
+    step cargo test --locked "$@" -- --test-threads="$SILL_TEST_THREADS"
+else
+    step cargo test --locked "$@"
+fi
 echo "== all checks passed"

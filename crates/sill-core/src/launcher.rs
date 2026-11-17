@@ -463,10 +463,22 @@ mod tests {
     /// A launcher is recognised by its command line, for its own session only.
     #[test]
     fn a_session_process_is_known_by_its_command_line() {
-        // a loop of short sleeps: killing the shell leaves at most a second's orphan behind
-        let mut launcher =
-            std::process::Command::new("sh").args(["-c", "while :; do sleep 1; done", "sill", "launch", "--session", "abcd1234"]).spawn().unwrap();
+        // A shell waiting on its own input: it starts no further process. (A loop of `sleep 1` did,
+        // and where processes were short — a session's task limit, with other work running — the
+        // failed fork ended the shell and with it this test.)
+        let mut launcher = std::process::Command::new("sh")
+            .args(["-c", "read _", "sill", "launch", "--session", "abcd1234"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
         let mut other = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        // `spawn` returns while the kernel is still putting the new program in place: for a moment
+        // the child still shows this test's own command line (seen in about one parallel run in
+        // eight). Wait for the shell to be there.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !is_session_process(launcher.id(), "abcd1234", SessionProcess::Launcher) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         assert!(is_session_process(launcher.id(), "abcd1234", SessionProcess::Launcher));
         assert!(!is_session_process(launcher.id(), "abcd12", SessionProcess::Launcher), "a prefix of the id is another session");
         assert!(!is_session_process(launcher.id(), "abcd1234", SessionProcess::Bwrap));

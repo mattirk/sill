@@ -178,6 +178,12 @@ fn add_session(app: &mut App, id: &str) {
     app.views.insert(id.into(), view);
 }
 
+/// The renderer every test draws with: the software one. A GPU renderer makes a Vulkan device per
+/// test, and devices made from several test threads at once crash in the system's Vulkan loader
+/// (a segmentation fault in about one parallel run in thirty, 2026-11-17). `iced_test`'s own
+/// simulator takes the same choice from `ICED_TEST_BACKEND`, set in `.cargo/config.toml`.
+pub(crate) const TEST_BACKEND: Option<&str> = Some("tiny-skia");
+
 pub(crate) fn simulator(app: &App, size: (f32, f32)) -> iced_test::Simulator<'_, Message> {
     iced_test::Simulator::with_size(crate::snapshots::settings(), size, app.view())
 }
@@ -1265,7 +1271,8 @@ impl Live {
     fn new(size: (f32, f32)) -> Self {
         use iced::advanced::renderer::Headless;
         let settings = crate::snapshots::settings();
-        let renderer = block_on(<iced::Renderer as Headless>::new(settings.default_font, settings.default_text_size, None)).expect("a headless renderer");
+        let renderer =
+            block_on(<iced::Renderer as Headless>::new(settings.default_font, settings.default_text_size, TEST_BACKEND)).expect("a headless renderer");
         Self {
             renderer,
             cache: Some(iced_runtime::user_interface::Cache::default()),

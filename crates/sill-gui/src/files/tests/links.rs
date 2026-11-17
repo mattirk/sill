@@ -71,7 +71,9 @@ fn heading_jump_finds_the_heading_in_the_laid_out_reader() {
     let items = view.reader.as_ref().unwrap().markdown.as_ref().unwrap().items();
     let index = heading_index(items, "destination").unwrap();
     let settings = crate::snapshots::settings();
-    let mut renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(settings.default_font, settings.default_text_size, None)).unwrap();
+    let mut renderer =
+        iced::futures::executor::block_on(<iced::Renderer as Headless>::new(settings.default_font, settings.default_text_size, crate::tests::TEST_BACKEND))
+            .unwrap();
     let mut ui = iced_runtime::UserInterface::build(app.view(), iced::Size::new(1000.0, 860.0), iced_runtime::user_interface::Cache::default(), &mut renderer);
     let mut find = FindHeading {
         target: iced::advanced::widget::Id::from(format!("markdown-heading-{index}")),

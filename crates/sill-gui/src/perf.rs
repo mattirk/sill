@@ -65,8 +65,8 @@ impl Screen {
     fn new() -> Self {
         use iced::advanced::renderer::Headless;
         let settings = crate::snapshots::settings();
-        let renderer =
-            crate::tests::block_on(<iced::Renderer as Headless>::new(settings.default_font, settings.default_text_size, None)).expect("a headless renderer");
+        let renderer = crate::tests::block_on(<iced::Renderer as Headless>::new(settings.default_font, settings.default_text_size, crate::tests::TEST_BACKEND))
+            .expect("a headless renderer");
         Self { renderer, cache: Some(iced_runtime::user_interface::Cache::default()) }
     }
 
