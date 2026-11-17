@@ -131,7 +131,7 @@ fn unpack_sparse(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The guest's root helper for the Mac's folders, installed by the image build
+/// The guest's root helper for the Mac's folders and the VM's clock, installed by the image build
 /// (`packaging/mac/guest/sill-mac-folders`).
 pub const MOUNTER: &str = "/usr/local/lib/sill/sill-mac-folders";
 
