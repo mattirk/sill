@@ -132,6 +132,7 @@ pub enum Event {
     DeleteAll,
     ToggleWhere,
     AlwaysOnTop(bool),
+    AlwaysApply(bool),
     HotkeyInput(String),
     ApplyHotkey,
 }
@@ -558,6 +559,11 @@ impl App {
                     switch(s.remember_pins.unwrap_or(false), move |v| {
                         change(SettingChange::RememberPins { value: Some(v) })
                     }),
+                ),
+                setting(
+                    "Always Apply",
+                    Some("Choosing an agent starts a workspace session and stages edits to pinned folders for review"),
+                    switch(self.settings.always_apply, |v| event(Event::AlwaysApply(v))),
                 ),
                 setting(
                     "Automatic workspaces",

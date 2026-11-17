@@ -173,6 +173,10 @@ impl App {
                 self.save_settings();
             }
             Event::Scale(scale) => return self.set_scale(scale),
+            Event::AlwaysApply(enabled) => {
+                self.settings.always_apply = enabled;
+                self.save_settings();
+            }
             Event::ShelfShare(share) => {
                 // the main display's width, and the default for displays without their own
                 self.settings.shelf_width = Some(share);

@@ -2084,6 +2084,35 @@ fn the_menu_starts_a_session_and_opens_it() {
     server.join().unwrap();
 }
 
+#[test]
+fn always_apply_setting_only_affects_default_agent_starts() {
+    use crate::menu::Event;
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let cases = [(false, None, false), (false, None, true), (true, None, false), (false, Some(false), false), (false, Some(true), false)];
+    let server = std::thread::spawn(move || {
+        for (ghost, workspaces, always_apply) in cases {
+            let create = daemon.expect(method::SESSIONS_CREATE);
+            let params = &create["params"];
+            assert_eq!(params["ghost"].as_bool(), Some(ghost));
+            assert_eq!(params["workspaces"].as_bool(), workspaces);
+            assert_eq!(params["always_apply"].as_bool().unwrap_or(false), always_apply);
+            daemon.reply(&create, json!({"session_id": "demo"}));
+            let list = daemon.expect(method::SESSIONS_LIST);
+            daemon.reply(&list, json!({"sessions": [session_record("demo", "witty-willow", false, false)], "next": null}));
+        }
+    });
+    for (index, (ghost, workspaces, _)) in cases.into_iter().enumerate() {
+        if index == 1 {
+            app.settings_page = Some(crate::settings_ui::SettingsPage::default());
+            let _ = app.update(Message::Settings(crate::settings_ui::Event::AlwaysApply(true)));
+        }
+        let task = app.update(Message::Menu(Event::New { agent: "codex".into(), ghost, workspaces }));
+        settle_task(&mut app, task);
+    }
+    server.join().unwrap();
+}
+
 /// The selected tab's × ends its session; a ghost's asks once first, since closing deletes it.
 #[test]
 fn closing_a_tab_ends_its_session_and_a_ghost_asks_first() {

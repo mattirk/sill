@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     pub settings_category: crate::settings_ui::Category,
     pub shortcuts: crate::shortcuts::Bindings,
+    /// Stage edits for review in sessions started by choosing an agent.
+    pub always_apply: bool,
     /// Shelf mode's width as a share of the main display's usable width (0.15–0.4), on displays
     /// without one of their own (`displays`). Unset = 35 %.
     pub shelf_width: Option<f32>,
