@@ -10,7 +10,9 @@ use sill_proto::{memory::Note, sessions::Session};
 pub enum Event {
     Open(String),
     Back,
-    Loaded(String, Result<(Session, Vec<Note>, Option<usize>), String>),
+    Loaded(String, Result<(Session, Vec<Note>), String>),
+    /// The session's kept changes, counted apart: the page does not wait for the Changes listing.
+    Kept(String, Option<usize>),
     Edit,
     Cancel,
     Input(text_editor::Action),
@@ -75,7 +77,8 @@ impl App {
         let key = sill_client::request_id("details-load");
         page.token = key.clone();
         page.load_pending = true;
-        blocking(
+        let (counting, counted, listed) = (actions.clone(), id.clone(), key.clone());
+        let load = blocking(
             move || {
                 actions
                     .reading(|c| {
@@ -90,15 +93,22 @@ impl App {
                                 break;
                             }
                         }
-                        let kept = sill_client::changes::list(c).ok().map(|entries| {
-                            entries.iter().filter(|entry| matches!(entry, sill_proto::changes::Entry::Kept { session_id, .. } if session_id == &id)).count()
-                        });
-                        Ok((session, notes, kept))
+                        Ok((session, notes))
                     })
                     .map_err(|e| format!("{e:#}"))
             },
             move |r| Message::Details(Event::Loaded(key, r)),
-        )
+        );
+        // asked after the page's own read: the daemon answers one connection's requests in order
+        let kept = blocking(
+            move || {
+                counting.reading(sill_client::changes::list).ok().map(|entries| {
+                    entries.iter().filter(|entry| matches!(entry, sill_proto::changes::Entry::Kept { session_id, .. } if session_id == &counted)).count()
+                })
+            },
+            move |kept| Message::Details(Event::Kept(listed, kept)),
+        );
+        Task::batch([load, kept])
     }
     pub fn details_event(&mut self, event: Event) -> Task<Message> {
         if let Event::Open(id) = event {
@@ -187,17 +197,20 @@ impl App {
                     return self.details_load(id);
                 }
                 match result {
-                    Ok((session, notes, kept)) => {
+                    Ok((session, notes)) => {
                         page.rendered = markdown::parse(&session.summary).collect();
                         if !page.editing {
                             page.editor = text_editor::Content::with_text(&session.summary);
                         }
                         page.session = Some(session);
                         page.notes = notes;
-                        page.kept = kept;
                     }
                     Err(e) => page.error = Some(e),
                 }
+                return Task::none();
+            }
+            Event::Kept(key, kept) if key == page.token => {
+                page.kept = kept;
                 return Task::none();
             }
             Event::Edit if !page.pending => {
@@ -381,7 +394,7 @@ mod tests {
             "settings":{}, "follows":null, "compacted":"0"
         }))
         .unwrap();
-        let _ = app.details_event(Event::Loaded(token, Ok((session, vec![], None))));
+        let _ = app.details_event(Event::Loaded(token, Ok((session, vec![]))));
         let _ = app.details_event(Event::Cancel);
         let page = app.details.as_ref().unwrap();
         assert!(!page.editing);

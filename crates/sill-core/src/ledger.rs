@@ -30,6 +30,10 @@ pub struct ScanOptions {
     pub ignore: Vec<String>,
     /// Paths that are masked or bound directly: nothing below them is a change.
     pub skip: Vec<PathBuf>,
+    /// Leave out what matches `ignore`, and never enter such a directory: for a reader that
+    /// drops ignored entries anyway. A package cache is tens of thousands of files, most of them
+    /// the host's own, each read whole on both sides to find that out.
+    pub prune_ignored: bool,
 }
 
 /// Scan every layer's upper tree.
@@ -84,6 +88,10 @@ fn walk(upper_root: &Path, host_root: &Path, dir: &Path, opts: &ScanOptions, out
         if opts.skip.iter().any(|s| host.starts_with(s)) {
             continue;
         }
+        let ignored = is_ignored(rel, &opts.ignore);
+        if ignored && opts.prune_ignored {
+            continue;
+        }
         let Ok(md) = upper.symlink_metadata() else { continue };
         let ft = md.file_type();
         let host_md = host.symlink_metadata().ok();
@@ -100,7 +108,6 @@ fn walk(upper_root: &Path, host_root: &Path, dir: &Path, opts: &ScanOptions, out
             }
             None => false,
         };
-        let ignored = is_ignored(rel, &opts.ignore);
 
         if ft.is_char_device() && md.rdev() == 0 {
             // whiteout: a deletion of something on the host; a file created and deleted in-session
@@ -164,11 +171,14 @@ fn walk_new(upper_root: &Path, host_root: &Path, dir: &Path, opts: &ScanOptions,
         if opts.skip.iter().any(|s| host.starts_with(s)) {
             continue;
         }
+        let ignored = is_ignored(rel, &opts.ignore);
+        if ignored && opts.prune_ignored {
+            continue;
+        }
         let Ok(md) = upper.symlink_metadata() else { continue };
         if md.file_type().is_char_device() && md.rdev() == 0 {
             continue;
         }
-        let ignored = is_ignored(rel, &opts.ignore);
         out.push(Change {
             path: host,
             upper: upper.clone(),
@@ -263,6 +273,27 @@ mod tests {
         assert_eq!(changes.len(), 2);
         assert!(changes.iter().any(|c| c.path == host.join(".cargo/config.toml")));
         assert!(!changes.iter().any(|c| c.path == host.join(".cargo/credentials")));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn pruning_leaves_out_ignored_entries_and_what_is_below_them() {
+        let base = std::env::temp_dir().join(format!("sill-ledger-prune-{}", std::process::id()));
+        let upper = base.join("upper");
+        let host = base.join("host");
+        std::fs::create_dir_all(upper.join(".cargo/registry/src/a")).unwrap();
+        std::fs::create_dir_all(host.join(".cargo")).unwrap();
+        std::fs::write(upper.join(".cargo/registry/src/a/lib.rs"), "").unwrap();
+        std::fs::write(upper.join(".cargo/config.toml"), "real change").unwrap();
+        let layers = [Layer { host: host.clone(), upper: upper.clone(), work: base.join("work") }];
+        let ignore = vec![".cargo/registry/".to_string()];
+        let all = scan(&layers, &ScanOptions { ignore: ignore.clone(), ..Default::default() }).unwrap();
+        assert_eq!(all.iter().filter(|c| c.ignored).count(), 4, "{all:?}");
+        let pruned = scan(&layers, &ScanOptions { ignore, prune_ignored: true, ..Default::default() }).unwrap();
+        let kept: Vec<_> = all.into_iter().filter(|c| !c.ignored).collect();
+        let paths = |v: &[Change]| v.iter().map(|c| c.path.clone()).collect::<Vec<_>>();
+        assert_eq!(paths(&pruned), paths(&kept));
+        assert_eq!(paths(&pruned), [host.join(".cargo/config.toml")]);
         std::fs::remove_dir_all(base).unwrap();
     }
 

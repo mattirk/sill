@@ -919,6 +919,16 @@ impl Hub {
     /// A session's writes as the Changes page lists them: its upper trees against its policy (a
     /// ghost's tightened).
     fn session_changes(&self, s: &sill_core::store::Session, uid: u32) -> Result<Vec<sill_core::ledger::Change>> {
+        self.session_scan(s, uid, false)
+    }
+
+    /// [`Self::session_changes`] without what the policy's ignore patterns match (package caches,
+    /// build output outside a repository): for listing and counting what is pending.
+    fn session_pending(&self, s: &sill_core::store::Session, uid: u32) -> Result<Vec<sill_core::ledger::Change>> {
+        self.session_scan(s, uid, true)
+    }
+
+    fn session_scan(&self, s: &sill_core::store::Session, uid: u32, pending: bool) -> Result<Vec<sill_core::ledger::Change>> {
         let sdir = sill_core::session::state_dir_path(uid, &s.id)?;
         if !sdir.is_dir() {
             return Ok(vec![]);
@@ -927,7 +937,7 @@ impl Hub {
         let filesystem = launch.filesystem.context("filesystem plan not recorded; rebuild the session")?;
         let policy = launch.policy;
         let plan = sill_core::changes::session_view(&policy, &sdir, &self.home, &filesystem)?;
-        sill_core::changes::scan(&policy, &plan, None)
+        if pending { sill_core::changes::scan_pending(&policy, &plan) } else { sill_core::changes::scan(&policy, &plan, None) }
     }
 
     /// A relay for the session answers on its socket.

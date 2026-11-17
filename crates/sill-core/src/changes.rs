@@ -52,9 +52,20 @@ pub fn session_view(policy: &Policy, state_dir: &Path, home: &Path, filesystem: 
 /// output) exactly as the repository defines them; the policy's `ledger_ignore` patterns apply
 /// everywhere else.
 pub fn scan(policy: &Policy, plan: &SessionView, session_start: Option<std::time::SystemTime>) -> Result<Vec<Change>> {
+    scan_with(policy, plan, session_start, false)
+}
+
+/// [`scan`] without what the policy's `ledger_ignore` patterns match, and without entering such
+/// a directory: for what lists or counts pending changes and would drop those entries anyway.
+/// What git ignores is still listed, marked ignored.
+pub fn scan_pending(policy: &Policy, plan: &SessionView) -> Result<Vec<Change>> {
+    scan_with(policy, plan, None, true)
+}
+
+fn scan_with(policy: &Policy, plan: &SessionView, session_start: Option<std::time::SystemTime>, prune_ignored: bool) -> Result<Vec<Change>> {
     let mut skip = plan.masked.clone();
     skip.extend(plan.direct.iter().cloned());
-    let opts = ScanOptions { session_start, ignore: policy.paths.ledger_ignore.clone(), skip };
+    let opts = ScanOptions { session_start, ignore: policy.paths.ledger_ignore.clone(), skip, prune_ignored };
     let mut changes = ledger::scan(&plan.layers, &opts)?;
     apply_gitignore(&mut changes);
     Ok(changes)

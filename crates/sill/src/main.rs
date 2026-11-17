@@ -1104,7 +1104,7 @@ fn jail_cmd(cmd: JailCmd) -> Result<()> {
             let plan = spec.plan()?;
             let mut skip = plan.masked.clone();
             skip.extend(plan.direct.iter().cloned());
-            let opts = ledger::ScanOptions { session_start: None, ignore: spec.policy.paths.ledger_ignore.clone(), skip };
+            let opts = ledger::ScanOptions { session_start: None, ignore: spec.policy.paths.ledger_ignore.clone(), skip, prune_ignored: false };
             let changes = ledger::scan(&plan.layers, &opts)?;
             let path = std::path::absolute(path)?;
             let Some(c) = changes.iter().find(|c| c.path == path) else { bail!("{} is not changed", path.display()) };
@@ -1185,7 +1185,7 @@ fn jail_cmd(cmd: JailCmd) -> Result<()> {
 fn print_changes(spec: &JailSpec, plan: &jail::JailPlan, all: bool, diff: Option<PathBuf>) -> Result<()> {
     let mut skip = plan.masked.clone();
     skip.extend(plan.direct.iter().cloned());
-    let opts = ledger::ScanOptions { session_start: None, ignore: spec.policy.paths.ledger_ignore.clone(), skip };
+    let opts = ledger::ScanOptions { session_start: None, ignore: spec.policy.paths.ledger_ignore.clone(), skip, prune_ignored: false };
     let changes = ledger::scan(&plan.layers, &opts)?;
     if let Some(path) = diff {
         let path = std::path::absolute(path)?;

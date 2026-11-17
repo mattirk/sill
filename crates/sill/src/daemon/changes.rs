@@ -38,7 +38,7 @@ impl Hub {
             let kept = kept_dir(uid, &s.id).map(|d| keep::undoable(&d)).unwrap_or_default();
             // one session that cannot be read (a launch recorded by an older Sill) is told on its
             // own; it does not take every other session's changes with it
-            let list: Vec<Change> = match self.session_changes(&s, uid) {
+            let list: Vec<Change> = match self.session_pending(&s, uid) {
                 Ok(list) => list.into_iter().filter(|c| !c.ignored).collect(),
                 Err(error) => {
                     unreadable.push(sill_proto::changes::Unreadable { session_id: s.id.clone(), title: s.title.clone(), why: format!("{error:#}") });
@@ -185,7 +185,7 @@ impl Hub {
             let Ok(state_dirs) = filesystem.state_paths() else { continue };
             let now = std::time::SystemTime::now();
             let mut due: Vec<Change> = self
-                .session_changes(&s, uid)
+                .session_pending(&s, uid)
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|c| !c.conflict && !c.ignored && sill_core::changes::repo_root(&c.path).is_none())
@@ -228,7 +228,7 @@ impl Hub {
         let _ = std::thread::Builder::new().name(format!("sill-turn-{id}")).spawn(move || {
             let Some(s) = hub.with_store(|st| st.sessions()).ok().and_then(|v| v.into_iter().find(|s| s.id == id)) else { return };
             let uid = own_uid();
-            let changes = match hub.session_changes(&s, uid) {
+            let changes = match hub.session_pending(&s, uid) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("sill daemon: session {id}: scanning after the turn: {e:#}");
