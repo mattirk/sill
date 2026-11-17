@@ -765,7 +765,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             session(hub, &a.session_id)?;
             let snapshot = sill_core::session::policy_snapshot(&a.session_id)?
                 .map(|r| { let name = r.policy.name.clone(); policy_view("launch", &a.session_id, &name, r) }).transpose()?;
-            bounded(api::PolicySnapshot { snapshot })
+            bounded(api::PolicySnapshot { snapshot, warnings: sill_core::session::launch_warnings(&a.session_id)? })
         }
         "_sill/policy.check" => {
             let a: api::PolicyCheck = args(p)?;

@@ -87,6 +87,8 @@ pub struct Views {
     /// The running jail's launch snapshot (none when not running, or never recorded).
     pub launch: Option<PolicyView>,
     pub agent_name: Option<String>,
+    /// What the running jail's launch warned about (the launcher's own words).
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +170,14 @@ impl Perms {
             n => out.push(format!("{n} approved hosts")),
         }
         out
+    }
+
+    /// What the running jail's launch warned about; nothing for a jail that is not running.
+    pub fn launch_warnings(&self, running: bool) -> &[String] {
+        match &self.views {
+            Some(views) if running => &views.warnings,
+            _ => &[],
+        }
     }
 
     /// The running jail was built with other permissions than the next build would have: a
@@ -427,13 +437,13 @@ impl App {
                 let preview: PolicyView = actions
                     .read("_sill/policy.preview", key.clone())
                     .map_err(|e| format!("{e:#}"))?;
-                let launch = if running {
-                    actions
+                let (launch, warnings) = if running {
+                    let read = actions
                         .read::<PolicySnapshot>("_sill/policy.snapshot", key)
-                        .map_err(|e| format!("{e:#}"))?
-                        .snapshot
+                        .map_err(|e| format!("{e:#}"))?;
+                    (read.snapshot, read.warnings)
                 } else {
-                    None
+                    (None, vec![])
                 };
                 let agent_name = match agent.filter(|_| want_name) {
                     Some(agent) => actions
@@ -446,6 +456,7 @@ impl App {
                     preview,
                     launch,
                     agent_name,
+                    warnings,
                 })
             },
             move |result| Message::Perms(Event::Read(id, serial, result)),
@@ -597,9 +608,10 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
     // orange while the agent may act on the host; yellow, the lesser caution, for expanded
     // access in the jail and for control of the VM (the person, 2026-11-13)
     let on = session.map(crate::host_control::groups_on).unwrap_or_default();
+    let warnings = view.permissions.launch_warnings(running);
     let color = if on.contains(&crate::host_control::Group::Host) {
         P.warning
-    } else if !expanded.is_empty() || !on.is_empty() || view.permissions.development_on() {
+    } else if !expanded.is_empty() || !on.is_empty() || view.permissions.development_on() || !warnings.is_empty() {
         alpha(style::yellow(), 0.85)
     } else if view.permissions.open {
         P.accent
@@ -619,6 +631,11 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
     }
     if pending {
         tip.push_str(" · changes apply after a restart");
+    }
+    match warnings.len() {
+        0 => {}
+        1 => tip.push_str(" · 1 launch warning"),
+        n => tip.push_str(&format!(" · {n} launch warnings")),
     }
     tip.push_str(" · right click: all permissions");
     let shield = keys::press_maybe(
@@ -977,6 +994,17 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
         .align_y(Alignment::Center),
     );
 
+    // what the launcher said about the running jail, above the switches: nothing here changes
+    // it, the person reads it
+    let warnings = perms.launch_warnings(running);
+    if !warnings.is_empty() {
+        let mut list = Column::new().spacing(3).push(heading("LAUNCH WARNINGS", alpha(style::yellow(), 0.85)));
+        for warning in warnings {
+            list = list.push(text(capitalised(warning)).size(style::TINY).color(P.fg).width(Fill));
+        }
+        content = content.push(list);
+    }
+
     // IN THE JAIL: tool approvals, then jail access; ON THE HOST: Host control. Two columns of
     // fixed width (the second under the first in a narrow window); nothing moves between states.
     let mut jail = Column::new().width(JAIL_COLUMN);
@@ -1278,7 +1306,7 @@ mod tests {
         let launch: PolicyView = serde_json::from_value(view("launch", false, json!([]))).unwrap();
         let mut preview = launch.clone();
         preview.filesystem.as_mut().unwrap().unused.push(sill_proto::sessions::HostPath::from_path(std::path::Path::new("/stored/.cargo")));
-        let mut perms = Perms { views: Some(Views { launch: Some(launch), preview, agent_name: None }), ..Default::default() };
+        let mut perms = Perms { views: Some(Views { launch: Some(launch), preview, agent_name: None, warnings: vec![] }), ..Default::default() };
         assert!(!perms.filesystem_open);
         assert!(!perms.restart_pending(true));
         perms.views.as_mut().unwrap().preview.filesystem.as_mut().unwrap().rules.push(sill_proto::admin::PathRule {
@@ -1312,7 +1340,7 @@ mod tests {
         app.views.get_mut("demo").unwrap().permissions = Perms {
             open: true,
             filesystem_open: true,
-            views: Some(Views { preview, launch: None, agent_name: None }),
+            views: Some(Views { preview, launch: None, agent_name: None, warnings: vec![] }),
             ..Default::default()
         };
         let mut ui = simulator(&app, (720.0, 860.0));
@@ -1354,7 +1382,7 @@ mod tests {
                 json!([{"host": "example.org", "applied": true, "reason": ""},
                        {"host": "blocked.example", "applied": false, "reason": "offline: no network"}])));
             let snapshot = daemon.expect("_sill/policy.snapshot");
-            daemon.reply(&snapshot, json!({"snapshot": view("launch", false, json!([]))}));
+            daemon.reply(&snapshot, json!({"snapshot": view("launch", false, json!([])), "warnings": ["a host socket lies in a pinned folder: /pin/agent.sock"]}));
             let agent = daemon.expect("_sill/agents.get");
             assert_eq!(agent["params"]["agent_id"], "claude");
             daemon.reply(&agent, json!({"id": "claude", "name": "Claude Code"}));
@@ -1368,7 +1396,11 @@ mod tests {
         assert!(perms.restart_pending(true));
         assert_eq!(perms.expanded(false), vec!["Public web".to_string(), "1 approved host".to_string()]);
         assert_eq!(perms.agent_name.as_deref(), Some("Claude Code"));
+        assert_eq!(perms.launch_warnings(true).len(), 1);
+        assert!(perms.launch_warnings(false).is_empty(), "a stopped jail has no launch to warn about");
         let mut ui = simulator(&app, (720.0, 860.0));
+        ui.find("LAUNCH WARNINGS").unwrap();
+        ui.find("A host socket lies in a pinned folder: /pin/agent.sock").unwrap();
         ui.find("Default · expanded access").unwrap();
         ui.find("needs restart").unwrap();
         ui.find("Restart now").unwrap();
@@ -1492,7 +1524,7 @@ mod tests {
         {
             let perms = &mut app.views.get_mut("demo").unwrap().permissions;
             perms.open = true;
-            perms.views = Some(Views { launch: None, preview: preview.clone(), agent_name: None });
+            perms.views = Some(Views { launch: None, preview: preview.clone(), agent_name: None, warnings: vec![] });
         }
         {
             let mut ui = simulator(&app, (720.0, 860.0));
@@ -1523,7 +1555,7 @@ mod tests {
         unavailable.permissions[1].available = false;
         unavailable.permissions[1].reason = "dbus-daemon is not installed (the private bus needs the dbus package)".into();
         let perms = &mut app.views.get_mut("demo").unwrap().permissions;
-        perms.views = Some(Views { launch: None, preview: unavailable, agent_name: None });
+        perms.views = Some(Views { launch: None, preview: unavailable, agent_name: None, warnings: vec![] });
         perms.notice = None;
         let mut ui = simulator(&app, (720.0, 860.0));
         ui.find("Apply development permissions").unwrap();
@@ -1587,7 +1619,7 @@ mod tests {
         let preview: PolicyView = serde_json::from_value(view("preview", true, json!([]))).unwrap();
         let launch: PolicyView = serde_json::from_value(view("launch", false, json!([]))).unwrap();
         app.views.get_mut("demo").unwrap().permissions.views =
-            Some(Views { preview, launch: Some(launch), agent_name: None });
+            Some(Views { preview, launch: Some(launch), agent_name: None, warnings: vec![] });
         let mut ui = simulator(&app, (720.0, 860.0));
         assert!(ui.find("Default · jailed · permission changes apply after a restart").is_err());
         assert!(app.views["demo"].permissions.expanded(true).is_empty(), "the running jail has no public web yet");
@@ -1607,7 +1639,7 @@ mod tests {
         let preview: PolicyView = serde_json::from_value(preview).unwrap();
         let perms = &mut app.views.get_mut("demo").unwrap().permissions;
         perms.open = true;
-        perms.views = Some(Views { launch: Some(preview.clone()), preview, agent_name: None });
+        perms.views = Some(Views { launch: Some(preview.clone()), preview, agent_name: None, warnings: vec![] });
         let mut ui = simulator(&app, (720.0, 860.0));
         ui.find("Desktop development").unwrap();
         ui.find("Private D-Bus").unwrap();
@@ -1628,6 +1660,7 @@ mod tests {
             preview,
             launch: None,
             agent_name: None,
+            warnings: vec![],
         }).unwrap());
         let mut ui = simulator(&app, (720.0, 860.0));
         ui.find("Ghost · Default only").unwrap();

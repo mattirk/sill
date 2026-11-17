@@ -810,7 +810,7 @@ endpoints.
 | Method | Behavior |
 |---|---|
 | `_sill/policy.preview` | Session key; resolve the session's policy, pins and remembered grants for the next build. Invalid inputs (a policy that does not parse, a pinned folder that is gone) return diagnostics and no resolved text. |
-| `_sill/policy.snapshot` | Session key; return the recorded last successful launch, or null for an older/never-launched jail. |
+| `_sill/policy.snapshot` | Session key; return the recorded last successful launch, or null for an older/never-launched jail, and `warnings`: what the session's last launch warned about, in the launcher's words (since 2026-11-15). |
 | `_sill/policy.check` | Validate transferred text as a complete policy. |
 | `_sill/policy.import` | Install transferred complete-policy text under a name; existing user policies require explicit replacement. |
 

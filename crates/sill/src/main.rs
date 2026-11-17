@@ -690,6 +690,7 @@ fn policy_cmd(cmd: Option<PolicyCmd>) -> Result<()> {
             let result: api::PolicySnapshot = c.call("_sill/policy.snapshot", SessionKey { session_id: key })?;
             if let Some(view) = result.snapshot { print_policy_view(&view); }
             else { println!("No launch policy snapshot was recorded for this session."); }
+            for w in &result.warnings { println!("# launch warning: {w}"); }
         }
         PolicyCmd::Check { file } => {
             let text = read_policy_input(&file)?;
@@ -1352,7 +1353,9 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
     };
     let seccomp = seccomp_fd(&mut spec)?;
     let plan = spec.plan()?;
-    for w in plan.warnings.iter().chain(&spec.live_sockets(&plan)) {
+    // every warning of this launch, for the journal and, through the daemon, the window
+    let mut launch_warnings: Vec<String> = plan.warnings.iter().cloned().chain(spec.live_sockets(&plan)).collect();
+    for w in &launch_warnings {
         eprintln!("sill launch: warning: {w}");
     }
     jail::prepare(&plan)?;
@@ -1369,6 +1372,7 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
                 let dir = sill_core::launcher::make_session_cgroup(root, session, &spec.policy.limits, &mut warnings)?;
                 for w in warnings {
                     eprintln!("sill launch: warning: {w}");
+                    launch_warnings.push(w);
                 }
                 eprintln!("sill launch: limits in cgroup {}", dir.display());
                 cgroup_procs = Some(dir.join("cgroup.procs"));
@@ -1376,9 +1380,17 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
             // a scope made by the daemon (`systemd-run --scope`) carries the limits already
             None => match own_scope() {
                 Some(scope) => eprintln!("sill launch: limits on {scope}"),
-                None => eprintln!("sill launch: warning: no resource limits — a busy agent can starve the host"),
+                None => {
+                    let w = "no resource limits — a busy agent can starve the host";
+                    eprintln!("sill launch: warning: {w}");
+                    launch_warnings.push(w.into());
+                }
             },
         }
+    }
+    // the window shows them (`_sill/policy.snapshot`); a launch does not fail for its record
+    if let Err(e) = sill_core::session::record_launch_warnings(&rt, &launch_warnings) {
+        eprintln!("sill launch: warning: {e:#}");
     }
 
     let listener = UnixListener::bind(&shim_sock).with_context(|| format!("bind {}", shim_sock.display()))?;

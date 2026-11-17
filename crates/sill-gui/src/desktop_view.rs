@@ -309,7 +309,7 @@ mod tests {
             "session_id": "demo", "name": "default", "text": null, "fingerprint": null,
             "diagnostics": [], "permissions": [state], "session_hosts": []})).unwrap();
         app.views.get_mut("demo").unwrap().permissions.views =
-            Some(crate::permissions::Views { preview: view.clone(), launch: Some(view), agent_name: None });
+            Some(crate::permissions::Views { preview: view.clone(), launch: Some(view), agent_name: None, warnings: vec![] });
     }
 
     /// A client whose daemon answered the desktop view capability, and that daemon's end.
