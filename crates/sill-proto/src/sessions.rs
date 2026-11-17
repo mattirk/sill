@@ -52,6 +52,8 @@ pub struct Session {
     pub summary: String,
     pub summary_kind: String,
     pub ghost: bool,
+    #[serde(default)]
+    pub always_apply: bool,
     pub running: bool,
     pub pins: Vec<HostPath>,
     pub settings: Settings,
@@ -90,6 +92,8 @@ pub struct Page {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Create {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub always_apply: bool,
     pub create_id: String,
     pub agent: String,
     pub policy: String,

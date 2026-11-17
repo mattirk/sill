@@ -968,7 +968,16 @@ impl Hub {
         let filesystem = launch.filesystem.context("filesystem plan not recorded; rebuild the session")?;
         let policy = launch.policy;
         let plan = sill_core::changes::session_view(&policy, &sdir, &self.home, &filesystem)?;
-        if pending { sill_core::changes::scan_pending(&policy, &plan) } else { sill_core::changes::scan(&policy, &plan, None) }
+        let mut changes = if pending { sill_core::changes::scan_pending(&policy, &plan)? } else { sill_core::changes::scan(&policy, &plan, None)? };
+        if !filesystem.staged_pins.is_empty() || !filesystem.staged_files.is_empty() {
+            let kept = sill_core::staged_pin::baseline_keeps(&sdir.join("kept"));
+            for change in &mut changes {
+                if let Some(original) = filesystem.staged_original(&sdir, &change.path)? {
+                    change.conflict = !sill_core::staged_pin::unchanged(&original, &change.path, &kept)?;
+                }
+            }
+        }
+        Ok(changes)
     }
 
     /// A relay for the session answers on its socket.
@@ -1450,6 +1459,7 @@ impl Hub {
         agent.ready(&self.home)?;
         let binds = vec![];
         let opts = StartOptions {
+            always_apply: s.always_apply,
             session: id.to_string(),
             policy: s.policy.clone(),
             pins: if s.ghost { vec![] } else { pins.clone() },

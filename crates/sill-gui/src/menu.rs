@@ -46,6 +46,7 @@ pub enum Event {
     },
     /// An agent without directory setup: open the Agents page to finish it.
     Setup(String),
+    AlwaysApply(String),
     Reopen(String),
     NewHere(String),
     Delete(String),
@@ -121,7 +122,8 @@ impl App {
                         tip(format!("{} as a ghost — leaves no session behind: no pins, no memory, its writes revert after an hour", agent.name)),
                         tooltip::Position::Left,
                     );
-                    panel = panel.push(row![start, other, ghost].align_y(Alignment::Center));
+                    let review = keys::press(button(text("Always Apply").size(style::TINY)).style(style::quiet), event(Event::AlwaysApply(agent.id.clone())));
+                    panel = panel.push(row![start, review, other, ghost].align_y(Alignment::Center));
                 }
             }
         }

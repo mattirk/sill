@@ -36,6 +36,7 @@ pub fn new_here(from: &Session) -> Request {
         pins: vec![],
         memory_scope: from.memory_scope.clone(),
         follows: from.session_id.clone(),
+        always_apply: from.always_apply,
         remember_pins: false,
         ghost: false,
         workspaces: None,

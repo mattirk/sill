@@ -85,14 +85,18 @@ fn some(items: &[String], n: usize) -> String {
 /// scratch and hidden paths, desktop access, network, tools off the PATH, and that the host's own
 /// changes meanwhile may not show. One bracketed block, a few lines — every token here is paid
 /// once per agent start, but saved on every prompt that would otherwise go looking.
-pub fn facts_block(policy: &Policy, home: &Path) -> String {
+pub fn facts_block(policy: &Policy, home: &Path, always_apply: bool) -> String {
     let p = &policy.paths;
     let mut lines: Vec<String> = Vec::new();
-    lines.push("You run in sill's jail. `/` is a view of the host: a write outside a pinned folder goes to this session's overlay and reaches the host only when the person keeps it (Changes); a pinned folder is the host itself — a write or a commit there is a host write at once. `sudo` and setuid do not work; system changes are for the person to keep.".into());
+    if always_apply {
+        lines.push("You run in Sill's jail. / is a view of the host. Writes outside pinned folders stay in the session overlay until the person applies them. sudo and setuid do not work. Always Apply is active. A staged folder is a snapshot: host edits appear after restart or reopen, and pending session edits stay staged. The person reviews them in Changes and clicks Apply. Repositories use workspaces. Host control permits screen viewing and process inspection.".into());
+    } else {
+        lines.push("You run in sill's jail. `/` is a view of the host: a write outside a pinned folder goes to this session's overlay and reaches the host only when the person keeps it (Changes); a pinned folder is the host itself — a write or a commit there is a host write at once. `sudo` and setuid do not work; system changes are for the person to keep.".into());
+    }
     if !p.private.is_empty() {
         lines.push(format!("Kept across turns, never on the host: {}.", p.private.join(", ")));
     }
-    if !p.direct.is_empty() {
+    if !always_apply && !p.direct.is_empty() {
         lines.push(format!("Written straight to the host, unrecorded: {}.", p.direct.join(", ")));
     }
     if !p.mask.is_empty() {
@@ -101,7 +105,14 @@ pub fn facts_block(policy: &Policy, home: &Path) -> String {
     if !p.ro.is_empty() {
         lines.push(format!("Read-only: {}.", some(&p.ro, 10)));
     }
-    lines.push("Host control, only when explicitly activated by the person: `/.sill/bin/sill-host state` reports its generation and granted operations. `sill-host OP GENERATION JSON_ARGS` executes on the daemon's host, with direct host paths and writes. launch/commands take {\"argv\":[\"program\",\"arg\"],\"cwd\":\"/absolute/host/path\",\"env\":{}}; inspect takes {}; stop takes {\"name\":\"host:ID\"}; stop_existing takes {\"pid\":PID,\"start_ticks\":TICKS} from inspect. Commands run asynchronously (use argv [\"/bin/sh\",\"-c\",\"...\"] for a shell). A refusal is not permission to find another host route. Never replay an uncertain action automatically. Revocation stops launched process groups unless the person marked them to keep; it cannot undo host effects. Launched host processes also appear in `sill-proc list` as host:ID with their output in `sill-proc tail host:ID`; only `sill-host stop` stops them. In Sill.app on a Mac, the mac_view grant lets `/.sill/bin/sill-mac displays|windows GENERATION` list the Mac's displays and windows and `sill-mac screenshot GENERATION --display ID|--window ID [--output PATH]` take a picture (`sill-mac state` says whether a Mac is attached); view the PNG with your image tools, and capture again after anything changes. With mac_input, `sill-mac click|move|drag|scroll GENERATION --frame F X Y` aims in the pixels of that picture's frame F (two minutes, refused if the target moved), and `sill-mac type|key GENERATION ARG` act where the Mac's focus is; it is the person's whole desktop. If the person uses the mouse or keyboard your input stops: take a new picture, never repeat blindly. With mac_commands, `sill-mac run GENERATION --cwd DIR -- PROGRAM ARG…` runs a program on the Mac as the person (unrestricted; DIR inside a shared Mac folder, which is at the same path in this jail), returning mac:N at once; `sill-mac ps|output|stop GENERATION [mac:N]` follow it. Mac processes stop on revocation and when Sill quits.".into());
+    if !always_apply {
+        lines.push("Host control, only when explicitly activated by the person: `/.sill/bin/sill-host state` reports its generation and granted operations. `sill-host OP GENERATION JSON_ARGS` executes on the daemon's host, with direct host paths and writes. launch/commands take {\"argv\":[\"program\",\"arg\"],\"cwd\":\"/absolute/host/path\",\"env\":{}}; inspect takes {}; stop takes {\"name\":\"host:ID\"}; stop_existing takes {\"pid\":PID,\"start_ticks\":TICKS} from inspect. Commands run asynchronously (use argv [\"/bin/sh\",\"-c\",\"...\"] for a shell). A refusal is not permission to find another host route. Never replay an uncertain action automatically. Revocation stops launched process groups unless the person marked them to keep; it cannot undo host effects. Launched host processes also appear in `sill-proc list` as host:ID with their output in `sill-proc tail host:ID`; only `sill-host stop` stops them. In Sill.app on a Mac, the mac_view grant lets `/.sill/bin/sill-mac displays|windows GENERATION` list the Mac's displays and windows and `sill-mac screenshot GENERATION --display ID|--window ID [--output PATH]` take a picture (`sill-mac state` says whether a Mac is attached); view the PNG with your image tools, and capture again after anything changes. With mac_input, `sill-mac click|move|drag|scroll GENERATION --frame F X Y` aims in the pixels of that picture's frame F (two minutes, refused if the target moved), and `sill-mac type|key GENERATION ARG` act where the Mac's focus is; it is the person's whole desktop. If the person uses the mouse or keyboard your input stops: take a new picture, never repeat blindly. With mac_commands, `sill-mac run GENERATION --cwd DIR -- PROGRAM ARG…` runs a program on the Mac as the person (unrestricted; DIR inside a shared Mac folder, which is at the same path in this jail), returning mac:N at once; `sill-mac ps|output|stop GENERATION [mac:N]` follow it. Mac processes stop on revocation and when Sill quits.".into());
+    } else {
+        lines.push(
+            "With a viewing or inspection grant, use /.sill/bin/sill-host state or /.sill/bin/sill-mac state for the generation and available operations."
+                .into(),
+        );
+    }
     let desktop = policy.permissions.test_desktop == crate::permissions::Rule::On;
     if policy.permissions.gpu == crate::permissions::Rule::On {
         lines.push("GPU: an Intel/AMD render node is available; display-control devices are not exposed.".into());
@@ -232,7 +243,11 @@ ro = ["/srv/music"]
 "#,
         )
         .unwrap();
-        let f = facts_block(&p, &home);
+        let reviewed = facts_block(&p, &home, true);
+        for fact in ["jail", "view of the host", "session overlay", "sudo and setuid", "snapshot", "restart or reopen"] {
+            assert!(reviewed.contains(fact), "missing {fact}");
+        }
+        let f = facts_block(&p, &home, false);
         assert!(f.starts_with("[You run in sill's jail."), "{f}");
         assert!(f.ends_with("until the session restarts.]"), "{f}");
         assert!(f.contains("never on the host: ~/.cache."));
@@ -245,7 +260,7 @@ ro = ["/srv/music"]
         std::fs::create_dir_all(home.join(".cargo/bin")).unwrap();
         assert_eq!(tool_dirs(&home), vec!["~/go/bin".to_string()]);
         let none: Policy = toml::from_str("name = \"n\"\n[network]\nmode = \"none\"").unwrap();
-        let f = facts_block(&none, &home);
+        let f = facts_block(&none, &home, false);
         assert!(f.contains("No network.") && f.contains("No X11, no D-Bus") && !f.contains("Hidden"));
         assert!(f.contains("![what it shows](/absolute/path.png)"), "agents are told how to show an image");
         // the long lists are cut

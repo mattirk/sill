@@ -39,6 +39,7 @@ pub mod session;
 pub mod sfp;
 pub mod sfp_client;
 pub mod shim;
+pub mod staged_pin;
 pub mod store;
 pub mod title;
 pub mod wire;

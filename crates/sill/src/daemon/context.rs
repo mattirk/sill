@@ -47,7 +47,7 @@ impl Context {
             .map(Ok)
             .unwrap_or_else(|| sill_core::session::policy_of(&session, home))
             .map(|policy| {
-                let mut facts = sill_core::instructions::facts_block(&policy, home);
+                let mut facts = sill_core::instructions::facts_block(&policy, home, session.always_apply);
                 if session.ghost {
                     facts.push_str(sill_core::instructions::GHOST_NOTICE);
                 }

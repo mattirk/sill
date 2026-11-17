@@ -117,6 +117,10 @@ pub struct Plan {
     pub view: FilesystemView,
     #[serde(default)]
     pub workspaces: Vec<WorkspaceBind>,
+    #[serde(default)]
+    pub staged_pins: Vec<HostPath>,
+    #[serde(default)]
+    pub staged_files: Vec<HostPath>,
 }
 
 /// No storage preparation, credential import or filesystem writes occur during resolution.
@@ -141,6 +145,8 @@ pub fn resolve(
         policy_paths: PolicyPaths::default(),
         view: FilesystemView { rules: vec![], unused: vec![] },
         workspaces: vec![],
+        staged_pins: vec![],
+        staged_files: vec![],
     };
     plan.rule(home, Some(home), Behavior::Overlay, "policy", "Host files are readable; writes stay in this session except for explicit bindings.");
     for entry in roots {
@@ -361,6 +367,47 @@ impl Plan {
         self.workspaces = binds.to_vec();
         Ok(())
     }
+    pub fn stage_pins(&mut self, pins: &[PathBuf], state: &Path) -> Result<()> {
+        self.bindings.retain(|b| b.kind != BindingKind::Pin);
+        self.view.rules.retain(|r| r.behavior != Behavior::Pin.as_str() && r.behavior != Behavior::Direct.as_str());
+        // Removing direct binds restores the jail's ordinary overlay or read-only mount.
+        self.policy_paths.direct.clear();
+        let workspaces = self.workspaces.iter().map(|w| w.source.to_path()).collect::<Result<Vec<_>>>()?;
+        let mut roots = Vec::new();
+        for pin in pins {
+            let path = pin.canonicalize()?;
+            if workspaces.iter().any(|w| path.starts_with(w)) {
+                continue;
+            }
+            if path.is_dir() {
+                roots.push(path);
+            } else {
+                self.staged_files.push(HostPath::from_path(&path));
+            }
+        }
+        roots.sort();
+        for root in roots {
+            if self.staged_pins.iter().any(|p| p.to_path().is_ok_and(|p| root.starts_with(p))) {
+                continue;
+            }
+            ensure!(!state.starts_with(&root) && !root.starts_with(crate::jail::STATE_FS), "cannot stage session storage");
+            self.staged_pins.push(HostPath::from_path(&root));
+            self.rule(&root, None, Behavior::Overlay, "Always Apply", "Edits are staged for review.");
+        }
+        Ok(())
+    }
+    pub fn staged_original(&self, state: &Path, path: &Path) -> Result<Option<PathBuf>> {
+        for pin in &self.staged_pins {
+            let pin = pin.to_path()?;
+            if let Ok(relative) = path.strip_prefix(&pin) {
+                return Ok(Some(crate::staged_pin::directory(state, &pin).join("reference").join(relative)));
+            }
+        }
+        if self.staged_files.contains(&HostPath::from_path(path)) {
+            return Ok(Some(crate::staged_pin::directory(state, path).join("lower")));
+        }
+        Ok(None)
+    }
     pub fn binds(&self) -> Result<Vec<(PathBuf, PathBuf)>> {
         self.bindings.iter().map(|b| Ok((b.source.to_path()?, b.target.to_path()?))).collect()
     }
@@ -376,6 +423,8 @@ impl Plan {
             && self.agent_masks == other.agent_masks
             && self.view.rules == other.view.rules
             && self.workspaces == other.workspaces
+            && self.staged_pins == other.staged_pins
+            && self.staged_files == other.staged_files
     }
     pub fn prepare(&self) -> Result<()> {
         use std::os::unix::fs::DirBuilderExt;
@@ -410,6 +459,8 @@ impl Plan {
     }
     pub fn apply(&self, spec: &mut crate::jail::JailSpec) -> Result<()> {
         spec.binds = self.binds()?;
+        spec.staged_files = self.staged_files.iter().map(HostPath::to_path).collect::<Result<_, _>>()?;
+        spec.staged_pins = self.staged_pins.iter().map(HostPath::to_path).collect::<Result<_, _>>()?;
         spec.workspace_mask =
             self.workspaces.iter().map(|w| Ok::<_, anyhow::Error>((w.source.to_path()?, w.clone.to_path()?, w.objects.to_path()?))).collect::<Result<_>>()?;
         spec.policy_paths = Some(self.policy_paths.clone());

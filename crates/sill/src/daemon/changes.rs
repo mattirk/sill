@@ -89,13 +89,16 @@ impl Hub {
     pub(super) fn changes_keep(&self, session: &str, items: Vec<(PathBuf, Option<String>)>) -> Result<Done> {
         let changes = self.scan_one(session)?;
         let dir = kept_dir(own_uid(), session)?;
+        let filesystem = sill_core::session::recorded_filesystem(session)?;
+        let state = sill_core::session::state_dir_path(own_uid(), session)?;
         let mut d = Done::default();
         for (path, hash) in with_new_parents(&changes, items) {
             let Some(c) = changes.iter().find(|c| c.path == path) else {
                 d.failed.push((path, "no longer a change of this session".into()));
                 continue;
             };
-            let opts = KeepOptions { undo: Some(dir.clone()), expected_hash: hash, ..Default::default() };
+            let opts =
+                KeepOptions { staged_original: filesystem.staged_original(&state, &path)?, undo: Some(dir.clone()), expected_hash: hash, ..Default::default() };
             match keep::keep(c, &opts) {
                 Ok(what) => {
                     // the history (SPEC §3.6): what was written, what was there, the journal's id
@@ -123,6 +126,14 @@ impl Hub {
         let changes = self.scan_one(session)?;
         paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
         let found: Vec<Change> = paths.iter().filter_map(|p| changes.iter().find(|c| &c.path == p).cloned()).collect();
+        let filesystem = sill_core::session::recorded_filesystem(session)?;
+        let state = sill_core::session::state_dir_path(own_uid(), session)?;
+        for pin in &filesystem.staged_pins {
+            let pin = pin.to_path()?;
+            for c in found.iter().filter(|c| c.path.starts_with(&pin)) {
+                sill_core::staged_pin::refresh_reference(&pin, &state, &c.path)?;
+            }
+        }
         let mut d = revert(session, &found);
         for (p, _) in &d.done {
             self.history(session, H::Reverted, p, |_| {});
@@ -173,7 +184,7 @@ impl Hub {
         }
         let after = std::time::Duration::from_secs(minutes as u64 * 60);
         let uid = own_uid();
-        let sessions: Vec<Session> = self.with_store(|s| s.sessions()).unwrap_or_default().into_iter().filter(|s| !s.ghost).collect();
+        let sessions: Vec<Session> = self.with_store(|s| s.sessions()).unwrap_or_default().into_iter().filter(|s| !s.ghost && !s.always_apply).collect();
         for s in sessions {
             if self.crosscheck_worker(&s.id) {
                 continue;

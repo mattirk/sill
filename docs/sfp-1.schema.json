@@ -1212,6 +1212,9 @@
         "agent": {
           "type": "string"
         },
+        "always_apply": {
+          "type": "boolean"
+        },
         "create_id": {
           "type": "string"
         },
@@ -6122,6 +6125,10 @@
         },
         "agent": {
           "type": "string"
+        },
+        "always_apply": {
+          "default": false,
+          "type": "boolean"
         },
         "auto_allow": {
           "type": "boolean"

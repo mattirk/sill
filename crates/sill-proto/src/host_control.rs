@@ -13,6 +13,11 @@ pub const CAPABILITY: &str = "sill.host_control";
 /// The separately grantable operations, in the specification's order.
 pub const OPERATIONS: [&str; 10] = ["view", "input", "mac_view", "mac_input", "mac_commands", "inspect", "launch", "stop", "stop_existing", "commands"];
 
+/// Host control operations available in an Always Apply session.
+pub fn available_for_review(operation: &str) -> bool {
+    matches!(operation, "inspect" | "view" | "mac_view")
+}
+
 /// The operations on the Mac the daemon's VM runs on (docs/sill-mac.md), served by Sill.app;
 /// the others act on the daemon's own host.
 pub const MAC_OPERATIONS: [&str; 3] = ["mac_view", "mac_input", "mac_commands"];

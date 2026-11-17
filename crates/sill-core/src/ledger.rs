@@ -39,11 +39,17 @@ pub struct ScanOptions {
 /// Scan every layer's upper tree.
 pub fn scan(layers: &[Layer], opts: &ScanOptions) -> Result<Vec<Change>> {
     let mut out = Vec::new();
-    for l in layers {
+    for (index, l) in layers.iter().enumerate() {
         if !l.upper.is_dir() {
             continue;
         }
-        walk(&l.upper, &l.host, &l.upper, opts, &mut out)?;
+        // A staged pin may cover an older layer after a jail rebuild. Only the
+        // visible layer can supply changes at that location.
+        let mut scoped = opts.clone();
+        scoped.skip.extend(layers[index + 1..].iter().filter(|later| later.host.starts_with(&l.host)).map(|later| later.host.clone()));
+        if !scoped.skip.iter().any(|path| l.host.starts_with(path)) {
+            walk(&l.upper, &l.host, &l.upper, &scoped, &mut out)?;
+        }
     }
     // Mount setup can create parents for absent masked targets. Hide an added
     // parent only when it contains no reportable change after applying skips.

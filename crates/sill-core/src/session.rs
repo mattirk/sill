@@ -12,6 +12,7 @@ use crate::shim;
 
 #[derive(Debug, Clone)]
 pub struct StartOptions {
+    pub always_apply: bool,
     pub session: String,
     pub policy: String,
     /// The session's pinned paths.
@@ -102,6 +103,9 @@ pub fn freeze_filesystem(
     let agent = registry.get(agent_id).context("unknown agent")?;
     let mut plan = crate::agent_storage::resolve(agent, &registry, &resolution.policy, state_dir, home, pins, ghost)?;
     plan.set_workspaces(workspace)?;
+    if resolution.always_apply {
+        plan.stage_pins(pins, state_dir)?;
+    }
     resolution.filesystem = Some(plan);
     Ok(resolution)
 }
@@ -290,6 +294,8 @@ mod paths_bytes {
 /// gets exactly this, and a successful launch keeps it as its record (`policy_snapshot`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Resolution {
+    #[serde(default)]
+    pub always_apply: bool,
     /// Missing evidence requires a rebuild, never inference from current definitions.
     pub filesystem: Option<crate::agent_storage::Plan>,
     /// Pins used by this launch, independent of later store edits.
@@ -345,6 +351,7 @@ pub fn input_fingerprint(base: &Policy, pins: &[PathBuf]) -> Result<String> {
 /// its filesystem plan.
 pub fn resolve(base: &Policy, pins: &[PathBuf]) -> Result<Resolution> {
     Ok(Resolution {
+        always_apply: false,
         filesystem: None,
         launch_pins: pins.to_vec(),
         policy: base.clone(),
@@ -385,7 +392,9 @@ pub fn resolved_policy_with_grants(resolution: Resolution, session: &str) -> Res
 /// (none for a ghost).
 pub fn next_build_base(row: &crate::store::Session, home: &Path, pins: &[PathBuf]) -> Result<Resolution> {
     let base = session_base_policy(&row.policy, home, row.ghost, Some(&row.agent))?;
-    resolve(&base, if row.ghost { &[] } else { pins })
+    let mut resolution = resolve(&base, if row.ghost { &[] } else { pins })?;
+    resolution.always_apply = row.always_apply;
+    Ok(resolution)
 }
 
 /// A stored session's next build, as the launcher resolves it.
@@ -729,7 +738,8 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
     }
     anyhow::ensure!(opts.agent.is_none() || opts.binds.is_empty(), "agent session bindings must come from the resolved filesystem plan");
     let base = session_base_policy(&opts.policy, home, opts.ghost, opts.agent.as_deref())?;
-    let resolution = resolved_policy_with_grants(resolve(&base, &opts.pins)?, &opts.session)?;
+    let mut resolution = resolved_policy_with_grants(resolve(&base, &opts.pins)?, &opts.session)?;
+    resolution.always_apply = opts.always_apply;
     let resolution = if let Some(id) = &opts.agent {
         let state = opts.state_dir.clone().unwrap_or(state_dir_path(rustix::process::getuid().as_raw(), &opts.session)?);
         freeze_filesystem(resolution, id, home, &state, &opts.pins, opts.ghost, &opts.workspace)?
@@ -745,10 +755,48 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
         let paths = |list: Vec<&sill_proto::sessions::HostPath>| list.into_iter().map(|p| p.to_path()).collect::<Result<Vec<_>, _>>();
         masks_git_cannot_undo(
             &paths(plan.policy_paths.masks.iter().map(|m| &m.path).collect())?,
-            &paths(plan.bindings.iter().filter(|b| b.kind == crate::agent_storage::BindingKind::Pin).map(|b| &b.target).collect())?,
+            &paths(
+                plan.bindings.iter().filter(|b| b.kind == crate::agent_storage::BindingKind::Pin).map(|b| &b.target).chain(plan.staged_pins.iter()).collect(),
+            )?,
             &paths(plan.workspaces.iter().map(|w| &w.source).collect())?,
         )?;
         plan.prepare()?;
+        if !plan.staged_pins.is_empty() || !plan.staged_files.is_empty() {
+            let state = match &opts.state_dir {
+                Some(path) => path.clone(),
+                None => state_dir(rustix::process::getuid().as_raw(), &opts.session)?,
+            };
+            let mounts = crate::mounts::host_mounts()?;
+            let aliases = crate::mounts::state_aliases(&mounts, Path::new(crate::jail::STATE_FS));
+            let mut hidden =
+                paths(plan.policy_paths.masks.iter().chain(&plan.agent_masks).map(|m| &m.path).chain(plan.workspaces.iter().map(|w| &w.source)).collect())?;
+            hidden.extend(resolution.policy.paths.hidden_mounts.iter().map(|p| crate::paths::expand_home(p, home)));
+            hidden.extend(aliases.iter().cloned());
+            hidden.push(crate::jail::STATE_FS.into());
+            let layout = crate::jail::layout(&resolution.policy, home, &state, &mounts, &crate::jail::read_root_entries()?)?;
+            for pin in plan.staged_pins.iter().chain(&plan.staged_files) {
+                let path = pin.to_path()?;
+                anyhow::ensure!(!aliases.iter().any(|alias| path.starts_with(alias) || alias.starts_with(&path)), "staged pin overlaps Sill storage");
+                // A standalone file lives in an ordinary overlay. Anchor its parent
+                // before inspecting or clearing any upper entry left by the agent.
+                let mut upper = crate::staged_pin::layer(&state, &path).upper;
+                let held;
+                if plan.staged_files.contains(pin)
+                    && let Some((layer, rel)) = layout.layers.iter().rev().find_map(|l| path.strip_prefix(&l.host).ok().map(|r| (l, r)))
+                {
+                    use std::os::fd::AsRawFd;
+                    match crate::safe_fs::open_dir_beneath(&layer.upper, rel.parent().context("pinned file has no parent")?, false) {
+                        Ok(fd) => {
+                            held = fd;
+                            upper = PathBuf::from(format!("/proc/self/fd/{}", held.as_raw_fd())).join(rel.file_name().context("pinned file has no name")?);
+                        }
+                        Err(e) if e.downcast_ref::<rustix::io::Errno>() == Some(&rustix::io::Errno::NOENT) => {}
+                        Err(e) => return Err(e.context("opening staged file upper directory")),
+                    }
+                }
+                crate::staged_pin::prepare(&state, &path, &hidden, &upper)?;
+            }
+        }
     }
     let serialized_resolution = serde_json::to_vec_pretty(&resolution)?;
     if serialized_resolution.len() > MAX_POLICY_SNAPSHOT_BYTES {

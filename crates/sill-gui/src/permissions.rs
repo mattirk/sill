@@ -595,7 +595,11 @@ pub fn dropdown<'a>(view: &'a SessionView, session: &'a Session) -> Element<'a, 
     let groups_on = crate::host_control::groups_on(session);
     let host_free = can_change && !view.host_control.busy && crate::host_control::ban(view).is_none();
     for (group, label, operations) in crate::host_control::groups() {
-        let names: Vec<String> = operations.iter().map(|op| crate::host_control::operation_label(op)).collect();
+        let names: Vec<String> = operations
+            .iter()
+            .filter(|op| !session.always_apply || sill_proto::host_control::available_for_review(op))
+            .map(|op| crate::host_control::operation_label(op))
+            .collect();
         let (said, color) = match (group, cfg!(target_os = "macos")) {
             (crate::host_control::Group::Vm, _) => (
                 format!(
@@ -619,6 +623,7 @@ pub fn dropdown<'a>(view: &'a SessionView, session: &'a Session) -> Element<'a, 
                 P.warning,
             ),
         };
+        let said = if session.always_apply { format!("Always Apply allows {}.", names.join(", ")) } else { said };
         let on = groups_on.contains(&group);
         basic = basic.push(basic_switch(
             label,

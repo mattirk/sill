@@ -1065,6 +1065,26 @@ fn session_images_use_jail_descriptors_across_daemon_restart() {
         .unwrap();
     let pinned_page: a::FileBytes = serde_json::from_value(pinned_reply["result"].clone()).unwrap();
     assert_eq!(a::decode_bytes(&pinned_page.bytes_base64).unwrap(), bytes);
+    let nested = pinned.join("project");
+    std::fs::create_dir(&nested).unwrap();
+    std::fs::write(nested.join("image.jpg"), bytes).unwrap();
+    std::os::unix::fs::symlink(&nested, pinned.join("alias")).unwrap();
+    std::os::unix::fs::symlink(nested.join("image.jpg"), pinned.join("final.jpg")).unwrap();
+    for (path, allowed) in [(pinned.join("alias/image.jpg"), true), (pinned.join("final.jpg"), false)] {
+        let result = c
+            .call(
+                "_sill/files.image",
+                json!(a::SessionImage {
+                    session_id: created["result"]["session_id"].as_str().unwrap().into(),
+                    path: HostPath::from_path(&path),
+                    offset: "0".into(),
+                    length: None,
+                    revision: None,
+                }),
+            )
+            .unwrap();
+        assert_eq!(result.get("result").is_some(), allowed, "{result}");
+    }
     std::fs::remove_dir_all(pinned).unwrap();
     c.call(sill_proto::method::DAEMON_SHUTDOWN, json!({})).unwrap();
     assert!(restarted.wait_exit().success());
@@ -1517,6 +1537,14 @@ fn host_control_is_an_activation_a_displaying_frontend_holds() {
         (json!("unsupported"), json!("sill.host_control")),
         "{refused}"
     );
+    let reviewed = modes.call("_sill/sessions.create", json!({"create_id":"reviewed","agent":"claude","policy":"default","always_apply":true})).unwrap();
+    let reviewed = reviewed["result"]["session_id"].as_str().unwrap();
+    for operation in ["input", "launch", "commands", "mac_input", "mac_commands", "stop", "stop_existing"] {
+        let refused = activate(&mut host, reviewed, json!(["inspect", operation]));
+        assert_eq!(refused["error"]["data"]["code"], "permission_denied", "{refused}");
+    }
+    // Observation passes the Always Apply check, then requires the usual running jail.
+    assert_eq!(activate(&mut host, reviewed, json!(["inspect"]))["error"]["data"]["code"], "invalid_state");
     // never for a ghost, never against a forbidding policy, never without a jail
     assert_eq!(activate(&mut host, &ghost, json!(["launch"]))["error"]["data"]["code"], "permission_denied");
     let refused = activate(&mut host, &forbidden, json!(["launch"]));

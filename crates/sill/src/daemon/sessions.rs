@@ -62,6 +62,7 @@ fn record(store: &Store, s: sill_core::store::Session) -> Result<api::Session> {
         summary: s.summary,
         summary_kind: s.summary_kind,
         ghost: s.ghost,
+        always_apply: s.always_apply,
         settings: s.agent_settings.into(),
         follows: (!s.follows.is_empty()).then_some(s.follows),
         compacted: s.compacted.to_string(),
@@ -108,7 +109,10 @@ pub(super) fn create(store: &Store, mut a: api::Create) -> Result<api::SessionKe
     if !a.follows.is_empty() {
         exact(store, &a.follows)?;
     }
-    let workspaces = !a.ghost && a.workspaces.unwrap_or_else(|| sill_core::config::load().automatic_workspaces());
+    if a.always_apply && (a.ghost || a.workspaces == Some(false)) {
+        return Err(Error::invalid_params("Always Apply needs a workspace session").into());
+    }
+    let workspaces = a.always_apply || (!a.ghost && a.workspaces.unwrap_or_else(|| sill_core::config::load().automatic_workspaces()));
     let session_id = Hub::create_session_row(
         store,
         NewSession { agent: a.agent, policy: a.policy, pins, memory_scope: a.memory_scope, follows: a.follows, remember_pins: a.remember_pins, ghost: a.ghost },
@@ -116,6 +120,9 @@ pub(super) fn create(store: &Store, mut a: api::Create) -> Result<api::SessionKe
     // a session's mode is fixed when it is made (docs/parallel-coding.md §12)
     sill_core::workspace::records::set_mode(store.conn(), &session_id, workspaces)?;
     store.conn().execute("INSERT INTO sfp_creates(create_id,fingerprint,session_id) VALUES (?1,?2,?3)", rusqlite::params![key, input, session_id])?;
+    if a.always_apply {
+        store.conn().execute("INSERT INTO always_apply_sessions(session_id) VALUES (?1)", [&session_id])?;
+    }
     tx.commit()?;
     Ok(api::SessionKey { session_id })
 }
@@ -340,6 +347,23 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn always_apply_survives_reopen_and_create_retry() {
+        let dir = std::env::temp_dir().join(format!("sill-always-apply-{}", crate::daemon::sfp::id()));
+        let store = Store::open(&dir.join("store.db")).unwrap();
+        let input = api::Create { create_id: "fixed".into(), agent: "test".into(), policy: "default".into(), always_apply: true, ..Default::default() };
+        let key = create(&store, input.clone()).unwrap();
+        drop(store);
+        let store = Store::open(&dir.join("store.db")).unwrap();
+        assert!(exact(&store, &key.session_id).unwrap().always_apply);
+        assert!(sill_core::workspace::records::mode(store.conn(), &key.session_id).unwrap());
+        assert_eq!(create(&store, input.clone()).unwrap().session_id, key.session_id);
+        assert!(create(&store, api::Create { always_apply: false, ..input.clone() }).is_err());
+        assert!(create(&store, api::Create { ghost: true, ..input }).is_err());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn public_pages_fill_across_worker_rows_without_losing_the_cursor() {
         let dir = std::env::temp_dir().join(format!("sill-review-pages-{}", crate::daemon::sfp::id()));

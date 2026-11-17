@@ -80,6 +80,15 @@ impl App {
                 let (method, params) = sill_client::sessions::create(&agent, ghost, remember, workspaces);
                 return self.act("", Act::Create, method, params);
             }
+            Event::AlwaysApply(agent) => {
+                let remember = self.menu.take().is_some_and(|menu| menu.remember_pins);
+                if self.demo {
+                    return Task::none();
+                }
+                let (method, mut params) = sill_client::sessions::create(&agent, false, remember, Some(true));
+                params["always_apply"] = true.into();
+                return self.act("", Act::Create, method, params);
+            }
             Event::Reopen(id) => {
                 self.menu = None;
                 let ended = self.all_sessions.iter().any(|s| s.session_id == id && s.ended_at.is_some());

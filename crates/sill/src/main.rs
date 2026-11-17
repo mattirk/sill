@@ -375,6 +375,9 @@ enum SessionCmd {
         /// everything deleted at its end
         #[arg(long)]
         ghost: bool,
+        /// Stage pinned files for Apply and restrict Host control to observation.
+        #[arg(long, conflicts_with = "ghost")]
+        always_apply: bool,
         /// pin a folder or file (repeatable; refused for a ghost)
         #[arg(long = "pin")]
         pins: Vec<PathBuf>,
@@ -1113,7 +1116,7 @@ fn jail_cmd(cmd: JailCmd) -> Result<()> {
                 bail!("{} changed on the host since the session started; not keeping", path.display());
             }
             let undo = if no_undo { None } else { Some(spec.state_dir.join("kept")) };
-            let what = sill_core::keep::keep(c, &sill_core::keep::KeepOptions { expected_hash: None, allow_special, undo })?;
+            let what = sill_core::keep::keep(c, &sill_core::keep::KeepOptions { allow_special, undo, ..Default::default() })?;
             println!("{}: {what}", path.display());
             Ok(())
         }
@@ -1573,6 +1576,7 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
 /// Start a session through sill-core `session` in whichever launcher mode this host offers.
 fn start_session(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>) -> Result<()> {
     let opts = sill_core::session::StartOptions {
+        always_apply: false,
         session: session.to_string(),
         policy: jail.policy.clone(),
         pins: vec![],
@@ -1746,9 +1750,10 @@ fn pin_cli_path(path: &std::path::Path) -> Result<PathBuf> {
 fn session_cmd(cmd: SessionCmd) -> Result<()> {
     let c = sill_proto::Client::connect_or_start()?;
     match cmd {
-        SessionCmd::New { agent, policy, ghost, pins } => {
+        SessionCmd::New { agent, policy, ghost, pins, always_apply } => {
             let pins = pins.into_iter().map(|p| p.canonicalize().with_context(|| format!("pin {}", p.display()))).collect::<Result<Vec<_>>>()?;
             let create = sill_proto::sessions::Create {
+                always_apply,
                 create_id: sill_core::sfp::new_id(),
                 agent,
                 policy,
@@ -1917,6 +1922,8 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
         masks: vec![],
         memory_dir: None,
         bridge_dir: None,
+        staged_pins: vec![],
+        staged_files: vec![],
         workspace_mask: vec![],
         seccomp_fd: None,
         extra_args,

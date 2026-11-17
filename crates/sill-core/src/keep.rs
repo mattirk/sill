@@ -33,6 +33,8 @@ use crate::ledger::{Change, Kind};
 pub struct KeepOptions {
     /// Hex SHA-256 of the upper content the person reviewed; `None` skips the check.
     pub expected_hash: Option<String>,
+    /// Original private pin snapshot for this path, when Apply requires a conflict check.
+    pub staged_original: Option<PathBuf>,
     /// Keep setuid/setgid bits.
     pub allow_special: bool,
     /// The session's `kept/` directory: the host's previous version goes there before every keep so
@@ -265,6 +267,11 @@ pub fn keep(change: &Change, opts: &KeepOptions) -> Result<&'static str> {
     // the host as it is now: the previous version saved next is this one, and the write below
     // happens only if it still is
     let before = snapshot(host);
+    if let Some(original) = &opts.staged_original {
+        let kept = opts.undo.as_ref().map(|dir| crate::staged_pin::baseline_keeps(dir)).unwrap_or_default();
+        anyhow::ensure!(crate::staged_pin::unchanged(original, host, &kept)?, "{} changed on the host since staging; review the conflict", host.display());
+        still(host, before)?;
+    }
     // the previous version first: if it can't be saved, nothing is kept
     let prior = match &opts.undo {
         Some(dir) => Some(Prior::save(dir, change)?),

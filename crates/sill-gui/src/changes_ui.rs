@@ -380,7 +380,7 @@ impl App {
             body = self.workspace_part(page, body, d, session.is_some_and(|s| s.ended_at.is_none()));
         }
         for group in &section.writes {
-            body = self.writes_part(page, body, group, now);
+            body = self.writes_part(page, body, group, now, session.is_some_and(|s| s.always_apply));
         }
         if !section.kept.is_empty() {
             body = body.push(part_head(
@@ -460,7 +460,7 @@ impl App {
 
     /// A session's writes outside its pinned folders, in one repository (or none): held in its
     /// overlay until kept or reverted.
-    fn writes_part<'a>(&'a self, page: &'a ChangesPage, mut body: Column<'a, Message>, group: &Group, now: i64) -> Column<'a, Message> {
+    fn writes_part<'a>(&'a self, page: &'a ChangesPage, mut body: Column<'a, Message>, group: &Group, now: i64, review: bool) -> Column<'a, Message> {
         let Kind::Session { repo, .. } = &group.kind else {
             return body;
         };
@@ -470,18 +470,27 @@ impl App {
         let armed = page.armed.get().is_some_and(|a| matches!(a, Reverting::All(keys) if *keys == all));
         let header = row![
             crate::icons::glyph("file", 13.0, alpha(P.fg, 0.6)),
-            text("Outside its pinned folders").size(style::SMALL),
+            text(if review { "Staged files" } else { "Outside its pinned folders" }).size(style::SMALL),
             match repo {
                 Some(repo) => badge(name(repo), P.success),
                 None => badge("no git", P.warning),
             },
-            text("held until kept or reverted").size(style::TINY).color(P.fg_dim),
+            text(if review { "Always Apply" } else { "held until kept or reverted" }).size(style::TINY).color(P.fg_dim),
             space().width(Fill),
-            small("Keep all", (fresh && !keepable.is_empty()).then(|| event(Event::KeepAll(keepable))),),
+            small(if review { "Apply all" } else { "Keep all" }, (fresh && !keepable.is_empty()).then(|| event(Event::KeepAll(keepable))),),
             keys::press_maybe(
-                button(text(if armed { "Revert all?" } else { "Revert all" }).size(style::SMALL).color(warn_color(armed, fresh)),)
-                    .padding([2, 8])
-                    .style(style::quiet),
+                button(
+                    text(match (review, armed) {
+                        (true, true) => "Discard all?",
+                        (true, false) => "Discard all",
+                        (false, true) => "Revert all?",
+                        (false, false) => "Revert all",
+                    })
+                    .size(style::SMALL)
+                    .color(warn_color(armed, fresh)),
+                )
+                .padding([2, 8])
+                .style(style::quiet),
                 fresh.then(|| event(Event::RevertAll(all))),
             ),
         ]
@@ -581,19 +590,20 @@ impl App {
         let mut actions = row![].spacing(2).align_y(Alignment::Center);
         match entry {
             Entry::Live { .. } => {
-                actions = actions.push(revert(&key, armed, fresh, "git checkout HEAD (an untracked file is removed)"));
+                actions = actions.push(revert(&key, armed, fresh, false, "git checkout HEAD (an untracked file is removed)"));
             }
-            Entry::Overlay { conflict, protected, .. } => {
+            Entry::Overlay { session_id, conflict, protected, .. } => {
+                let review = self.all_sessions.iter().any(|s| s.session_id == *session_id && s.always_apply);
                 if *conflict {
                     actions = actions.push(text("changed on the host too").size(style::TINY).color(P.warning));
-                } else if let Some(seconds) = changes::reverts_in(entry, auto_revert, now) {
+                } else if !review && let Some(seconds) = changes::reverts_in(entry, auto_revert, now) {
                     actions = actions.push(
                         text(if seconds == 0 { "reverting".to_string() } else { format!("reverts in {}", changes::human(seconds)) })
                             .size(style::TINY)
                             .color(P.fg_dim),
                     );
                 }
-                let keep = small("Keep", (fresh && changes::keepable(entry)).then(|| event(Event::Keep(key.clone()))));
+                let keep = small(if review { "Apply" } else { "Keep" }, (fresh && changes::keepable(entry)).then(|| event(Event::Keep(key.clone()))));
                 actions = actions.push(match protected {
                     Some(why) => tooltip(
                         keep,
@@ -605,7 +615,7 @@ impl App {
                     .into(),
                     None => keep,
                 });
-                actions = actions.push(revert(&key, armed, fresh, "drop the session's write"));
+                actions = actions.push(revert(&key, armed, fresh, review, "drop the session's write"));
             }
             Entry::Kept { .. } => {
                 actions = actions.push(small("Undo", fresh.then(|| event(Event::Undo(key.clone())))));
@@ -653,10 +663,21 @@ impl App {
 }
 
 /// Revert, on a second press.
-fn revert<'a>(key: &str, armed: bool, offered: bool, tip: &'a str) -> Element<'a, Message> {
+fn revert<'a>(key: &str, armed: bool, offered: bool, review: bool, tip: &'a str) -> Element<'a, Message> {
     tooltip(
         keys::press_maybe(
-            button(text(if armed { "Revert?" } else { "Revert" }).size(style::SMALL).color(warn_color(armed, offered))).padding([2, 8]).style(style::quiet),
+            button(
+                text(match (review, armed) {
+                    (true, true) => "Discard?",
+                    (true, false) => "Discard",
+                    (false, true) => "Revert?",
+                    (false, false) => "Revert",
+                })
+                .size(style::SMALL)
+                .color(warn_color(armed, offered)),
+            )
+            .padding([2, 8])
+            .style(style::quiet),
             offered.then(|| event(Event::Revert(key.to_string()))),
         ),
         container(text(if armed { "Press again to revert" } else { tip }).size(style::TINY)).padding([3, 8]).style(style::fill(P.surface)),

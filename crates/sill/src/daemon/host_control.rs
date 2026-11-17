@@ -179,8 +179,11 @@ fn list(operations: &BTreeSet<String>) -> String {
 /// Activate, or change the scope of an active control. The connection must display Host control.
 pub fn activate(hub: &std::sync::Arc<Hub>, conn: &Conn, a: api::Activate) -> Result<api::State> {
     displaying_capability(conn)?;
-    let operations = operations_of(&a.operations)?;
     let row = session_row(hub, &a.session_id)?;
+    if row.always_apply && a.operations.iter().any(|op| !api::available_for_review(op)) {
+        return Err(domain("permission_denied", "Always Apply permits only screen viewing and process inspection"));
+    }
+    let operations = operations_of(&a.operations)?;
     if row.ghost {
         return Err(domain("permission_denied", "ghost sessions support Default only"));
     }

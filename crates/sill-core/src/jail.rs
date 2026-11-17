@@ -82,6 +82,8 @@ pub const PROXY_PORT: u16 = 3128;
 
 #[derive(Debug, Clone)]
 pub struct JailSpec {
+    pub staged_pins: Vec<PathBuf>,
+    pub staged_files: Vec<PathBuf>,
     pub policy: Policy,
     pub home: PathBuf,
     pub user: String,
@@ -438,6 +440,38 @@ impl JailSpec {
             push(&mut a, &[&"--overlay-src", &l.host, &"--overlay", &l.upper, &l.work, &l.host]);
         }
         self.lay_host_view(&mut a, &layers, &expanded, &ro_binds, &symlinks);
+        let mut layers = layers;
+        let aliases = mounts::state_aliases(&self.mounts, Path::new(STATE_FS));
+        for pin in &self.staged_pins {
+            anyhow::ensure!(!aliases.iter().any(|alias| pin.starts_with(alias) || alias.starts_with(pin)), "staged pin overlaps Sill storage");
+            let layer = crate::staged_pin::layer(&self.state_dir, pin);
+            let dir = crate::staged_pin::directory(&self.state_dir, pin);
+            if let Ok(reason) = std::fs::read(dir.join("readonly")) {
+                warnings.push(format!("Always Apply: {} is read-only because staging failed: {}", pin.display(), String::from_utf8_lossy(&reason).trim()));
+                if !ro_binds.iter().any(|r| pin.starts_with(r)) {
+                    // A temporary overlay hides live Unix sockets in the original.
+                    push(&mut a, &[&"--overlay-src", pin, &"--tmp-overlay", pin, &"--remount-ro", pin]);
+                }
+                continue;
+            }
+            let lower = dir.join("lower");
+            push(&mut a, &[&"--overlay-src", &lower, &"--overlay", &layer.upper, &layer.work, pin]);
+            push(&mut a, &[&"--ro-bind", &dir.join("reference"), &host_view(pin)]);
+            layers.push(layer);
+        }
+        for file in &self.staged_files {
+            if self.staged_pins.iter().any(|pin| file.starts_with(pin)) {
+                continue;
+            }
+            let snapshot = crate::staged_pin::directory(&self.state_dir, file);
+            if snapshot.join("readonly").is_file() {
+                // Only the selected regular file is exposed, never its siblings.
+                push(&mut a, &[&"--ro-bind", file, file]);
+                warnings.push(format!("Always Apply: {} is read-only because its snapshot could not be created.", file.display()));
+            } else if !layers.iter().any(|l| file.starts_with(&l.host)) || ro_binds.iter().any(|r| file.starts_with(r)) {
+                warnings.push(format!("Always Apply: {} is on a read-only mount. Pin its folder to stage edits there.", file.display()));
+            }
+        }
         let host_view_laid = a.len();
 
         let sill_own = crate::paths::sill_own(&self.home)?;
@@ -1065,6 +1099,8 @@ mod tests {
             masks: vec![],
             memory_dir: None,
             bridge_dir: None,
+            staged_pins: vec![],
+            staged_files: vec![],
             workspace_mask: vec![],
             seccomp_fd: None,
             extra_args: vec![],
@@ -1613,6 +1649,67 @@ git -C "$S" fsck --full
         assert_eq!(git(&ws, &["log", "-1", "--format=%s"]), "two");
         assert_eq!(std::fs::read_to_string(ws.join(".git/objects/info/alternates")).unwrap(), host_alternates);
         assert_eq!(walk(&source.join(".git/objects")), before, "the source's store is unchanged");
+    }
+
+    #[test]
+    fn staged_pin_overlays_only_its_private_snapshot_and_seals_its_reference() {
+        let tree = TempTree::new();
+        let pin = tree.0.join("shared");
+        std::fs::create_dir(&pin).unwrap();
+        let mut s = spec();
+        s.staged_pins.push(pin.clone());
+        let plan = s.plan().unwrap();
+        let layer = crate::staged_pin::layer(&s.state_dir, &pin);
+        let lower = crate::staged_pin::directory(&s.state_dir, &pin).join("lower");
+        assert!(plan.layers.contains(&layer));
+        assert!(plan.argv.windows(6).any(|a| a[0] == "--overlay-src" && a[1] == lower && a[2] == "--overlay" && a[5] == pin));
+        assert!(!plan.argv.windows(3).any(|a| a[0] == "--bind" && a[2] == pin));
+        assert!(plan.argv.windows(2).any(|a| a[0] == "--remount-ro" && a[1] == host_view(&pin)));
+    }
+
+    #[test]
+    #[ignore = "host only: requires bubblewrap user namespaces and overlayfs"]
+    fn real_always_apply_stages_pinned_folder_edits() {
+        let parent = std::env::var_os("SILL_TEST_SHARED_FOLDER").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let pin = parent.join(format!("sill-apply-test-{:032x}", rand::random::<u128>()));
+        std::fs::create_dir(&pin).unwrap();
+        let pin = TempTree(pin.canonicalize().unwrap());
+        let storage = TempTree::new();
+        let mut spec = spec();
+        spec.uid = rustix::process::getuid().as_raw();
+        spec.home = storage.0.join("home");
+        std::fs::create_dir_all(&spec.home).unwrap();
+        spec.state_dir = storage.0.join("state");
+        spec.cwd = pin.0.clone();
+        spec.unsafe_state = true;
+        spec.mounts = mounts::host_mounts().unwrap();
+        spec.root_entries = read_root_entries().unwrap();
+        for name in ["edit", "delete"] {
+            std::fs::write(pin.0.join(name), "before").unwrap();
+        }
+        crate::staged_pin::prepare(&spec.state_dir, &pin.0, &[], &crate::staged_pin::layer(&spec.state_dir, &pin.0).upper).unwrap();
+        spec.staged_pins.push(pin.0.clone());
+        spec.command = ["/bin/sh", "-ec", "printf after > edit && rm delete && printf new > added"].map(Into::into).to_vec();
+        let plan = spec.plan().unwrap();
+        prepare(&plan).unwrap();
+        let out = plan.command().output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(std::fs::read(pin.0.join("edit")).unwrap(), b"before");
+        assert!(pin.0.join("delete").exists());
+        assert!(!pin.0.join("added").exists());
+        let staged = crate::staged_pin::layer(&spec.state_dir, &pin.0);
+        let changes = crate::ledger::scan(&[staged], &Default::default()).unwrap();
+        assert_eq!(changes.len(), 3);
+        for change in changes {
+            if change.path.ends_with("added") {
+                std::fs::remove_file(change.upper).unwrap(); // discard in the stopped jail
+            } else {
+                let original = crate::staged_pin::directory(&spec.state_dir, &pin.0).join("lower").join(change.path.file_name().unwrap());
+                crate::keep::keep(&change, &crate::keep::KeepOptions { staged_original: Some(original), ..Default::default() }).unwrap();
+            }
+        }
+        assert_eq!(std::fs::read(pin.0.join("edit")).unwrap(), b"after");
+        assert!(!pin.0.join("delete").exists() && !pin.0.join("added").exists());
     }
 
     fn walk(dir: &Path) -> Vec<PathBuf> {

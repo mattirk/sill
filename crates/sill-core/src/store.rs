@@ -60,6 +60,8 @@ pub struct Session {
     pub compacted: i64,
     /// A ghost session (docs/memory.md §3): chosen at creation, never changed; it leaves no row.
     pub ghost: bool,
+    #[serde(default)]
+    pub always_apply: bool,
 }
 
 pub use sill_proto::wire::AgentSettings;
@@ -163,6 +165,8 @@ impl Store {
                  follows TEXT NOT NULL DEFAULT '', compacted INTEGER NOT NULL DEFAULT 0,
                  title_kind TEXT NOT NULL DEFAULT '', ghost INTEGER NOT NULL DEFAULT 0);
              CREATE INDEX IF NOT EXISTS sessions_creation_order ON sessions(created_at DESC,id DESC);
+             CREATE TABLE IF NOT EXISTS always_apply_sessions (session_id TEXT PRIMARY KEY);
+             CREATE TRIGGER IF NOT EXISTS always_apply_deleted AFTER DELETE ON sessions BEGIN DELETE FROM always_apply_sessions WHERE session_id=OLD.id; END;
              CREATE TABLE IF NOT EXISTS session_pins (
                  session_id TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (session_id, path));
              CREATE TABLE IF NOT EXISTS session_network_hosts (
@@ -249,7 +253,7 @@ impl Store {
     }
     fn session_query(&self, suffix: &str, params: impl rusqlite::Params) -> Result<Vec<Session>> {
         let mut st = self.conn.prepare(&format!(
-            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings, ended_at, summary, summary_kind, memory_scope, follows, compacted, title_kind, ghost FROM sessions {suffix}"
+            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings, ended_at, summary, summary_kind, memory_scope, follows, compacted, title_kind, ghost, EXISTS(SELECT 1 FROM always_apply_sessions WHERE session_id=sessions.id) FROM sessions {suffix}"
         ))?;
         let rows = st.query_map(params, |r| {
             Ok(Session {
@@ -270,6 +274,7 @@ impl Store {
                 compacted: r.get(14)?,
                 title_kind: r.get(15)?,
                 ghost: r.get::<_, i32>(16)? != 0,
+                always_apply: r.get(17)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -310,6 +315,7 @@ impl Store {
             follows: String::new(),
             compacted: 0,
             ghost,
+            always_apply: false,
         };
         self.conn.execute(
             "INSERT INTO sessions (id, agent, title, created_at, last_used, acp_session_id, policy, agent_settings, ghost) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8)",

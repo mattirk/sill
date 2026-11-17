@@ -45,7 +45,11 @@ pub fn session_view(policy: &Policy, state_dir: &Path, home: &Path, filesystem: 
     for w in &filesystem.workspaces {
         direct.push(w.source.to_path()?);
     }
-    Ok(SessionView { layers: layout.layers, masked, direct })
+    let mut layers = layout.layers;
+    for pin in &filesystem.staged_pins {
+        layers.push(crate::staged_pin::layer(state_dir, &pin.to_path()?));
+    }
+    Ok(SessionView { layers, masked, direct })
 }
 
 /// Scan a session's upper trees. Inside git repositories, git-ignored paths count as ignored (build

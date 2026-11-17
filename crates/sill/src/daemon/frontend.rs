@@ -36,16 +36,49 @@ pub(super) fn open_session_image(hub: &Hub, session: &str, src: &Path, home: &Pa
             }
         }
     }
-    let Some(path) = stored_image_path(hub, session, &p)? else { return Ok(None) };
-    use std::os::unix::fs::OpenOptionsExt;
-    Ok(Some(std::fs::OpenOptions::new().read(true).custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32).open(path)?))
+    let launch = sill_core::session::policy_snapshot(session)?;
+    let reviewed = launch.as_ref().is_some_and(|l| l.always_apply);
+    let Some(path) = stored_image_path(hub, session, &p, launch)? else { return Ok(None) };
+    if !reviewed {
+        use std::os::unix::fs::OpenOptionsExt;
+        return Ok(Some(
+            std::fs::OpenOptions::new().read(true).custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32).open(path)?,
+        ));
+    }
+    let root = rustix::fs::open("/", rustix::fs::OFlags::PATH | rustix::fs::OFlags::DIRECTORY, rustix::fs::Mode::empty())?;
+    sill_core::safe_fs::open_regular_at(&root, path.strip_prefix("/")?)
 }
 
-fn stored_image_path(hub: &Hub, session: &str, p: &Path) -> Result<Option<std::path::PathBuf>> {
+fn stored_image_path(hub: &Hub, session: &str, p: &Path, launch: Option<sill_core::session::Resolution>) -> Result<Option<std::path::PathBuf>> {
     use std::os::unix::fs::FileTypeExt;
     // The pins its jail was launched with; a session that never launched has no jail and no
     // overlay, so a path under a pin it will mount is the host's file (its stored pins decide).
-    let pins = match sill_core::session::policy_snapshot(session)? {
+    let pins = match launch {
+        Some(launch) if launch.always_apply => {
+            let plan = launch.filesystem.ok_or_else(|| anyhow::anyhow!("reviewed filesystem plan is missing"))?;
+            if plan.policy_paths.masks.iter().chain(&plan.agent_masks).any(|mask| mask.path.to_path().is_ok_and(|m| p.starts_with(m))) {
+                return Ok(None);
+            }
+            for workspace in &plan.workspaces {
+                if let Ok(relative) = p.strip_prefix(workspace.source.to_path()?) {
+                    return Ok(Some(workspace.clone.to_path()?.join(relative)));
+                }
+            }
+            let state = sill_core::session::state_dir_path(rustix::process::getuid().as_raw(), session)?;
+            for pin in &plan.staged_pins {
+                let pin = pin.to_path()?;
+                if let Ok(relative) = p.strip_prefix(&pin) {
+                    let dir = sill_core::staged_pin::directory(&state, &pin);
+                    let upper = dir.join("upper").join(relative);
+                    return match upper.symlink_metadata() {
+                        Ok(m) => Ok(m.is_file().then_some(upper)),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(dir.join("lower").join(relative))),
+                        Err(e) => Err(e.into()),
+                    };
+                }
+            }
+            vec![]
+        }
         Some(launch) => launch.launch_pins,
         None => hub.with_store(|s| s.jail_pins(session))?,
     };

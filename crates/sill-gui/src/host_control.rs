@@ -174,7 +174,8 @@ impl App {
                     .and_then(|s| s.host_control.as_ref())
                     .map(|brief| brief.operations.iter().cloned().collect())
                     .unwrap_or_default();
-                for operation in operations {
+                let review = self.all_sessions.iter().any(|s| s.session_id == id && s.always_apply);
+                for operation in operations.into_iter().filter(|op| !review || sill_proto::host_control::available_for_review(op)) {
                     if on {
                         next.insert(operation.to_string());
                     } else {
@@ -304,7 +305,7 @@ pub fn rows<'a>(view: &'a SessionView, session: &'a Session, can_change: bool) -
     let hc = &view.host_control;
     let brief: BTreeSet<String> = session.host_control.as_ref().map(|b| b.operations.iter().cloned().collect()).unwrap_or_default();
     offered()
-        .into_iter()
+        .into_iter().filter(|op| !session.always_apply || sill_proto::host_control::available_for_review(op))
         .map(|operation| {
             let operation = &operation;
             let ticked = hc.selected.contains(*operation);
