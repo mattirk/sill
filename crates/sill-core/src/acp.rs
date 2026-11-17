@@ -520,11 +520,16 @@ pub fn run_session(stream: UnixStream, opts: SessionOptions, commands: async_cha
     let events_form = events.clone();
     let events_loop = events.clone();
     let auto = opts.auto;
+    // every session's notifications in the order they came: the open session's and its subagents'
+    let session_open = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (notified_tx, notified_rx) = async_channel::unbounded();
+    let notifications = SessionNotifications { open: session_open.clone(), queue: notified_tx };
 
     let result: Result<(), agent_client_protocol::Error> = futures::executor::block_on(async move {
         Client
             .builder()
             .name("sill")
+            .with_handler(notifications)
             .on_receive_request(
                 async move |req: RequestPermissionRequest, responder, _cx| {
                     let options: Vec<PermissionOption> =
@@ -598,7 +603,12 @@ pub fn run_session(stream: UnixStream, opts: SessionOptions, commands: async_cha
                 let mut auth_caps = AuthCapabilities::new();
                 auth_caps.terminal = true;
                 // forms: the agent's multiple-choice questions come as elicitations (SPEC §3.3)
-                let caps = ClientCapabilities::new().auth(auth_caps).elicitation(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()));
+                // subagents: an agent that knows them announces each as a session of its own
+                // (`subagent_update`) and sends that session's updates on this connection
+                let caps = ClientCapabilities::new()
+                    .auth(auth_caps)
+                    .elicitation(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()))
+                    .subagents(acp_v1::SubagentCapabilities::new());
                 let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1).client_capabilities(caps)).block_task().await?;
                 let can_load = init.agent_capabilities.load_session;
                 let source = ActivitySource::of(init.agent_info.as_ref().map(|agent| agent.name.as_str()));
@@ -612,6 +622,7 @@ pub fn run_session(stream: UnixStream, opts: SessionOptions, commands: async_cha
                 // which would turn "authentication required" into a dead session.
                 loop {
                     let resume = opts.resume.clone().filter(|_| can_load);
+                    let link = SessionLink { source, open: &session_open, notified: &notified_rx };
                     let attempt: Result<(), agent_client_protocol::Error> = match resume {
                         Some(id) => match cx
                             .load_session_from(
@@ -625,15 +636,15 @@ pub fn run_session(stream: UnixStream, opts: SessionOptions, commands: async_cha
                         {
                             Ok(restored) => {
                                 let mut session = restored.into_session();
-                                drive(&mut session, true, source, &auth_methods, &commands, &events_loop).await
+                                drive(&mut session, true, link, &auth_methods, &commands, &events_loop).await
                             }
                             Err(e) if e.code == ErrorCode::AuthRequired => Err(e),
                             Err(e) => {
                                 tracing::warn!("session/load failed, starting fresh: {e}");
-                                open_fresh(&cx, &opts.cwd, &roots, source, &auth_methods, &commands, &events_loop).await
+                                open_fresh(&cx, &opts.cwd, &roots, link, &auth_methods, &commands, &events_loop).await
                             }
                         },
-                        None => open_fresh(&cx, &opts.cwd, &roots, source, &auth_methods, &commands, &events_loop).await,
+                        None => open_fresh(&cx, &opts.cwd, &roots, link, &auth_methods, &commands, &events_loop).await,
                     };
                     match attempt {
                         Ok(()) => return Ok(()),
@@ -810,6 +821,233 @@ impl AgentTurns {
     }
 }
 
+/// What `drive` needs of the connection beside its session: the agent's kind, and every
+/// session's notifications ([`SessionNotifications`]).
+#[derive(Clone, Copy)]
+struct SessionLink<'a> {
+    /// Where the agent says that it works with no prompt open.
+    source: ActivitySource,
+    open: &'a std::sync::atomic::AtomicBool,
+    notified: &'a async_channel::Receiver<agent_client_protocol::Dispatch>,
+}
+
+/// Takes every notification that names a session, once one is open, and queues it for `drive`.
+/// The SDK gives a session only its own, and a subagent's (ACP subagent sessions) come on the
+/// same connection under the subagent's session id: one queue keeps the order they were sent in.
+struct SessionNotifications {
+    open: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    queue: async_channel::Sender<agent_client_protocol::Dispatch>,
+}
+
+impl<Counterpart: agent_client_protocol::Role> agent_client_protocol::HandleDispatchFrom<Counterpart> for SessionNotifications {
+    async fn handle_dispatch_from(
+        &mut self,
+        message: agent_client_protocol::Dispatch,
+        _connection: agent_client_protocol::ConnectionTo<Counterpart>,
+    ) -> Result<agent_client_protocol::Handled<agent_client_protocol::Dispatch>, agent_client_protocol::Error> {
+        if !self.open.load(std::sync::atomic::Ordering::SeqCst) || notified_session(&message).is_none() {
+            return Ok(agent_client_protocol::Handled::No { message, retry: false });
+        }
+        let _ = self.queue.try_send(message);
+        Ok(agent_client_protocol::Handled::Yes)
+    }
+
+    fn describe_chain(&self) -> impl std::fmt::Debug {
+        "SessionNotifications"
+    }
+}
+
+/// The session a notification names.
+fn notified_session(dispatch: &agent_client_protocol::Dispatch) -> Option<&str> {
+    let agent_client_protocol::Dispatch::Notification(n) = dispatch else { return None };
+    n.params().get("sessionId")?.as_str()
+}
+
+/// The id of a subagent's card in the conversation: the delegation its calls and text go under.
+/// A subagent session has no tool call of its own, so the card is named by the session.
+pub fn subagent_card(session: &str) -> String {
+    format!("subagent:{session}")
+}
+
+/// A subagent the agent announced (ACP `subagent_update`).
+#[derive(Debug, Default)]
+struct Subagent {
+    /// The subagent session that announced it; none for the open session's own.
+    parent: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
+}
+
+impl Subagent {
+    /// The card's title: the mark that makes it a delegation, then what the agent calls it.
+    fn card_title(&self) -> String {
+        let name = self.title.as_deref().or(self.description.as_deref()).map(str::trim).filter(|name| !name.is_empty()).unwrap_or("subagent");
+        format!("sub-agent · {name}")
+    }
+}
+
+/// A message between two sessions, as one session's transcript has it.
+#[derive(Debug, Default)]
+struct Relayed {
+    sender: Option<String>,
+    recipient: Option<String>,
+    text: String,
+    /// How much of `text` the conversation has.
+    shown: usize,
+}
+
+/// The agent's subagents as ACP subagent sessions tell them, turned into what the conversation
+/// already shows for a delegation: a `Delegate` card per subagent ([`subagent_card`]), the brief
+/// as its body, the subagent's calls and words under it. Each method answers with the events
+/// to send.
+#[derive(Debug, Default)]
+struct Subagents {
+    by_session: std::collections::HashMap<String, Subagent>,
+    /// By the session whose transcript it is in, and its id there.
+    messages: std::collections::HashMap<(String, String), Relayed>,
+}
+
+/// The card's status for a subagent's state; none when the state says nothing of its work.
+fn subagent_status(state: &acp_v1::StateUpdate) -> Option<&'static str> {
+    use acp_v1::{IdleStopReason, StateUpdate};
+    match state {
+        StateUpdate::Running(_) | StateUpdate::RequiresAction(_) => Some("InProgress"),
+        StateUpdate::Idle(idle) => Some(match idle.stop_reason {
+            None | Some(IdleStopReason::EndTurn) => "Completed",
+            Some(_) => "Failed",
+        }),
+        _ => None,
+    }
+}
+
+/// A patch field onto what is kept: omitted leaves it, `null` clears it. True when it changed.
+fn patch(kept: &mut Option<String>, field: agent_client_protocol::schema::MaybeUndefined<String>) -> bool {
+    use agent_client_protocol::schema::MaybeUndefined;
+    let new = match field {
+        MaybeUndefined::Undefined => return false,
+        MaybeUndefined::Null => None,
+        MaybeUndefined::Value(value) => Some(value),
+    };
+    let changed = *kept != new;
+    *kept = new;
+    changed
+}
+
+impl Subagents {
+    /// `announcer` (a subagent session, none for the open session) announced a subagent or
+    /// changed what it says of one.
+    fn announced(&mut self, announcer: Option<&str>, update: acp_v1::SubagentUpdate) -> Vec<Event> {
+        use agent_client_protocol::schema::MaybeUndefined;
+        let session = update.session_id.to_string();
+        let id = subagent_card(&session);
+        let status = match &update.state {
+            MaybeUndefined::Value(state) => subagent_status(state),
+            _ => None,
+        };
+        let known = self.by_session.contains_key(&session);
+        let subagent = self.by_session.entry(session).or_insert_with(|| Subagent { parent: announcer.map(str::to_string), ..Subagent::default() });
+        let renamed = patch(&mut subagent.title, update.title) | patch(&mut subagent.description, update.description);
+        if !known {
+            return vec![Event::ToolCall {
+                id,
+                title: subagent.card_title(),
+                kind: "Delegate".into(),
+                // no state yet: announced, its work not confirmed
+                status: status.unwrap_or("Pending").into(),
+                detail: None,
+                diff: None,
+                parent: subagent.parent.as_deref().map(subagent_card),
+                command: None,
+            }];
+        }
+        if !renamed && status.is_none() {
+            return vec![];
+        }
+        vec![Event::ToolCallUpdate {
+            id,
+            status: status.map(str::to_string),
+            title: renamed.then(|| subagent.card_title()),
+            detail: None,
+            diff: None,
+            command: None,
+        }]
+    }
+
+    /// A message between sessions, as `session`'s transcript has it (whole: content replaces).
+    fn message(&mut self, session: &str, message: acp_v1::SessionMessage) -> Vec<Event> {
+        use agent_client_protocol::schema::MaybeUndefined;
+        let relayed = self.messages.entry((session.to_string(), message.message_id.to_string())).or_default();
+        patch(&mut relayed.sender, message.sender_session_id.map_value(|id| id.to_string()));
+        patch(&mut relayed.recipient, message.recipient_session_id.map_value(|id| id.to_string()));
+        match message.content {
+            MaybeUndefined::Undefined => {}
+            MaybeUndefined::Null => relayed.text.clear(),
+            MaybeUndefined::Value(blocks) => relayed.text = blocks.iter().map(text).collect::<Vec<_>>().join("\n"),
+        }
+        self.show_message(session, &message.message_id.to_string())
+    }
+
+    /// One more block of a message in `session`'s transcript.
+    fn message_chunk(&mut self, session: &str, chunk: acp_v1::SessionMessageChunk) -> Vec<Event> {
+        let relayed = self.messages.entry((session.to_string(), chunk.message_id.to_string())).or_default();
+        relayed.text.push_str(&text(&chunk.content));
+        self.show_message(session, &chunk.message_id.to_string())
+    }
+
+    /// What a message adds to the conversation. Both ends have it in their transcripts; the
+    /// sender's is the one shown. To a subagent of the sender it is the brief, the body of that
+    /// subagent's card; from a subagent to anyone else it is what the subagent said.
+    fn show_message(&mut self, session: &str, id: &str) -> Vec<Event> {
+        let Some(relayed) = self.messages.get_mut(&(session.to_string(), id.to_string())) else { return vec![] };
+        let (Some(sender), Some(recipient)) = (relayed.sender.as_deref(), relayed.recipient.as_deref()) else { return vec![] };
+        if sender != session || relayed.text.len() == relayed.shown {
+            return vec![];
+        }
+        let from_subagent = self.by_session.contains_key(sender);
+        let brief = self.by_session.get(recipient).is_some_and(|to| match &to.parent {
+            Some(parent) => parent == sender,
+            None => !from_subagent,
+        });
+        let event = if brief {
+            Event::ToolCallUpdate { id: subagent_card(recipient), status: None, title: None, detail: Some(relayed.text.clone()), diff: None, command: None }
+        } else if from_subagent {
+            // content that replaced what was shown starts over
+            let from = if relayed.text.is_char_boundary(relayed.shown) && relayed.shown < relayed.text.len() { relayed.shown } else { 0 };
+            Event::SubagentText { parent: subagent_card(sender), text: relayed.text[from..].to_string() }
+        } else {
+            return vec![];
+        };
+        relayed.shown = relayed.text.len();
+        vec![event]
+    }
+
+    /// An update of a session that is not the open one. Only an announced subagent's is shown:
+    /// its calls and words under its card. Its settings, usage and plan are its own, not the
+    /// session's, and are left out.
+    fn child_update(&mut self, session: &str, update: SessionUpdate) -> Vec<Event> {
+        if !self.by_session.contains_key(session) {
+            return vec![];
+        }
+        match update {
+            SessionUpdate::SubagentUpdate(u) => self.announced(Some(session), u),
+            SessionUpdate::SessionMessage(m) => self.message(session, m),
+            SessionUpdate::SessionMessageChunk(c) => self.message_chunk(session, c),
+            SessionUpdate::AgentMessageChunk(c) => vec![match c.content {
+                ContentBlock::Image(i) => Event::Image { mime: i.mime_type, data_base64: i.data, parent: Some(subagent_card(session)) },
+                content => Event::SubagentText { parent: subagent_card(session), text: text(&content) },
+            }],
+            call @ SessionUpdate::ToolCall(_) => match to_event(call) {
+                Event::ToolCall { id, title, kind, status, detail, diff, command, .. } => {
+                    vec![Event::ToolCall { id, title, kind, status, detail, diff, parent: Some(subagent_card(session)), command }]
+                }
+                _ => vec![],
+            },
+            update @ SessionUpdate::ToolCallUpdate(_) => vec![to_event(update)],
+            _ => vec![],
+        }
+    }
+}
+
 /// How long `session/new` may take before the agent is assumed to be waiting for a login it
 /// started on its own (Antigravity opens a browser flow at startup when it has no token and blocks
 /// the request until the callback arrives — which never happens inside the jail).
@@ -826,7 +1064,7 @@ async fn open_fresh(
     cx: &agent_client_protocol::ConnectionTo<Agent>,
     cwd: &Path,
     roots: &[std::path::PathBuf],
-    source: ActivitySource,
+    link: SessionLink<'_>,
     auth_methods: &[AuthMethodInfo],
     commands: &async_channel::Receiver<Command>,
     events_loop: &async_channel::Sender<Event>,
@@ -834,12 +1072,14 @@ async fn open_fresh(
     let opened = std::rc::Rc::new(std::cell::Cell::new(false));
     let session = {
         let opened = opened.clone();
-        cx.build_session_from(agent_client_protocol::schema::v1::NewSessionRequest::new(cwd).additional_directories(roots.to_vec()).meta(source.session_meta()))
-            .block_task()
-            .run_until(async move |mut s| {
-                opened.set(true);
-                drive(&mut s, false, source, auth_methods, commands, events_loop).await
-            })
+        cx.build_session_from(
+            agent_client_protocol::schema::v1::NewSessionRequest::new(cwd).additional_directories(roots.to_vec()).meta(link.source.session_meta()),
+        )
+        .block_task()
+        .run_until(async move |mut s| {
+            opened.set(true);
+            drive(&mut s, false, link, auth_methods, commands, events_loop).await
+        })
     };
     let stall = async {
         let timeout = session_open_timeout();
@@ -893,11 +1133,16 @@ fn is_prompt_auth_error(msg: &str) -> bool {
 async fn drive(
     session: &mut ActiveSession<'_, Agent>,
     resumed: bool,
-    source: ActivitySource,
+    link: SessionLink<'_>,
     auth_methods: &[AuthMethodInfo],
     commands: &async_channel::Receiver<Command>,
     events_loop: &async_channel::Sender<Event>,
 ) -> Result<(), agent_client_protocol::Error> {
+    // from here every session's notifications come by one queue, in order; those the SDK gave
+    // the session before this are read first (below)
+    let source = link.source;
+    link.open.store(true, std::sync::atomic::Ordering::SeqCst);
+    let main_session = session.session_id().to_string();
     let _ = events_loop
         .send(Event::Ready { session_id: session.session_id().to_string(), resumed, controls: controls_from(session.modes(), session.config_options()) })
         .await;
@@ -913,6 +1158,8 @@ async fn drive(
     let mut in_turn = false;
     // turns the agent starts itself, as its `source` tells them (`Event::AgentTurn`)
     let agent_turns = std::cell::RefCell::new(AgentTurns::default());
+    // the subagents the agent announced, and what each shows under its card
+    let subagents = std::cell::RefCell::new(Subagents::default());
     // update kinds this build can't parse, each noted once
     let mut unknown_kinds: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
@@ -927,19 +1174,28 @@ async fn drive(
         // updates, so the notifications the agent sends while handling it (a config snapshot of
         // that moment) are still queued when it answers. Read them before the next request goes
         // out, or that older snapshot lands after the newer request's response and undoes it.
+        // What the SDK queued for the session before `link.notified` took over comes first.
         let next = {
+            use futures::future::Either::{Left, Right};
             let cmd_fut = Box::pin(commands.recv());
             let upd_fut = Box::pin(session.read_update());
-            let inner = futures::future::select(upd_fut, cmd_fut);
+            let child_fut = Box::pin(link.notified.recv());
+            let inner = futures::future::select(upd_fut, futures::future::select(child_fut, cmd_fut));
+            let other = |next| match next {
+                Left((Ok(dispatch), _)) => Next::Update(Ok(SessionMessage::SessionMessage(dispatch))),
+                // the sender lives as long as the connection does
+                Left((Err(_), _)) => Next::Cmd(None),
+                Right((cmd, _)) => Next::Cmd(Result::ok(cmd)),
+            };
             match pending.as_mut() {
                 Some(p) => match futures::future::select(inner, p).await {
-                    futures::future::Either::Left((futures::future::Either::Left((upd, _)), _)) => Next::Update(upd),
-                    futures::future::Either::Left((futures::future::Either::Right((cmd, _)), _)) => Next::Cmd(cmd.ok()),
-                    futures::future::Either::Right((r, _)) => Next::Prompt(r),
+                    Left((Left((upd, _)), _)) => Next::Update(upd),
+                    Left((Right((next, _)), _)) => other(next),
+                    Right((r, _)) => Next::Prompt(r),
                 },
                 None => match inner.await {
-                    futures::future::Either::Left((upd, _)) => Next::Update(upd),
-                    futures::future::Either::Right((cmd, _)) => Next::Cmd(cmd.ok()),
+                    Left((upd, _)) => Next::Update(upd),
+                    Right((next, _)) => other(next),
                 },
             }
         };
@@ -1076,6 +1332,33 @@ async fn drive(
                     in_turn = false;
                     let _ = events_loop.send(Event::Stopped(stop_reason(reason))).await;
                 }
+                // another session's: a subagent's, shown under its card
+                SessionMessage::SessionMessage(dispatch) if notified_session(&dispatch).is_some_and(|session| session != main_session) => {
+                    let shown = std::cell::RefCell::new(Vec::new());
+                    let parsed = MatchDispatch::new(dispatch)
+                        .if_notification(async |n: SessionNotification| {
+                            *shown.borrow_mut() = subagents.borrow_mut().child_update(&n.session_id.to_string(), n.update);
+                            Ok(())
+                        })
+                        .await
+                        .otherwise_ignore();
+                    match parsed {
+                        // one of a kind this build does not know is skipped, as the session's own are
+                        Ok(()) => {}
+                        Err(e) if e.code == ErrorCode::InvalidParams => {}
+                        Err(e) => return Err(e),
+                    }
+                    let shown = shown.into_inner();
+                    // a subagent's call is the agent's work too ([`AgentTurns::output`])
+                    let called = shown.iter().any(|event| matches!(event, Event::ToolCall { .. }));
+                    let step = called.then(|| agent_turns.borrow_mut().output(in_turn)).flatten();
+                    if let Some(step) = step {
+                        let _ = events_loop.send(Event::AgentTurn(step)).await;
+                    }
+                    for event in shown {
+                        let _ = events_loop.send(event).await;
+                    }
+                }
                 SessionMessage::SessionMessage(dispatch) => {
                     if let Some(activity) = source.notification(&dispatch) {
                         let step = agent_turns.borrow_mut().said(activity, in_turn);
@@ -1101,6 +1384,24 @@ async fn drive(
                                     **options_cell.borrow_mut() = u.config_options.clone();
                                     let c = controls_from(modes_cell.borrow().as_ref(), Some(options_cell.borrow().as_slice()));
                                     let _ = events.send(Event::Controls(c)).await;
+                                }
+                                SessionUpdate::SubagentUpdate(u) => {
+                                    let shown = subagents.borrow_mut().announced(None, u);
+                                    for event in shown {
+                                        let _ = events.send(event).await;
+                                    }
+                                }
+                                SessionUpdate::SessionMessage(m) => {
+                                    let shown = subagents.borrow_mut().message(&main_session, m);
+                                    for event in shown {
+                                        let _ = events.send(event).await;
+                                    }
+                                }
+                                SessionUpdate::SessionMessageChunk(c) => {
+                                    let shown = subagents.borrow_mut().message_chunk(&main_session, c);
+                                    for event in shown {
+                                        let _ = events.send(event).await;
+                                    }
                                 }
                                 other => {
                                     let said = source.update(&other).and_then(|activity| agent_turns.borrow_mut().said(activity, in_turn));
@@ -1553,6 +1854,12 @@ mod tests {
                     }
                 }
                 Event::Text(t) if t != "end" => seen.push(t),
+                Event::ToolCall { id, title, status, parent, .. } => seen.push(format!("call {id} [{title}] {status} in {}", parent.as_deref().unwrap_or("-"))),
+                Event::ToolCallUpdate { id, status, detail, .. } => {
+                    seen.push(format!("update {id} {} {}", status.as_deref().unwrap_or("-"), detail.as_deref().unwrap_or("-")));
+                }
+                Event::SubagentText { parent, text } => seen.push(format!("{parent} said {text}")),
+                Event::Controls(_) => seen.push("controls".into()),
                 _ => {}
             }
             if last {
@@ -1629,6 +1936,68 @@ mod tests {
             vec![said(CODEX, "idle"), said(CODEX, "running"), text("working on the goal"), waiting, said(CODEX, "running"), said(CODEX, "idle")]
         });
         assert_eq!(seen, ["turn", "answer", "stopped", "agent started", "working on the goal", "agent ended"]);
+    }
+
+    /// A session update as `session` sends it.
+    fn sent(session: &str, update: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session,"update":update}})
+    }
+
+    /// ACP subagent sessions, in claude-agent-acp's words (probed 2026-11-17): the agent
+    /// announces a subagent in the session, briefs it with a message both transcripts get, and
+    /// the subagent's updates come under its own session id. The conversation gets one card per
+    /// subagent, with the brief as its body and the subagent's calls and answer under it; the
+    /// subagent's settings are not the session's, and a session nobody announced shows nothing.
+    #[test]
+    fn a_subagent_session_is_a_card_with_its_calls_and_words_under_it() {
+        let seen = agent_turns_seen("opencode", 1, false, |_| {
+            let brief = serde_json::json!({"sessionUpdate":"session_message","messageId":"m1","senderSessionId":"s1","recipientSessionId":"c1",
+                "content":[{"type":"text","text":"count the words"}]});
+            let answer = |extra: (&str, &str)| {
+                let mut m = serde_json::json!({"sessionUpdate":"session_message","messageId":"m2","senderSessionId":"c1","recipientSessionId":"s1",
+                    "content":[{"type":"text","text":"2"}]});
+                m[extra.0] = extra.1.into();
+                m
+            };
+            let call = serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"t1","title":"wc -w a.txt","kind":"execute","status":"pending",
+                "_meta":{"claudeCode":{"toolName":"Bash","parentToolUseId":"m1"}}});
+            vec![
+                sent(
+                    "s1",
+                    serde_json::json!({"sessionUpdate":"subagent_update","sessionId":"c1","title":"Count words","description":"general-purpose",
+                    "capabilities":{"cancel":{}},"state":{"state":"running"}}),
+                ),
+                sent("s1", brief.clone()),
+                sent("c1", brief),
+                sent("c1", serde_json::json!({"sessionUpdate":"config_option_update","configOptions":[]})),
+                sent("c1", call.clone()),
+                sent("stray", call),
+                sent("c1", serde_json::json!({"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed"})),
+                sent("c1", serde_json::json!({"sessionUpdate":"subagent_update","sessionId":"c2","title":"Nested"})),
+                sent("c1", serde_json::json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"thinking aloud"}})),
+                sent("c1", answer(("recipientMessageId", "m2"))),
+                sent("s1", answer(("senderMessageId", "m2"))),
+                sent("s1", serde_json::json!({"sessionUpdate":"subagent_update","sessionId":"c1","state":{"state":"idle","stopReason":"end_turn"}})),
+                sent("s1", serde_json::json!({"sessionUpdate":"subagent_update","sessionId":"c1","state":{"state":"idle","stopReason":"cancelled"}})),
+            ]
+        });
+        assert_eq!(
+            seen,
+            [
+                "turn",
+                "answer",
+                "stopped",
+                "call subagent:c1 [sub-agent · Count words] InProgress in -",
+                "update subagent:c1 - count the words",
+                "call t1 [wc -w a.txt] Pending in subagent:c1",
+                "update t1 Completed -",
+                "call subagent:c2 [sub-agent · Nested] Pending in subagent:c1",
+                "subagent:c1 said thinking aloud",
+                "subagent:c1 said 2",
+                "update subagent:c1 Completed -",
+                "update subagent:c1 Failed -",
+            ]
+        );
     }
 
     /// An agent with no word of its own state is never shown working outside a prompt, whatever it
