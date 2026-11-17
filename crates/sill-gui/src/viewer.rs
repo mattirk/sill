@@ -239,3 +239,69 @@ impl<'a> SillViewer<'a> {
         )
     }
 }
+
+fn text_leaf(text: &Text, style: markdown::Style) -> String {
+    text.spans(style)
+        .iter()
+        .map(|span| span.text.as_ref())
+        .collect()
+}
+
+/// Extracts the flattened text of every [`selection::Selectable`] leaf that [`SillViewer`] builds
+/// for `items`, in the exact traversal order [`selection::Area`] visits them.
+pub fn markdown_leaves(items: &[Item], out: &mut Vec<String>) {
+    let style = crate::ui::markdown_settings().style;
+    for item in items {
+        match item {
+            Item::Heading(_, text) | Item::Paragraph(text) => {
+                out.push(text_leaf(text, style));
+            }
+            Item::CodeBlock { lines, .. } => {
+                for line in lines {
+                    out.push(text_leaf(line, style));
+                }
+            }
+            Item::List {
+                start: None,
+                bullets,
+            } => {
+                for bullet in bullets {
+                    match bullet {
+                        Bullet::Point { items } => {
+                            out.push("•".to_string());
+                            markdown_leaves(items, out);
+                        }
+                        Bullet::Task { items, .. } => {
+                            markdown_leaves(items, out);
+                        }
+                    }
+                }
+            }
+            Item::List {
+                start: Some(start),
+                bullets,
+            } => {
+                for (i, bullet) in bullets.iter().enumerate() {
+                    out.push(format!("{}.", i as u64 + *start));
+                    markdown_leaves(bullet_items(bullet), out);
+                }
+            }
+            Item::Quote(items) => {
+                markdown_leaves(items, out);
+            }
+            Item::Table { columns, rows } => {
+                for column in columns {
+                    markdown_leaves(&column.header, out);
+                }
+                for row in rows {
+                    for i in 0..columns.len() {
+                        if let Some(cells) = row.cells().get(i) {
+                            markdown_leaves(cells, out);
+                        }
+                    }
+                }
+            }
+            Item::Image { .. } | Item::Rule => {}
+        }
+    }
+}

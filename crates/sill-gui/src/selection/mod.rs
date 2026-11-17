@@ -13,7 +13,6 @@ mod area;
 mod model;
 mod selectable;
 
-pub use area::area;
-#[cfg(test)]
+pub use area::{FindQuery, VisibleLeaf, area};
 pub use model::Selectable;
 pub use selectable::{rich_text, text};

@@ -239,9 +239,15 @@ pub struct Selectable {
     generation: u64,
     /// Bumped whenever the paragraph is laid out again (text, shape or bounds changed).
     layout_version: u64,
+    mouse_selectable: bool,
     highlight: Option<(usize, usize)>,
     rects: Vec<Rectangle>,
     rects_key: Option<((usize, usize), u64)>,
+    find_matches: Vec<(usize, usize)>,
+    find_current: Option<usize>,
+    find_rects: Vec<Rectangle>,
+    find_current_rects: Vec<Rectangle>,
+    find_rects_key: Option<u64>,
 }
 
 impl Default for Selectable {
@@ -251,9 +257,15 @@ impl Default for Selectable {
             uid: NEXT_UID.fetch_add(1, Ordering::Relaxed),
             generation: 0,
             layout_version: 0,
+            mouse_selectable: true,
             highlight: None,
             rects: Vec::new(),
             rects_key: None,
+            find_matches: Vec::new(),
+            find_current: None,
+            find_rects: Vec::new(),
+            find_current_rects: Vec::new(),
+            find_rects_key: None,
         }
     }
 }
@@ -275,6 +287,14 @@ impl Selectable {
         self.layout.origin(bounds)
     }
 
+    pub fn set_mouse_selectable(&mut self, mouse_selectable: bool) {
+        self.mouse_selectable = mouse_selectable;
+    }
+
+    pub fn is_mouse_selectable(&self) -> bool {
+        self.mouse_selectable
+    }
+
     /// The highlighted part of the text, if any.
     #[cfg(test)]
     pub fn highlighted_text(&self) -> Option<&str> {
@@ -282,9 +302,46 @@ impl Selectable {
         self.layout.text().get(start..end)
     }
 
+    /// All find-matched slices in this leaf.
+    #[cfg(test)]
+    pub fn find_matched_texts(&self) -> Vec<&str> {
+        self.find_matches
+            .iter()
+            .filter_map(|&(start, end)| self.layout.text().get(start..end))
+            .collect()
+    }
+
+    /// The current find-matched slice in this leaf, if the current match lies here.
+    #[cfg(test)]
+    pub fn current_matched_text(&self) -> Option<&str> {
+        let idx = self.find_current?;
+        let &(start, end) = self.find_matches.get(idx)?;
+        self.layout.text().get(start..end)
+    }
+
     /// Whether a highlight is set.
     pub fn is_highlighted(&self) -> bool {
         self.highlight.is_some()
+    }
+
+    /// Whether any find match is set on this leaf.
+    pub fn has_find(&self) -> bool {
+        !self.find_matches.is_empty()
+    }
+
+    /// The rectangles to paint behind non-current find matches, in paragraph coordinates.
+    pub fn find_rects(&self) -> &[Rectangle] {
+        &self.find_rects
+    }
+
+    /// The rectangles to paint behind the current find match, in paragraph coordinates.
+    pub fn find_current_rects(&self) -> &[Rectangle] {
+        &self.find_current_rects
+    }
+
+    /// The first rectangle of the current find match, in paragraph coordinates.
+    pub fn current_match_rect(&self) -> Option<Rectangle> {
+        self.find_current_rects.first().copied()
     }
 
     /// The rectangles to paint behind the highlighted text, in paragraph coordinates.
@@ -334,6 +391,40 @@ impl Selectable {
             self.rects = self.layout.highlight_rects(range);
             self.rects_key = Some((range, self.layout_version));
         }
+    }
+
+    /// Sets the find match byte ranges and optional current match index within `matches`, laying
+    /// out their rectangles only when the matches or paragraph layout changed.
+    pub fn set_find(&mut self, matches: Vec<(usize, usize)>, current: Option<usize>) {
+        let clamped: Vec<(usize, usize)> = matches
+            .into_iter()
+            .map(|(start, end)| (self.layout.floor(start), self.layout.floor(end)))
+            .filter(|(start, end)| start < end)
+            .collect();
+        let current = current.filter(|&idx| idx < clamped.len());
+        if self.find_matches == clamped
+            && self.find_current == current
+            && self.find_rects_key == Some(self.layout_version)
+        {
+            return;
+        }
+        self.find_matches = clamped;
+        self.find_current = current;
+        self.find_rects.clear();
+        self.find_current_rects.clear();
+        if self.find_matches.is_empty() {
+            self.find_rects_key = None;
+            return;
+        }
+        for (i, &range) in self.find_matches.iter().enumerate() {
+            let rects = self.layout.highlight_rects(range);
+            if Some(i) == self.find_current {
+                self.find_current_rects.extend(rects);
+            } else {
+                self.find_rects.extend(rects);
+            }
+        }
+        self.find_rects_key = Some(self.layout_version);
     }
 }
 

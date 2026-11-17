@@ -117,6 +117,7 @@ const LINES: &[(&str, &str)] = &[
     ("chevron-right", "m9 18 6-6-6-6"),
     ("chevron-left", "m15 18-6-6 6-6"),
     ("chevron-down", "m6 9 6 6 6-6"),
+    ("chevron-up", "m18 15-6-6-6 6"),
     ("check", "M20 6 9 17l-5-5"),
     (
         "copy",

@@ -3,7 +3,7 @@
 //! Mac (`CONTROL`, `CARD`). Every theme is here, the
 //! same struct with other values.
 use iced::widget::{
-    button, container, overlay::menu, pick_list, rule, scrollable, svg, text_editor,
+    button, container, overlay::menu, pick_list, rule, scrollable, svg, text_editor, text_input,
 };
 use iced::{Background, Border, Color, Shadow, Theme};
 
@@ -673,4 +673,42 @@ pub fn selectable_inherited(_: &Theme) -> iced_selection::text::Style {
 /// What selected text lies on.
 fn selection() -> Color {
     alpha(P.accent, 0.35)
+}
+
+/// Find match background: `current` in the accent tint, all other matches in the warning tint.
+pub fn find_match(current: bool) -> Color {
+    if current {
+        alpha(P.accent, 0.50)
+    } else {
+        alpha(P.warning, 0.25)
+    }
+}
+
+/// The floating Find bar card in the top-right corner of the active content pane.
+pub fn find_bar(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(P.surface.into()),
+        border: Border {
+            radius: CARD.into(),
+            ..square(P.border, 1.0)
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+            offset: iced::Vector::new(0.0, 2.0),
+            blur_radius: 10.0,
+        },
+        ..container::Style::default()
+    }
+}
+
+/// Borderless text input inside the Find bar (`find_bar` draws the outer border).
+pub fn find_input(_: &Theme, _status: text_input::Status) -> text_input::Style {
+    text_input::Style {
+        background: Background::Color(Color::TRANSPARENT),
+        border: square(Color::TRANSPARENT, 0.0),
+        icon: P.fg_dim,
+        placeholder: alpha(P.fg, 0.40),
+        value: P.fg,
+        selection: selection(),
+    }
 }

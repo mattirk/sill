@@ -37,6 +37,8 @@ where
     width: Length,
     font: Option<Font>,
     align_x: Alignment,
+    wrapping: Wrapping,
+    mouse_selectable: bool,
     style: StyleFn<'a, Theme>,
     on_link_click: Option<Box<dyn Fn(Link) -> Message + 'a>>,
     on_link_copy: Option<Box<dyn Fn(Link) -> Message + 'a>>,
@@ -68,6 +70,8 @@ where
             width: Length::Shrink,
             font: None,
             align_x: Alignment::Default,
+            wrapping: Wrapping::default(),
+            mouse_selectable: true,
             style: Box::new(iced_selection::text::default),
             on_link_click: None,
             on_link_copy: None,
@@ -91,6 +95,17 @@ where
 
     pub fn align_x(mut self, alignment: impl Into<Alignment>) -> Self {
         self.align_x = alignment.into();
+        self
+    }
+
+    pub fn wrapping(mut self, wrapping: Wrapping) -> Self {
+        self.wrapping = wrapping;
+        self
+    }
+
+    /// Searchable and highlighted by Find, but skipped by mouse selection drags.
+    pub fn find_only(mut self) -> Self {
+        self.mouse_selectable = false;
         self
     }
 
@@ -142,9 +157,11 @@ where
     }
 
     fn state(&self) -> tree::State {
+        let mut selectable = Selectable::default();
+        selectable.set_mouse_selectable(self.mouse_selectable);
         tree::State::new(State::<Link> {
             last: Last::Nothing,
-            selectable: Selectable::default(),
+            selectable,
             span_pressed: None,
             hovered_link: None,
         })
@@ -166,6 +183,7 @@ where
         use iced::advanced::text::Renderer as _;
 
         let state = tree.state.downcast_mut::<State<Link>>();
+        state.selectable.set_mouse_selectable(self.mouse_selectable);
         layout::sized(limits, self.width, Length::Shrink, |limits| {
             let bounds = limits.max();
             let size = self.size.unwrap_or_else(|| renderer.default_size());
@@ -179,7 +197,7 @@ where
                 align_x: self.align_x,
                 align_y: alignment::Vertical::Top,
                 shaping,
-                wrapping: Wrapping::default(),
+                wrapping: self.wrapping,
             };
             match &self.content {
                 Content::Plain(content) => {
@@ -309,6 +327,28 @@ where
             }
         }
 
+        // find matches under the selection and glyphs
+        for (rects, current) in [
+            (state.selectable.find_rects(), false),
+            (state.selectable.find_current_rects(), true),
+        ] {
+            if rects.is_empty() {
+                continue;
+            }
+            let color = crate::style::find_match(current);
+            for rect in rects {
+                if let Some(visible) = bounds.intersection(&(*rect + translation)) {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: visible,
+                            ..renderer::Quad::default()
+                        },
+                        color,
+                    );
+                }
+            }
+        }
+
         // this leaf's part of the area's selection, under the glyphs
         for rect in state.selectable.highlight_rects().iter() {
             if let Some(visible) = bounds.intersection(&(*rect + translation)) {
@@ -418,7 +458,7 @@ where
         let state = tree.state.downcast_ref::<State<Link>>();
         if state.hovered_link.is_some() {
             mouse::Interaction::Pointer
-        } else if cursor.is_over(layout.bounds()) {
+        } else if self.mouse_selectable && cursor.is_over(layout.bounds()) {
             mouse::Interaction::Text
         } else {
             mouse::Interaction::None
