@@ -2,6 +2,7 @@
 use super::Hub;
 use anyhow::Result;
 use serde_json::{Value, json};
+use sill_proto::method;
 use sill_proto::{agent_admin as api, rpc::Error, sessions::HostPath};
 fn args<T: serde::de::DeserializeOwned>(v: Value) -> Result<T> {
     serde_json::from_value(v).map_err(|e| Error::invalid_params(e).into())
@@ -42,18 +43,18 @@ fn select(home: &std::path::Path, a: &api::EntryKey) -> Result<sill_core::regist
 pub fn handle(hub: &Hub, m: &str, p: Value) -> Option<Result<Value>> {
     if !matches!(
         m,
-        "_sill/agents.list"
-            | "_sill/agents.get"
-            | "_sill/agents.save"
-            | "_sill/agents.remove"
-            | "_sill/agents.available"
-            | "_sill/agents.defaults.get"
-            | "_sill/agents.defaults.set"
-            | "_sill/agents.discovered"
-            | "_sill/registry.refresh"
-            | "_sill/registry.installed"
-            | "_sill/registry.uninstall"
-            | "_sill/registry.icon"
+        method::AGENTS_LIST
+            | method::AGENTS_GET
+            | method::AGENTS_SAVE
+            | method::AGENTS_REMOVE
+            | method::AGENTS_AVAILABLE
+            | method::AGENTS_DEFAULTS_GET
+            | method::AGENTS_DEFAULTS_SET
+            | method::AGENTS_DISCOVERED
+            | method::REGISTRY_REFRESH
+            | method::REGISTRY_INSTALLED
+            | method::REGISTRY_UNINSTALL
+            | method::REGISTRY_ICON
     ) {
         return None;
     }
@@ -63,7 +64,7 @@ pub fn handle(hub: &Hub, m: &str, p: Value) -> Option<Result<Value>> {
         }
         let home = sill_core::changes::home()?;
         let result = match m {
-            "_sill/agents.list" => {
+            method::AGENTS_LIST => {
                 let a: api::List = args(p)?;
                 let n = a.limit.unwrap_or(64) as usize;
                 if !(1..=128).contains(&n) {
@@ -80,7 +81,7 @@ pub fn handle(hub: &Hub, m: &str, p: Value) -> Option<Result<Value>> {
                 let next = more.then(|| agents.last().unwrap().id.clone());
                 json!(api::Page { agents, next })
             }
-            "_sill/agents.save" => {
+            method::AGENTS_SAVE => {
                 let a: sill_core::agents::Agent = serde_json::from_value(p).map_err(Error::invalid_params)?;
                 valid(&a.id)?;
                 if a.command.is_empty() || a.command.iter().any(|v| v.contains('\0')) {
@@ -89,22 +90,22 @@ pub fn handle(hub: &Hub, m: &str, p: Value) -> Option<Result<Value>> {
                 let agent = a;
                 json!(api::Saved { path: HostPath::from_path(&sill_core::agents::save_override(&home, &agent)?) })
             }
-            "_sill/agents.remove" => {
+            method::AGENTS_REMOVE => {
                 let a: api::AgentKey = args(p)?;
                 valid(&a.agent_id)?;
                 json!(api::Removed { removed: sill_core::agents::remove_override(&home, &a.agent_id)? })
             }
-            "_sill/agents.get" | "_sill/agents.available" | "_sill/agents.defaults.get" => {
+            method::AGENTS_GET | method::AGENTS_AVAILABLE | method::AGENTS_DEFAULTS_GET => {
                 let a: api::AgentKey = args(p)?;
                 valid(&a.agent_id)?;
                 let agent = sill_core::agents::load(&home)?.remove(&a.agent_id).ok_or_else(|| err("not_found", "agent not found"))?;
                 match m {
-                    "_sill/agents.get" => json!(definition(agent)?),
-                    "_sill/agents.available" => json!(api::Available { path: sill_core::registry::available(&agent, &home).map(|p| HostPath::from_path(&p)) }),
+                    method::AGENTS_GET => json!(definition(agent)?),
+                    method::AGENTS_AVAILABLE => json!(api::Available { path: sill_core::registry::available(&agent, &home).map(|p| HostPath::from_path(&p)) }),
                     _ => json!(hub.with_store(|s| Ok(s.agent_settings(&a.agent_id)))?),
                 }
             }
-            "_sill/agents.defaults.set" => {
+            method::AGENTS_DEFAULTS_SET => {
                 let a: api::Defaults = args(p)?;
                 valid(&a.agent_id)?;
                 if !sill_core::agents::load(&home)?.contains_key(&a.agent_id) {
@@ -113,7 +114,7 @@ pub fn handle(hub: &Hub, m: &str, p: Value) -> Option<Result<Value>> {
                 hub.with_store(|s| s.set_agent_settings(&a.agent_id, &a.settings))?;
                 json!({})
             }
-            "_sill/agents.discovered" => {
+            method::AGENTS_DISCOVERED => {
                 let a: api::AgentKey = args(p)?;
                 valid(&a.agent_id)?;
                 json!(api::Discovered {
@@ -132,12 +133,12 @@ pub fn handle(hub: &Hub, m: &str, p: Value) -> Option<Result<Value>> {
                     })
                 })
             }
-            "_sill/registry.refresh" => {
+            method::REGISTRY_REFRESH => {
                 let _: sill_proto::Empty = args(p)?;
                 sill_core::registry::fetch(&home)?;
                 json!({})
             }
-            "_sill/registry.installed" => {
+            method::REGISTRY_INSTALLED => {
                 let a: api::AgentKey = args(p)?;
                 valid(&a.agent_id)?;
                 json!(api::Installation {
@@ -150,7 +151,7 @@ pub fn handle(hub: &Hub, m: &str, p: Value) -> Option<Result<Value>> {
                     })
                 })
             }
-            "_sill/registry.uninstall" => {
+            method::REGISTRY_UNINSTALL => {
                 let a: api::EntryKey = args(p)?;
                 valid(&a.entry_id)?;
                 let _job = super::host::Job::reserve(format!("install:{}", a.entry_id))?;
@@ -165,7 +166,7 @@ pub fn handle(hub: &Hub, m: &str, p: Value) -> Option<Result<Value>> {
                 sill_core::registry::uninstall(&home, &entry)?;
                 json!({})
             }
-            "_sill/registry.icon" => {
+            method::REGISTRY_ICON => {
                 use std::io::Read;
                 // by id: the icon is the agent's, not a version's, and the installed version may no
                 // longer be listed

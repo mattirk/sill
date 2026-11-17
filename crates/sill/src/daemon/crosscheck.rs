@@ -10,6 +10,7 @@ use sill_core::{
     sfp::Journal,
     workspace::{flow, records},
 };
+use sill_proto::method;
 use sill_proto::{crosscheck as api, sfp as p};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -85,7 +86,7 @@ impl Hub {
         Ok(run)
     }
     fn cc_notice(&self, workspace: &str, run: &str) {
-        let req = sill_proto::rpc::Request::new(None, "_sill/crosscheck.changed", json!(api::Notice { workspace_id: workspace.into(), run_id: run.into() }));
+        let req = sill_proto::rpc::Request::new(None, method::CROSSCHECK_CHANGED, json!(api::Notice { workspace_id: workspace.into(), run_id: run.into() }));
         if let Ok(line) = serde_json::to_string(&req) {
             for conn in self.connections().into_iter().filter(|c| c.has_capability(api::CAPABILITY)) {
                 conn.send(line.clone());
@@ -168,11 +169,11 @@ impl Hub {
             return Some(Err(error.into()));
         }
         Some((|| match method {
-            "_sill/crosscheck.reviewers" => {
+            method::CROSSCHECK_REVIEWERS => {
                 parse::<api::Empty>(params)?;
                 Ok(json!(self.cc_reviewers()?))
             }
-            "_sill/crosscheck.set_reviewers" => {
+            method::CROSSCHECK_SET_REVIEWERS => {
                 let a: api::SetReviewers = parse(params)?;
                 validate_reviewers(&a.reviewers)?;
                 self.with_store(|s| {
@@ -184,9 +185,9 @@ impl Hub {
                 })?;
                 Ok(json!(self.cc_reviewers()?))
             }
-            "_sill/crosscheck.get" => Ok(json!(self.cc_current(&parse::<api::WorkspaceKey>(params)?.workspace_id)?)),
-            "_sill/crosscheck.start" => Ok(json!(self.cc_start(parse(params)?)?)),
-            "_sill/crosscheck.remove" => {
+            method::CROSSCHECK_GET => Ok(json!(self.cc_current(&parse::<api::WorkspaceKey>(params)?.workspace_id)?)),
+            method::CROSSCHECK_START => Ok(json!(self.cc_start(parse(params)?)?)),
+            method::CROSSCHECK_REMOVE => {
                 self.cc_remove(&parse::<api::RunKey>(params)?.run_id)?;
                 Ok(json!({}))
             }

@@ -1,6 +1,7 @@
 //! The desktop window, sill-gui: a binary of its own, installed beside `sill`. `sill gui` runs it,
 //! `sill toggle` shows or hides it over its control socket, and `sill restart` restarts the daemon
 //! and the window — under the `sill-gui` user service when that is installed.
+use sill_proto::method;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
@@ -133,8 +134,8 @@ pub fn restart(hidden: bool, dev: bool, detached: bool, jails: bool) -> Result<(
         for session in running {
             let key = sill_proto::sessions::SessionKey { session_id: session.session_id.clone() };
             let restarted = client
-                .call::<serde_json::Value>("_sill/sessions.stop", &key)
-                .and_then(|_| client.call::<sill_proto::sessions::Started>("_sill/sessions.start", &key));
+                .call::<serde_json::Value>(method::SESSIONS_STOP, &key)
+                .and_then(|_| client.call::<sill_proto::sessions::Started>(method::SESSIONS_START, &key));
             match restarted {
                 Ok(_) => println!("jail {} restarted", session.session_id),
                 Err(e) => {

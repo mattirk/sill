@@ -14,6 +14,7 @@
 //!
 //! The VM's clock is the Mac's: set at each start and after each sleep of the Mac (`watch_clock`),
 //! since the VM does not run while the Mac sleeps and its clock stays behind by that long.
+use sill_proto::method;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
@@ -949,7 +950,7 @@ fn granted(session: &str, generation: u64, operation: &str) -> Result<(), String
         return Err(not_ticked());
     }
     let state: sill_proto::host_control::State = sill_proto::Client::connect()
-        .and_then(|client| client.call_within("_sill/host_control.state", serde_json::json!({"session_id": session}), Duration::from_secs(2)))
+        .and_then(|client| client.call_within(method::HOST_CONTROL_STATE, serde_json::json!({"session_id": session}), Duration::from_secs(2)))
         .map_err(|e| format!("the grant could not be checked: {e:#}"))?;
     if !state.active || state.generation != generation {
         return Err("refused: stale Host control generation".into());
@@ -1094,7 +1095,7 @@ fn watch_mac_processes() {
                 std::thread::sleep(Duration::from_secs(3));
                 for session in crate::mac_procs::sessions_running() {
                     let state: Result<sill_proto::host_control::State, _> =
-                        sill_proto::Client::connect().and_then(|client| client.call("_sill/host_control.state", serde_json::json!({"session_id": session})));
+                        sill_proto::Client::connect().and_then(|client| client.call(method::HOST_CONTROL_STATE, serde_json::json!({"session_id": session})));
                     // the daemon unreachable is not a revocation: only a clear answer stops them
                     if let Ok(state) = state
                         && (!state.active

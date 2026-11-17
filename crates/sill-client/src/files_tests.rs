@@ -1,6 +1,7 @@
 //! The file requests over the public protocol: exact path bytes, revisions, cursors, pins.
 use super::*;
 use serde_json::{Value, json};
+use sill_proto::method;
 use sill_proto::sessions::HostPath;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::{ffi::OsStringExt, net::UnixStream};
@@ -36,7 +37,7 @@ fn file_pages_preserve_exact_path_bytes_and_revision() {
     let server = std::thread::spawn(move || {
         let mut reader = BufReader::new(peer.try_clone().unwrap());
         for (offset, next, chunk, eof) in [("0", "3", b"abc".as_slice(), false), ("3", "6", b"def".as_slice(), true)] {
-            let req = receive(&mut reader, "_sill/files.read");
+            let req = receive(&mut reader, method::FILES_READ);
             let params: admin::FileRead = serde_json::from_value(req["params"].clone()).unwrap();
             assert_eq!(params.path.bytes_base64, expected);
             assert_eq!(params.offset, offset);
@@ -58,7 +59,7 @@ fn changed_revision_and_binary_bytes_are_refused() {
         let (client, mut peer) = pair();
         let server = std::thread::spawn(move || {
             let mut reader = BufReader::new(peer.try_clone().unwrap());
-            let first = receive(&mut reader, "_sill/files.read");
+            let first = receive(&mut reader, method::FILES_READ);
             respond(
                 &mut peer,
                 &first,
@@ -70,7 +71,7 @@ fn changed_revision_and_binary_bytes_are_refused() {
                 },
             );
             if !binary {
-                let next = receive(&mut reader, "_sill/files.read");
+                let next = receive(&mut reader, method::FILES_READ);
                 respond(
                     &mut peer,
                     &next,
@@ -91,12 +92,12 @@ fn directory_cursor_and_pin_actions_use_public_protocol() {
     let after = path_of("/project/last");
     let server = std::thread::spawn(move || {
         let mut reader = BufReader::new(peer.try_clone().unwrap());
-        let req = receive(&mut reader, "_sill/files.list");
+        let req = receive(&mut reader, method::FILES_LIST);
         let params: admin::FilesList = serde_json::from_value(req["params"].clone()).unwrap();
         assert_eq!(params.path.display, "/project");
         assert_eq!(params.after.unwrap().display, "/project/last");
         respond(&mut peer, &req, admin::FilesPage { entries: vec![], next: None });
-        for method in ["_sill/sessions.pin", "_sill/sessions.unpin"] {
+        for method in [method::SESSIONS_PIN, method::SESSIONS_UNPIN] {
             let req = receive(&mut reader, method);
             let params: pins::SessionPin = serde_json::from_value(req["params"].clone()).unwrap();
             assert_eq!(params.session_id, "session-a");
@@ -117,7 +118,7 @@ fn diff_pages_use_fingerprint_and_live_target() {
     let server = std::thread::spawn(move || {
         let mut reader = BufReader::new(peer.try_clone().unwrap());
         for (offset, next, text) in [("0", Some("4"), "---\n"), ("4", None, "+++\n")] {
-            let req = receive(&mut reader, "_sill/changes.diff");
+            let req = receive(&mut reader, method::CHANGES_DIFF);
             let params: changes::Diff = serde_json::from_value(req["params"].clone()).unwrap();
             assert_eq!(params.offset.as_deref(), Some(offset));
             assert_eq!(params.fingerprint.as_deref(), if offset == "0" { None } else { Some("fp") });
@@ -135,14 +136,14 @@ fn global_pins_are_suggestions_and_session_pins_take_precedence() {
     let server = std::thread::spawn(move || {
         let mut reader = BufReader::new(peer.try_clone().unwrap());
         for (session, paths) in [(Some("a"), vec!["/shared"]), (None, vec!["/shared", "/global-only"])] {
-            let req = receive(&mut reader, "_sill/pins.list");
+            let req = receive(&mut reader, method::PINS_LIST);
             let params: pins::List = serde_json::from_value(req["params"].clone()).unwrap();
             assert_eq!(params.session_id.as_deref(), session);
             respond(&mut peer, &req, pins::Page { pins: paths.iter().map(|p| path_of(p)).collect(), next: None });
-            let req = receive(&mut reader, "_sill/files.metadata");
+            let req = receive(&mut reader, method::FILES_METADATA);
             respond(&mut peer, &req, metadata(true));
         }
-        let req = receive(&mut reader, "_sill/files.home");
+        let req = receive(&mut reader, method::FILES_HOME);
         respond(&mut peer, &req, path_of("/home/demo"));
     });
     let Data::Roots { roots, .. } = execute(&client, "a", &Request::Roots).unwrap() else { panic!("roots") };
@@ -161,7 +162,7 @@ fn a_refresh_of_two_loaded_pages_follows_the_cursor_across_both() {
     let server = std::thread::spawn(move || {
         let mut reader = BufReader::new(peer.try_clone().unwrap());
         for page in 0..2 {
-            let req = receive(&mut reader, "_sill/files.list");
+            let req = receive(&mut reader, method::FILES_LIST);
             let params: admin::FilesList = serde_json::from_value(req["params"].clone()).unwrap();
             assert_eq!(params.after.as_ref().map(|p| p.display.as_str()), if page == 0 { None } else { Some("/last") });
             respond(

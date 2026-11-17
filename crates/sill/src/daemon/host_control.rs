@@ -5,6 +5,7 @@
 //! stops. Every activation and scope change is a new generation; the bridge's actions carry the
 //! generation they were made under and a stale one is refused. Activations and revocations are
 //! recorded in the session's conversation as notices.
+use sill_proto::method;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Mutex, OnceLock};
 
@@ -273,17 +274,17 @@ pub fn handle(hub: &std::sync::Arc<Hub>, conn: &Conn, method: &str, params: serd
         serde_json::from_value::<sill_proto::sessions::SessionKey>(v).map_err(|e| anyhow::Error::from(Error::invalid_params(e.to_string())))
     };
     Some(match method {
-        "_sill/host_control.activate" => serde_json::from_value::<api::Activate>(params)
+        method::HOST_CONTROL_ACTIVATE => serde_json::from_value::<api::Activate>(params)
             .map_err(|e| anyhow::Error::from(Error::invalid_params(e.to_string())))
             .and_then(|a| activate(hub, conn, a))
             .map(|s| json!(s)),
-        "_sill/host_control.revoke" => args(params).and_then(|a| {
+        method::HOST_CONTROL_REVOKE => args(params).and_then(|a| {
             displaying_capability(conn)?;
             session_row(hub, &a.session_id)?;
             revoke(hub, &a.session_id, "revoked by the person")?;
             full_state(hub, &a.session_id).map(|s| json!(s))
         }),
-        "_sill/host_control.keep" => serde_json::from_value::<api::Keep>(params).map_err(anyhow::Error::from).and_then(|a| {
+        method::HOST_CONTROL_KEEP => serde_json::from_value::<api::Keep>(params).map_err(anyhow::Error::from).and_then(|a| {
             if !conn.has_capability(CAPABILITY) {
                 return Err(domain("unsupported", "Host control needs a displaying frontend"));
             }
@@ -298,7 +299,7 @@ pub fn handle(hub: &std::sync::Arc<Hub>, conn: &Conn, method: &str, params: serd
             note(hub, &a.session_id, format!("Host process {}: keep after revocation = {}", a.name, a.keep));
             Ok(json!({}))
         }),
-        "_sill/host_control.state" => args(params).and_then(|a| {
+        method::HOST_CONTROL_STATE => args(params).and_then(|a| {
             if !conn.has_capability("sill.permission_modes") {
                 let mut error =
                     Error::domain("unsupported", "Host control state needs a frontend that shows permission state (session records carry the active brief)");

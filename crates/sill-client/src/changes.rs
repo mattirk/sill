@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use sill_proto::Client;
 use sill_proto::changes::{Diff, DiffPage, Done, GitRevert, History, HistoryPage, Keep, KeepItem, List, Page, Revert, Target, Undo};
 pub use sill_proto::changes::{Entry, Unreadable};
+use sill_proto::method;
 use sill_proto::sessions::HostPath;
 
 use crate::files::key;
@@ -185,13 +186,13 @@ pub fn keep(session_id: &str, entries: &[&Entry]) -> Request {
         })
         .collect();
     let keep = Keep { session_id: session_id.into(), items };
-    ("_sill/changes.keep", json!(keep))
+    (method::CHANGES_KEEP, json!(keep))
 }
 
 /// Drop these overlay writes.
 pub fn revert(session_id: &str, entries: &[&Entry]) -> Request {
     let revert = Revert { session_id: session_id.into(), paths: entries.iter().map(|e| path(e).clone()).collect() };
-    ("_sill/changes.revert", json!(revert))
+    (method::CHANGES_REVERT, json!(revert))
 }
 
 /// The most paths the daemon takes in one keep or revert.
@@ -258,13 +259,13 @@ pub fn call_all(actions: &crate::actions::Actions, requests: Vec<Request>) -> cr
 /// Undo a keep: the host file goes back to what it was before.
 pub fn undo(session_id: &str, keep_id: &str) -> Request {
     let undo = Undo { session_id: session_id.into(), keep_ids: vec![keep_id.into()], force: false };
-    ("_sill/changes.undo", json!(undo))
+    (method::CHANGES_UNDO, json!(undo))
 }
 
 /// `git checkout HEAD` for a pinned repository's file; an untracked file is removed.
 pub fn git_revert(repo: &HostPath, path: &HostPath) -> Request {
     let revert = GitRevert { repo: repo.clone(), path: path.clone() };
-    ("_sill/changes.git-revert", json!(revert))
+    (method::CHANGES_GIT_REVERT, json!(revert))
 }
 
 /// Can be kept: an overlay write the host has not changed meanwhile, of a path sill keeps.
@@ -308,7 +309,7 @@ fn list_once(client: &Client) -> anyhow::Result<(Vec<Entry>, Vec<Unreadable>)> {
     let mut unreadable = vec![];
     let mut after = None;
     loop {
-        let page: Page = client.call("_sill/changes.list", List { after, limit: Some(128) })?;
+        let page: Page = client.call(method::CHANGES_LIST, List { after, limit: Some(128) })?;
         entries.extend(page.entries);
         unreadable.extend(page.unreadable);
         anyhow::ensure!(entries.len() <= 20_000, "too many changes to show");
@@ -321,7 +322,7 @@ fn list_once(client: &Client) -> anyhow::Result<(Vec<Entry>, Vec<Unreadable>)> {
 
 /// History before `before` (newest first).
 pub fn history(client: &Client, before: Option<String>) -> anyhow::Result<HistoryPage> {
-    client.call("_sill/changes.history", History { before, limit: Some(100), ..History::default() })
+    client.call(method::CHANGES_HISTORY, History { before, limit: Some(100), ..History::default() })
 }
 
 /// An entry's whole diff, read page by page against one fingerprint: a file that changes
@@ -331,7 +332,7 @@ pub fn diff(client: &Client, target: Target) -> anyhow::Result<String> {
     let mut offset = None;
     let mut fingerprint: Option<String> = None;
     loop {
-        let page: DiffPage = client.call("_sill/changes.diff", Diff { target: target.clone(), offset: offset.clone(), fingerprint: fingerprint.clone() })?;
+        let page: DiffPage = client.call(method::CHANGES_DIFF, Diff { target: target.clone(), offset: offset.clone(), fingerprint: fingerprint.clone() })?;
         if let Some(expected) = &fingerprint {
             anyhow::ensure!(*expected == page.fingerprint, "The file changed while reading its diff. Open it again.");
         }
@@ -496,12 +497,12 @@ mod tests {
         assert!(matches!(groups[2].kind, Kind::Kept { .. }));
         let refs: Vec<&Entry> = groups[1].entries.iter().collect();
         let (method, params) = keep("s1", &refs);
-        assert_eq!(method, "_sill/changes.keep");
+        assert_eq!(method, method::CHANGES_KEEP);
         serde_json::from_value::<Keep>(params.clone()).unwrap();
         assert_eq!(params["items"][0]["expected_hash"], "h1");
         let (_, params) = undo("s1", "k1");
         assert_eq!(params, json!({"session_id":"s1", "keep_ids":["k1"], "force": false}));
-        assert_eq!(git_revert(&path("/r"), &path("/r/x")).0, "_sill/changes.git-revert");
+        assert_eq!(git_revert(&path("/r"), &path("/r/x")).0, method::CHANGES_GIT_REVERT);
     }
 
     #[test]

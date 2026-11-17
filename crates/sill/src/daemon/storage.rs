@@ -3,6 +3,7 @@
 use super::Hub;
 use anyhow::{Result, ensure};
 use serde_json::Value;
+use sill_proto::method;
 use sill_proto::storage as api;
 
 fn root() -> std::path::PathBuf {
@@ -59,25 +60,25 @@ fn clear(hub: &Hub, id: &str) -> Result<()> {
     Ok(())
 }
 pub(super) fn handle(hub: &Hub, conn: &super::Conn, method: &str, params: Value) -> Option<Result<Value>> {
-    if !matches!(method, "_sill/storage.space" | "_sill/storage.caches" | "_sill/storage.clear_build_cache") {
+    if !matches!(method, method::STORAGE_SPACE | method::STORAGE_CACHES | method::STORAGE_CLEAR_BUILD_CACHE) {
         return None;
     }
     if !conn.has_capability("sill.storage") {
         return Some(Err(sill_proto::rpc::Error::needs_capability("sill.storage", "Storage administration needs sill.storage").into()));
     }
     Some((|| match method {
-        "_sill/storage.space" => {
+        method::STORAGE_SPACE => {
             let _: sill_proto::Empty = serde_json::from_value(params).map_err(sill_proto::rpc::Error::invalid_params)?;
             Ok(serde_json::to_value(api::Space {
                 home: sill_core::storage::space(&hub.home)?,
                 state: sill_core::storage::space(std::path::Path::new(sill_core::jail::STATE_FS))?,
             })?)
         }
-        "_sill/storage.caches" => {
+        method::STORAGE_CACHES => {
             let _: sill_proto::Empty = serde_json::from_value(params).map_err(sill_proto::rpc::Error::invalid_params)?;
             Ok(serde_json::to_value(caches(hub)?)?)
         }
-        "_sill/storage.clear_build_cache" => {
+        method::STORAGE_CLEAR_BUILD_CACHE => {
             let args: api::ClearBuildCache = serde_json::from_value(params).map_err(sill_proto::rpc::Error::invalid_params)?;
             clear(hub, &args.session_id)?;
             Ok(serde_json::json!({}))

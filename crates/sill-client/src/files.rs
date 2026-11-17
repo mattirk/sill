@@ -3,6 +3,7 @@
 //! connections. [`FilesState`] is one session's drawer and reader, without a toolkit: requests carry
 //! a serial, and a reply is applied only if it is still the one that state waits for — so a late
 //! reply can neither replace a newer selection nor act on another session.
+use sill_proto::method;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc;
 
@@ -667,14 +668,14 @@ pub fn execute(client: &Client, session: &str, request: &Request) -> anyhow::Res
                 let mut after = None;
                 loop {
                     let page: pins::Page = client.call(
-                        "_sill/pins.list",
+                        method::PINS_LIST,
                         pins::List { session_id: (!global).then(|| session.to_string()), after: after.clone(), limit: Some(PAGE as u16) },
                     )?;
                     for path in page.pins {
                         if roots.iter().any(|r| key(&r.path) == key(&path)) {
                             continue;
                         }
-                        let metadata = client.call("_sill/files.metadata", admin::FileKey { path: path.clone() });
+                        let metadata = client.call(method::FILES_METADATA, admin::FileKey { path: path.clone() });
                         let (metadata, error) = match metadata {
                             Ok(m) => (Some(m), None),
                             Err(e) => (None, Some(format!("{e:#}"))),
@@ -689,14 +690,14 @@ pub fn execute(client: &Client, session: &str, request: &Request) -> anyhow::Res
                     after = page.next;
                 }
             }
-            Data::Roots { roots, home: client.call("_sill/files.home", Empty::default())? }
+            Data::Roots { roots, home: client.call(method::FILES_HOME, Empty::default())? }
         }
         Request::Directory { path, after, pages } => {
             let mut cursor = after.clone();
             let mut entries = Vec::new();
             for _ in 0..*pages {
                 let page: admin::FilesPage =
-                    client.call("_sill/files.list", admin::FilesList { path: path.clone(), after: cursor.clone(), limit: Some(PAGE as u16) })?;
+                    client.call(method::FILES_LIST, admin::FilesList { path: path.clone(), after: cursor.clone(), limit: Some(PAGE as u16) })?;
                 anyhow::ensure!(page.next.is_none() || page.next.as_ref().map(key) != cursor.as_ref().map(key), "directory listing did not advance");
                 entries.extend(page.entries);
                 cursor = page.next;
@@ -706,15 +707,15 @@ pub fn execute(client: &Client, session: &str, request: &Request) -> anyhow::Res
             }
             Data::Directory(admin::FilesPage { entries, next: cursor })
         }
-        Request::Inspect(path) => Data::Metadata(client.call("_sill/files.metadata", admin::FileKey { path: path.clone() })?),
+        Request::Inspect(path) => Data::Metadata(client.call(method::FILES_METADATA, admin::FileKey { path: path.clone() })?),
         Request::Pin { path, on } => {
             let _: serde_json::Value = client
-                .call(if *on { "_sill/sessions.pin" } else { "_sill/sessions.unpin" }, pins::SessionPin { session_id: session.into(), path: path.clone() })?;
+                .call(if *on { method::SESSIONS_PIN } else { method::SESSIONS_UNPIN }, pins::SessionPin { session_id: session.into(), path: path.clone() })?;
             Data::Pinned
         }
         Request::File { path, repo } => Data::File(read_text(client, path, repo.as_ref())?),
         Request::Repo { path, counts: files } => {
-            let root: discovery::Root = client.call("_sill/repos.root", discovery::PathKey { path: path.clone() })?;
+            let root: discovery::Root = client.call(method::REPOS_ROOT, discovery::PathKey { path: path.clone() })?;
             let mut head = String::new();
             let mut entries = Vec::new();
             let mut summary = String::new();
@@ -722,10 +723,10 @@ pub fn execute(client: &Client, session: &str, request: &Request) -> anyhow::Res
             let mut counts = Vec::new();
             let mut truncated = false;
             if let Some(repo) = &root.path {
-                let h: discovery::HeadResult = client.call("_sill/repos.head", discovery::PathKey { path: repo.clone() })?;
+                let h: discovery::HeadResult = client.call(method::REPOS_HEAD, discovery::PathKey { path: repo.clone() })?;
                 head = h.head.map_or_else(String::new, |h| h.label);
                 let s: discovery::SummaryResult =
-                    client.call("_sill/repos.summary", discovery::SummaryKey { path: repo.clone(), files: files.then_some(true) })?;
+                    client.call(method::REPOS_SUMMARY, discovery::SummaryKey { path: repo.clone(), files: files.then_some(true) })?;
                 if let Some(s) = s.summary {
                     summary = format!("+{} −{}  ?{}", s.insertions, s.deletions, s.untracked);
                     lines = Some((s.insertions, s.deletions));
@@ -743,7 +744,7 @@ pub fn execute(client: &Client, session: &str, request: &Request) -> anyhow::Res
                 let mut after = None;
                 loop {
                     let page: discovery::StatusPage =
-                        client.call("_sill/repos.status", discovery::Status { repo: repo.clone(), after: after.clone(), limit: Some(PAGE as u16) })?;
+                        client.call(method::REPOS_STATUS, discovery::Status { repo: repo.clone(), after: after.clone(), limit: Some(PAGE as u16) })?;
                     entries.extend(page.entries);
                     anyhow::ensure!(entries.len() <= 10_000, "too many changed files to display");
                     if page.next.is_none() {
@@ -767,7 +768,7 @@ pub fn read_text(client: &Client, path: &HostPath, repo: Option<&HostPath>) -> a
     loop {
         let (chunk, next, fingerprint) = if let Some(repo) = repo {
             let page: changes::DiffPage = client.call(
-                "_sill/changes.diff",
+                method::CHANGES_DIFF,
                 changes::Diff {
                     target: changes::Target::Live { repo: repo.clone(), path: path.clone() },
                     offset: Some(offset.clone()),
@@ -777,7 +778,7 @@ pub fn read_text(client: &Client, path: &HostPath, repo: Option<&HostPath>) -> a
             (page.text.into_bytes(), page.next_offset, page.fingerprint)
         } else {
             let page: admin::FileBytes = client.call(
-                "_sill/files.read",
+                method::FILES_READ,
                 admin::FileRead { path: path.clone(), offset: offset.clone(), length: Some(RENDER_LIMIT as u32), revision: revision.clone() },
             )?;
             (admin::decode_bytes(&page.bytes_base64)?, (!page.eof).then_some(page.next_offset), page.revision)

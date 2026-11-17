@@ -2,6 +2,7 @@
 use crate::{App, Message, settings_ui::quiet_button, style};
 use iced::widget::{button, column, container, hover, image, text};
 use iced::{Element, Task};
+use sill_proto::method;
 use sill_proto::{
     admin,
     sfp::{Attachment, Upload},
@@ -145,7 +146,7 @@ fn attach(path: std::path::PathBuf, session: &str, actions: &sill_client::action
         mime: "application/octet-stream".into(),
         data_base64: admin::encode_bytes(&bytes),
     };
-    match actions.call("_sill/uploads.create", serde_json::to_value(params).unwrap()) {
+    match actions.call(method::UPLOADS_CREATE, serde_json::to_value(params).unwrap()) {
         sill_client::actions::Outcome::Done(_) => Ok((Attachment::Uploaded { upload_id, name, mime: "application/octet-stream".into() }, None)),
         other => Err(format!("Upload did not complete: {}", other.problem().unwrap_or("unknown response"))),
     }
@@ -510,7 +511,7 @@ impl App {
                 move || -> Result<Picture, String> {
                     let bytes = if let Some(id) = key.strip_prefix("upload:") {
                         let upload: Upload =
-                            actions.read("_sill/uploads.get", serde_json::json!({"session_id":session,"upload_id":id})).map_err(|e| format!("{e:#}"))?;
+                            actions.read(method::UPLOADS_GET, serde_json::json!({"session_id":session,"upload_id":id})).map_err(|e| format!("{e:#}"))?;
                         admin::decode_bytes(&upload.data_base64).map_err(|e| e.to_string())?
                     } else {
                         let path = key.strip_prefix("file://").unwrap_or(&key);
@@ -526,7 +527,7 @@ impl App {
                         loop {
                             let page: admin::FileBytes = actions
                                 .read(
-                                    "_sill/files.image",
+                                    method::FILES_IMAGE,
                                     serde_json::to_value(admin::SessionImage {
                                         session_id: session.clone(),
                                         path: sill_proto::sessions::HostPath::from_path(&path),

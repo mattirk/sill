@@ -3,6 +3,7 @@
 use iced::Task;
 use iced::widget::{operation, scrollable, text_editor};
 use sill_client::actions::Outcome;
+use sill_proto::method;
 
 use crate::{App, Message, blocking, daemon_ui, geometry, keys, layout, lists, policies, settings_ui, style};
 
@@ -18,7 +19,7 @@ impl App {
         let revision = self.settings_revision;
         blocking(
             move || {
-                actions.reading(|client| client.call::<sill_proto::admin::Settings>("_sill/settings.get", sill_proto::Empty {})).map_err(|e| format!("{e:#}"))
+                actions.reading(|client| client.call::<sill_proto::admin::Settings>(method::SETTINGS_GET, sill_proto::Empty {})).map_err(|e| format!("{e:#}"))
             },
             move |result| Message::DaemonSettings(revision, result),
         )

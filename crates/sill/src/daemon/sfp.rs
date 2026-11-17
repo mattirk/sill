@@ -3,6 +3,7 @@ use super::{Conn, Hub};
 use anyhow::Result;
 use serde_json::{Value, json};
 use sill_core::sfp::Journal;
+use sill_proto::method;
 use sill_proto::{
     rpc::{Error, Request, Response},
     sfp::*,
@@ -69,7 +70,7 @@ impl Subscriptions {
 }
 fn notify(conn: &Conn, session: &str, sub: &str, event: &StoredEvent) -> bool {
     let params = SessionEvent { session_id: session.into(), subscription_id: sub.into(), seq: event.seq.clone(), event: event.event.clone() };
-    conn.send(serde_json::to_string(&Request::new(None, "_sill/session.event", json!(params))).unwrap())
+    conn.send(serde_json::to_string(&Request::new(None, method::SESSION_EVENT, json!(params))).unwrap())
 }
 pub(super) fn id() -> String {
     // Multiple independently random components; opaque identity, unrelated to relay request IDs.
@@ -202,7 +203,7 @@ impl Hub {
             });
             return Ok(true);
         }
-        if method == "_sill/sessions.attach" {
+        if method == method::SESSIONS_ATTACH {
             let result = (|| -> Result<(), Error> {
                 let a: Attach = args(params)?;
                 if let Some(since) = &a.since {
@@ -289,7 +290,7 @@ impl Hub {
             return Ok(true);
         }
         let result: Result<Value, Error> = match method {
-            "_sill/sessions.snapshot" => (|| {
+            method::SESSIONS_SNAPSHOT => (|| {
                 let a: SnapshotRequest = args(params)?;
                 let mut all = self.sfp.lock().unwrap();
                 all.snapshots.retain(|_, s| s.expires > Instant::now());
@@ -305,7 +306,7 @@ impl Hub {
                 result.expires_at = Some(sill_core::sfp::timestamp(sill_core::store::now() + remaining.as_secs() as i64));
                 Ok(json!(result))
             })(),
-            "_sill/sessions.detach" => (|| {
+            method::SESSIONS_DETACH => (|| {
                 let a: Detach = args(params)?;
                 let mut all = self.sfp.lock().unwrap();
                 if all.active.get(&(conn.id, a.session_id.clone())).is_some_and(|s| s.id == a.subscription_id) {
@@ -316,25 +317,25 @@ impl Hub {
                 super::host_control::displaying_changed(self);
                 Ok(json!({}))
             })(),
-            "_sill/uploads.create" => (|| {
+            method::UPLOADS_CREATE => (|| {
                 let a: UploadCreate = args(params)?;
                 self.with_store(|s| super::uploads::create(s, a)).map(|s| json!(s)).map_err(failure)
             })(),
-            "_sill/uploads.get" => (|| {
+            method::UPLOADS_GET => (|| {
                 let a: UploadGet = args(params)?;
                 self.with_store(|s| super::uploads::get(s, a)).map(|s| json!(s)).map_err(failure)
             })(),
-            "_sill/sessions.control" => (|| {
+            method::SESSIONS_CONTROL => (|| {
                 let a: SessionControl = args(params)?;
                 self.runner_for_sfp(&a.session_id)?.sfp_control(self, a.control).map_err(failure)?;
                 Ok(json!({}))
             })(),
-            "_sill/sessions.cancel" => (|| {
+            method::SESSIONS_CANCEL => (|| {
                 let a: CancelTurn = args(params)?;
                 self.runner_for_sfp(&a.session_id)?.sfp_cancel_turn(self, &a.turn_id).map_err(failure)?;
                 Ok(json!({"requested":true}))
             })(),
-            "_sill/sessions.submit" => (|| {
+            method::SESSIONS_SUBMIT => (|| {
                 let a: Submit = args(params)?;
                 let previous = self
                     .with_store(|store| {
@@ -357,19 +358,19 @@ impl Hub {
                 }
                 self.ensure_runner(&a.session_id, false).map_err(failure)?.sfp_submit(self, a).map(|s| json!(s)).map_err(failure)
             })(),
-            "_sill/submissions.get" => (|| {
+            method::SUBMISSIONS_GET => (|| {
                 let a: SubmissionKey = args(params)?;
                 self.with_store(|s| Journal::new(s)?.submission(&a.session_id, &a.submission_id)).map(|s| json!(s)).map_err(failure)
             })(),
-            "_sill/submissions.cancel" | "_sill/submissions.resume" => (|| {
+            method::SUBMISSIONS_CANCEL | method::SUBMISSIONS_RESUME => (|| {
                 let a: SubmissionKey = args(params)?;
                 self.runner_for_sfp(&a.session_id)?.sfp_queue_action(self, &a, method.ends_with("resume")).map(|s| json!(s)).map_err(failure)
             })(),
-            "_sill/submissions.send_now" => (|| {
+            method::SUBMISSIONS_SEND_NOW => (|| {
                 let a: SubmissionKey = args(params)?;
                 self.runner_for_sfp(&a.session_id)?.sfp_send_now(self, &a).map(|s| json!(s)).map_err(failure)
             })(),
-            "_sill/questions.answer" => (|| {
+            method::QUESTIONS_ANSWER => (|| {
                 // the answer is open in the schema (questions carry it in results); the request is strict
                 if let Some(answer) = params.get("answer") {
                     sill_proto::rpc::strict::<sill_proto::sfp::Answer>(answer.clone())?;

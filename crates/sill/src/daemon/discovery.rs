@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde_json::Value;
+use sill_proto::method;
 use sill_proto::{discovery as api, rpc::Error, sessions::HostPath};
 use std::path::PathBuf;
 fn args<T: serde::de::DeserializeOwned>(p: Value) -> Result<T> {
@@ -18,12 +19,12 @@ fn value(v: impl serde::Serialize) -> Result<Value> {
 pub(super) fn handle(method: &str, params: Value) -> Option<Result<Value>> {
     if !matches!(
         method,
-        "_sill/files.find" | "_sill/repos.root" | "_sill/repos.head" | "_sill/repos.status" | "_sill/repos.changed_lines" | "_sill/repos.summary"
+        method::FILES_FIND | method::REPOS_ROOT | method::REPOS_HEAD | method::REPOS_STATUS | method::REPOS_CHANGED_LINES | method::REPOS_SUMMARY
     ) {
         return None;
     }
     Some((|| match method {
-        "_sill/files.find" => {
+        method::FILES_FIND => {
             let a: api::Find = args(params)?;
             let n = a.limit.unwrap_or(128) as usize;
             let visits = a.visits.unwrap_or(10000) as usize;
@@ -34,15 +35,15 @@ pub(super) fn handle(method: &str, params: Value) -> Option<Result<Value>> {
             let (paths, truncated) = super::frontend::find_files(&bases, &a.query.to_lowercase(), n, visits);
             value(api::Found { paths: paths.iter().map(|p| HostPath::from_path(p)).collect(), truncated })
         }
-        "_sill/repos.root" => {
+        method::REPOS_ROOT => {
             let a: api::PathKey = args(params)?;
             value(api::Root { path: sill_core::changes::repo_root(&path(&a.path)?).map(|p| HostPath::from_path(&p)) })
         }
-        "_sill/repos.head" => {
+        method::REPOS_HEAD => {
             let a: api::PathKey = args(params)?;
             value(api::HeadResult { head: super::frontend::head_label(&path(&a.path)?).map(|(label, detached)| api::Head { label, detached }) })
         }
-        "_sill/repos.summary" => {
+        method::REPOS_SUMMARY => {
             let a: api::SummaryKey = args(params)?;
             let n = |n: u64| n.to_string();
             value(api::SummaryResult {
@@ -62,7 +63,7 @@ pub(super) fn handle(method: &str, params: Value) -> Option<Result<Value>> {
                 }),
             })
         }
-        "_sill/repos.changed_lines" => {
+        method::REPOS_CHANGED_LINES => {
             let a: api::ChangedLines = args(params)?;
             let repo = path(&a.repo)?;
             let p = path(&a.path)?;
@@ -75,7 +76,7 @@ pub(super) fn handle(method: &str, params: Value) -> Option<Result<Value>> {
                     .map(|r| r.into_iter().map(|(a, b)| api::LineRange { start: a.to_string(), end: b.to_string() }).collect()),
             })
         }
-        "_sill/repos.status" => {
+        method::REPOS_STATUS => {
             use std::os::unix::ffi::OsStrExt;
             let a: api::Status = args(params)?;
             let n = a.limit.unwrap_or(64) as usize;
@@ -117,24 +118,24 @@ mod tests {
         std::fs::write(&b, b"b").unwrap();
         let invoke = |method: &str, params: Value| handle(method, params).unwrap().unwrap();
         let found: api::Found =
-            serde_json::from_value(invoke("_sill/files.find", serde_json::json!({"bases":[HostPath::from_path(&dir)],"query":"FILE","limit":10,"visits":100})))
+            serde_json::from_value(invoke(method::FILES_FIND, serde_json::json!({"bases":[HostPath::from_path(&dir)],"query":"FILE","limit":10,"visits":100})))
                 .unwrap();
         let paths = found.paths.iter().map(|p| p.to_path().unwrap()).collect::<Vec<_>>();
         assert!(paths.contains(&a) && paths.contains(&b));
         let first: api::StatusPage =
-            serde_json::from_value(invoke("_sill/repos.status", serde_json::json!({"repo":HostPath::from_path(&dir),"limit":1}))).unwrap();
+            serde_json::from_value(invoke(method::REPOS_STATUS, serde_json::json!({"repo":HostPath::from_path(&dir),"limit":1}))).unwrap();
         assert_eq!(first.entries.len(), 1);
         let second: api::StatusPage =
-            serde_json::from_value(invoke("_sill/repos.status", serde_json::json!({"repo":HostPath::from_path(&dir),"limit":1,"after":first.next}))).unwrap();
+            serde_json::from_value(invoke(method::REPOS_STATUS, serde_json::json!({"repo":HostPath::from_path(&dir),"limit":1,"after":first.next}))).unwrap();
         assert_eq!(second.entries.len(), 1);
         assert!(second.next.is_none());
         assert_ne!(first.entries[0].path.to_path().unwrap(), second.entries[0].path.to_path().unwrap());
         assert!(
-            handle("_sill/repos.changed_lines", serde_json::json!({"repo":HostPath::from_path(&dir),"path":HostPath::from_path(&dir.join("../outside"))}))
+            handle(method::REPOS_CHANGED_LINES, serde_json::json!({"repo":HostPath::from_path(&dir),"path":HostPath::from_path(&dir.join("../outside"))}))
                 .unwrap()
                 .is_err()
         );
-        assert!(handle("_sill/files.find", serde_json::json!({"bases":[],"query":"x","limit":1001})).unwrap().is_err());
+        assert!(handle(method::FILES_FIND, serde_json::json!({"bases":[],"query":"x","limit":1001})).unwrap().is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
     /// The Diff view's rows (docs/sill-gui.md "Diff"): each file's lines from the same numstat as
@@ -170,7 +171,7 @@ mod tests {
         git(&["commit", "-qm", "first"]);
         let read = |files: bool| {
             let r: api::SummaryResult =
-                serde_json::from_value(handle("_sill/repos.summary", serde_json::json!({"path":HostPath::from_path(&dir),"files":files})).unwrap().unwrap())
+                serde_json::from_value(handle(method::REPOS_SUMMARY, serde_json::json!({"path":HostPath::from_path(&dir),"files":files})).unwrap().unwrap())
                     .unwrap();
             let s = r.summary.unwrap();
             let rows = s.files.clone().map(|f| {
@@ -215,7 +216,7 @@ mod tests {
         assert_eq!((s.insertions.as_str(), s.deletions.as_str(), s.untracked.as_str()), ("2", "2", "2"));
         // the rows are the ones repos.status lists, in its order
         let status: api::StatusPage =
-            serde_json::from_value(handle("_sill/repos.status", serde_json::json!({"repo":HostPath::from_path(&dir),"limit":128})).unwrap().unwrap()).unwrap();
+            serde_json::from_value(handle(method::REPOS_STATUS, serde_json::json!({"repo":HostPath::from_path(&dir),"limit":128})).unwrap().unwrap()).unwrap();
         assert_eq!(
             status.entries.iter().map(|e| e.path.to_path().unwrap()).collect::<Vec<_>>(),
             s.files.unwrap().iter().map(|f| f.path.to_path().unwrap()).collect::<Vec<_>>()

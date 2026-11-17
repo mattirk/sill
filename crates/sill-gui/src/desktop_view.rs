@@ -3,6 +3,7 @@
 //! composer staying below, from pictures the daemon takes outside the jail (`_sill/desktop.capture`
 //! and `_sill/desktop.read`, capability `sill.desktop_view`). It refreshes about once a second
 //! while shown; an unchanged desktop is not fetched again. View only: input is a later step.
+use sill_proto::method;
 use std::time::Instant;
 
 use iced::widget::{button, center, column, container, image, row, text};
@@ -142,7 +143,7 @@ impl App {
                         if !client.has_capability(CAPABILITY) {
                             anyhow::bail!("the daemon is older than this window and cannot show the test desktop ({CAPABILITY}); update and restart it");
                         }
-                        let frame: DesktopFrame = client.call("_sill/desktop.capture", DesktopCapture { session_id: session.clone(), since: shown.clone() })?;
+                        let frame: DesktopFrame = client.call(method::DESKTOP_CAPTURE, DesktopCapture { session_id: session.clone(), since: shown.clone() })?;
                         if !frame.changed || shown.as_ref() == Some(&frame.revision) {
                             return Ok(None);
                         }
@@ -153,7 +154,7 @@ impl App {
                         let mut png = Vec::with_capacity(size);
                         loop {
                             let chunk: FileBytes = client.call(
-                                "_sill/desktop.read",
+                                method::DESKTOP_READ,
                                 DesktopRead { session_id: session.clone(), revision: frame.revision.clone(), offset: png.len().to_string(), length: None },
                             )?;
                             png.extend(sill_proto::admin::decode_bytes(&chunk.bytes_base64)?);
@@ -325,10 +326,10 @@ mod tests {
         let size = bytes.len();
         let fake = std::thread::spawn(move || {
             let frame = json!({"revision": "r1", "changed": true, "width": 4, "height": 2, "scale": 2, "size": size.to_string()});
-            let capture = daemon.expect("_sill/desktop.capture");
+            let capture = daemon.expect(method::DESKTOP_CAPTURE);
             assert_eq!(capture["params"], json!({"session_id": "demo", "since": null}));
             daemon.reply(&capture, frame.clone());
-            let read = daemon.expect("_sill/desktop.read");
+            let read = daemon.expect(method::DESKTOP_READ);
             assert_eq!(read["params"]["revision"], "r1");
             assert_eq!(read["params"]["offset"], "0");
             daemon.reply(
@@ -337,7 +338,7 @@ mod tests {
                 "next_offset": size.to_string(), "eof": true, "revision": "r1"}),
             );
             // the same picture again: the window says which it has, no read follows
-            let again = daemon.expect("_sill/desktop.capture");
+            let again = daemon.expect(method::DESKTOP_CAPTURE);
             assert_eq!(again["params"]["since"], "r1");
             daemon.reply(&again, json!({"revision": "r1", "changed": false, "width": 4, "height": 2, "scale": 2, "size": "0"}));
         });

@@ -1,4 +1,5 @@
 //! Public session administration. These records are independent of store and ACP types.
+use crate::method;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -187,7 +188,7 @@ impl crate::Client {
         let mut after = None;
         let mut sessions = vec![];
         loop {
-            let page: Page = self.call("_sill/sessions.list", List { after, limit: Some(128) })?;
+            let page: Page = self.call(method::SESSIONS_LIST, List { after, limit: Some(128) })?;
             sessions.extend(page.sessions);
             after = page.next;
             if after.is_none() {

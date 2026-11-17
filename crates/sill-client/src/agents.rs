@@ -1,5 +1,6 @@
 //! Agent catalog and installation through the selected daemon, independent of a toolkit.
 use anyhow::{Context, Result, bail};
+use sill_proto::method;
 use sill_proto::{Client, Empty, agent_admin as api, host};
 use std::collections::BTreeMap;
 use std::io::BufRead;
@@ -41,7 +42,7 @@ pub fn load(client: &Client) -> Result<Catalog> {
     let mut definitions = BTreeMap::new();
     let mut after = None;
     loop {
-        let page: api::Page = client.call("_sill/agents.list", api::List { after, limit: Some(128) })?;
+        let page: api::Page = client.call(method::AGENTS_LIST, api::List { after, limit: Some(128) })?;
         for d in page.agents {
             definitions.insert(d.id.clone(), d);
         }
@@ -54,7 +55,7 @@ pub fn load(client: &Client) -> Result<Catalog> {
     let mut refresh_due = false;
     let mut after = None;
     loop {
-        let page: host::RegistryPage = client.call("_sill/registry.list", host::RegistryList { after: after.clone(), limit: Some(128) })?;
+        let page: host::RegistryPage = client.call(method::REGISTRY_LIST, host::RegistryList { after: after.clone(), limit: Some(128) })?;
         if after.is_none() {
             let fetched = page.fetched_at.as_deref().and_then(|s| s.parse::<u64>().ok());
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
@@ -63,15 +64,15 @@ pub fn load(client: &Client) -> Result<Catalog> {
         for registry in page.entries {
             let id = registry.builtin_agent_id.as_deref().unwrap_or(&registry.entry_id);
             let definition = definitions.get(id).cloned();
-            let installed: api::Installation = client.call("_sill/registry.installed", api::AgentKey { agent_id: registry.entry_id.clone() })?;
+            let installed: api::Installation = client.call(method::REGISTRY_INSTALLED, api::AgentKey { agent_id: registry.entry_id.clone() })?;
             let available = if let Some(d) = &definition {
-                client.call::<api::Available>("_sill/agents.available", api::AgentKey { agent_id: d.id.clone() })?.path.is_some()
+                client.call::<api::Available>(method::AGENTS_AVAILABLE, api::AgentKey { agent_id: d.id.clone() })?.path.is_some()
             } else {
                 false
             };
             let mut entry = Entry { registry, installed: installed.installed, definition, available, discovery: None };
             if entry.needs_setup() && client.has_capability("sill.agent_setup") {
-                let found: api::Discovered = client.call("_sill/agents.discovered", api::AgentKey { agent_id: entry.registry.entry_id.clone() })?;
+                let found: api::Discovered = client.call(method::AGENTS_DISCOVERED, api::AgentKey { agent_id: entry.registry.entry_id.clone() })?;
                 entry.discovery = found.discovery;
             }
             entries.push(entry);
@@ -86,7 +87,7 @@ pub fn load(client: &Client) -> Result<Catalog> {
 }
 
 pub fn refresh(client: &Client) -> Result<()> {
-    let _: serde_json::Value = client.call("_sill/registry.refresh", Empty::default())?;
+    let _: serde_json::Value = client.call(method::REGISTRY_REFRESH, Empty::default())?;
     Ok(())
 }
 
@@ -96,7 +97,7 @@ pub fn install(client: &Client, entry: &host::RegistryEntry, progress: impl FnMu
     run_job(
         client,
         "Install",
-        "_sill/registry.install",
+        method::REGISTRY_INSTALL,
         host::RegistryInstall {
             operation_id: Some(operation_id.clone()),
             entry_id: entry.entry_id.clone(),
@@ -120,7 +121,7 @@ pub fn discover(client: &Client, agent_id: &str, method_id: Option<&str>, progre
     run_job(
         client,
         "Directory probe",
-        "_sill/agents.discover",
+        method::AGENTS_DISCOVER,
         host::AgentDiscover { operation_id: Some(operation_id.clone()), agent_id: agent_id.to_string(), method_id: method_id.map(str::to_string) },
         operation_id,
         progress,
@@ -191,7 +192,7 @@ fn run_job(client: &Client, what: &str, method: &str, params: impl serde::Serial
             }
         }
     }
-    let receipt: host::Operation = client.call("_sill/operations.get", host::OperationKey { operation_id: operation_id.clone() })?;
+    let receipt: host::Operation = client.call(method::OPERATIONS_GET, host::OperationKey { operation_id: operation_id.clone() })?;
     if receipt.state == host::OperationState::Completed {
         return Ok(());
     }
@@ -252,18 +253,18 @@ mod tests {
     fn an_install_receipt_is_read_without_replaying_the_mutation() {
         let (client, mut peer) = crate::fake::pair();
         let worker = std::thread::spawn(move || {
-            let req = peer.expect("_sill/registry.install");
+            let req = peer.expect(method::REGISTRY_INSTALL);
             let id = req["params"]["operation_id"].as_str().unwrap().to_owned();
             assert_eq!(req["params"]["allow_unreviewed"], true);
             peer.reply(
                 &req,
                 json!({"token":null,"operation":{
-                    "operation_id":id,"method":"_sill/registry.install","state":"running","agent_id":null,"code":null
+                    "operation_id":id,"method":method::REGISTRY_INSTALL,"state":"running","agent_id":null,"code":null
                 }}),
             );
-            let req = peer.expect("_sill/operations.get");
+            let req = peer.expect(method::OPERATIONS_GET);
             assert_eq!(req["params"]["operation_id"], id);
-            peer.reply(&req, json!({"operation_id":id,"method":"_sill/registry.install","state":"completed","agent_id":"example","code":null}));
+            peer.reply(&req, json!({"operation_id":id,"method":method::REGISTRY_INSTALL,"state":"completed","agent_id":"example","code":null}));
         });
         let entry = serde_json::from_value(json!({
             "entry_id":"example","name":"Example","version":"1","source":"live",
@@ -279,9 +280,9 @@ mod tests {
     fn catalog_paginates_and_uses_host_installation_facts() {
         let (client, mut peer) = crate::fake::pair();
         let worker = std::thread::spawn(move || {
-            let req = peer.expect("_sill/agents.list");
+            let req = peer.expect(method::AGENTS_LIST);
             peer.reply(&req, json!({"agents":[],"next":null}));
-            let req = peer.expect("_sill/registry.list");
+            let req = peer.expect(method::REGISTRY_LIST);
             peer.reply(
                 &req,
                 json!({"entries":[{
@@ -291,10 +292,10 @@ mod tests {
                 "has_icon":false,"builtin_agent_id":null,"newer":null
             }],"next":"remote-agent","fetched_at":null}),
             );
-            let req = peer.expect("_sill/registry.installed");
+            let req = peer.expect(method::REGISTRY_INSTALLED);
             assert_eq!(req["params"]["agent_id"], "remote-agent");
             peer.reply(&req, json!({"installed":{"version":"1","kind":"binary","command":["/remote/agent"],"env":{},"source":"snapshot"}}));
-            let req = peer.expect("_sill/registry.list");
+            let req = peer.expect(method::REGISTRY_LIST);
             assert_eq!(req["params"]["after"], "remote-agent");
             peer.reply(&req, json!({"entries":[],"next":null,"fetched_at":null}));
         });
@@ -310,6 +311,6 @@ mod tests {
 
 /// Icons are fetched and cached by the daemon; paths never refer to the frontend host.
 pub fn icon(client: &Client, selector: api::EntryKey) -> Result<Option<Vec<u8>>> {
-    let icon: api::Icon = client.call("_sill/registry.icon", selector)?;
+    let icon: api::Icon = client.call(method::REGISTRY_ICON, selector)?;
     icon.bytes_base64.map(|b| sill_proto::admin::decode_bytes(&b)).transpose()
 }

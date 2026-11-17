@@ -2,6 +2,7 @@
 use super::Hub;
 use anyhow::Result;
 use serde_json::{Value, json};
+use sill_proto::method;
 use sill_proto::{memory as api, rpc::Error};
 fn invalid(s: impl ToString) -> anyhow::Error {
     Error::invalid_params(s.to_string()).into()
@@ -38,21 +39,21 @@ fn bounded(v: impl serde::Serialize) -> Result<Value> {
 pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> {
     if !matches!(
         m,
-        "_sill/memory.text.close"
-            | "_sill/memory.compact"
-            | "_sill/memory.forget"
-            | "_sill/memory.list"
-            | "_sill/memory.text"
-            | "_sill/memory.search"
-            | "_sill/memory.notes.list"
-            | "_sill/memory.notes.add"
-            | "_sill/memory.notes.remove"
-            | "_sill/memory.refresh"
+        method::MEMORY_TEXT_CLOSE
+            | method::MEMORY_COMPACT
+            | method::MEMORY_FORGET
+            | method::MEMORY_LIST
+            | method::MEMORY_TEXT
+            | method::MEMORY_SEARCH
+            | method::MEMORY_NOTES_LIST
+            | method::MEMORY_NOTES_ADD
+            | method::MEMORY_NOTES_REMOVE
+            | method::MEMORY_REFRESH
     ) {
         return None;
     }
     Some((|| match m {
-        "_sill/memory.compact" => {
+        method::MEMORY_COMPACT => {
             let _: sill_proto::Empty = args(p)?;
             let uid = rustix::process::getuid().as_raw();
             let done = hub.with_store(|s| {
@@ -65,7 +66,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let _ = sill_core::memory::refresh_snapshot();
             bounded(api::Compacted { compacted: done.compacted.to_string(), trimmed: done.trimmed.to_string(), deleted: done.deleted.to_string() })
         }
-        "_sill/memory.forget" => {
+        method::MEMORY_FORGET => {
             let _: sill_proto::Empty = args(p)?;
             let ids = hub.with_store(|s| Ok(s.sessions()?.into_iter().filter(|s| s.ended_at.is_some()).map(|s| s.id).collect::<Vec<_>>()))?;
             for id in &ids {
@@ -73,7 +74,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             }
             bounded(api::Forgotten { deleted: ids.len().to_string() })
         }
-        "_sill/memory.list" => {
+        method::MEMORY_LIST => {
             let a: api::List = args(p)?;
             let n = limit(a.limit)?;
             let store = sill_core::store::Store::open_read_only(&sill_core::store::default_path()?)?;
@@ -100,8 +101,8 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let next = if more { sessions.last().map(|s| s.session_id.clone()) } else { None };
             bounded(api::Page { sessions, next })
         }
-        "_sill/memory.text" => bounded(text_page(hub, conn, args(p)?)?),
-        "_sill/memory.text.close" => {
+        method::MEMORY_TEXT => bounded(text_page(hub, conn, args(p)?)?),
+        method::MEMORY_TEXT_CLOSE => {
             let a: api::TextClose = args(p)?;
             let mut leases = leases().lock().unwrap();
             if leases.get(&a.snapshot_id).is_some_and(|l| l.conn == conn) {
@@ -109,7 +110,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             }
             Ok(json!({}))
         }
-        "_sill/memory.search" => {
+        method::MEMORY_SEARCH => {
             let a: api::Search = args(p)?;
             let n = limit(a.limit)?;
             let start = a.after.unwrap_or(0) as usize;
@@ -151,7 +152,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let next = more.then_some(accepted as u16);
             bounded(api::Hits { hits, next })
         }
-        "_sill/memory.notes.list" => {
+        method::MEMORY_NOTES_LIST => {
             let a: api::NotesList = args(p)?;
             let n = limit(a.limit)?;
             let after = a.after.as_deref().unwrap_or("0").parse::<i64>().map_err(invalid)?;
@@ -191,7 +192,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let next = if more { notes.last().map(|n| n.cursor.clone()) } else { None };
             bounded(api::Notes { notes, next })
         }
-        "_sill/memory.notes.add" => {
+        method::MEMORY_NOTES_ADD => {
             let a: api::AddNote = args(p)?;
             if a.text.len() > 1024 * 1024 {
                 return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "note exceeds 1 MiB"));
@@ -203,7 +204,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let _ = sill_core::memory::refresh_snapshot();
             Ok(json!({}))
         }
-        "_sill/memory.notes.remove" => {
+        method::MEMORY_NOTES_REMOVE => {
             let a: api::RemoveNote = args(p)?;
             let ts = a.timestamp.parse::<i64>().map_err(invalid)?;
             hub.with_store(|s| {
@@ -213,7 +214,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let _ = sill_core::memory::refresh_snapshot();
             Ok(json!({}))
         }
-        "_sill/memory.refresh" => {
+        method::MEMORY_REFRESH => {
             let _: sill_proto::Empty = args(p)?;
             sill_core::memory::refresh_snapshot()?;
             Ok(json!({}))

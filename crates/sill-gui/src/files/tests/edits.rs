@@ -1,5 +1,6 @@
 //! The reader's source: editing, the unsaved-edits guard, save, the extent and history.
 use super::*;
+use sill_proto::method;
 
 #[test]
 fn source_is_editable_and_binary_file_errors_are_visible() {
@@ -87,12 +88,12 @@ fn save_writes_exact_source_and_failed_save_keeps_the_edits() {
     let wire = expected.clone();
     app.actions = Some(sill_client::actions::Actions::new(connector(vec![client])));
     let server = std::thread::spawn(move || {
-        let request = peer.expect("_sill/files.write");
+        let request = peer.expect(method::FILES_WRITE);
         assert_eq!(request["params"]["path"]["display"], "/home/demo/project/src/main.rs");
         let bytes = sill_proto::admin::decode_bytes(request["params"]["bytes_base64"].as_str().unwrap()).unwrap();
         assert_eq!(bytes, wire.as_bytes());
         peer.reply(&request, serde_json::json!({}));
-        let request = peer.expect("_sill/files.write");
+        let request = peer.expect(method::FILES_WRITE);
         peer.refuse(&request, "permission_denied", "read-only file");
     });
     let task = app.update(Message::Files(Action::SaveFile));

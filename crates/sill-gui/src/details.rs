@@ -3,6 +3,7 @@ use crate::{App, Message, blocking, style};
 use iced::widget::{button, column, container, markdown, row, scrollable, space, text, text_editor, text_input};
 use iced::{Element, Fill, Task};
 use serde_json::json;
+use sill_proto::method;
 use sill_proto::{memory::Note, sessions::Session};
 
 #[expect(clippy::large_enum_variant, reason = "a window message: made once, handled once, never kept in bulk")]
@@ -82,11 +83,11 @@ impl App {
             move || {
                 actions
                     .reading(|c| {
-                        let session = c.call("_sill/sessions.get", json!({"session_id":id}))?;
+                        let session = c.call(method::SESSIONS_GET, json!({"session_id":id}))?;
                         let mut notes = vec![];
                         let mut after: Option<String> = None;
                         loop {
-                            let page: sill_proto::memory::Notes = c.call("_sill/memory.notes.list", json!({"session_id":id,"after":after,"limit":128}))?;
+                            let page: sill_proto::memory::Notes = c.call(method::MEMORY_NOTES_LIST, json!({"session_id":id,"after":after,"limit":128}))?;
                             notes.extend(page.notes);
                             after = page.next;
                             if after.is_none() {
@@ -235,10 +236,10 @@ impl App {
                 page.note = s;
                 return Task::none();
             }
-            Event::Save => ("_sill/sessions.update", json!({"session_id":id,"change":{"type":"summary","text":page.editor.text(),"kind":"person"}})),
-            Event::Add if !page.note.trim().is_empty() => ("_sill/memory.notes.add", json!({"session_id":id,"text":page.note.trim()})),
-            Event::Remove(timestamp, text) => ("_sill/memory.notes.remove", json!({"session_id":id,"timestamp":timestamp,"text":text})),
-            Event::Summarize => ("_sill/sessions.checkpoint", json!({"session_id":id})),
+            Event::Save => (method::SESSIONS_UPDATE, json!({"session_id":id,"change":{"type":"summary","text":page.editor.text(),"kind":"person"}})),
+            Event::Add if !page.note.trim().is_empty() => (method::MEMORY_NOTES_ADD, json!({"session_id":id,"text":page.note.trim()})),
+            Event::Remove(timestamp, text) => (method::MEMORY_NOTES_REMOVE, json!({"session_id":id,"timestamp":timestamp,"text":text})),
+            Event::Summarize => (method::SESSIONS_CHECKPOINT, json!({"session_id":id})),
             _ => return Task::none(),
         };
         if page.pending {

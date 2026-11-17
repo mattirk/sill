@@ -2,6 +2,7 @@
 //! chips' marks, and the requests Apply and Discard make with the revision the person saw.
 use serde_json::{Value, json};
 use sill_client::workspaces::Loaded;
+use sill_proto::method;
 
 use super::*;
 use crate::tests::{daemon, live_app, settle_task};
@@ -69,14 +70,14 @@ fn apply_and_discard_send_the_revision_the_person_saw() {
     let mut app = live_app(vec![client]);
     app.views.get_mut("demo").unwrap().workspaces.loaded = Some(loaded(3));
     let server = std::thread::spawn(move || {
-        let get = daemon.expect("_sill/workspaces.get");
+        let get = daemon.expect(method::WORKSPACES_GET);
         assert_eq!(get["params"]["workspace_id"], "ws-1");
         daemon.reply(&get, detail(3));
-        let apply = daemon.expect("_sill/workspaces.apply");
+        let apply = daemon.expect(method::WORKSPACES_APPLY);
         assert_eq!(apply["params"]["revision"], revision());
         assert!(!apply["params"]["operation_id"].as_str().unwrap().is_empty());
         daemon.reply(&apply, json!({"workspace": workspace(), "operation": null, "discarded": null}));
-        let discard = daemon.expect("_sill/workspaces.discard");
+        let discard = daemon.expect(method::WORKSPACES_DISCARD);
         assert_eq!(discard["params"]["revision"], revision());
         daemon.refuse(&discard, "invalid_state", "The workspace changed since you looked; look again at what would be discarded.");
     });
@@ -113,7 +114,7 @@ fn resolve_asks_the_agent_to_finish_a_stopped_rebase() {
     idle.draft = crate::editor::Editor::with_text("half a thought");
     app.views.insert("idle".into(), idle);
     let _task = app.update(Message::Workspaces(Event::Resolve("idle".into(), "ws-1".into())));
-    let request = daemon.expect("_sill/sessions.submit");
+    let request = daemon.expect(method::SESSIONS_SUBMIT);
     assert_eq!(request["params"]["session_id"], "idle");
     let text = request["params"]["text"].as_str().unwrap();
     assert!(text.starts_with(stopped), "{text}");
@@ -155,22 +156,22 @@ fn apply_with_uncommitted_changes_asks_the_agent_to_commit_and_applies_after_its
     idle.draft = crate::editor::Editor::with_text("half a thought");
     app.views.insert("idle".into(), idle);
     let server = std::thread::spawn(move || {
-        let get = daemon.expect("_sill/workspaces.get");
+        let get = daemon.expect(method::WORKSPACES_GET);
         daemon.reply(&get, serde_json::to_value(&uncommitted().details[0]).unwrap());
-        let apply = daemon.expect("_sill/workspaces.apply");
+        let apply = daemon.expect(method::WORKSPACES_APPLY);
         daemon.refuse_for(
             &apply,
             "uncommitted",
             "The workspace has uncommitted changes: apply from its session, where the agent is asked to commit them first.",
         );
-        let submit = daemon.expect("_sill/sessions.submit");
+        let submit = daemon.expect(method::SESSIONS_SUBMIT);
         assert_eq!(submit["params"]["session_id"], "idle");
         let text = submit["params"]["text"].as_str().unwrap().to_string();
         daemon.reply(&submit, json!({}));
         // after the turn: applied at the agent's commit
-        let get = daemon.expect("_sill/workspaces.get");
+        let get = daemon.expect(method::WORKSPACES_GET);
         daemon.reply(&get, serde_json::to_value(&committed("tree-1").details[0]).unwrap());
-        let apply = daemon.expect("_sill/workspaces.apply");
+        let apply = daemon.expect(method::WORKSPACES_APPLY);
         assert_eq!(apply["params"]["revision"]["tip"], "t2");
         daemon.reply(&apply, json!({"workspace": workspace(), "operation": null, "discarded": null}));
         text
@@ -246,11 +247,11 @@ fn apply_onto_another_branch_asks_once_for_that_branch() {
     settle_task(&mut app, task);
     // the second click for the same branch applies onto it
     let server = std::thread::spawn(move || {
-        let get = daemon.expect("_sill/workspaces.get");
+        let get = daemon.expect(method::WORKSPACES_GET);
         let mut d = detail(3);
         d["revision"]["destination_branch"] = json!("other");
         daemon.reply(&get, d);
-        let apply = daemon.expect("_sill/workspaces.apply");
+        let apply = daemon.expect(method::WORKSPACES_APPLY);
         assert_eq!(apply["params"]["revision"]["destination_branch"], "other");
         daemon.reply(&apply, json!({"workspace": workspace(), "operation": null, "discarded": null}));
     });
@@ -283,16 +284,16 @@ fn a_workspace_that_changed_between_the_two_clicks_is_asked_about_again() {
     };
     let server = std::thread::spawn(move || {
         // one Discard, of the work shown at the click before it
-        let discard = daemon.expect("_sill/workspaces.discard");
+        let discard = daemon.expect(method::WORKSPACES_DISCARD);
         assert_eq!(discard["params"]["revision"]["tip"], "t2");
         daemon.reply(&discard, json!({"workspace": workspace(), "operation": null, "discarded": null}));
         // one Apply, likewise
-        let get = daemon.expect("_sill/workspaces.get");
+        let get = daemon.expect(method::WORKSPACES_GET);
         let mut d = detail(3);
         d["revision"]["tip"] = json!("t4");
         d["revision"]["destination_branch"] = json!("feature");
         daemon.reply(&get, d);
-        let apply = daemon.expect("_sill/workspaces.apply");
+        let apply = daemon.expect(method::WORKSPACES_APPLY);
         assert_eq!(apply["params"]["revision"]["tip"], "t4");
         daemon.reply(&apply, json!({"workspace": workspace(), "operation": null, "discarded": null}));
     });
@@ -331,9 +332,9 @@ fn an_apply_asks_the_agent_to_commit_once() {
     idle.workspaces.committing = Some(("ws-1".into(), "tree-1".into()));
     app.views.insert("idle".into(), idle);
     let server = std::thread::spawn(move || {
-        let get = daemon.expect("_sill/workspaces.get");
+        let get = daemon.expect(method::WORKSPACES_GET);
         daemon.reply(&get, serde_json::to_value(&committed("tree-1").details[0]).unwrap());
-        let apply = daemon.expect("_sill/workspaces.apply");
+        let apply = daemon.expect(method::WORKSPACES_APPLY);
         daemon.refuse_for(&apply, "uncommitted", "The workspace has uncommitted changes.");
     });
     let task = app.update(Message::Workspaces(Event::Committed("idle".into(), Ok(committed("tree-1")))));
@@ -359,9 +360,9 @@ fn apply_without_commit_copies_what_the_person_saw() {
     assert!(app.workspace_shelf(&app.views["idle"]).is_some());
     let seen = serde_json::to_value(&uncommitted().details[0].revision).unwrap();
     let server = std::thread::spawn(move || {
-        let get = daemon.expect("_sill/workspaces.get");
+        let get = daemon.expect(method::WORKSPACES_GET);
         daemon.reply(&get, serde_json::to_value(&uncommitted().details[0]).unwrap());
-        let copy = daemon.expect("_sill/workspaces.copy");
+        let copy = daemon.expect(method::WORKSPACES_COPY);
         assert_eq!(copy["params"]["revision"], seen);
         daemon.reply(&copy, json!({"workspace": workspace(), "operation": null, "discarded": null}));
     });
@@ -383,12 +384,12 @@ fn apply_as_branch_asks_for_the_commit_then_makes_the_branch() {
     idle.workspaces.loaded = Some(uncommitted());
     app.views.insert("idle".into(), idle);
     let server = std::thread::spawn(move || {
-        let first = daemon.expect("_sill/workspaces.branch");
+        let first = daemon.expect(method::WORKSPACES_BRANCH);
         daemon.refuse_for(&first, "uncommitted", "The workspace has uncommitted changes.");
-        let submit = daemon.expect("_sill/sessions.submit");
+        let submit = daemon.expect(method::SESSIONS_SUBMIT);
         assert_eq!(submit["params"]["purpose"], "commit");
         daemon.reply(&submit, json!({}));
-        let second = daemon.expect("_sill/workspaces.branch");
+        let second = daemon.expect(method::WORKSPACES_BRANCH);
         assert_eq!(second["params"]["revision"]["tip"], "t2", "the committed work");
         daemon.reply(&second, json!({"workspace": workspace(), "operation": null, "branch": "fix_the_clock"}));
     });
@@ -417,16 +418,16 @@ fn a_failed_commit_for_a_branch_leaves_no_branch_for_a_later_apply() {
     idle.workspaces.loaded = Some(uncommitted());
     app.views.insert("idle".into(), idle);
     let server = std::thread::spawn(move || {
-        let first = daemon.expect("_sill/workspaces.branch");
+        let first = daemon.expect(method::WORKSPACES_BRANCH);
         daemon.refuse_for(&first, "uncommitted", "The workspace has uncommitted changes.");
-        let submit = daemon.expect("_sill/sessions.submit");
+        let submit = daemon.expect(method::SESSIONS_SUBMIT);
         daemon.reply(&submit, json!({}));
         // the Changes page's Apply asks for a commit of its own
-        let submit = daemon.expect("_sill/sessions.submit");
+        let submit = daemon.expect(method::SESSIONS_SUBMIT);
         daemon.reply(&submit, json!({}));
-        let get = daemon.expect("_sill/workspaces.get");
+        let get = daemon.expect(method::WORKSPACES_GET);
         daemon.reply(&get, serde_json::to_value(&committed("tree-1").details[0]).unwrap());
-        let apply = daemon.expect("_sill/workspaces.apply");
+        let apply = daemon.expect(method::WORKSPACES_APPLY);
         daemon.reply(&apply, json!({"workspace": workspace(), "operation": null, "discarded": null}));
     });
     let task = app.update(Message::Workspaces(Event::Branch("idle".into(), "ws-1".into())));

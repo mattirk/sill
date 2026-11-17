@@ -12,6 +12,7 @@
 //!   one (the daemon keeps it outside the jail).
 //!
 //! No widget here: a frontend shows the card and calls these.
+use sill_proto::method;
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
@@ -67,9 +68,9 @@ pub fn prepare(client: &Client, session_id: &str) -> Result<(Definition, bool)> 
         #[serde(default)]
         policy_changed: bool,
     }
-    let session: Session = client.call("_sill/sessions.get", SessionKey { session_id: session_id.into() })?;
+    let session: Session = client.call(method::SESSIONS_GET, SessionKey { session_id: session_id.into() })?;
     let agent: Definition =
-        client.call("_sill/agents.get", AgentKey { agent_id: session.agent.clone() }).with_context(|| format!("reading agent {}", session.agent))?;
+        client.call(method::AGENTS_GET, AgentKey { agent_id: session.agent.clone() }).with_context(|| format!("reading agent {}", session.agent))?;
     anyhow::ensure!(agent.home_paths.is_some(), "agent {} needs directory setup before login", agent.id);
     let restart_first = session.running && session.policy_changed;
     if restart_first {
@@ -100,7 +101,7 @@ pub enum HostEvent {
 pub fn host_login(client: &Client, agent_id: &str, method_id: &str, mut progress: impl FnMut(HostEvent)) -> Result<()> {
     use std::io::BufRead;
     let job: JobStream = client
-        .call("_sill/agents.login", AgentLogin { operation_id: Some(crate::request_id("login")), agent_id: agent_id.into(), method_id: method_id.into() })?;
+        .call(method::AGENTS_LOGIN, AgentLogin { operation_id: Some(crate::request_id("login")), agent_id: agent_id.into(), method_id: method_id.into() })?;
     let Some(token) = job.token else {
         // a job already known by this identity: its receipt, without its output
         return match job.operation.state {
@@ -163,14 +164,14 @@ fn callback_opener(operation_id: String) -> crate::processes::Opener {
     std::sync::Arc::new(move || {
         let client = Client::connect()?;
         let opened: sill_proto::host::HostStream =
-            client.call("_sill/streams.login_callback", sill_proto::host::OperationKey { operation_id: operation_id.clone() })?;
+            client.call(method::STREAMS_LOGIN_CALLBACK, sill_proto::host::OperationKey { operation_id: operation_id.clone() })?;
         sill_proto::transport::open_stream(&opened.token)
     })
 }
 
 /// Stop a running host login (`_sill/operations.cancel`); it fails with code `cancelled`.
 pub fn cancel(client: &Client, operation_id: &str) -> Result<()> {
-    let _: sill_proto::Empty = client.call("_sill/operations.cancel", sill_proto::host::OperationKey { operation_id: operation_id.into() })?;
+    let _: sill_proto::Empty = client.call(method::OPERATIONS_CANCEL, sill_proto::host::OperationKey { operation_id: operation_id.into() })?;
     Ok(())
 }
 
@@ -183,8 +184,8 @@ pub fn busy_login(error: &anyhow::Error) -> Option<String> {
 /// Start the session's jail again, with the login the host wrote bound in.
 pub fn restart(client: &Client, session_id: &str) -> Result<()> {
     let key = SessionKey { session_id: session_id.into() };
-    let _: serde_json::Value = client.call("_sill/sessions.stop", &key)?;
-    let _: serde_json::Value = client.call("_sill/sessions.start", &key)?;
+    let _: serde_json::Value = client.call(method::SESSIONS_STOP, &key)?;
+    let _: serde_json::Value = client.call(method::SESSIONS_START, &key)?;
     Ok(())
 }
 

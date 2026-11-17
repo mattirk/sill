@@ -4,6 +4,7 @@
 //! frontend needs no `sill-core`; a change there belongs here too.
 use serde_json::{Value, json};
 use sill_proto::admin::{SettingChange, Settings, SettingsPatch, Text};
+use sill_proto::method;
 use sill_proto::pins;
 use sill_proto::sessions::HostPath;
 use sill_proto::{Client, Empty};
@@ -67,12 +68,12 @@ pub const ACTIVE_DAYS: u16 = 32;
 
 /// Read the settings, the global instructions and the global pins.
 pub fn read(client: &Client) -> anyhow::Result<Snapshot> {
-    let settings: Settings = client.call("_sill/settings.get", Empty {})?;
-    let instructions: Text = client.call("_sill/settings.instructions.get", Empty {})?;
+    let settings: Settings = client.call(method::SETTINGS_GET, Empty {})?;
+    let instructions: Text = client.call(method::SETTINGS_INSTRUCTIONS_GET, Empty {})?;
     let mut global_pins = Vec::new();
     let mut after = None;
     loop {
-        let page: pins::Page = client.call("_sill/pins.list", pins::List { session_id: None, after: after.clone(), limit: Some(64) })?;
+        let page: pins::Page = client.call(method::PINS_LIST, pins::List { session_id: None, after: after.clone(), limit: Some(64) })?;
         global_pins.extend(page.pins);
         anyhow::ensure!(
             page.next.is_none() || page.next.as_ref().map(|p| &p.bytes_base64) != after.as_ref().map(|p: &HostPath| &p.bytes_base64),
@@ -85,7 +86,7 @@ pub fn read(client: &Client) -> anyhow::Result<Snapshot> {
     }
     let active_hours = client
         .has_capability("sill.usage")
-        .then(|| client.call::<sill_proto::admin::ActiveTime>("_sill/usage.active_time", sill_proto::admin::ActiveTimeQuery { days: ACTIVE_DAYS }))
+        .then(|| client.call::<sill_proto::admin::ActiveTime>(method::USAGE_ACTIVE_TIME, sill_proto::admin::ActiveTimeQuery { days: ACTIVE_DAYS }))
         .and_then(Result::ok)
         .map(|time| time.hours);
     Ok(Snapshot { settings, instructions: instructions.text, global_pins, active_hours })
@@ -93,29 +94,29 @@ pub fn read(client: &Client) -> anyhow::Result<Snapshot> {
 
 /// One setting changed.
 pub fn patch(change: SettingChange) -> Request {
-    ("_sill/settings.patch", json!(SettingsPatch { changes: vec![change] }))
+    (method::SETTINGS_PATCH, json!(SettingsPatch { changes: vec![change] }))
 }
 
 pub fn set_instructions(text: &str) -> Request {
-    ("_sill/settings.instructions.set", json!(Text { text: text.into() }))
+    (method::SETTINGS_INSTRUCTIONS_SET, json!(Text { text: text.into() }))
 }
 
 pub fn add_global_pin(path: HostPath) -> Request {
-    ("_sill/pins.add", json!(pins::GlobalPin { path }))
+    (method::PINS_ADD, json!(pins::GlobalPin { path }))
 }
 
 pub fn remove_global_pin(path: HostPath) -> Request {
-    ("_sill/pins.remove", json!(pins::GlobalPin { path }))
+    (method::PINS_REMOVE, json!(pins::GlobalPin { path }))
 }
 
 /// Compaction and retention now, by the durations set.
 pub fn compact() -> Request {
-    ("_sill/memory.compact", json!({}))
+    (method::MEMORY_COMPACT, json!({}))
 }
 
 /// Delete every ended session (open tabs stay).
 pub fn forget_ended() -> Request {
-    ("_sill/memory.forget", json!({}))
+    (method::MEMORY_FORGET, json!({}))
 }
 
 /// A duration setting's days (`30d`, `1y`, `0`), or `default` when unset or unreadable.
@@ -151,7 +152,7 @@ mod tests {
     #[test]
     fn settings_requests_and_choices_read_as_the_frontend_does() {
         let (method, params) = patch(SettingChange::Memory { value: Some(false) });
-        assert_eq!(method, "_sill/settings.patch");
+        assert_eq!(method, method::SETTINGS_PATCH);
         assert_eq!(params, json!({"changes":[{"type":"memory","value":false}]}));
         assert_eq!(days(Some("1y"), 1), 365);
         assert_eq!(days(Some("0"), 30), 0);

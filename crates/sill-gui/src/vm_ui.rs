@@ -4,6 +4,7 @@
 //!
 //! It is drawn apart from the daemon's settings, which come from the daemon in the VM: when the VM
 //! is down or failed, this section is still there to do something about it.
+use sill_proto::method;
 use std::path::PathBuf;
 
 use iced::widget::{column, container, pick_list, row, space, text};
@@ -249,7 +250,7 @@ impl App {
                         if !client.has_capability("sill.storage") {
                             return Err("Update the VM's daemon to read free space and clear build caches.".into());
                         }
-                        client.call_within("_sill/storage.space", sill_proto::Empty {}, sill_proto::client::QUICK_TIMEOUT).map_err(|e| format!("{e:#}"))
+                        client.call_within(method::STORAGE_SPACE, sill_proto::Empty {}, sill_proto::client::QUICK_TIMEOUT).map_err(|e| format!("{e:#}"))
                     },
                     |r| msg(Event::Space(r)),
                 );
@@ -285,7 +286,7 @@ impl App {
                 return blocking(
                     move || {
                         let client = connect().map_err(|e| format!("{e:#}"))?;
-                        client.call_within("_sill/storage.caches", sill_proto::Empty {}, std::time::Duration::from_secs(120)).map_err(|e| format!("{e:#}"))
+                        client.call_within(method::STORAGE_CACHES, sill_proto::Empty {}, std::time::Duration::from_secs(120)).map_err(|e| format!("{e:#}"))
                     },
                     |r| msg(Event::Caches(r)),
                 );
@@ -327,7 +328,7 @@ impl App {
                         let mut failures = Vec::new();
                         for id in ids {
                             if let Err(error) = client.call_within::<serde_json::Value>(
-                                "_sill/storage.clear_build_cache",
+                                method::STORAGE_CLEAR_BUILD_CACHE,
                                 sill_proto::storage::ClearBuildCache { session_id: id.clone() },
                                 std::time::Duration::from_secs(120),
                             ) {

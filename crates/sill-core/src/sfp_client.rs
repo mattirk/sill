@@ -1,6 +1,7 @@
 //! SFP state reconstruction and local adaptation for the existing Rust renderers.
 //! No daemon store is read: snapshots and sequenced public events are the only state source.
 use anyhow::{Context, Result, bail};
+use sill_proto::method;
 use sill_proto::{Client, sfp::*, wire};
 use std::collections::BTreeMap;
 
@@ -18,7 +19,7 @@ pub struct View {
 }
 impl View {
     pub fn attach(&mut self, client: &Client, session_id: &str) -> Result<Vec<wire::Event>> {
-        let attached: Attached = client.call("_sill/sessions.attach", Attach { session_id: session_id.into(), since: None })?;
+        let attached: Attached = client.call(method::SESSIONS_ATTACH, Attach { session_id: session_id.into(), since: None })?;
         let Attached::Snapshot { subscription_id, snapshot } = attached else {
             bail!("snapshot attach unexpectedly returned replay");
         };
@@ -26,7 +27,7 @@ impl View {
         let mut page = None;
         let mut decoder = SnapshotDecoder::default();
         loop {
-            let part: SnapshotPage = client.call("_sill/sessions.snapshot", SnapshotRequest { token: snapshot.token.clone(), page })?;
+            let part: SnapshotPage = client.call(method::SESSIONS_SNAPSHOT, SnapshotRequest { token: snapshot.token.clone(), page })?;
             if part.at != snapshot.at {
                 bail!("snapshot cursor changed between pages");
             }
@@ -56,7 +57,7 @@ impl View {
     }
     pub fn detach(&self, client: &Client) -> Result<()> {
         client.call::<serde_json::Value>(
-            "_sill/sessions.detach",
+            method::SESSIONS_DETACH,
             Detach { session_id: self.session_id.clone(), subscription_id: self.subscription_id.clone() },
         )?;
         Ok(())
@@ -620,11 +621,11 @@ pub fn command_request(session_id: &str, command: &wire::Command, view: Option<&
                     wire::AttachmentKind::File { jail_path } => json!({"type":"uploaded","name":a.name,"mime":a.mime,"upload_id":jail_path.to_string_lossy()}),
                 })
                 .collect();
-            return Ok(("_sill/sessions.submit", json!({"session_id":session_id,"submission_id":new_id(),"text":text,"attachments":attachments})));
+            return Ok((method::SESSIONS_SUBMIT, json!({"session_id":session_id,"submission_id":new_id(),"text":text,"attachments":attachments})));
         }
         wire::Command::Cancel => {
             let turn_id = view.and_then(|v| v.session.as_ref()).and_then(|s| s.turn_id.as_ref()).context("no active turn to cancel")?;
-            return Ok(("_sill/sessions.cancel", json!({"session_id":session_id,"turn_id":turn_id})));
+            return Ok((method::SESSIONS_CANCEL, json!({"session_id":session_id,"turn_id":turn_id})));
         }
         wire::Command::Authenticate(method_id) => json!({"type":"authenticate","method_id":method_id}),
         wire::Command::AuthenticateWithKey { method_id, key } => json!({"type":"authenticate","method_id":method_id,"api_key":key.0}),
@@ -635,7 +636,7 @@ pub fn command_request(session_id: &str, command: &wire::Command, view: Option<&
         }
         wire::Command::Quit => bail!("detach using the subscription ID"),
     };
-    Ok(("_sill/sessions.control", json!({"session_id":session_id,"control":control})))
+    Ok((method::SESSIONS_CONTROL, json!({"session_id":session_id,"control":control})))
 }
 
 #[cfg(test)]

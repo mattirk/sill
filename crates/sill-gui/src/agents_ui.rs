@@ -8,6 +8,7 @@ use iced::{Alignment, Element, Fill, Task};
 use sill_client::agents::{self, Entry};
 use sill_proto::agent_admin::Definition;
 use sill_proto::host::RegistryEntry;
+use sill_proto::method;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default)]
@@ -595,7 +596,7 @@ impl App {
                     return Task::none();
                 }
                 let id = editor.id.clone();
-                return self.agent_call(id, "_sill/agents.save", serde_json::to_value(definition).unwrap());
+                return self.agent_call(id, method::AGENTS_SAVE, serde_json::to_value(definition).unwrap());
             }
             Event::Tab(tab) => p.tab = tab,
             Event::Choose(id, path, ticked) => {
@@ -615,7 +616,7 @@ impl App {
                 };
                 let unticked = p.unticked.get(&id).cloned().unwrap_or_default();
                 let definition = agents::set_up(definition, discovery, &unticked);
-                return self.agent_call(id, "_sill/agents.save", serde_json::to_value(definition).unwrap());
+                return self.agent_call(id, method::AGENTS_SAVE, serde_json::to_value(definition).unwrap());
             }
             Event::Discover(id, method) => {
                 if p.busy.contains(&id) {
@@ -702,14 +703,14 @@ impl App {
                     let Some(d) = &entry.definition else {
                         return Task::none();
                     };
-                    ("_sill/agents.reset", serde_json::json!({"agent_id":d.id}))
+                    (method::AGENTS_RESET, serde_json::json!({"agent_id":d.id}))
                 } else {
                     let mut selector = entry.selector();
                     if let Some(i) = &entry.installed {
                         selector.version = i.version.clone();
                         selector.source = i.source.clone();
                     }
-                    ("_sill/registry.uninstall", serde_json::to_value(selector).unwrap())
+                    (method::REGISTRY_UNINSTALL, serde_json::to_value(selector).unwrap())
                 };
                 return self.agent_call(id, method, params);
             }
@@ -962,7 +963,7 @@ mod tests {
         let (client, mut daemon) = daemon();
         app.actions = Some(sill_client::actions::Actions::new(connector(vec![client])));
         let worker = std::thread::spawn(move || {
-            let req = daemon.expect("_sill/agents.save");
+            let req = daemon.expect(method::AGENTS_SAVE);
             assert_eq!(req["params"]["id"], "codex");
             assert_eq!(req["params"]["domains"], json!(["openai.com", "*.example.com:8443"]));
             assert_eq!(req["params"]["env"], json!({"KEEP":"yes"}));
@@ -1186,7 +1187,7 @@ mod tests {
         let (client, mut daemon) = daemon();
         app.actions = Some(sill_client::actions::Actions::new(connector(vec![client])));
         let worker = std::thread::spawn(move || {
-            let req = daemon.expect("_sill/agents.save");
+            let req = daemon.expect(method::AGENTS_SAVE);
             assert_eq!(req["params"]["id"], "antigravity-acp");
             assert_eq!(req["params"]["command"], json!(["antigravity-acp"]));
             assert_eq!(

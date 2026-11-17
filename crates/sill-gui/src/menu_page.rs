@@ -2,6 +2,7 @@
 //! reopening and deleting sessions from it.
 use iced::Task;
 use serde_json::json;
+use sill_proto::method;
 
 use crate::{Act, App, Message, Page, blocking, menu};
 
@@ -37,7 +38,7 @@ impl App {
                     ),
                     blocking(
                         move || {
-                            settings.read::<sill_proto::admin::Settings>("_sill/settings.get", json!({})).ok().and_then(|s| s.remember_pins).unwrap_or(false)
+                            settings.read::<sill_proto::admin::Settings>(method::SETTINGS_GET, json!({})).ok().and_then(|s| s.remember_pins).unwrap_or(false)
                         },
                         |on| Message::Menu(Event::RememberPins(on)),
                     ),

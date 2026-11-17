@@ -2,13 +2,14 @@
 //! lost connection means reading the workspace's review before deciding to start again.
 use crate::actions::Actions;
 use sill_proto::crosscheck as api;
+use sill_proto::method;
 
 pub fn reviewers(actions: &Actions) -> anyhow::Result<api::Reviewers> {
-    actions.reading(|c| c.call("_sill/crosscheck.reviewers", api::Empty {}))
+    actions.reading(|c| c.call(method::CROSSCHECK_REVIEWERS, api::Empty {}))
 }
 
 pub fn set_reviewers(actions: &Actions, reviewers: &[api::Reviewer]) -> anyhow::Result<api::Reviewers> {
-    actions.once(|c| c.call("_sill/crosscheck.set_reviewers", api::SetReviewers { reviewers: reviewers.into() }))
+    actions.once(|c| c.call(method::CROSSCHECK_SET_REVIEWERS, api::SetReviewers { reviewers: reviewers.into() }))
 }
 
 /// A workspace's review as a frontend asks for it: whether this daemon does Crosscheck at all,
@@ -24,17 +25,17 @@ pub fn get(actions: &Actions, workspace_id: &str) -> anyhow::Result<Seen> {
         if !c.has_capability(api::CAPABILITY) {
             return Ok(Seen { offered: false, run: None });
         }
-        let current: api::Current = c.call("_sill/crosscheck.get", api::WorkspaceKey { workspace_id: workspace_id.into() })?;
+        let current: api::Current = c.call(method::CROSSCHECK_GET, api::WorkspaceKey { workspace_id: workspace_id.into() })?;
         Ok(Seen { offered: true, run: current.run })
     })
 }
 
 pub fn start(actions: &Actions, request: &api::Start) -> anyhow::Result<api::Run> {
-    actions.once(|c| c.call("_sill/crosscheck.start", request))
+    actions.once(|c| c.call(method::CROSSCHECK_START, request))
 }
 
 pub fn remove(actions: &Actions, run_id: &str) -> anyhow::Result<()> {
-    actions.once(|c| c.call::<serde_json::Value>("_sill/crosscheck.remove", api::RunKey { run_id: run_id.into() })).map(|_| ())
+    actions.once(|c| c.call::<serde_json::Value>(method::CROSSCHECK_REMOVE, api::RunKey { run_id: run_id.into() })).map(|_| ())
 }
 
 /// Where a review stands, as the shelf's line needs it.

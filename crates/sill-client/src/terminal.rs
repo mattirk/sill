@@ -7,6 +7,7 @@
 //! threads leave, even if the connection is still being made — and the shell keeps running, to be
 //! found again. A terminal takes at most eight viewers, so a link that outlived its pane would
 //! eventually lock the person out of their own shell.
+use sill_proto::method;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -261,12 +262,12 @@ fn named_terminal(
 ) -> impl FnOnce(u16, u16) -> anyhow::Result<Connection> + Send + 'static {
     move |cols, rows| {
         let client = connect()?;
-        let listed: api::Terminals = client.call("_sill/terminals.list", api::List { session_id: session_id.clone() })?;
+        let listed: api::Terminals = client.call(method::TERMINALS_LIST, api::List { session_id: session_id.clone() })?;
         let found = listed.terminals.into_iter().rev().find(|t| t.session_id == session_id && t.label == label && t.state == "running");
         let terminal = match found {
             Some(t) => t,
             None => client.call(
-                "_sill/terminals.open",
+                method::TERMINALS_OPEN,
                 api::Open {
                     session_id,
                     label,
@@ -281,12 +282,12 @@ fn named_terminal(
         };
         let id = terminal.terminal_id.clone();
         let key = |id: &str| api::TerminalKey { terminal_id: id.to_string() };
-        let stream: api::Stream = client.call("_sill/terminals.attach", key(&id))?;
+        let stream: api::Stream = client.call(method::TERMINALS_ATTACH, key(&id))?;
         let stream = sill_proto::transport::open_stream(&stream.token)?;
         let control = move |control: Control| -> anyhow::Result<()> {
             let _: serde_json::Value = match control {
-                Control::Resize(cols, rows) => client.call("_sill/terminals.resize", api::Resize { terminal_id: id.clone(), cols, rows })?,
-                Control::Close => client.call("_sill/terminals.close", key(&id))?,
+                Control::Resize(cols, rows) => client.call(method::TERMINALS_RESIZE, api::Resize { terminal_id: id.clone(), cols, rows })?,
+                Control::Close => client.call(method::TERMINALS_CLOSE, key(&id))?,
             };
             Ok(())
         };

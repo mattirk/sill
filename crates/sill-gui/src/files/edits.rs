@@ -3,6 +3,7 @@
 use iced::Task;
 use iced::widget::{markdown, text_editor};
 use sill_client::files::{self, Request};
+use sill_proto::method;
 
 use super::Action;
 use crate::{App, Message, SessionView};
@@ -225,7 +226,7 @@ impl App {
         })
         .unwrap();
         crate::blocking(
-            move || (text, actions.call("_sill/files.write", params)),
+            move || (text, actions.call(method::FILES_WRITE, params)),
             move |(text, outcome)| Message::Files(Action::Saved { session: id.clone(), key: key.clone(), serial, text, outcome }),
         )
     }

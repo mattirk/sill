@@ -2,6 +2,7 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 use sill_core::providers as core;
+use sill_proto::method;
 use sill_proto::{providers as api, rpc::Error};
 
 fn args<T: serde::de::DeserializeOwned>(v: Value) -> Result<T> {
@@ -48,13 +49,13 @@ fn request_key(home: &std::path::Path, base_url: &str, key: Option<sill_proto::w
 }
 
 pub fn handle(conn: &super::Conn, m: &str, p: Value) -> Option<Result<Value>> {
-    if !matches!(m, "_sill/providers.list" | "_sill/providers.save" | "_sill/providers.remove" | "_sill/providers.test" | "_sill/providers.detect_limits") {
+    if !matches!(m, method::PROVIDERS_LIST | method::PROVIDERS_SAVE | method::PROVIDERS_REMOVE | method::PROVIDERS_TEST | method::PROVIDERS_DETECT_LIMITS) {
         return None;
     }
     Some((|| {
         let home = sill_core::changes::home()?;
         Ok(match m {
-            "_sill/providers.list" => {
+            method::PROVIDERS_LIST => {
                 let _: sill_proto::Empty = args(p)?;
                 let mut providers = vec![];
                 for p in core::load(&home)?.into_values() {
@@ -64,7 +65,7 @@ pub fn handle(conn: &super::Conn, m: &str, p: Value) -> Option<Result<Value>> {
                 let agents = core::TRANSLATED.iter().map(|id| id.to_string()).collect();
                 json!(api::Listed { providers, agents })
             }
-            "_sill/providers.save" => {
+            method::PROVIDERS_SAVE => {
                 let mut a: Save = args(p)?;
                 a.provider.validate().map_err(invalid)?;
                 if !a.provider.model_limits.is_empty() && !conn.has_capability(api::LIMITS_CAPABILITY) {
@@ -97,11 +98,11 @@ pub fn handle(conn: &super::Conn, m: &str, p: Value) -> Option<Result<Value>> {
                 core::save(&home, &a.provider)?;
                 json!(api::Saved { endpoint: a.provider.endpoint().pattern() })
             }
-            "_sill/providers.remove" => {
+            method::PROVIDERS_REMOVE => {
                 let a: api::Key = args(p)?;
                 json!(api::Removed { removed: core::remove(&home, &a.provider_id).map_err(invalid)? })
             }
-            "_sill/providers.detect_limits" => {
+            method::PROVIDERS_DETECT_LIMITS => {
                 if !conn.has_capability(api::LIMITS_CAPABILITY) {
                     return Err(Error::needs_capability(api::LIMITS_CAPABILITY, "Update the frontend for model token limits").into());
                 }
@@ -110,7 +111,7 @@ pub fn handle(conn: &super::Conn, m: &str, p: Value) -> Option<Result<Value>> {
                 let context = core::detect_context(&a.base_url, key.as_deref(), &a.model).map_err(|e| Error::domain("operation_failed", format!("{e:#}")))?;
                 json!(api::DetectedLimits { context })
             }
-            "_sill/providers.test" => {
+            method::PROVIDERS_TEST => {
                 let a: api::Test = args(p)?;
                 let endpoint = core::endpoint(&a.base_url).map_err(invalid)?.pattern();
                 let key = request_key(&home, &a.base_url, a.key, a.provider_id.as_deref())?;

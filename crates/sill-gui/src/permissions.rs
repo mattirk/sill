@@ -16,6 +16,7 @@ use iced::widget::{Column, button, column, container, row, rule, space, text, to
 use iced::{Alignment, Element, Fill, Task};
 use sill_client::actions::Outcome;
 use sill_proto::admin::{PermissionState, PermissionsChanged, PolicySnapshot, PolicyView};
+use sill_proto::method;
 use sill_proto::sessions::Session;
 
 use crate::style::{self, P, alpha};
@@ -250,7 +251,7 @@ impl App {
             }
             Event::DevelopmentRestarting(id) => {
                 let params = json!({"session_id": id});
-                return self.permission_change(id, Change::DevelopmentRestarting, "_sill/permissions.apply_development", params);
+                return self.permission_change(id, Change::DevelopmentRestarting, method::PERMISSIONS_APPLY_DEVELOPMENT, params);
             }
             Event::SetDevelopment(id, true) => return self.permissions_event(Event::DevelopmentRestarting(id)),
             Event::SetDevelopment(id, false) => {
@@ -267,7 +268,7 @@ impl App {
                         let mut last = None;
                         for capability in DEVELOPMENT {
                             let params = json!({"session_id": session, "capability": capability, "enabled": null});
-                            let outcome = actions.call_needing(CAPABILITY, "_sill/permissions.set", params);
+                            let outcome = actions.call_needing(CAPABILITY, method::PERMISSIONS_SET, params);
                             let done = outcome.is_done();
                             last = Some(outcome);
                             if !done {
@@ -309,24 +310,24 @@ impl App {
             }
             Event::Set(id, capability, enabled) => {
                 let params = json!({"session_id": id, "capability": capability, "enabled": enabled});
-                return self.permission_change(id, Change::Choice(capability, enabled), "_sill/permissions.set", params);
+                return self.permission_change(id, Change::Choice(capability, enabled), method::PERMISSIONS_SET, params);
             }
             Event::Restore(id) => {
                 let params = json!({"session_id": id});
-                return self.permission_change(id, Change::Restore, "_sill/permissions.restore_defaults", params);
+                return self.permission_change(id, Change::Restore, method::PERMISSIONS_RESTORE_DEFAULTS, params);
             }
             Event::ApplyDevelopment(id) => {
                 let params = json!({"session_id": id});
-                return self.permission_change(id, Change::Development, "_sill/permissions.apply_development", params);
+                return self.permission_change(id, Change::Development, method::PERMISSIONS_APPLY_DEVELOPMENT, params);
             }
             Event::SaveHost(id, host) => {
                 let params = json!({"session_id": id, "host": host});
-                return self.permission_change(id, Change::SaveHost(host), "_sill/policy.save_host", params);
+                return self.permission_change(id, Change::SaveHost(host), method::POLICY_SAVE_HOST, params);
             }
             Event::AutoAllow(id, enabled) => {
                 let params = json!({"session_id": id,
                     "change": {"type": "auto_allow", "enabled": enabled}});
-                return self.permission_change(id, Change::AutoAllow(enabled), "_sill/sessions.update", params);
+                return self.permission_change(id, Change::AutoAllow(enabled), method::SESSIONS_UPDATE, params);
             }
             Event::Restart(id, change) => {
                 let (Some(actions), Some(view)) = (self.actions.clone(), self.views.get_mut(&id)) else {
@@ -340,11 +341,11 @@ impl App {
                 return blocking(
                     move || {
                         let key = json!({"session_id": session});
-                        let stopped = actions.call("_sill/sessions.stop", key.clone());
+                        let stopped = actions.call(method::SESSIONS_STOP, key.clone());
                         if !stopped.is_done() {
                             return stopped;
                         }
-                        actions.call("_sill/sessions.start", key)
+                        actions.call(method::SESSIONS_START, key)
                     },
                     move |outcome| Message::Perms(Event::Done(id, change, outcome)),
                 );
@@ -384,16 +385,16 @@ impl App {
         blocking(
             move || {
                 let key = json!({"session_id": session});
-                let preview: PolicyView = actions.read("_sill/policy.preview", key.clone()).map_err(|e| format!("{e:#}"))?;
+                let preview: PolicyView = actions.read(method::POLICY_PREVIEW, key.clone()).map_err(|e| format!("{e:#}"))?;
                 let (launch, warnings) = if running {
-                    let read = actions.read::<PolicySnapshot>("_sill/policy.snapshot", key).map_err(|e| format!("{e:#}"))?;
+                    let read = actions.read::<PolicySnapshot>(method::POLICY_SNAPSHOT, key).map_err(|e| format!("{e:#}"))?;
                     (read.snapshot, read.warnings)
                 } else {
                     (None, vec![])
                 };
                 let agent_name = match agent.filter(|_| want_name) {
                     Some(agent) => actions
-                        .read::<serde_json::Value>("_sill/agents.get", json!({"agent_id": agent}))
+                        .read::<serde_json::Value>(method::AGENTS_GET, json!({"agent_id": agent}))
                         .ok()
                         .and_then(|a| a["name"].as_str().map(str::to_string)),
                     None => None,
@@ -1198,7 +1199,7 @@ mod tests {
         let mut app = live_app(vec![client]);
         app.all_sessions = vec![session_record("demo", "demo", false, false)];
         let fake = std::thread::spawn(move || {
-            let preview = daemon.expect("_sill/policy.preview");
+            let preview = daemon.expect(method::POLICY_PREVIEW);
             daemon.reply(
                 &preview,
                 view(
@@ -1208,12 +1209,12 @@ mod tests {
                        {"host": "blocked.example", "applied": false, "reason": "offline: no network"}]),
                 ),
             );
-            let snapshot = daemon.expect("_sill/policy.snapshot");
+            let snapshot = daemon.expect(method::POLICY_SNAPSHOT);
             daemon.reply(
                 &snapshot,
                 json!({"snapshot": view("launch", false, json!([])), "warnings": ["a host socket lies in a pinned folder: /pin/agent.sock"]}),
             );
-            let agent = daemon.expect("_sill/agents.get");
+            let agent = daemon.expect(method::AGENTS_GET);
             assert_eq!(agent["params"]["agent_id"], "claude");
             daemon.reply(&agent, json!({"id": "claude", "name": "Claude Code"}));
         });
@@ -1259,15 +1260,15 @@ mod tests {
         let mut app = live_app(vec![client]);
         app.all_sessions = vec![session_record("demo", "demo", false, false)];
         let fake = std::thread::spawn(move || {
-            let set = daemon.expect("_sill/permissions.set");
+            let set = daemon.expect(method::PERMISSIONS_SET);
             assert_eq!(set["params"], json!({"session_id": "demo", "capability": "public_web", "enabled": true}));
             daemon.reply(&set, json!({"preview": view("preview", true, json!([])), "restart_required": true}));
             // then the list and a fresh read, in either order; the read is refused here
             for _ in 0..2 {
                 let request = daemon.next();
                 match request["method"].as_str().unwrap() {
-                    "_sill/sessions.list" => daemon.reply(&request, json!({"sessions": [session_record("demo", "demo", false, false)], "next": null})),
-                    "_sill/policy.preview" => daemon.refuse(&request, "unavailable", "later"),
+                    method::SESSIONS_LIST => daemon.reply(&request, json!({"sessions": [session_record("demo", "demo", false, false)], "next": null})),
+                    method::POLICY_PREVIEW => daemon.refuse(&request, "unavailable", "later"),
                     other => panic!("unexpected {other}"),
                 }
             }
@@ -1294,23 +1295,23 @@ mod tests {
                 let request = daemon.next();
                 let method = request["method"].as_str().unwrap().to_string();
                 match method.as_str() {
-                    "_sill/permissions.restore_defaults" => {
+                    method::PERMISSIONS_RESTORE_DEFAULTS => {
                         assert_eq!(request["params"], json!({"session_id": "demo"}));
                         daemon.reply(&request, json!({"preview": view("preview", false, json!([])), "restart_required": false}));
                     }
-                    "_sill/policy.save_host" => {
+                    method::POLICY_SAVE_HOST => {
                         assert_eq!(request["params"], json!({"session_id": "demo", "host": "example.org"}));
                         daemon.reply(&request, json!({"agent_id": "claude", "agent_name": "Claude Code"}));
                     }
-                    "_sill/sessions.update" => {
+                    method::SESSIONS_UPDATE => {
                         assert_eq!(request["params"]["change"], json!({"type": "auto_allow", "enabled": true}));
                         daemon.reply(&request, json!({}));
                     }
-                    "_sill/sessions.list" => {
+                    method::SESSIONS_LIST => {
                         daemon.reply(&request, json!({"sessions": [session_record("demo", "demo", false, false)], "next": null}));
                         continue;
                     }
-                    "_sill/policy.preview" => {
+                    method::POLICY_PREVIEW => {
                         daemon.refuse(&request, "unavailable", "later");
                         continue;
                     }
@@ -1357,13 +1358,13 @@ mod tests {
             loop {
                 let request = daemon.next();
                 match request["method"].as_str().unwrap() {
-                    "_sill/permissions.apply_development" => {
+                    method::PERMISSIONS_APPLY_DEVELOPMENT => {
                         assert_eq!(request["params"], json!({"session_id": "demo"}));
                         daemon.reply(&request, json!({"preview": view("preview", false, json!([])), "restart_required": true}));
                         return;
                     }
-                    "_sill/sessions.list" => daemon.reply(&request, json!({"sessions": [session_record("demo", "demo", false, false)], "next": null})),
-                    "_sill/policy.preview" => daemon.refuse(&request, "unavailable", "later"),
+                    method::SESSIONS_LIST => daemon.reply(&request, json!({"sessions": [session_record("demo", "demo", false, false)], "next": null})),
+                    method::POLICY_PREVIEW => daemon.refuse(&request, "unavailable", "later"),
                     other => panic!("unexpected {other}"),
                 }
             }
@@ -1402,22 +1403,22 @@ mod tests {
                 let request = daemon.next();
                 let method = request["method"].as_str().unwrap().to_string();
                 match method.as_str() {
-                    "_sill/permissions.apply_development" => {
+                    method::PERMISSIONS_APPLY_DEVELOPMENT => {
                         assert_eq!(request["params"], json!({"session_id": "demo"}));
                         daemon.reply(&request, json!({"preview": view("preview", false, json!([])), "restart_required": true}));
                     }
-                    "_sill/sessions.stop" | "_sill/sessions.start" => {
+                    method::SESSIONS_STOP | method::SESSIONS_START => {
                         assert_eq!(request["params"], json!({"session_id": "demo"}));
                         daemon.reply(&request, json!({}));
                     }
-                    "_sill/sessions.list" => {
+                    method::SESSIONS_LIST => {
                         daemon.reply(&request, json!({"sessions": [session_record("demo", "demo", false, false)], "next": null}));
                     }
-                    "_sill/host_control.state" => daemon.refuse(&request, "unavailable", "later"),
-                    "_sill/policy.preview" => daemon.refuse(&request, "unavailable", "later"),
+                    method::HOST_CONTROL_STATE => daemon.refuse(&request, "unavailable", "later"),
+                    method::POLICY_PREVIEW => daemon.refuse(&request, "unavailable", "later"),
                     other => panic!("unexpected {other}"),
                 }
-                if method == "_sill/sessions.list" && seen.contains(&"_sill/sessions.start".to_string()) {
+                if method == method::SESSIONS_LIST && seen.contains(&method::SESSIONS_START.to_string()) {
                     return seen;
                 }
                 seen.push(method);
@@ -1427,7 +1428,7 @@ mod tests {
         settle_task(&mut app, task);
         let seen = fake.join().unwrap();
         let order: Vec<&str> = seen.iter().map(String::as_str).filter(|m| m.starts_with("_sill/permissions") || m.starts_with("_sill/sessions.st")).collect();
-        assert_eq!(order, ["_sill/permissions.apply_development", "_sill/sessions.stop", "_sill/sessions.start"]);
+        assert_eq!(order, [method::PERMISSIONS_APPLY_DEVELOPMENT, method::SESSIONS_STOP, method::SESSIONS_START]);
         let perms = &app.views["demo"].permissions;
         assert!(!perms.open && perms.menu, "the dropdown stays; the panel stays closed");
         let (_, said, failed) = perms.notice.clone().unwrap();

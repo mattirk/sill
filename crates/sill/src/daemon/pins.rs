@@ -1,5 +1,6 @@
 //! Public pin methods. Exact host bytes are retained through storage and jail startup.
 use super::*;
+use sill_proto::method;
 use sill_proto::{pins as api, sessions::HostPath};
 
 fn pin_path(path: &HostPath) -> Result<PathBuf> {
@@ -31,8 +32,8 @@ impl Hub {
     pub(in crate::daemon) fn public_pins(self: &Arc<Self>, method: &str, params: Value) -> Option<Result<Value, Error>> {
         let result = || -> Result<Value> {
             match method {
-                "_sill/pins.list" => self.with_store(|store| Ok(json!(list(store, args(params)?)?))),
-                "_sill/pins.add" => {
+                method::PINS_LIST => self.with_store(|store| Ok(json!(list(store, args(params)?)?))),
+                method::PINS_ADD => {
                     let a: api::GlobalPin = args(params)?;
                     let path = pin_path(&a.path)?
                         .canonicalize()
@@ -52,18 +53,18 @@ impl Hub {
                     })?;
                     Ok(json!(api::Pinned { path: HostPath::from_path(&path) }))
                 }
-                "_sill/pins.remove" => {
+                method::PINS_REMOVE => {
                     let a: api::GlobalPin = args(params)?;
                     let path = pin_path(&a.path)?;
                     self.with_store(|store| store.global_unpin(&path))?;
                     Ok(json!({}))
                 }
-                "_sill/sessions.pin" | "_sill/sessions.unpin" => {
+                method::SESSIONS_PIN | method::SESSIONS_UNPIN => {
                     let a: api::SessionPin = args(params)?;
                     let path = pin_path(&a.path)?;
                     self.with_store(|store| {
                         let session = store.session_exact(&a.session_id)?.ok_or_else(|| Error::domain("not_found", "session not found"))?;
-                        if method == "_sill/sessions.pin" {
+                        if method == method::SESSIONS_PIN {
                             if session.ghost {
                                 return Err(Error::domain("invalid_state", GHOST_NO_PINS).into());
                             }
@@ -83,7 +84,7 @@ impl Hub {
                 _ => unreachable!(),
             }
         };
-        if matches!(method, "_sill/pins.list" | "_sill/pins.add" | "_sill/pins.remove" | "_sill/sessions.pin" | "_sill/sessions.unpin") {
+        if matches!(method, method::PINS_LIST | method::PINS_ADD | method::PINS_REMOVE | method::SESSIONS_PIN | method::SESSIONS_UNPIN) {
             Some(result().map_err(crate::daemon::sfp::failure))
         } else {
             None

@@ -1,6 +1,7 @@
 //! `sill` command line: the daemon, sessions, changes, memory, policies and the jail by hand
 //! (`sill jail …`, `sill dev …`). The desktop window is sill-gui: `sill gui`, `sill toggle`, `sill restart`.
 
+use sill_proto::method;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::os::fd::{AsFd, FromRawFd, OwnedFd};
@@ -606,7 +607,7 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
                 return Ok(());
             }
             MemoryCmd::Refresh => {
-                c.call::<serde_json::Value>("_sill/memory.refresh", sill_proto::Empty::default())?;
+                c.call::<serde_json::Value>(method::MEMORY_REFRESH, sill_proto::Empty::default())?;
                 println!("the box's memory snapshot refreshed");
                 return Ok(());
             }
@@ -619,7 +620,7 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
     match cmd {
         MemoryCmd::Compact => {
             let c = sill_proto::Client::connect_or_start()?;
-            let done: sill_proto::memory::Compacted = c.call("_sill/memory.compact", sill_proto::Empty::default())?;
+            let done: sill_proto::memory::Compacted = c.call(method::MEMORY_COMPACT, sill_proto::Empty::default())?;
             println!("{} compacted, {} trimmed to summary and prompts, {} deleted", done.compacted, done.trimmed, done.deleted);
             return Ok(());
         }
@@ -628,7 +629,7 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
             let mut rows = Vec::new();
             let mut after = None;
             loop {
-                let page: sill_proto::memory::Page = c.call("_sill/memory.list", sill_proto::memory::List { after, limit: Some(128) })?;
+                let page: sill_proto::memory::Page = c.call(method::MEMORY_LIST, sill_proto::memory::List { after, limit: Some(128) })?;
                 rows.extend(page.sessions);
                 after = page.next;
                 if after.is_none() {
@@ -664,7 +665,7 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
                 terms.push(format!("since:{s}"));
             }
             let hits: sill_proto::memory::Hits =
-                c.call("_sill/memory.search", sill_proto::memory::Search { query: terms.join(" "), after: None, limit: Some(50) })?;
+                c.call(method::MEMORY_SEARCH, sill_proto::memory::Search { query: terms.join(" "), after: None, limit: Some(50) })?;
             if hits.hits.is_empty() {
                 println!("nothing found");
             }
@@ -733,12 +734,12 @@ fn policy_cmd(cmd: Option<PolicyCmd>) -> Result<()> {
     let c = sill_proto::Client::connect_or_start()?;
     match cmd {
         PolicyCmd::Show { name } => {
-            let policy: api::PolicyEntry = c.call("_sill/policy.get", api::PolicyKey { name })?;
+            let policy: api::PolicyEntry = c.call(method::POLICY_GET, api::PolicyKey { name })?;
             print!("{}", policy.text);
         }
         PolicyCmd::Preview { session } => {
             let key = policy_session_key(&c, &session)?;
-            let view: api::PolicyView = c.call("_sill/policy.preview", SessionKey { session_id: key })?;
+            let view: api::PolicyView = c.call(method::POLICY_PREVIEW, SessionKey { session_id: key })?;
             print_policy_view(&view);
             if !view.diagnostics.is_empty() {
                 bail!("policy preview has errors");
@@ -746,7 +747,7 @@ fn policy_cmd(cmd: Option<PolicyCmd>) -> Result<()> {
         }
         PolicyCmd::Snapshot { session } => {
             let key = policy_session_key(&c, &session)?;
-            let result: api::PolicySnapshot = c.call("_sill/policy.snapshot", SessionKey { session_id: key })?;
+            let result: api::PolicySnapshot = c.call(method::POLICY_SNAPSHOT, SessionKey { session_id: key })?;
             if let Some(view) = result.snapshot {
                 print_policy_view(&view);
             } else {
@@ -758,7 +759,7 @@ fn policy_cmd(cmd: Option<PolicyCmd>) -> Result<()> {
         }
         PolicyCmd::Check { file } => {
             let text = read_policy_input(&file)?;
-            let result: api::PolicyChecked = c.call("_sill/policy.check", api::PolicyCheck { text })?;
+            let result: api::PolicyChecked = c.call(method::POLICY_CHECK, api::PolicyCheck { text })?;
             for diagnostic in result.diagnostics {
                 eprintln!("{diagnostic}");
             }
@@ -770,7 +771,7 @@ fn policy_cmd(cmd: Option<PolicyCmd>) -> Result<()> {
         PolicyCmd::Import { file, name, replace } => {
             let text = read_policy_input(&file)?;
             let name = name.unwrap_or_else(|| file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
-            let result: api::PolicyEntry = c.call("_sill/policy.import", api::PolicyImport { name, text, replace })?;
+            let result: api::PolicyEntry = c.call(method::POLICY_IMPORT, api::PolicyImport { name, text, replace })?;
             println!("Imported policy {} on the daemon host.", result.name);
         }
     }
@@ -800,7 +801,7 @@ fn host_control_cmd(cmd: HostControlCmd) -> Result<()> {
             sill_proto::client::declare_capability(api::CAPABILITY);
             let c = sill_proto::Client::connect_or_start()?;
             let key = policy_session_key(&c, &session)?;
-            let _: sill_proto::Empty = c.call("_sill/host_control.keep", api::Keep { session_id: key, name: name.clone(), keep })?;
+            let _: sill_proto::Empty = c.call(method::HOST_CONTROL_KEEP, api::Keep { session_id: key, name: name.clone(), keep })?;
             println!("{name}: keep after revocation = {keep}");
         }
         HostControlCmd::State { session } => {
@@ -808,13 +809,13 @@ fn host_control_cmd(cmd: HostControlCmd) -> Result<()> {
             sill_proto::client::declare_capability("sill.permission_modes");
             let c = sill_proto::Client::connect_or_start()?;
             let key = policy_session_key(&c, &session)?;
-            print(&c.call("_sill/host_control.state", SessionKey { session_id: key })?);
+            print(&c.call(method::HOST_CONTROL_STATE, SessionKey { session_id: key })?);
         }
         HostControlCmd::Revoke { session } => {
             sill_proto::client::declare_capability(api::CAPABILITY);
             let c = sill_proto::Client::connect_or_start()?;
             let key = policy_session_key(&c, &session)?;
-            print(&c.call("_sill/host_control.revoke", SessionKey { session_id: key })?);
+            print(&c.call(method::HOST_CONTROL_REVOKE, SessionKey { session_id: key })?);
         }
         HostControlCmd::Activate { session, operations } => {
             // this command is the displaying frontend: it shows the state and keeps the connection,
@@ -823,17 +824,17 @@ fn host_control_cmd(cmd: HostControlCmd) -> Result<()> {
             sill_proto::client::declare_capability("sill.permission_modes");
             let c = sill_proto::Client::connect_or_start()?;
             let key = policy_session_key(&c, &session)?;
-            let before: api::State = c.call("_sill/host_control.state", SessionKey { session_id: key.clone() })?;
+            let before: api::State = c.call(method::HOST_CONTROL_STATE, SessionKey { session_id: key.clone() })?;
             if let Some(forbidden) = &before.forbidden {
                 bail!("{forbidden}");
             }
-            let state: api::State = c.call("_sill/host_control.activate", api::Activate { session_id: key.clone(), operations })?;
+            let state: api::State = c.call(method::HOST_CONTROL_ACTIVATE, api::Activate { session_id: key.clone(), operations })?;
             print(&state);
             println!("HOST CONTROL · actions can run outside the jail · session {key}");
             println!("This command keeps it active; Ctrl-C or closing it revokes.");
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(30));
-                let state: api::State = c.call("_sill/host_control.state", SessionKey { session_id: key.clone() })?;
+                let state: api::State = c.call(method::HOST_CONTROL_STATE, SessionKey { session_id: key.clone() })?;
                 if !state.active {
                     print(&state);
                     break;
@@ -861,12 +862,12 @@ fn permissions_cmd(cmd: PermissionsCmd) -> Result<()> {
     match cmd {
         PermissionsCmd::Show { session } => {
             let row = c.resolve_session(&session)?;
-            let preview: api::PolicyView = c.call("_sill/policy.preview", SessionKey { session_id: row.session_id.clone() })?;
+            let preview: api::PolicyView = c.call(method::POLICY_PREVIEW, SessionKey { session_id: row.session_id.clone() })?;
             print_permissions(&preview);
             for diagnostic in &preview.diagnostics {
                 eprintln!("{diagnostic}");
             }
-            let launch: api::PolicySnapshot = c.call("_sill/policy.snapshot", SessionKey { session_id: row.session_id })?;
+            let launch: api::PolicySnapshot = c.call(method::POLICY_SNAPSHOT, SessionKey { session_id: row.session_id })?;
             if let Some(launch) = launch.snapshot.filter(|_| row.running) {
                 let effective = |view: &api::PolicyView| view.permissions.iter().map(|p| (p.capability.clone(), p.effective)).collect::<Vec<_>>();
                 if effective(&launch) != effective(&preview) {
@@ -885,19 +886,19 @@ fn permissions_cmd(cmd: PermissionsCmd) -> Result<()> {
                 "off" => Some(false),
                 _ => None,
             };
-            print_changed(c.call("_sill/permissions.set", api::PermissionChoice { session_id: key, capability, enabled })?);
+            print_changed(c.call(method::PERMISSIONS_SET, api::PermissionChoice { session_id: key, capability, enabled })?);
         }
         PermissionsCmd::Development { session } => {
             let key = policy_session_key(&c, &session)?;
-            print_changed(c.call("_sill/permissions.apply_development", SessionKey { session_id: key })?);
+            print_changed(c.call(method::PERMISSIONS_APPLY_DEVELOPMENT, SessionKey { session_id: key })?);
         }
         PermissionsCmd::Restore { session } => {
             let key = policy_session_key(&c, &session)?;
-            print_changed(c.call("_sill/permissions.restore_defaults", SessionKey { session_id: key })?);
+            print_changed(c.call(method::PERMISSIONS_RESTORE_DEFAULTS, SessionKey { session_id: key })?);
         }
         PermissionsCmd::SaveHost { session, host } => {
             let key = policy_session_key(&c, &session)?;
-            let saved: api::SavedHost = c.call("_sill/policy.save_host", api::NetworkHost { session_id: key, host: host.clone() })?;
+            let saved: api::SavedHost = c.call(method::POLICY_SAVE_HOST, api::NetworkHost { session_id: key, host: host.clone() })?;
             println!("Saved {host} for future {} sessions; existing sessions are unchanged.", saved.agent_name);
         }
     }
@@ -1709,7 +1710,7 @@ fn pin_cmd(cmd: PinCmd) -> Result<()> {
         PinCmd::List => {
             let mut after = None;
             loop {
-                let page: api::Page = c.call("_sill/pins.list", api::List { after, ..Default::default() })?;
+                let page: api::Page = c.call(method::PINS_LIST, api::List { after, ..Default::default() })?;
                 for p in page.pins {
                     println!("{}", p.display);
                 }
@@ -1721,12 +1722,12 @@ fn pin_cmd(cmd: PinCmd) -> Result<()> {
         }
         PinCmd::Add { path } => {
             let path = pin_cli_path(&path)?;
-            let added: api::Pinned = c.call("_sill/pins.add", api::GlobalPin { path: HostPath::from_path(&path) })?;
+            let added: api::Pinned = c.call(method::PINS_ADD, api::GlobalPin { path: HostPath::from_path(&path) })?;
             println!("{} pinned globally", added.path.display);
         }
         PinCmd::Remove { path } => {
             let path = pin_cli_path(&path)?;
-            let _: serde_json::Value = c.call("_sill/pins.remove", api::GlobalPin { path: HostPath::from_path(&path) })?;
+            let _: serde_json::Value = c.call(method::PINS_REMOVE, api::GlobalPin { path: HostPath::from_path(&path) })?;
             println!("{} removed from the shortcuts", path.display());
         }
     }
@@ -1758,8 +1759,8 @@ fn session_cmd(cmd: SessionCmd) -> Result<()> {
                 ghost,
                 workspaces: None,
             };
-            let k: sill_proto::sessions::SessionKey = c.call("_sill/sessions.create", create)?;
-            let _: sill_proto::sessions::Started = c.call("_sill/sessions.start", &k)?;
+            let k: sill_proto::sessions::SessionKey = c.call(method::SESSIONS_CREATE, create)?;
+            let _: sill_proto::sessions::Started = c.call(method::SESSIONS_START, &k)?;
             println!("{}", k.session_id);
             eprintln!("{}session {} started", if ghost { "ghost " } else { "" }, k.session_id);
         }
@@ -1779,7 +1780,7 @@ fn session_cmd(cmd: SessionCmd) -> Result<()> {
         SessionCmd::End { key } => {
             let s = c.resolve_session(&key.join(" "))?;
             let e: sill_proto::sessions::Ending =
-                c.call("_sill/sessions.end", sill_proto::sessions::End { session_id: s.session_id.clone(), reason: "close".into() })?;
+                c.call(method::SESSIONS_END, sill_proto::sessions::End { session_id: s.session_id.clone(), reason: "close".into() })?;
             match (e.pending, e.deleted) {
                 (true, _) => println!("{}: the agent writes its summary; the session ends when it is done", s.session_id),
                 (false, true) => println!("{}: deleted ({})", s.session_id, if s.ghost { "a ghost leaves nothing" } else { "nothing was asked in it" }),

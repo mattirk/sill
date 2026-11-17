@@ -1,6 +1,7 @@
 //! Model providers (`sill.providers`, docs/model-providers.md) for a frontend.
 use anyhow::{Result, bail};
 use sill_proto::client::Client;
+use sill_proto::method;
 use sill_proto::providers as api;
 use sill_proto::wire::Secret;
 
@@ -16,7 +17,7 @@ pub fn load(client: &Client) -> Result<Option<api::Listed>> {
     if !client.has_capability(api::CAPABILITY) {
         return Ok(None);
     }
-    Ok(Some(client.call("_sill/providers.list", sill_proto::Empty::default())?))
+    Ok(Some(client.call(method::PROVIDERS_LIST, sill_proto::Empty::default())?))
 }
 
 pub fn save(client: &Client, provider: api::Provider, key: Option<String>, clear_key: bool) -> Result<api::Saved> {
@@ -24,7 +25,7 @@ pub fn save(client: &Client, provider: api::Provider, key: Option<String>, clear
     if !provider.model_limits.is_empty() && !client.has_capability(api::LIMITS_CAPABILITY) {
         bail!("update and restart the daemon to save model token limits");
     }
-    client.call("_sill/providers.save", api::Save { provider, key: key.map(Secret), clear_key })
+    client.call(method::PROVIDERS_SAVE, api::Save { provider, key: key.map(Secret), clear_key })
 }
 
 /// The context a running Ollama model was loaded with, read on the daemon host.
@@ -32,18 +33,18 @@ pub fn detect_limits(client: &Client, request: api::DetectLimits) -> Result<api:
     if !client.has_capability(api::LIMITS_CAPABILITY) {
         bail!("update and restart the daemon for model token-limit detection");
     }
-    client.call("_sill/providers.detect_limits", request)
+    client.call(method::PROVIDERS_DETECT_LIMITS, request)
 }
 
 pub fn remove(client: &Client, provider_id: &str) -> Result<()> {
     supported(client)?;
-    let _: api::Removed = client.call("_sill/providers.remove", api::Key { provider_id: provider_id.into() })?;
+    let _: api::Removed = client.call(method::PROVIDERS_REMOVE, api::Key { provider_id: provider_id.into() })?;
     Ok(())
 }
 
 pub fn test(client: &Client, base_url: &str, key: Option<String>, provider_id: Option<String>) -> Result<api::Tested> {
     supported(client)?;
-    client.call("_sill/providers.test", api::Test { base_url: base_url.into(), key: key.map(Secret), provider_id })
+    client.call(method::PROVIDERS_TEST, api::Test { base_url: base_url.into(), key: key.map(Secret), provider_id })
 }
 
 /// A provider id from its name: lowercase letters, digits and `-`, not one of `taken`.

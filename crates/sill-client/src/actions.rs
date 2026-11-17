@@ -168,27 +168,28 @@ mod tests {
     use super::*;
     use crate::fake::{connector, pair};
     use serde_json::json;
+    use sill_proto::method;
 
     #[test]
     fn outcomes_tell_refused_from_never_sent_from_uncertain() {
         let (client, mut peer) = pair();
         let actions = Actions::new(connector(vec![client]));
         let server = std::thread::spawn(move || {
-            let first = peer.expect("_sill/sessions.submit");
+            let first = peer.expect(method::SESSIONS_SUBMIT);
             peer.refuse(&first, "invalid_state", "the session has ended");
-            let second = peer.expect("_sill/sessions.cancel");
+            let second = peer.expect(method::SESSIONS_CANCEL);
             peer.reply(&second, json!({"requested": true}));
-            let _third = peer.expect("_sill/questions.answer");
+            let _third = peer.expect(method::QUESTIONS_ANSWER);
             // the daemon goes away with the request in hand
         });
-        let refused = actions.call("_sill/sessions.submit", json!({"text":"hi"}));
+        let refused = actions.call(method::SESSIONS_SUBMIT, json!({"text":"hi"}));
         assert_eq!(refused, Outcome::Refused { code: Some("invalid_state".into()), message: "_sill/sessions.submit: the session has ended".into() });
-        assert_eq!(actions.call("_sill/sessions.cancel", json!({})), Outcome::Done(json!({"requested": true})));
-        let lost = actions.call("_sill/questions.answer", json!({}));
+        assert_eq!(actions.call(method::SESSIONS_CANCEL, json!({})), Outcome::Done(json!({"requested": true})));
+        let lost = actions.call(method::QUESTIONS_ANSWER, json!({}));
         assert!(matches!(lost, Outcome::Uncertain(_)), "{lost:?}");
         server.join().unwrap();
         // the connection is gone and no new one can be made: the next request never leaves
-        let unsent = actions.call("_sill/sessions.cancel", json!({}));
+        let unsent = actions.call(method::SESSIONS_CANCEL, json!({}));
         assert!(matches!(unsent, Outcome::NotSent(_)), "{unsent:?}");
     }
 }

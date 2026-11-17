@@ -2,6 +2,7 @@
 use super::Hub;
 use anyhow::Result;
 use serde_json::{Value, json};
+use sill_proto::method;
 use sill_proto::{changes as api, rpc::Error, sessions::HostPath};
 fn invalid(e: impl std::fmt::Display) -> anyhow::Error {
     Error::invalid_params(e).into()
@@ -232,18 +233,18 @@ impl Hub {
     pub(super) fn changes_public(&self, method: &str, params: Value) -> Option<Result<Value>> {
         if !matches!(
             method,
-            "_sill/changes.list"
-                | "_sill/changes.diff"
-                | "_sill/changes.keep"
-                | "_sill/changes.revert"
-                | "_sill/changes.undo"
-                | "_sill/changes.git-revert"
-                | "_sill/changes.history"
+            method::CHANGES_LIST
+                | method::CHANGES_DIFF
+                | method::CHANGES_KEEP
+                | method::CHANGES_REVERT
+                | method::CHANGES_UNDO
+                | method::CHANGES_GIT_REVERT
+                | method::CHANGES_HISTORY
         ) {
             return None;
         }
         Some((|| match method {
-            "_sill/changes.list" => {
+            method::CHANGES_LIST => {
                 let a: api::List = parse(params)?;
                 let limit = limit(a.limit)?;
                 let mut unreadable = vec![];
@@ -269,7 +270,7 @@ impl Hub {
                 }
                 bounded(page)
             }
-            "_sill/changes.diff" => {
+            method::CHANGES_DIFF => {
                 let a: api::Diff = parse(params)?;
                 let target = match a.target {
                     api::Target::Change { session_id, path: p } => {
@@ -301,7 +302,7 @@ impl Hub {
                 }
                 bounded(api::DiffPage { text: text[offset..end].into(), next_offset: (end < text.len()).then(|| end.to_string()), fingerprint })
             }
-            "_sill/changes.keep" => {
+            method::CHANGES_KEEP => {
                 let a: api::Keep = parse(params)?;
                 session(self, &a.session_id)?;
                 batch(a.items.len())?;
@@ -317,14 +318,14 @@ impl Hub {
                     .collect::<Result<Vec<_>>>()?;
                 done(self, self.changes_keep(&a.session_id, items))
             }
-            "_sill/changes.revert" => {
+            method::CHANGES_REVERT => {
                 let a: api::Revert = parse(params)?;
                 session(self, &a.session_id)?;
                 batch(a.paths.len())?;
                 let paths = a.paths.iter().map(path).collect::<Result<_>>()?;
                 done(self, self.changes_revert(&a.session_id, paths))
             }
-            "_sill/changes.undo" => {
+            method::CHANGES_UNDO => {
                 let a: api::Undo = parse(params)?;
                 session(self, &a.session_id)?;
                 batch(a.keep_ids.len())?;
@@ -333,14 +334,14 @@ impl Hub {
                 }
                 done(self, self.changes_undo(&a.session_id, a.keep_ids, a.force))
             }
-            "_sill/changes.git-revert" => {
+            method::CHANGES_GIT_REVERT => {
                 let a: api::GitRevert = parse(params)?;
                 let (repo, rel) = live(&a.repo, &a.path)?;
                 let result = self.changes_git_revert(&repo, &rel);
                 self.changes_changed();
                 bounded(sill_proto::Text { text: result? })
             }
-            "_sill/changes.history" => {
+            method::CHANGES_HISTORY => {
                 let a: api::History = parse(params)?;
                 let limit = limit(a.limit)?;
                 let before =

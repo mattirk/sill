@@ -1,6 +1,7 @@
 //! Local presentation conversions over public SFP only. Exact paths never pass through lossy JSON strings.
 use anyhow::{Result, bail};
 use serde_json::Value;
+use sill_proto::method;
 use sill_proto::{changes as api, sessions::HostPath as P, wire};
 type Call<'a> = &'a dyn Fn(&str, Value) -> Result<Value>;
 fn invoke<T: serde::de::DeserializeOwned>(call: Call<'_>, method: &str, input: impl serde::Serialize) -> Result<T> {
@@ -10,7 +11,7 @@ pub fn list(call: Call<'_>) -> Result<wire::ChangesList> {
     let mut result = wire::ChangesList::default();
     let mut after = None;
     loop {
-        let page: api::Page = invoke(call, "_sill/changes.list", api::List { after, limit: Some(128) })?;
+        let page: api::Page = invoke(call, method::CHANGES_LIST, api::List { after, limit: Some(128) })?;
         result.unreadable.extend(page.unreadable);
         for row in page.entries {
             match row {
@@ -98,7 +99,7 @@ pub fn diff(call: Call<'_>, of: wire::DiffOf) -> Result<sill_proto::Text> {
     let mut fingerprint = None;
     let mut text = String::new();
     loop {
-        let p: api::DiffPage = invoke(call, "_sill/changes.diff", api::Diff { target: target.clone(), offset, fingerprint })?;
+        let p: api::DiffPage = invoke(call, method::CHANGES_DIFF, api::Diff { target: target.clone(), offset, fingerprint })?;
         text.push_str(&p.text);
         offset = p.next_offset;
         fingerprint = Some(p.fingerprint);
@@ -115,7 +116,7 @@ pub fn keep(call: Call<'_>, a: sill_proto::ChangesKeep) -> Result<wire::Done> {
         return Ok(wire::Done::default());
     }
     let items = a.items.into_iter().map(|(p, h)| api::KeepItem { path: P::from_path(&p), expected_hash: h }).collect();
-    let d: api::Done = invoke(call, "_sill/changes.keep", api::Keep { session_id: a.session, items })?;
+    let d: api::Done = invoke(call, method::CHANGES_KEEP, api::Keep { session_id: a.session, items })?;
     d.try_into()
 }
 pub fn revert(call: Call<'_>, a: sill_proto::ChangesPaths) -> Result<wire::Done> {
@@ -123,7 +124,7 @@ pub fn revert(call: Call<'_>, a: sill_proto::ChangesPaths) -> Result<wire::Done>
     if a.paths.is_empty() {
         return Ok(wire::Done::default());
     }
-    let d: api::Done = invoke(call, "_sill/changes.revert", api::Revert { session_id: a.session, paths: a.paths.iter().map(|p| P::from_path(p)).collect() })?;
+    let d: api::Done = invoke(call, method::CHANGES_REVERT, api::Revert { session_id: a.session, paths: a.paths.iter().map(|p| P::from_path(p)).collect() })?;
     d.try_into()
 }
 pub fn undo(call: Call<'_>, a: sill_proto::ChangesUndo) -> Result<wire::Done> {
@@ -136,7 +137,7 @@ pub fn undo(call: Call<'_>, a: sill_proto::ChangesUndo) -> Result<wire::Done> {
     if ids.is_empty() {
         return Ok(wire::Done::default());
     }
-    let d: api::Done = invoke(call, "_sill/changes.undo", api::Undo { session_id: a.session, keep_ids: ids, force: a.force })?;
+    let d: api::Done = invoke(call, method::CHANGES_UNDO, api::Undo { session_id: a.session, keep_ids: ids, force: a.force })?;
     d.try_into()
 }
 pub fn history(call: Call<'_>, f: sill_core::history::Filter) -> Result<Vec<sill_core::history::Event>> {
@@ -146,7 +147,7 @@ pub fn history(call: Call<'_>, f: sill_core::history::Filter) -> Result<Vec<sill
     loop {
         let p: api::HistoryPage = invoke(
             call,
-            "_sill/changes.history",
+            method::CHANGES_HISTORY,
             api::History {
                 before,
                 since: f.since.map(|v| v.to_string()),
@@ -203,7 +204,7 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
         let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(b"/fixture/\xff\nname".to_vec()));
         let call = |method: &str, value: Value| -> Result<Value> {
-            assert_eq!(method, "_sill/changes.keep");
+            assert_eq!(method, method::CHANGES_KEEP);
             let request: api::Keep = serde_json::from_value(value)?;
             assert_eq!(request.items[0].path.to_path()?, path);
             Ok(serde_json::to_value(api::Done { done: vec![api::Outcome { path: P::from_path(&path), message: "kept".into() }], failed: vec![] })?)

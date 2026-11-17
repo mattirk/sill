@@ -2,6 +2,7 @@
 use crate::{App, Message, blocking};
 use iced::{Task, widget::operation};
 use serde_json::json;
+use sill_proto::method;
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -58,7 +59,7 @@ impl App {
                 let token = e.token.clone();
                 blocking(
                     move || {
-                        let outcome = actions.call("_sill/sessions.update", json!({"session_id":id,"change":{"type":"name","text":text}}));
+                        let outcome = actions.call(method::SESSIONS_UPDATE, json!({"session_id":id,"change":{"type":"name","text":text}}));
                         let result = if outcome.is_done() {
                             Ok(())
                         } else {

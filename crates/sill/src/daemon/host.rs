@@ -4,6 +4,7 @@ use super::Hub;
 use anyhow::Result;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use sill_proto::method;
 use sill_proto::{host as api, rpc::Error};
 use std::collections::HashMap;
 use std::io::Write;
@@ -247,25 +248,25 @@ fn start(
 pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
     if !matches!(
         method,
-        "_sill/streams.port"
-            | "_sill/streams.login_callback"
-            | "_sill/operations.cancel"
-            | "_sill/agents.login"
-            | "_sill/agents.discover"
-            | "_sill/agents.reset"
-            | "_sill/registry.install"
-            | "_sill/registry.list"
-            | "_sill/operations.get"
+        method::STREAMS_PORT
+            | method::STREAMS_LOGIN_CALLBACK
+            | method::OPERATIONS_CANCEL
+            | method::AGENTS_LOGIN
+            | method::AGENTS_DISCOVER
+            | method::AGENTS_RESET
+            | method::REGISTRY_INSTALL
+            | method::REGISTRY_LIST
+            | method::OPERATIONS_GET
     ) {
         return None;
     }
     Some((|| {
         match method {
-            "_sill/operations.get" => {
+            method::OPERATIONS_GET => {
                 let a: api::OperationKey = args(params)?;
                 hub.with_store(|s| Ok(json!(sill_core::operations::Journal::new(s.conn())?.get(&a.operation_id)?)))
             }
-            "_sill/streams.port" => {
+            method::STREAMS_PORT => {
                 let a: api::PortOpen = args(params)?;
                 if !sill_core::session::valid_id(&a.session_id) || a.port == 0 {
                     return Err(invalid("valid session_id and nonzero port required"));
@@ -282,7 +283,7 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
                 }
                 Ok(json!(api::HostStream { token: super::streams::port(&a.session_id, a.port)? }))
             }
-            "_sill/streams.login_callback" => {
+            method::STREAMS_LOGIN_CALLBACK => {
                 let a: api::OperationKey = args(params)?;
                 let login = running_login(&a.operation_id)?;
                 let Some(port) = *login.callback_port.lock().unwrap() else { return Err(domain("invalid_state", "this login reported no callback port")) };
@@ -291,12 +292,12 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
                     .map_err(|e| domain("invalid_state", &format!("nothing answers the login's callback port {port}: {e}")))?;
                 Ok(json!(api::HostStream { token: super::streams::tcp(tcp)? }))
             }
-            "_sill/operations.cancel" => {
+            method::OPERATIONS_CANCEL => {
                 let a: api::OperationKey = args(params)?;
                 running_login(&a.operation_id)?.cancelled.store(true, Ordering::Release);
                 Ok(json!(sill_proto::Empty {}))
             }
-            "_sill/agents.login" => {
+            method::AGENTS_LOGIN => {
                 let a: api::AgentLogin = args(params)?;
                 let (id, input) = identity(&a.operation_id, &a)?;
                 if let Some(result) = existing(hub, &id, method, &input)? {
@@ -316,7 +317,7 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
                     Ok(agent.id)
                 })?))
             }
-            "_sill/agents.discover" => {
+            method::AGENTS_DISCOVER => {
                 let a: api::AgentDiscover = args(params)?;
                 let (id, input) = identity(&a.operation_id, &a)?;
                 if let Some(result) = existing(hub, &id, method, &input)? {
@@ -348,7 +349,7 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
                     Ok(agent.id)
                 })?))
             }
-            "_sill/agents.reset" => {
+            method::AGENTS_RESET => {
                 let a: api::AgentReset = args(params)?;
                 valid_id(&a.agent_id)?;
                 let home = sill_core::changes::home()?;
@@ -364,7 +365,7 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
                 *credentials = Default::default();
                 Ok(json!(api::AgentResetDone { removed: removed as u32, stopped }))
             }
-            "_sill/registry.install" => {
+            method::REGISTRY_INSTALL => {
                 let a: api::RegistryInstall = args(params)?;
                 let (id, input) = identity(&a.operation_id, &a)?;
                 if let Some(result) = existing(hub, &id, method, &input)? {
@@ -377,7 +378,7 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
                     Ok(agent.id)
                 })?))
             }
-            "_sill/registry.list" => {
+            method::REGISTRY_LIST => {
                 let a: api::RegistryList = args(params)?;
                 let limit = a.limit.unwrap_or(64) as usize;
                 if !(1..=128).contains(&limit) {

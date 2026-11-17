@@ -2,6 +2,7 @@
 use super::*;
 use crate::daemon::sfp::failure;
 use rusqlite::OptionalExtension;
+use sill_proto::method;
 use sill_proto::sessions as api;
 
 fn record(store: &Store, s: sill_core::store::Session) -> Result<api::Session> {
@@ -148,7 +149,7 @@ impl Hub {
         }
         let result = || -> Result<Value> {
             match method {
-                "_sill/sessions.list" => {
+                method::SESSIONS_LIST => {
                     let a: api::List = args(params)?;
                     let limit = a.limit.unwrap_or(64) as usize;
                     if !(1..=128).contains(&limit) {
@@ -187,15 +188,15 @@ impl Hub {
                         Ok(value)
                     })
                 }
-                "_sill/sessions.get" => {
+                method::SESSIONS_GET => {
                     let a: api::SessionKey = args(params)?;
                     self.with_store(|s| Ok(json!(record(s, exact(s, &a.session_id)?)?)))
                 }
-                "_sill/sessions.create" => {
+                method::SESSIONS_CREATE => {
                     let a: api::Create = args(params)?;
                     self.with_store(|s| Ok(json!(create(s, a)?)))
                 }
-                "_sill/sessions.update" => {
+                method::SESSIONS_UPDATE => {
                     let a: api::Update = args(params)?;
                     if serde_json::to_vec(&a.change)?.len() > 1024 * 1024 {
                         return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "session update exceeds 1 MiB").into());
@@ -247,7 +248,7 @@ impl Hub {
                     }
                     Ok(json!({}))
                 }
-                "_sill/sessions.end" => {
+                method::SESSIONS_END => {
                     let a: api::End = args(params)?;
                     if !["close", "idle", "quit"].contains(&a.reason.as_str()) {
                         return Err(Error::invalid_params("reason must be close, idle or quit").into());
@@ -256,13 +257,13 @@ impl Hub {
                     let e = if row.ended_at.is_some() { Ending { pending: false, deleted: false } } else { self.end_session(&a.session_id, &a.reason)? };
                     Ok(json!(api::Ending { pending: e.pending, deleted: e.deleted }))
                 }
-                "_sill/sessions.delete" => {
+                method::SESSIONS_DELETE => {
                     let a: api::SessionKey = args(params)?;
                     self.with_store(|s| exact(s, &a.session_id))?;
                     self.delete_session(&a.session_id)?;
                     Ok(json!({}))
                 }
-                "_sill/sessions.reset" => {
+                method::SESSIONS_RESET => {
                     let a: api::SessionKey = args(params)?;
                     let row = self.with_store(|s| exact(s, &a.session_id))?;
                     if row.ended_at.is_some() {
@@ -271,7 +272,7 @@ impl Hub {
                     self.ensure_runner(&a.session_id, true)?;
                     Ok(json!({}))
                 }
-                "_sill/sessions.log" => {
+                method::SESSIONS_LOG => {
                     let a: api::Log = args(params)?;
                     self.with_store(|s| exact(s, &a.session_id))?;
                     let n = a.lines.unwrap_or(100);
@@ -289,19 +290,19 @@ impl Hub {
                     }
                     Ok(json!(sill_proto::Text { text }))
                 }
-                "_sill/sessions.start" | "_sill/sessions.stop" | "_sill/sessions.checkpoint" => {
+                method::SESSIONS_START | method::SESSIONS_STOP | method::SESSIONS_CHECKPOINT => {
                     let a: api::SessionKey = args(params)?;
                     let row = self.with_store(|s| exact(s, &a.session_id))?;
                     if row.ended_at.is_some() {
                         return Err(Error::domain("invalid_state", "session has ended; reopen it explicitly").into());
                     }
                     match method {
-                        "_sill/sessions.start" => {
+                        method::SESSIONS_START => {
                             let s = self.start_session(&a.session_id)?;
                             self.ensure_runner(&a.session_id, false)?;
                             Ok(json!(api::Started { session_id: a.session_id, fresh: s.fresh }))
                         }
-                        "_sill/sessions.stop" => {
+                        method::SESSIONS_STOP => {
                             crate::daemon::host_control::session_ended(self, &a.session_id, "the session stopped");
                             self.stop_session(&a.session_id)?;
                             Ok(json!({}))

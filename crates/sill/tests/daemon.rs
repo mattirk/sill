@@ -2,6 +2,7 @@
 //! state dir of its own: it needs no systemd, no jail and no agent, so it runs anywhere the
 //! binary builds — a sill session included.
 
+use sill_proto::method;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -137,7 +138,7 @@ impl Daemon {
 
 /// Attach a stream to a terminal; the token line and first keystrokes go in one write.
 fn attach_terminal(d: &Daemon, c: &mut Conn, id: &str, input: &str) -> UnixStream {
-    let r = c.call("_sill/terminals.attach", json!({"terminal_id": id})).unwrap();
+    let r = c.call(method::TERMINALS_ATTACH, json!({"terminal_id": id})).unwrap();
     let token = r["result"]["token"].as_str().unwrap_or_else(|| panic!("attach: {r}")).to_string();
     let mut stream = UnixStream::connect(d.socket()).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -172,13 +173,13 @@ fn a_terminal_outlives_its_stream_and_replays_on_attach() {
     let d = Daemon::start();
     let mut c = d.connect().unwrap();
     let home = d.dir.join("home");
-    let open = c.call("_sill/terminals.open", json!({
+    let open = c.call(method::TERMINALS_OPEN, json!({
         "label": "test", "argv": ["/bin/sh", "-c", "while read line; do [ \"$line\" = size ] && stty size; [ \"$line\" = quit ] && exit 3; printf 'echo:%s\\n' \"$line\"; done"],
         "cwd": sill_proto::sessions::HostPath::from_path(&home), "cols": 80, "rows": 24,
     })).unwrap();
     let id = open["result"]["terminal_id"].as_str().unwrap_or_else(|| panic!("open: {open}")).to_string();
     assert_eq!(open["result"]["state"], "running");
-    let resize = c.call("_sill/terminals.resize", json!({"terminal_id": id, "cols": 92, "rows": 41})).unwrap();
+    let resize = c.call(method::TERMINALS_RESIZE, json!({"terminal_id": id, "cols": 92, "rows": 41})).unwrap();
     assert!(resize.get("error").is_none(), "{resize}");
 
     let mut first = attach_terminal(&d, &mut c, &id, "hello\nsize\n");
@@ -188,7 +189,7 @@ fn a_terminal_outlives_its_stream_and_replays_on_attach() {
     std::thread::sleep(Duration::from_millis(300));
 
     // closing the stream detached: the shell still runs and its output comes back first
-    let list = c.call("_sill/terminals.list", json!({})).unwrap();
+    let list = c.call(method::TERMINALS_LIST, json!({})).unwrap();
     assert_eq!(list["result"]["terminals"][0]["state"], "running", "{list}");
     assert_eq!(list["result"]["terminals"][0]["label"], "test");
     let mut second = attach_terminal(&d, &mut c, &id, "again\n");
@@ -202,7 +203,7 @@ fn a_terminal_outlives_its_stream_and_replays_on_attach() {
     let _ = std::io::Read::read_to_end(&mut second, &mut rest);
     let mut state = json!(null);
     for _ in 0..50 {
-        state = c.call("_sill/terminals.get", json!({"terminal_id": id})).unwrap();
+        state = c.call(method::TERMINALS_GET, json!({"terminal_id": id})).unwrap();
         if state["result"]["exit_code"] == 3 {
             break;
         }
@@ -212,8 +213,8 @@ fn a_terminal_outlives_its_stream_and_replays_on_attach() {
     assert_eq!(state["result"]["exit_code"], 3, "{state}");
 
     // close forgets it
-    assert!(c.call("_sill/terminals.close", json!({"terminal_id": id})).unwrap().get("error").is_none());
-    let gone = c.call("_sill/terminals.get", json!({"terminal_id": id})).unwrap();
+    assert!(c.call(method::TERMINALS_CLOSE, json!({"terminal_id": id})).unwrap().get("error").is_none());
+    let gone = c.call(method::TERMINALS_GET, json!({"terminal_id": id})).unwrap();
     assert_eq!(gone["error"]["data"]["code"], "not_found", "{gone}");
 }
 
@@ -221,27 +222,27 @@ fn a_terminal_outlives_its_stream_and_replays_on_attach() {
 fn unclaimed_stream_tokens_are_bounded() {
     let d = Daemon::start();
     let mut c = d.connect().unwrap();
-    let open = c.call("_sill/terminals.open", json!({"argv": ["/bin/sh", "-c", "exec sleep 600"], "cols": 80, "rows": 24})).unwrap();
+    let open = c.call(method::TERMINALS_OPEN, json!({"argv": ["/bin/sh", "-c", "exec sleep 600"], "cols": 80, "rows": 24})).unwrap();
     let id = open["result"]["terminal_id"].as_str().unwrap().to_string();
     for i in 0..64 {
-        let r = c.call("_sill/terminals.attach", json!({"terminal_id": id})).unwrap();
+        let r = c.call(method::TERMINALS_ATTACH, json!({"terminal_id": id})).unwrap();
         assert!(r["result"]["token"].is_string(), "token {i}: {r}");
     }
-    let refused = c.call("_sill/terminals.attach", json!({"terminal_id": id})).unwrap();
+    let refused = c.call(method::TERMINALS_ATTACH, json!({"terminal_id": id})).unwrap();
     assert_eq!(refused["error"]["data"]["code"], "limit_exceeded", "{refused}");
-    c.call("_sill/terminals.close", json!({"terminal_id": id})).unwrap();
+    c.call(method::TERMINALS_CLOSE, json!({"terminal_id": id})).unwrap();
 }
 
 #[test]
 fn closing_a_terminal_hangs_up_its_shell_and_ends_streams() {
     let d = Daemon::start();
     let mut c = d.connect().unwrap();
-    let open = c.call("_sill/terminals.open", json!({"argv": ["/bin/sh", "-c", "echo up; exec sleep 600"], "cols": 80, "rows": 24})).unwrap();
+    let open = c.call(method::TERMINALS_OPEN, json!({"argv": ["/bin/sh", "-c", "echo up; exec sleep 600"], "cols": 80, "rows": 24})).unwrap();
     let id = open["result"]["terminal_id"].as_str().unwrap_or_else(|| panic!("open: {open}")).to_string();
     let pid = open["result"]["pid"].as_u64().unwrap();
     let mut stream = attach_terminal(&d, &mut c, &id, "");
     assert!(read_until(&mut stream, "up").contains("up"));
-    assert!(c.call("_sill/terminals.close", json!({"terminal_id": id})).unwrap().get("error").is_none());
+    assert!(c.call(method::TERMINALS_CLOSE, json!({"terminal_id": id})).unwrap().get("error").is_none());
     let mut rest = Vec::new();
     let _ = std::io::Read::read_to_end(&mut stream, &mut rest);
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -522,14 +523,14 @@ fn initialized_connections_receive_public_change_notifications_only_after_handsh
     assert_eq!(public.call("_sill/internal/sessions.list", json!({})).unwrap()["error"]["code"], -32601);
     let mut publisher = d.connect().unwrap();
     let session =
-        publisher.call("_sill/sessions.create", json!({"create_id":"notifications","agent":"claude","policy":"default"})).unwrap()["result"]["session_id"]
+        publisher.call(method::SESSIONS_CREATE, json!({"create_id":"notifications","agent":"claude","policy":"default"})).unwrap()["result"]["session_id"]
             .clone();
     let request_id = publisher.next;
-    publisher.send_raw(&json!({"jsonrpc":"2.0","id":request_id,"method":"_sill/sessions.delete","params":{"session_id":session}}).to_string()).unwrap();
+    publisher.send_raw(&json!({"jsonrpc":"2.0","id":request_id,"method":method::SESSIONS_DELETE,"params":{"session_id":session}}).to_string()).unwrap();
     let mut changed = false;
     loop {
         let message = publisher.read().unwrap();
-        if message.get("method") == Some(&json!("_sill/changes.changed")) {
+        if message.get("method") == Some(&json!(method::CHANGES_CHANGED)) {
             changed = true;
         }
         if message.get("id") == Some(&json!(request_id)) {
@@ -537,7 +538,7 @@ fn initialized_connections_receive_public_change_notifications_only_after_handsh
         }
     }
     assert!(changed, "initialized subscriber receives the public change notification");
-    assert_eq!(public.read().unwrap()["method"], "_sill/changes.changed");
+    assert_eq!(public.read().unwrap()["method"], method::CHANGES_CHANGED);
     {
         let mut conn = uninitialized;
         let error = conn.read().unwrap_err();
@@ -556,23 +557,23 @@ fn public_session_lifecycle_retries_pagination_and_restart() {
     };
     assert_eq!(c.call("_sill/internal/sessions.list", json!({})).unwrap()["error"]["code"], -32601);
     let input = json!({"create_id":"durable-create","agent":"claude","policy":"default"});
-    let first = call(&mut c, "_sill/sessions.create", input.clone());
-    assert_eq!(call(&mut c, "_sill/sessions.create", input.clone()), first);
-    assert_eq!(call(&mut c, "_sill/sessions.stop", first.clone()), json!({}));
-    assert_eq!(call(&mut c, "_sill/sessions.get", first.clone())["ended_at"], Value::Null);
-    let conflict = c.call("_sill/sessions.create", json!({"create_id":"durable-create","agent":"codex","policy":"default"})).unwrap();
+    let first = call(&mut c, method::SESSIONS_CREATE, input.clone());
+    assert_eq!(call(&mut c, method::SESSIONS_CREATE, input.clone()), first);
+    assert_eq!(call(&mut c, method::SESSIONS_STOP, first.clone()), json!({}));
+    assert_eq!(call(&mut c, method::SESSIONS_GET, first.clone())["ended_at"], Value::Null);
+    let conflict = c.call(method::SESSIONS_CREATE, json!({"create_id":"durable-create","agent":"codex","policy":"default"})).unwrap();
     assert_eq!(conflict["error"]["data"]["code"], "id_conflict");
     for i in 0..4 {
-        call(&mut c, "_sill/sessions.create", json!({"create_id":format!("page-{i}"),"agent":"claude","policy":"default"}));
+        call(&mut c, method::SESSIONS_CREATE, json!({"create_id":format!("page-{i}"),"agent":"claude","policy":"default"}));
     }
-    let page = call(&mut c, "_sill/sessions.list", json!({"limit":2}));
+    let page = call(&mut c, method::SESSIONS_LIST, json!({"limit":2}));
     assert_eq!(page["sessions"].as_array().unwrap().len(), 2);
     let mut seen: Vec<Value> = page["sessions"].as_array().unwrap().iter().map(|s| s["session_id"].clone()).collect();
     // Rename a record between pages: stable creation ordering must not repeat or skip it.
-    call(&mut c, "_sill/sessions.update", json!({"session_id":first["session_id"],"change":{"type":"title","text":"Public name","kind":"person"}}));
+    call(&mut c, method::SESSIONS_UPDATE, json!({"session_id":first["session_id"],"change":{"type":"title","text":"Public name","kind":"person"}}));
     let mut next = page["next"].clone();
     while !next.is_null() {
-        let page = call(&mut c, "_sill/sessions.list", json!({"limit":2,"after":next}));
+        let page = call(&mut c, method::SESSIONS_LIST, json!({"limit":2,"after":next}));
         for s in page["sessions"].as_array().unwrap() {
             assert!(!seen.contains(&s["session_id"]));
             seen.push(s["session_id"].clone());
@@ -580,16 +581,16 @@ fn public_session_lifecycle_retries_pagination_and_restart() {
         next = page["next"].clone();
     }
     assert_eq!(seen.len(), 5);
-    assert_eq!(call(&mut c, "_sill/sessions.get", first.clone())["title"], "Public name");
+    assert_eq!(call(&mut c, method::SESSIONS_GET, first.clone())["title"], "Public name");
     assert_eq!(
-        c.call("_sill/sessions.get", json!({"session_id":first["session_id"].as_str().unwrap()[..4].to_string()})).unwrap()["error"]["data"]["code"],
+        c.call(method::SESSIONS_GET, json!({"session_id":first["session_id"].as_str().unwrap()[..4].to_string()})).unwrap()["error"]["data"]["code"],
         "not_found"
     );
-    assert_eq!(c.call("_sill/sessions.list", json!({"limit":129})).unwrap()["error"]["data"]["code"], "limit_exceeded");
-    assert_eq!(c.call("_sill/sessions.list", json!({"after":"bad"})).unwrap()["error"]["data"]["code"], "invalid_cursor");
+    assert_eq!(c.call(method::SESSIONS_LIST, json!({"limit":129})).unwrap()["error"]["data"]["code"], "limit_exceeded");
+    assert_eq!(c.call(method::SESSIONS_LIST, json!({"after":"bad"})).unwrap()["error"]["data"]["code"], "invalid_cursor");
     // Unknown change kinds cannot mutate permissions or fall back to another operation.
     assert!(
-        c.call("_sill/sessions.update", json!({"session_id":first["session_id"],"change":{"type":"future","enabled":true}})).unwrap().get("error").is_some()
+        c.call(method::SESSIONS_UPDATE, json!({"session_id":first["session_id"],"change":{"type":"future","enabled":true}})).unwrap().get("error").is_some()
     );
     drop(c);
     d.child.kill().unwrap();
@@ -598,21 +599,21 @@ fn public_session_lifecycle_retries_pagination_and_restart() {
     std::mem::forget(d);
     let d = Daemon::start_in(dir);
     let mut c = d.connect_caps(json!({})).unwrap();
-    assert_eq!(call(&mut c, "_sill/sessions.create", input.clone()), first);
-    assert_eq!(call(&mut c, "_sill/sessions.get", first.clone())["title"], "Public name");
+    assert_eq!(call(&mut c, method::SESSIONS_CREATE, input.clone()), first);
+    assert_eq!(call(&mut c, method::SESSIONS_GET, first.clone())["title"], "Public name");
     // A no-prompt end deletes the row. Retried creation must never resurrect it.
-    let end = call(&mut c, "_sill/sessions.end", json!({"session_id":first["session_id"],"reason":"close"}));
+    let end = call(&mut c, method::SESSIONS_END, json!({"session_id":first["session_id"],"reason":"close"}));
     assert_eq!(end, json!({"pending":false,"deleted":true}));
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let result = c.call("_sill/sessions.create", input.clone()).unwrap();
+        let result = c.call(method::SESSIONS_CREATE, input.clone()).unwrap();
         if result["error"]["data"]["code"] == "gone" {
             break;
         }
         assert!(Instant::now() < deadline, "deletion did not finish: {result}; {}", d.log());
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(c.call("_sill/sessions.start", first).unwrap()["error"]["data"]["code"], "not_found");
+    assert_eq!(c.call(method::SESSIONS_START, first).unwrap()["error"]["data"]["code"], "not_found");
 }
 
 /// Mock programs and registry only: no network, installed packages, or real login credentials.
@@ -734,7 +735,7 @@ fn public_host_streams_validate_selectors_and_report_login_and_install_outcomes(
     let mut after = Value::Null;
     let mut ids = Vec::new();
     loop {
-        let page = c.call("_sill/registry.list", json!({"after":after,"limit":1})).unwrap();
+        let page = c.call(method::REGISTRY_LIST, json!({"after":after,"limit":1})).unwrap();
         let entries = page["result"]["entries"].as_array().unwrap();
         assert_eq!(entries.len(), 1);
         ids.push(entries[0]["entry_id"].as_str().unwrap().to_string());
@@ -746,32 +747,32 @@ fn public_host_streams_validate_selectors_and_report_login_and_install_outcomes(
     assert!(ids.windows(2).all(|p| p[0] < p[1]));
     assert!(ids.iter().any(|id| id == "fixture"));
     let install = json!({"entry_id":"fixture","version":"1.0.0","source":"live"});
-    let denied = c.call("_sill/registry.install", install.clone()).unwrap();
+    let denied = c.call(method::REGISTRY_INSTALL, install.clone()).unwrap();
     assert_eq!(denied["error"]["data"]["code"], "permission_denied");
     assert!(!d.dir.join("state/sill/tools/fixture").exists());
     let mut allowed = install;
     allowed["allow_unreviewed"] = json!(true);
-    let opened = c.call("_sill/registry.install", allowed).unwrap();
+    let opened = c.call(method::REGISTRY_INSTALL, allowed).unwrap();
     let events: Vec<Value> = claim_host(&d, &opened).lines().map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect();
     assert!(events.iter().any(|e| e["type"] == "output" && e["text"] == "fixture-installer-output"), "{events:?}");
     assert_eq!(events.last().unwrap()["type"], "failed");
     assert_eq!(events.last().unwrap()["code"], "operation_failed");
-    let success = c.call("_sill/registry.install", json!({"entry_id":"fixture-success","version":"1.0.0","source":"live","allow_unreviewed":true})).unwrap();
+    let success = c.call(method::REGISTRY_INSTALL, json!({"entry_id":"fixture-success","version":"1.0.0","source":"live","allow_unreviewed":true})).unwrap();
     let events: Vec<Value> = claim_host(&d, &success).lines().map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect();
     assert_eq!(events.last().unwrap(), &json!({"type":"completed","agent_id":"fixture-success"}));
     assert!(d.dir.join("home/.config/sill/agents/fixture-success.toml").exists());
     let login = json!({"agent_id":"fixture","method_id":"browser"});
-    let opened = c.call("_sill/agents.login", login.clone()).unwrap();
-    let busy = c.call("_sill/agents.login", login).unwrap();
+    let opened = c.call(method::AGENTS_LOGIN, login.clone()).unwrap();
+    let busy = c.call(method::AGENTS_LOGIN, login).unwrap();
     assert_eq!(busy["error"]["data"]["code"], "busy");
     let events: Vec<Value> = claim_host(&d, &opened).lines().map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect();
     assert_eq!(events.last().unwrap(), &json!({"type":"completed","agent_id":"fixture"}));
-    let bad_method = c.call("_sill/agents.login", json!({"agent_id":"fixture","method_id":"unknown"})).unwrap();
+    let bad_method = c.call(method::AGENTS_LOGIN, json!({"agent_id":"fixture","method_id":"unknown"})).unwrap();
     let events: Vec<Value> = claim_host(&d, &bad_method).lines().map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect();
     assert_eq!(events.last().unwrap()["type"], "failed");
-    let bad_port = c.call("_sill/streams.port", json!({"session_id":"abcdef01","port":0})).unwrap();
+    let bad_port = c.call(method::STREAMS_PORT, json!({"session_id":"abcdef01","port":0})).unwrap();
     assert_eq!(bad_port["error"]["code"], -32602);
-    let unknown = c.call("_sill/agents.login", json!({"agent_id":"absent-fixture","method_id":"browser"})).unwrap();
+    let unknown = c.call(method::AGENTS_LOGIN, json!({"agent_id":"absent-fixture","method_id":"browser"})).unwrap();
     assert_eq!(unknown["error"]["data"]["code"], "not_found");
 }
 
@@ -780,7 +781,7 @@ fn public_host_streams_validate_selectors_and_report_login_and_install_outcomes(
 fn independent_python_client_consumes_public_host_streams() {
     let d = host_fixture();
     let mut c = d.connect_caps(json!({})).unwrap();
-    let created = c.call("_sill/sessions.create", json!({"create_id":"python-port", "agent":"claude", "policy":"default"})).unwrap();
+    let created = c.call(method::SESSIONS_CREATE, json!({"create_id":"python-port", "agent":"claude", "policy":"default"})).unwrap();
     let session = created["result"]["session_id"].as_str().unwrap();
     let shim = mock_port(&d, session);
     let output = Command::new(std::env::var("SILL_SFP_PYTHON").unwrap_or_else(|_| "python3".into()))
@@ -820,12 +821,12 @@ fn public_port_stream_preserves_bytes_and_half_close() {
     use std::io::Read;
     let d = Daemon::start();
     let mut c = d.connect_caps(json!({})).unwrap();
-    let created = c.call("_sill/sessions.create", json!({"create_id":"port-fixture", "agent":"claude", "policy":"default"})).unwrap();
+    let created = c.call(method::SESSIONS_CREATE, json!({"create_id":"port-fixture", "agent":"claude", "policy":"default"})).unwrap();
     let session = created["result"]["session_id"].as_str().unwrap();
     let params = json!({"session_id":session,"port":8123});
-    assert_eq!(c.call("_sill/streams.port", params.clone()).unwrap()["error"]["data"]["code"], "invalid_state");
+    assert_eq!(c.call(method::STREAMS_PORT, params.clone()).unwrap()["error"]["data"]["code"], "invalid_state");
     let shim = mock_port(&d, session);
-    let opened = c.call("_sill/streams.port", params).unwrap();
+    let opened = c.call(method::STREAMS_PORT, params).unwrap();
     let mut stream = claim_host(&d, &opened);
     stream.get_mut().write_all(b"\0hello\xff").unwrap();
     stream.get_mut().shutdown(std::net::Shutdown::Write).unwrap();
@@ -842,7 +843,7 @@ fn a_login_hands_over_its_page_relays_its_callback_and_can_be_cancelled() {
     use std::io::BufRead;
     let d = host_fixture();
     let mut c = d.connect_caps(json!({"sill.login_browser": 1})).unwrap();
-    let opened = c.call("_sill/agents.login", json!({"operation_id":"page-login","agent_id":"page-fixture","method_id":"browser"})).unwrap();
+    let opened = c.call(method::AGENTS_LOGIN, json!({"operation_id":"page-login","agent_id":"page-fixture","method_id":"browser"})).unwrap();
     let mut events = claim_host(&d, &opened);
     let next = |events: &mut BufReader<UnixStream>| -> Value {
         let mut line = String::new();
@@ -859,8 +860,8 @@ fn a_login_hands_over_its_page_relays_its_callback_and_can_be_cancelled() {
     assert!(page["url"].as_str().unwrap().starts_with("https://auth.example/authorize?"), "{page}");
     let port = page["callback_port"].as_u64().unwrap();
     assert!(port > 0);
-    assert_eq!(c.call("_sill/streams.login_callback", json!({"operation_id":"other-login"})).unwrap()["error"]["data"]["code"], "not_found");
-    let relay = c.call("_sill/streams.login_callback", json!({"operation_id":"page-login"})).unwrap();
+    assert_eq!(c.call(method::STREAMS_LOGIN_CALLBACK, json!({"operation_id":"other-login"})).unwrap()["error"]["data"]["code"], "not_found");
+    let relay = c.call(method::STREAMS_LOGIN_CALLBACK, json!({"operation_id":"page-login"})).unwrap();
     let mut callback = claim_host(&d, &relay);
     callback.get_mut().write_all(b"GET /cb?code=x\n").unwrap();
     let mut answer = String::new();
@@ -869,21 +870,21 @@ fn a_login_hands_over_its_page_relays_its_callback_and_can_be_cancelled() {
     let rest: Vec<Value> = events.lines().map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect();
     assert_eq!(rest.last().unwrap(), &json!({"type":"completed","agent_id":"page-fixture"}), "{rest:?}");
     // the relay ends with its login
-    assert_eq!(c.call("_sill/streams.login_callback", json!({"operation_id":"page-login"})).unwrap()["error"]["data"]["code"], "not_found");
+    assert_eq!(c.call(method::STREAMS_LOGIN_CALLBACK, json!({"operation_id":"page-login"})).unwrap()["error"]["data"]["code"], "not_found");
 
     let hang = json!({"operation_id":"hanging-login","agent_id":"page-fixture","method_id":"hang"});
-    let opened = c.call("_sill/agents.login", hang).unwrap();
-    let busy = c.call("_sill/agents.login", json!({"agent_id":"page-fixture","method_id":"hang"})).unwrap();
+    let opened = c.call(method::AGENTS_LOGIN, hang).unwrap();
+    let busy = c.call(method::AGENTS_LOGIN, json!({"agent_id":"page-fixture","method_id":"hang"})).unwrap();
     assert_eq!(busy["error"]["data"]["code"], "busy");
     assert_eq!(busy["error"]["data"]["details"]["operation_id"], "hanging-login", "{busy}");
-    assert_eq!(c.call("_sill/streams.login_callback", json!({"operation_id":"hanging-login"})).unwrap()["error"]["data"]["code"], "invalid_state");
+    assert_eq!(c.call(method::STREAMS_LOGIN_CALLBACK, json!({"operation_id":"hanging-login"})).unwrap()["error"]["data"]["code"], "invalid_state");
     let events = claim_host(&d, &opened);
-    assert_eq!(c.call("_sill/operations.cancel", json!({"operation_id":"hanging-login"})).unwrap()["result"], json!({}));
+    assert_eq!(c.call(method::OPERATIONS_CANCEL, json!({"operation_id":"hanging-login"})).unwrap()["result"], json!({}));
     let events: Vec<Value> = events.lines().map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect();
     assert_eq!(events.last().unwrap()["code"], "cancelled", "{events:?}");
-    let receipt = c.call("_sill/operations.get", json!({"operation_id":"hanging-login"})).unwrap();
+    let receipt = c.call(method::OPERATIONS_GET, json!({"operation_id":"hanging-login"})).unwrap();
     assert_eq!((receipt["result"]["state"].as_str(), receipt["result"]["code"].as_str()), (Some("failed"), Some("cancelled")));
-    assert_eq!(c.call("_sill/operations.cancel", json!({"operation_id":"hanging-login"})).unwrap()["error"]["data"]["code"], "not_found");
+    assert_eq!(c.call(method::OPERATIONS_CANCEL, json!({"operation_id":"hanging-login"})).unwrap()["error"]["data"]["code"], "not_found");
 }
 
 #[test]
@@ -891,14 +892,14 @@ fn disconnecting_login_keeps_the_job_until_it_finishes() {
     let d = host_fixture();
     let mut c = d.connect_caps(json!({})).unwrap();
     let login = json!({"agent_id":"fixture","method_id":"browser"});
-    let opened = c.call("_sill/agents.login", login.clone()).unwrap();
+    let opened = c.call(method::AGENTS_LOGIN, login.clone()).unwrap();
     let stream = claim_host(&d, &opened);
     stream.get_ref().shutdown(std::net::Shutdown::Both).unwrap();
     drop(stream);
-    assert_eq!(c.call("_sill/agents.login", login.clone()).unwrap()["error"]["data"]["code"], "busy");
+    assert_eq!(c.call(method::AGENTS_LOGIN, login.clone()).unwrap()["error"]["data"]["code"], "busy");
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let reply = c.call("_sill/agents.login", login.clone()).unwrap();
+        let reply = c.call(method::AGENTS_LOGIN, login.clone()).unwrap();
         if reply.get("error").is_none() {
             let events: Vec<Value> = claim_host(&d, &reply).lines().map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect();
             assert_eq!(events.last().unwrap()["type"], "completed");
@@ -914,14 +915,14 @@ fn host_operation_receipts_survive_crash_and_do_not_repeat_uncertain_work() {
     let mut d = host_fixture();
     let mut c = d.connect_caps(json!({})).unwrap();
     let complete = json!({"operation_id":"finished-login", "agent_id":"fixture", "method_id":"browser"});
-    let opened = c.call("_sill/agents.login", complete.clone()).unwrap();
+    let opened = c.call(method::AGENTS_LOGIN, complete.clone()).unwrap();
     let events: Vec<Value> = claim_host(&d, &opened).lines().map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect();
     assert_eq!(events.last().unwrap()["type"], "completed");
     // An unclaimed stream cannot prevent acceptance or bind the durable receipt to its token.
     let uncertain = json!({"operation_id":"interrupted-login", "agent_id":"fixture", "method_id":"browser"});
-    let opened = c.call("_sill/agents.login", uncertain.clone()).unwrap();
+    let opened = c.call(method::AGENTS_LOGIN, uncertain.clone()).unwrap();
     assert_eq!(opened["result"]["operation"]["state"], "running");
-    let repeat = c.call("_sill/agents.login", uncertain.clone()).unwrap();
+    let repeat = c.call(method::AGENTS_LOGIN, uncertain.clone()).unwrap();
     assert!(repeat["result"]["token"].is_null());
     assert_eq!(repeat["result"]["operation"]["operation_id"], "interrupted-login");
     d.child.kill().unwrap();
@@ -931,18 +932,18 @@ fn host_operation_receipts_survive_crash_and_do_not_repeat_uncertain_work() {
     std::mem::forget(d);
     let d = Daemon::start_in(dir);
     let mut c = d.connect_caps(json!({})).unwrap();
-    let finished = c.call("_sill/operations.get", json!({"operation_id":"finished-login"})).unwrap();
+    let finished = c.call(method::OPERATIONS_GET, json!({"operation_id":"finished-login"})).unwrap();
     assert_eq!(finished["result"]["state"], "completed");
     assert_eq!(finished["result"]["agent_id"], "fixture");
-    let interrupted = c.call("_sill/operations.get", json!({"operation_id":"interrupted-login"})).unwrap();
+    let interrupted = c.call(method::OPERATIONS_GET, json!({"operation_id":"interrupted-login"})).unwrap();
     assert_eq!(interrupted["result"]["state"], "unknown");
-    let repeat = c.call("_sill/agents.login", uncertain).unwrap();
+    let repeat = c.call(method::AGENTS_LOGIN, uncertain).unwrap();
     assert_eq!(repeat["result"]["operation"], interrupted["result"]);
     assert!(repeat["result"]["token"].is_null());
-    let repeat = c.call("_sill/agents.login", complete).unwrap();
+    let repeat = c.call(method::AGENTS_LOGIN, complete).unwrap();
     assert_eq!(repeat["result"]["operation"], finished["result"]);
     assert!(repeat["result"]["token"].is_null());
-    let conflict = c.call("_sill/agents.login", json!({"operation_id":"finished-login","agent_id":"fixture","method_id":"changed"})).unwrap();
+    let conflict = c.call(method::AGENTS_LOGIN, json!({"operation_id":"finished-login","agent_id":"fixture","method_id":"changed"})).unwrap();
     assert_eq!(conflict["error"]["data"]["code"], "id_conflict");
 }
 
@@ -954,7 +955,7 @@ fn session_images_use_jail_descriptors_across_daemon_restart() {
 
     let mut d = Daemon::start();
     let mut c = d.connect().unwrap();
-    let created = c.call("_sill/sessions.create", json!({"create_id":"image-test", "agent":"claude", "policy":"default"})).unwrap();
+    let created = c.call(method::SESSIONS_CREATE, json!({"create_id":"image-test", "agent":"claude", "policy":"default"})).unwrap();
     let session = created["result"]["session_id"].as_str().unwrap().to_owned();
     let runtime = d.dir.join("run/sill").join(&session);
     std::fs::create_dir_all(&runtime).unwrap();
@@ -1003,7 +1004,7 @@ fn session_images_use_jail_descriptors_across_daemon_restart() {
     let request = |offset: &str, length, revision: Option<String>| {
         json!(a::SessionImage { session_id: session.clone(), path: HostPath::from_path(&path), offset: offset.into(), length, revision })
     };
-    let first = c.call("_sill/files.image", request("0", Some(2), None)).unwrap();
+    let first = c.call(method::FILES_IMAGE, request("0", Some(2), None)).unwrap();
     let page: a::FileBytes = serde_json::from_value(first["result"].clone()).unwrap();
     assert_eq!(a::decode_bytes(&page.bytes_base64).unwrap(), &bytes[..2]);
     assert!(!page.eof);
@@ -1012,31 +1013,31 @@ fn session_images_use_jail_descriptors_across_daemon_restart() {
     assert!(d.wait_exit().success());
     let mut restarted = Daemon::start_in(d.dir.clone());
     let mut c = restarted.connect().unwrap();
-    let rest = c.call("_sill/files.image", request(&page.next_offset, None, Some(page.revision.clone()))).unwrap();
+    let rest = c.call(method::FILES_IMAGE, request(&page.next_offset, None, Some(page.revision.clone()))).unwrap();
     let rest: a::FileBytes = serde_json::from_value(rest["result"].clone()).unwrap();
     assert_eq!(a::decode_bytes(&rest.bytes_base64).unwrap(), &bytes[2..]);
     assert!(rest.eof);
-    let bad_length = c.call("_sill/files.image", request("0", Some(a::FILE_CHUNK_BYTES as u32 + 1), None)).unwrap();
+    let bad_length = c.call(method::FILES_IMAGE, request("0", Some(a::FILE_CHUNK_BYTES as u32 + 1), None)).unwrap();
     assert!(bad_length.get("error").is_some());
     std::fs::write(&jail_image, b"changed image").unwrap();
-    let stale = c.call("_sill/files.image", request("2", None, Some(page.revision))).unwrap();
+    let stale = c.call(method::FILES_IMAGE, request("2", None, Some(page.revision))).unwrap();
     assert_eq!(stale["error"]["data"]["code"], "invalid_cursor");
     let host_only = path.with_file_name(format!("sill-host-only-{session}.jpg"));
     std::fs::write(&host_only, b"must not fall back to this").unwrap();
     let mut missing = request("0", None, None);
     missing["path"] = json!(HostPath::from_path(&host_only));
-    let absent = c.call("_sill/files.image", missing).unwrap();
+    let absent = c.call(method::FILES_IMAGE, missing).unwrap();
     assert_eq!(absent["error"]["data"]["code"], "not_found");
     for forbidden in ["/.sill/host/tmp/private.jpg", "/tmp/../private.jpg"] {
         let mut req = request("0", None, None);
         req["path"] = json!(HostPath::from_path(Path::new(forbidden)));
-        assert!(c.call("_sill/files.image", req).unwrap().get("error").is_some());
+        assert!(c.call(method::FILES_IMAGE, req).unwrap().get("error").is_some());
     }
     let mut stop = UnixStream::connect(&socket).unwrap();
     writeln!(stop, "stop").unwrap();
     server.join().unwrap();
     std::fs::remove_file(&socket).unwrap();
-    let stopped = c.call("_sill/files.image", request("0", None, None)).unwrap();
+    let stopped = c.call(method::FILES_IMAGE, request("0", None, None)).unwrap();
     assert_eq!(stopped["error"]["data"]["code"], "not_found", "a stopped jail's tmp image cannot resolve to the host");
     // A deliberately pinned directory under /tmp is a host bind, not private tmpfs.
     let pinned = PathBuf::from(format!("/tmp/sill-image-pin-{session}"));
@@ -1045,14 +1046,14 @@ fn session_images_use_jail_descriptors_across_daemon_restart() {
     std::fs::write(&pinned_image, bytes).unwrap();
     let created = c
         .call(
-            "_sill/sessions.create",
+            method::SESSIONS_CREATE,
             json!({"create_id":"pinned-image-test",
         "agent":"claude", "policy":"default", "pins":[HostPath::from_path(&pinned)]}),
         )
         .unwrap();
     let pinned_reply = c
         .call(
-            "_sill/files.image",
+            method::FILES_IMAGE,
             json!(a::SessionImage {
                 session_id: created["result"]["session_id"].as_str().unwrap().into(),
                 path: HostPath::from_path(&pinned_image),
@@ -1081,36 +1082,36 @@ fn public_host_files_and_settings_need_no_internal_capability() {
     std::fs::create_dir_all(&files).unwrap();
     let p = files.join(std::ffi::OsString::from_vec(b"raw-\xff".to_vec()));
     let path = HostPath::from_path(&p);
-    let write = c.call("_sill/files.write", json!(a::FileWrite { path: path.clone(), bytes_base64: a::encode_bytes(b"abcdef") })).unwrap();
+    let write = c.call(method::FILES_WRITE, json!(a::FileWrite { path: path.clone(), bytes_base64: a::encode_bytes(b"abcdef") })).unwrap();
     assert!(write.get("error").is_none(), "{write}");
-    let read = c.call("_sill/files.read", json!(a::FileRead { path: path.clone(), offset: "2".into(), length: Some(2), revision: None })).unwrap();
+    let read = c.call(method::FILES_READ, json!(a::FileRead { path: path.clone(), offset: "2".into(), length: Some(2), revision: None })).unwrap();
     assert_eq!(read["result"]["bytes_base64"], a::encode_bytes(b"cd"));
     assert_eq!(read["result"]["next_offset"], "4");
     assert_eq!(read["result"]["eof"], false);
     std::fs::write(&p, "changed file length").unwrap();
-    let stale = c.call("_sill/files.read", json!({"path":path,"offset":"4","length":2,"revision":read["result"]["revision"]})).unwrap();
+    let stale = c.call(method::FILES_READ, json!({"path":path,"offset":"4","length":2,"revision":read["result"]["revision"]})).unwrap();
     assert_eq!(stale["error"]["data"]["code"], "invalid_cursor");
     let root = HostPath::from_path(&files);
     std::fs::write(files.join("another"), "other").unwrap();
-    let first = c.call("_sill/files.list", json!(a::FilesList { path: root.clone(), after: None, limit: Some(1) })).unwrap();
+    let first = c.call(method::FILES_LIST, json!(a::FilesList { path: root.clone(), after: None, limit: Some(1) })).unwrap();
     assert_eq!(first["result"]["entries"].as_array().unwrap().len(), 1);
     assert!(!first["result"]["next"].is_null());
-    let last = c.call("_sill/files.list", json!({"path":root,"after":first["result"]["next"],"limit":1})).unwrap();
+    let last = c.call(method::FILES_LIST, json!({"path":root,"after":first["result"]["next"],"limit":1})).unwrap();
     assert_eq!(last["result"]["entries"][0]["path"]["bytes_base64"], path.bytes_base64);
     let link = files.join("link");
     std::os::unix::fs::symlink(&p, &link).unwrap();
     assert!(
-        c.call("_sill/files.read", json!(a::FileRead { path: HostPath::from_path(&link), offset: "0".into(), length: None, revision: None }))
+        c.call(method::FILES_READ, json!(a::FileRead { path: HostPath::from_path(&link), offset: "0".into(), length: None, revision: None }))
             .unwrap()
             .get("error")
             .is_some()
     );
-    assert!(c.call("_sill/files.list", json!({"path":root,"limit":0})).unwrap().get("error").is_some());
+    assert!(c.call(method::FILES_LIST, json!({"path":root,"limit":0})).unwrap().get("error").is_some());
     // settings go through the daemon: a patch is read back, an unknown change is refused
-    let patch = c.call("_sill/settings.patch", json!({"changes":[{"type":"theme","value":"nord"},{"type":"tray","value":false}]})).unwrap();
+    let patch = c.call(method::SETTINGS_PATCH, json!({"changes":[{"type":"theme","value":"nord"},{"type":"tray","value":false}]})).unwrap();
     assert!(patch.get("error").is_none(), "{patch}");
-    assert_eq!(c.call("_sill/settings.get", json!({})).unwrap()["result"]["theme"], "nord");
-    assert!(c.call("_sill/settings.patch", json!({"changes":[{"type":"future","value":true}]})).unwrap().get("error").is_some());
+    assert_eq!(c.call(method::SETTINGS_GET, json!({})).unwrap()["result"]["theme"], "nord");
+    assert!(c.call(method::SETTINGS_PATCH, json!({"changes":[{"type":"future","value":true}]})).unwrap().get("error").is_some());
 }
 
 #[test]
@@ -1129,41 +1130,41 @@ fn independent_python_public_administration() {
 fn public_memory_notes_and_text_are_paged_without_internal_apis() {
     let d = Daemon::start();
     let mut c = d.connect_caps(json!({})).unwrap();
-    let created = c.call("_sill/sessions.create", json!({"create_id":"memory-public","agent":"claude","policy":"default"})).unwrap();
+    let created = c.call(method::SESSIONS_CREATE, json!({"create_id":"memory-public","agent":"claude","policy":"default"})).unwrap();
     let session = created["result"]["session_id"].as_str().unwrap();
     for text in ["first note", "second note"] {
-        let r = c.call("_sill/memory.notes.add", json!({"session_id":session,"text":text})).unwrap();
+        let r = c.call(method::MEMORY_NOTES_ADD, json!({"session_id":session,"text":text})).unwrap();
         assert!(r.get("error").is_none(), "{r}");
     }
-    let first = c.call("_sill/memory.notes.list", json!({"session_id":session,"limit":1})).unwrap();
+    let first = c.call(method::MEMORY_NOTES_LIST, json!({"session_id":session,"limit":1})).unwrap();
     assert_eq!(first["result"]["notes"][0]["text"], "first note");
-    let last = c.call("_sill/memory.notes.list", json!({"session_id":session,"after":first["result"]["next"],"limit":1})).unwrap();
+    let last = c.call(method::MEMORY_NOTES_LIST, json!({"session_id":session,"after":first["result"]["next"],"limit":1})).unwrap();
     assert_eq!(last["result"]["notes"][0]["text"], "second note");
     assert_eq!(last["result"]["next"], Value::Null);
     let note = &first["result"]["notes"][0];
-    let removed = c.call("_sill/memory.notes.remove", json!({"session_id":session,"timestamp":note["timestamp"],"text":note["text"]})).unwrap();
+    let removed = c.call(method::MEMORY_NOTES_REMOVE, json!({"session_id":session,"timestamp":note["timestamp"],"text":note["text"]})).unwrap();
     assert!(removed.get("error").is_none(), "{removed}");
-    let read = c.call("_sill/memory.text", json!({"session_id":session,"format":"show","length":8})).unwrap();
+    let read = c.call(method::MEMORY_TEXT, json!({"session_id":session,"format":"show","length":8})).unwrap();
     assert!(read["result"]["text"].as_str().unwrap().len() <= 8);
     assert!(read["result"]["next"].is_string());
-    c.call("_sill/memory.notes.add", json!({"session_id":session,"text":"changed"})).unwrap();
+    c.call(method::MEMORY_NOTES_ADD, json!({"session_id":session,"text":"changed"})).unwrap();
     let stale = c
         .call(
-            "_sill/memory.text",
+            method::MEMORY_TEXT,
             json!({"session_id":session,"format":"show","length":8,"offset":read["result"]["next"],"fingerprint":read["result"]["fingerprint"]}),
         )
         .unwrap();
     assert_eq!(stale["error"]["data"]["code"], "invalid_cursor");
     let continuation = json!({"session_id":session,"format":"show","snapshot_id":read["result"]["snapshot_id"],"offset":read["result"]["next"],"fingerprint":read["result"]["fingerprint"]});
     let mut stranger = d.connect_caps(json!({})).unwrap();
-    assert_eq!(stranger.call("_sill/memory.text", continuation.clone()).unwrap()["error"]["data"]["code"], "snapshot_expired");
-    let frozen = c.call("_sill/memory.text", continuation.clone()).unwrap();
+    assert_eq!(stranger.call(method::MEMORY_TEXT, continuation.clone()).unwrap()["error"]["data"]["code"], "snapshot_expired");
+    let frozen = c.call(method::MEMORY_TEXT, continuation.clone()).unwrap();
     let text = frozen["result"]["text"].as_str().unwrap();
     assert!(text.contains("second note"));
     assert!(!text.contains("changed"), "snapshot must remain immutable");
-    c.call("_sill/memory.text.close", json!({"snapshot_id":read["result"]["snapshot_id"]})).unwrap();
-    assert_eq!(c.call("_sill/memory.text", continuation).unwrap()["error"]["data"]["code"], "snapshot_expired");
-    assert!(c.call("_sill/memory.text", json!({"session_id":session,"format":"unknown"})).unwrap().get("error").is_some());
+    c.call(method::MEMORY_TEXT_CLOSE, json!({"snapshot_id":read["result"]["snapshot_id"]})).unwrap();
+    assert_eq!(c.call(method::MEMORY_TEXT, continuation).unwrap()["error"]["data"]["code"], "snapshot_expired");
+    assert!(c.call(method::MEMORY_TEXT, json!({"session_id":session,"format":"unknown"})).unwrap().get("error").is_some());
 }
 
 #[test]
@@ -1180,47 +1181,47 @@ fn public_changes_preserve_exact_paths_page_history_and_bound_mutations() {
     std::fs::write(&file, "fixture contents\n").unwrap();
     // Changes lists the repositories open sessions have pinned (global pins are only shortcuts since 2026-11-09).
     let session =
-        c.call("_sill/sessions.create", json!({"create_id":"public-changes","agent":"claude","policy":"default"})).unwrap()["result"]["session_id"].clone();
-    let added = c.call("_sill/sessions.pin", json!({"session_id":session,"path":HostPath::from_path(&repo)})).unwrap();
+        c.call(method::SESSIONS_CREATE, json!({"create_id":"public-changes","agent":"claude","policy":"default"})).unwrap()["result"]["session_id"].clone();
+    let added = c.call(method::SESSIONS_PIN, json!({"session_id":session,"path":HostPath::from_path(&repo)})).unwrap();
     assert!(added.get("error").is_none(), "{added}");
-    let page = c.call("_sill/changes.list", json!({"limit":1})).unwrap();
+    let page = c.call(method::CHANGES_LIST, json!({"limit":1})).unwrap();
     let entry = &page["result"]["entries"][0];
     assert_eq!(entry["type"], "live", "{page}");
     let mut path: HostPath = serde_json::from_value(entry["path"].clone()).unwrap();
     assert_eq!(path.to_path().unwrap(), file);
     path.display = "/wrong/display/path".into();
-    let diff = c.call("_sill/changes.diff", json!({"target":{"type":"live","repo":HostPath::from_path(&repo),"path":path}})).unwrap();
+    let diff = c.call(method::CHANGES_DIFF, json!({"target":{"type":"live","repo":HostPath::from_path(&repo),"path":path}})).unwrap();
     assert!(diff["result"]["text"].as_str().unwrap().contains("fixture contents"), "{diff}");
     let bad = c
-        .call("_sill/changes.diff", json!({"target":{"type":"live","repo":HostPath::from_path(&repo),"path":path},"offset":"1","fingerprint":"wrong"}))
+        .call(method::CHANGES_DIFF, json!({"target":{"type":"live","repo":HostPath::from_path(&repo),"path":path},"offset":"1","fingerprint":"wrong"}))
         .unwrap();
     assert_eq!(bad["error"]["data"]["code"], "invalid_cursor");
-    let bad = c.call("_sill/changes.list", json!({"after":"nonsense"})).unwrap();
+    let bad = c.call(method::CHANGES_LIST, json!({"after":"nonsense"})).unwrap();
     assert_eq!(bad["error"]["data"]["code"], "invalid_cursor");
     // A listing is computed once and its pages read that one: what changes between two pages is in the next listing, not in this one.
     std::fs::write(repo.join("b"), "b\n").unwrap();
     std::fs::write(repo.join("c"), "c\n").unwrap();
-    let first = c.call("_sill/changes.list", json!({"limit":1})).unwrap();
+    let first = c.call(method::CHANGES_LIST, json!({"limit":1})).unwrap();
     let mut names = vec![first["result"]["entries"][0]["path"]["display"].as_str().unwrap().to_string()];
     std::fs::write(repo.join("a-later"), "later\n").unwrap();
     let mut after = first["result"]["next"].clone();
     assert!(after.is_string(), "{first}");
     let second_cursor = after.clone();
     while !after.is_null() {
-        let page = c.call("_sill/changes.list", json!({"limit":1,"after":after})).unwrap();
+        let page = c.call(method::CHANGES_LIST, json!({"limit":1,"after":after})).unwrap();
         assert!(page.get("error").is_none(), "{page}");
         names.push(page["result"]["entries"][0]["path"]["display"].as_str().unwrap().to_string());
         after = page["result"]["next"].clone();
     }
     assert_eq!(names.len(), 3, "{names:?}");
     assert!(!names.iter().any(|n| n.ends_with("a-later")), "{names:?}");
-    let whole = c.call("_sill/changes.list", json!({})).unwrap();
+    let whole = c.call(method::CHANGES_LIST, json!({})).unwrap();
     assert_eq!(whole["result"]["entries"].as_array().unwrap().len(), 4);
     assert!(whole["result"]["next"].is_null());
     // Read to its end, a listing is no longer held; nor is one the daemon never made.
-    let gone = c.call("_sill/changes.list", json!({"limit":1,"after":second_cursor})).unwrap();
+    let gone = c.call(method::CHANGES_LIST, json!({"limit":1,"after":second_cursor})).unwrap();
     assert_eq!(gone["error"]["data"]["code"], "snapshot_expired", "{gone}");
-    let gone = c.call("_sill/changes.list", json!({"after":"[\"00\",1]"})).unwrap();
+    let gone = c.call(method::CHANGES_LIST, json!({"after":"[\"00\",1]"})).unwrap();
     assert_eq!(gone["error"]["data"]["code"], "snapshot_expired");
     // History survives exact-byte storage and duplicate timestamps; each next cursor is exclusive.
     let store = sill_core::store::Store::open(&d.dir.join("state/sill/sill.db")).unwrap();
@@ -1232,7 +1233,7 @@ fn public_changes_preserve_exact_paths_page_history_and_bound_mutations() {
     let mut before = Value::Null;
     let mut seen = Vec::new();
     loop {
-        let page = c.call("_sill/changes.history", json!({"limit":1,"before":before,"path":path})).unwrap();
+        let page = c.call(method::CHANGES_HISTORY, json!({"limit":1,"before":before,"path":path})).unwrap();
         let event = &page["result"]["events"][0];
         assert_eq!(serde_json::from_value::<HostPath>(event["path"].clone()).unwrap().to_path().unwrap(), file);
         assert!(!seen.contains(&event["event_id"]));
@@ -1244,11 +1245,11 @@ fn public_changes_preserve_exact_paths_page_history_and_bound_mutations() {
     }
     assert_eq!(seen.len(), 3);
     // Public mutations use exact session identities and cannot interpret an unknown target.
-    let invalid = c.call("_sill/changes.keep", json!({"session_id":"missing","items":[]})).unwrap();
+    let invalid = c.call(method::CHANGES_KEEP, json!({"session_id":"missing","items":[]})).unwrap();
     assert!(invalid.get("error").is_some());
-    let invalid = c.call("_sill/changes.diff", json!({"target":{"type":"future","path":path}})).unwrap();
+    let invalid = c.call(method::CHANGES_DIFF, json!({"target":{"type":"future","path":path}})).unwrap();
     assert_eq!(invalid["error"]["code"], -32602);
-    let reverted = c.call("_sill/changes.git-revert", json!({"repo":HostPath::from_path(&repo),"path":path})).unwrap();
+    let reverted = c.call(method::CHANGES_GIT_REVERT, json!({"repo":HostPath::from_path(&repo),"path":path})).unwrap();
     assert!(reverted.get("error").is_none(), "{reverted}");
     assert!(!file.exists());
 }
@@ -1275,7 +1276,7 @@ fn independent_python_public_changes() {
 fn public_network_denials_are_live_bounded_pages() {
     let d = Daemon::start();
     let mut c = d.connect_caps(json!({})).unwrap();
-    let created = c.call("_sill/sessions.create", json!({"create_id":"denial-pages","agent":"claude","policy":"default"})).unwrap();
+    let created = c.call(method::SESSIONS_CREATE, json!({"create_id":"denial-pages","agent":"claude","policy":"default"})).unwrap();
     let session = created["result"]["session_id"].as_str().unwrap();
     let runtime = d.dir.join("run/sill").join(session);
     std::fs::create_dir_all(&runtime).unwrap();
@@ -1284,7 +1285,7 @@ fn public_network_denials_are_live_bounded_pages() {
     let mut after = Value::Null;
     let mut found = Vec::new();
     loop {
-        let response = c.call("_sill/policy.denied", json!({"session_id":session,"after":after,"limit":17})).unwrap();
+        let response = c.call(method::POLICY_DENIED, json!({"session_id":session,"after":after,"limit":17})).unwrap();
         assert!(response.get("error").is_none(), "{response}");
         let page = &response["result"];
         assert!(page["hosts"].as_array().unwrap().len() + page["answered"].as_array().unwrap().len() + page["quiet"].as_array().unwrap().len() <= 17);
@@ -1297,31 +1298,31 @@ fn public_network_denials_are_live_bounded_pages() {
     assert_eq!(found.len(), 201);
     assert_eq!(found[0], "host-000.example");
     assert_eq!(found[200], "host-200.example");
-    let answer = c.call("_sill/policy.remember_denied", json!({"session_id":session,"host":"host-000.example"})).unwrap();
+    let answer = c.call(method::POLICY_REMEMBER_DENIED, json!({"session_id":session,"host":"host-000.example"})).unwrap();
     assert!(answer.get("error").is_none(), "{answer}");
     assert_eq!(std::fs::read_to_string(runtime.join("denied.answered")).unwrap(), "host-000.example\n");
     // A permanent quiet choice survives another session and never grants access.
     for host in ["SDMNTPRCENTRALUS.oaiusercontent.com:443", "sdmntprcentralus.oaiusercontent.com"] {
-        let saved = c.call("_sill/policy.quiet_host", json!({"session_id":session,"host":host})).unwrap();
+        let saved = c.call(method::POLICY_QUIET_HOST, json!({"session_id":session,"host":host})).unwrap();
         assert!(saved.get("error").is_none(), "{saved}");
     }
     for host in ["*.oaiusercontent.com", "bad\nname", "../invalid"] {
-        let saved = c.call("_sill/policy.quiet_host", json!({"session_id":session,"host":host})).unwrap();
+        let saved = c.call(method::POLICY_QUIET_HOST, json!({"session_id":session,"host":host})).unwrap();
         assert!(saved.get("error").is_some(), "{saved}");
     }
     let config = std::fs::read_to_string(d.dir.join("config/sill/sill.toml")).unwrap();
     assert_eq!(config.matches("sdmntprcentralus.oaiusercontent.com").count(), 1);
-    let other = c.call("_sill/sessions.create", json!({"create_id":"quiet-other","agent":"claude","policy":"default"})).unwrap();
+    let other = c.call(method::SESSIONS_CREATE, json!({"create_id":"quiet-other","agent":"claude","policy":"default"})).unwrap();
     let other_id = other["result"]["session_id"].as_str().unwrap();
-    let page = c.call("_sill/policy.denied", json!({"session_id":other_id,"limit":128})).unwrap();
+    let page = c.call(method::POLICY_DENIED, json!({"session_id":other_id,"limit":128})).unwrap();
     assert!(page["result"]["quiet"].as_array().unwrap().contains(&json!("sdmntprcentralus.oaiusercontent.com")), "{page}");
     assert!(!runtime.join("session-allowed-hosts").exists());
-    let settings = c.call("_sill/settings.get", json!({})).unwrap();
+    let settings = c.call(method::SETTINGS_GET, json!({})).unwrap();
     assert_eq!(settings["result"]["network_quiet_hosts"], json!(["sdmntprcentralus.oaiusercontent.com"]));
-    let restored = c.call("_sill/settings.patch", json!({"changes":[{"type":"network_quiet_hosts","value":[]}]})).unwrap();
+    let restored = c.call(method::SETTINGS_PATCH, json!({"changes":[{"type":"network_quiet_hosts","value":[]}]})).unwrap();
     assert!(restored.get("error").is_none(), "{restored}");
     for id in [session, other_id] {
-        let page = c.call("_sill/policy.denied", json!({"session_id":id,"limit":128})).unwrap();
+        let page = c.call(method::POLICY_DENIED, json!({"session_id":id,"limit":128})).unwrap();
         assert!(!page["result"]["quiet"].as_array().unwrap().contains(&json!("sdmntprcentralus.oaiusercontent.com")), "{page}");
     }
     let config = std::fs::read_to_string(d.dir.join("config/sill/sill.toml")).unwrap();
@@ -1329,32 +1330,32 @@ fn public_network_denials_are_live_bounded_pages() {
     assert!(!runtime.join("session-allowed-hosts").exists());
     // Allow is session-only and concrete (2026-11-06); a wildcard is only an agent-wide default,
     // saved deliberately by a frontend that shows permission state
-    let allowed = c.call("_sill/policy.allow_host", json!({"session_id":session,"host":"*.example.test"})).unwrap();
+    let allowed = c.call(method::POLICY_ALLOW_HOST, json!({"session_id":session,"host":"*.example.test"})).unwrap();
     assert_eq!(allowed["error"]["code"], -32602, "{allowed}");
-    let saved = c.call("_sill/policy.save_host", json!({"session_id":session,"host":"*.example.test"})).unwrap();
+    let saved = c.call(method::POLICY_SAVE_HOST, json!({"session_id":session,"host":"*.example.test"})).unwrap();
     assert_eq!(saved["error"]["data"]["details"]["capability"], "sill.permission_modes", "{saved}");
     let mut modes = d.connect_caps(json!({"sill.permission_modes":1})).unwrap();
-    let saved = modes.call("_sill/policy.save_host", json!({"session_id":session,"host":"*.example.test"})).unwrap();
+    let saved = modes.call(method::POLICY_SAVE_HOST, json!({"session_id":session,"host":"*.example.test"})).unwrap();
     assert_eq!(saved["result"]["agent_id"], "claude", "{saved}");
-    let agent = c.call("_sill/agents.get", json!({"agent_id":"claude"})).unwrap();
+    let agent = c.call(method::AGENTS_GET, json!({"agent_id":"claude"})).unwrap();
     assert!(agent["result"]["domains"].as_array().unwrap().contains(&json!("*.example.test")), "{agent}");
     // a running session gets an exact host at once, as a live grant its proxy reads per
     // connection: the agent goes on without a restart (2026-11-05)
     let _shim = std::os::unix::net::UnixListener::bind(runtime.join("shim.sock")).unwrap();
-    let allowed = c.call("_sill/policy.allow_host", json!({"session_id":session,"host":"api.example.test"})).unwrap();
+    let allowed = c.call(method::POLICY_ALLOW_HOST, json!({"session_id":session,"host":"api.example.test"})).unwrap();
     assert_eq!(allowed["result"]["live"], true, "{allowed}");
     assert_eq!(std::fs::read_to_string(runtime.join("session-allowed-hosts")).unwrap(), "api.example.test\n");
-    let agent = c.call("_sill/agents.get", json!({"agent_id":"claude"})).unwrap();
+    let agent = c.call(method::AGENTS_GET, json!({"agent_id":"claude"})).unwrap();
     assert!(!agent["result"]["domains"].as_array().unwrap().contains(&json!("api.example.test")), "agent defaults unchanged: {agent}");
     // Restore defaults also stops hosts approved during this run from matching new connections
-    let restored = modes.call("_sill/permissions.restore_defaults", json!({"session_id":session})).unwrap();
+    let restored = modes.call(method::PERMISSIONS_RESTORE_DEFAULTS, json!({"session_id":session})).unwrap();
     assert_eq!(restored["result"]["restart_required"], true, "{restored}");
     assert_eq!(std::fs::read_to_string(runtime.join("session-allowed-hosts")).unwrap(), "");
     assert!(!restored["result"]["preview"]["text"].as_str().unwrap().contains("api.example.test"), "{restored}");
     for host in ["bad\nname", "../invalid"] {
-        assert!(c.call("_sill/policy.allow_host", json!({"session_id":session,"host":host})).unwrap().get("error").is_some());
+        assert!(c.call(method::POLICY_ALLOW_HOST, json!({"session_id":session,"host":host})).unwrap().get("error").is_some());
     }
-    assert!(c.call("_sill/policy.denied", json!({"session_id":session,"limit":0})).unwrap().get("error").is_some());
+    assert!(c.call(method::POLICY_DENIED, json!({"session_id":session,"limit":0})).unwrap().get("error").is_some());
 }
 
 #[test]
@@ -1362,28 +1363,28 @@ fn policy_check_import_and_explicit_replacement() {
     let d = Daemon::start();
     let mut c = d.connect().unwrap();
     let text = "name = 'shared'\n[network]\nmode = 'none'\n";
-    let checked = c.call("_sill/policy.check", json!({"text":text})).unwrap();
+    let checked = c.call(method::POLICY_CHECK, json!({"text":text})).unwrap();
     assert_eq!(checked["result"]["valid"], true, "{checked}");
-    let invalid = c.call("_sill/policy.check", json!({"text":"name = 'bad'\nunknown = true"})).unwrap();
+    let invalid = c.call(method::POLICY_CHECK, json!({"text":"name = 'bad'\nunknown = true"})).unwrap();
     assert_eq!(invalid["result"]["valid"], false, "{invalid}");
     assert!(!d.dir.join("home/.config/sill/policies/shared.toml").exists());
-    let imported = c.call("_sill/policy.import", json!({"name":"shared","text":text})).unwrap();
+    let imported = c.call(method::POLICY_IMPORT, json!({"name":"shared","text":text})).unwrap();
     assert_eq!(imported["result"]["name"], "shared", "{imported}");
-    let saved = c.call("_sill/policy.get", json!({"name":"shared"})).unwrap();
+    let saved = c.call(method::POLICY_GET, json!({"name":"shared"})).unwrap();
     assert_eq!(saved["result"]["text"], imported["result"]["text"]);
     let changed = "name = 'shared'\n[network]\nmode = 'allow'\n";
-    let conflict = c.call("_sill/policy.import", json!({"name":"shared","text":changed})).unwrap();
+    let conflict = c.call(method::POLICY_IMPORT, json!({"name":"shared","text":changed})).unwrap();
     assert_eq!(conflict["error"]["data"]["code"], "conflict", "{conflict}");
-    let unchanged = c.call("_sill/policy.get", json!({"name":"shared"})).unwrap();
+    let unchanged = c.call(method::POLICY_GET, json!({"name":"shared"})).unwrap();
     assert_eq!(saved["result"], unchanged["result"]);
-    let replaced = c.call("_sill/policy.import", json!({"name":"shared","text":changed,"replace":true})).unwrap();
+    let replaced = c.call(method::POLICY_IMPORT, json!({"name":"shared","text":changed,"replace":true})).unwrap();
     assert!(replaced.get("error").is_none(), "{replaced}");
-    let invalid_name = c.call("_sill/policy.import", json!({"name":"../escape","text":text})).unwrap();
+    let invalid_name = c.call(method::POLICY_IMPORT, json!({"name":"../escape","text":text})).unwrap();
     assert_eq!(invalid_name["error"]["code"], -32602, "{invalid_name}");
-    let oversized = c.call("_sill/policy.check", json!({"text":"x".repeat(1024*1024+1)})).unwrap();
+    let oversized = c.call(method::POLICY_CHECK, json!({"text":"x".repeat(1024*1024+1)})).unwrap();
     assert_eq!(oversized["error"]["data"]["code"], "limit_exceeded", "{oversized}");
     // a check is of a complete policy and nothing else: a request for another kind is refused, not answered as one
-    let other = c.call("_sill/policy.check", json!({"text":text,"fragment":true})).unwrap();
+    let other = c.call(method::POLICY_CHECK, json!({"text":text,"fragment":true})).unwrap();
     assert_eq!(other["error"]["code"], -32602, "{other}");
 }
 
@@ -1398,15 +1399,15 @@ fn policy_preview_follows_today_and_the_launch_snapshot_stays() {
     std::fs::write(&policy, "name='preview'\n[network]\nmode='allow'\nallow=['launch.example']\n").unwrap();
     let created = c
         .call(
-            "_sill/sessions.create",
+            method::SESSIONS_CREATE,
             json!({"create_id":"policy-preview","agent":"claude","policy":policy.to_str().unwrap(),"pins":[HostPath::from_path(&root)]}),
         )
         .unwrap();
     let id = created["result"]["session_id"].as_str().unwrap();
     let key = json!({"session_id":id});
-    let empty = c.call("_sill/policy.snapshot", key.clone()).unwrap();
+    let empty = c.call(method::POLICY_SNAPSHOT, key.clone()).unwrap();
     assert!(empty["result"]["snapshot"].is_null(), "{empty}");
-    let preview = c.call("_sill/policy.preview", key.clone()).unwrap();
+    let preview = c.call(method::POLICY_PREVIEW, key.clone()).unwrap();
     assert_eq!(preview["result"]["view"], "preview", "{preview}");
     assert!(preview["result"]["diagnostics"].as_array().unwrap().is_empty(), "{preview}");
     assert!(preview["result"]["text"].as_str().unwrap().contains("launch.example"), "{preview}");
@@ -1424,24 +1425,24 @@ fn policy_preview_follows_today_and_the_launch_snapshot_stays() {
     std::fs::write(snapshots.join("latest.json"), serde_json::to_vec(&resolution).unwrap()).unwrap();
     // the policy changes: the preview is the next build's, the snapshot what was launched
     std::fs::write(&policy, "name='preview'\n[network]\nmode='allow'\nallow=['next.example']\n").unwrap();
-    let next = c.call("_sill/policy.preview", key.clone()).unwrap();
+    let next = c.call(method::POLICY_PREVIEW, key.clone()).unwrap();
     assert!(next["result"]["text"].as_str().unwrap().contains("next.example"), "{next}");
     assert_ne!(next["result"]["fingerprint"], preview["result"]["fingerprint"]);
-    let retained = c.call("_sill/policy.snapshot", key.clone()).unwrap();
+    let retained = c.call(method::POLICY_SNAPSHOT, key.clone()).unwrap();
     assert_eq!(retained["result"]["snapshot"]["view"], "launch", "{retained}");
     assert!(retained["result"]["snapshot"]["text"].as_str().unwrap().contains("launch.example"), "{retained}");
     assert_eq!(retained["result"]["snapshot"]["fingerprint"], resolution.fingerprint.as_str());
     // a policy that no longer parses, or a pinned folder that is gone: diagnostics and no rules,
     // while the launch stays readable
     std::fs::write(&policy, "name='preview'\nunknown = true\n").unwrap();
-    let invalid = c.call("_sill/policy.preview", key.clone()).unwrap();
+    let invalid = c.call(method::POLICY_PREVIEW, key.clone()).unwrap();
     assert!(invalid["result"]["text"].is_null(), "{invalid}");
     assert!(!invalid["result"]["diagnostics"].as_array().unwrap().is_empty(), "{invalid}");
     std::fs::write(&policy, "name='preview'\n").unwrap();
     std::fs::remove_dir(&root).unwrap();
-    let unpinned = c.call("_sill/policy.preview", key.clone()).unwrap();
+    let unpinned = c.call(method::POLICY_PREVIEW, key.clone()).unwrap();
     assert!(unpinned["result"]["diagnostics"][0].as_str().unwrap().contains("resolve pinned path"), "{unpinned}");
-    let retained = c.call("_sill/policy.snapshot", key).unwrap();
+    let retained = c.call(method::POLICY_SNAPSHOT, key).unwrap();
     assert_eq!(retained["result"]["snapshot"]["view"], "launch", "{retained}");
 }
 
@@ -1452,7 +1453,7 @@ fn session_host_grants_wait_for_the_next_build_and_offline_is_not_overridden() {
     let policy = d.dir.join("home/grants.toml");
     let online = "name='grants'\n[network]\nmode='allow'\n";
     std::fs::write(&policy, online).unwrap();
-    let created = c.call("_sill/sessions.create", json!({"create_id":"host-grants","agent":"claude","policy":policy.to_str().unwrap()})).unwrap();
+    let created = c.call(method::SESSIONS_CREATE, json!({"create_id":"host-grants","agent":"claude","policy":policy.to_str().unwrap()})).unwrap();
     let id = created["result"]["session_id"].as_str().unwrap();
     let mut resolution = sill_core::session::resolve(&sill_core::policy::Policy::parse(online).unwrap(), &[]).unwrap();
     let snapshot = d.dir.join("state/sill/policy-snapshots").join(id);
@@ -1460,21 +1461,21 @@ fn session_host_grants_wait_for_the_next_build_and_offline_is_not_overridden() {
     let runtime = d.dir.join("run/sill").join(id);
     std::fs::create_dir_all(&runtime).unwrap();
     std::fs::write(snapshot.join("latest.json"), serde_json::to_vec(&resolution).unwrap()).unwrap();
-    let allowed = c.call("_sill/policy.allow_host", json!({"session_id":id,"host":"packages.example"})).unwrap();
+    let allowed = c.call(method::POLICY_ALLOW_HOST, json!({"session_id":id,"host":"packages.example"})).unwrap();
     assert_eq!(allowed["result"]["agent_name"], "this session", "{allowed}");
     // Not running: the grant waits in the session store for the next build, no live file
     assert_eq!(allowed["result"]["live"], false, "{allowed}");
     assert!(!runtime.join("session-allowed-hosts").exists());
-    let preview = c.call("_sill/policy.preview", json!({"session_id":id})).unwrap();
+    let preview = c.call(method::POLICY_PREVIEW, json!({"session_id":id})).unwrap();
     assert!(preview["result"]["text"].as_str().unwrap().contains("packages.example"), "{preview}");
     assert_eq!(preview["result"]["session_hosts"], json!([{"host":"packages.example","applied":true,"reason":""}]), "{preview}");
     assert!(!d.dir.join("home/.config/sill/agents/claude.toml").exists());
     // A stopped session resolves its policy as it is now before approving
     std::fs::write(&policy, "name='grants'\n[network]\nmode='none'\n").unwrap();
-    let offline = c.call("_sill/policy.allow_host", json!({"session_id":id,"host":"other.example"})).unwrap();
+    let offline = c.call(method::POLICY_ALLOW_HOST, json!({"session_id":id,"host":"other.example"})).unwrap();
     assert_eq!(offline["error"]["data"]["code"], "permission_denied", "{offline}");
     // …and its next build leaves the remembered host out, saying why, without forgetting it
-    let preview = c.call("_sill/policy.preview", json!({"session_id":id})).unwrap();
+    let preview = c.call(method::POLICY_PREVIEW, json!({"session_id":id})).unwrap();
     let hosts = &preview["result"]["session_hosts"];
     assert!(hosts[0]["host"] == "packages.example" && hosts[0]["applied"] == false && hosts[0]["reason"].as_str().unwrap().contains("offline"), "{preview}");
     // A running session is held to its recorded launch policy
@@ -1482,7 +1483,7 @@ fn session_host_grants_wait_for_the_next_build_and_offline_is_not_overridden() {
     let _shim = std::os::unix::net::UnixListener::bind(runtime.join("shim.sock")).unwrap();
     resolution.policy.network.mode = sill_core::policy::NetMode::None;
     std::fs::write(snapshot.join("latest.json"), serde_json::to_vec(&resolution).unwrap()).unwrap();
-    let offline = c.call("_sill/policy.allow_host", json!({"session_id":id,"host":"packages.example"})).unwrap();
+    let offline = c.call(method::POLICY_ALLOW_HOST, json!({"session_id":id,"host":"packages.example"})).unwrap();
     assert_eq!(offline["error"]["data"]["code"], "permission_denied", "{offline}");
 }
 
@@ -1497,14 +1498,14 @@ fn host_control_is_an_activation_a_displaying_frontend_holds() {
     let mut create = |name: &str, text: &str, ghost: bool| {
         let path = policies.join(format!("{name}.toml"));
         std::fs::write(&path, format!("name='{name}'\n{text}")).unwrap();
-        let created = modes.call("_sill/sessions.create", json!({"create_id":name,"agent":"claude","policy":path.to_str().unwrap(),"ghost":ghost})).unwrap();
+        let created = modes.call(method::SESSIONS_CREATE, json!({"create_id":name,"agent":"claude","policy":path.to_str().unwrap(),"ghost":ghost})).unwrap();
         created["result"]["session_id"].as_str().unwrap().to_string()
     };
     let stopped = create("stopped", "[network]\nmode='allow'", false);
     let forbidden = create("forbidden", "[permissions]\nhost_control='forbidden'", false);
     let ghost = create("ghost", "", true);
     let activate =
-        |c: &mut Conn, session: &str, operations: Value| c.call("_sill/host_control.activate", json!({"session_id":session,"operations":operations})).unwrap();
+        |c: &mut Conn, session: &str, operations: Value| c.call(method::HOST_CONTROL_ACTIVATE, json!({"session_id":session,"operations":operations})).unwrap();
 
     // only a frontend that shows Host control may activate: the permission-modes gate first, then
     // the host-control capability itself
@@ -1529,8 +1530,8 @@ fn host_control_is_an_activation_a_displaying_frontend_holds() {
     assert_eq!(activate(&mut host, &stopped, json!([]))["error"]["code"], -32602);
     // the state shows to frontends that show permission state (records carry the brief to all);
     // nothing above left an activation behind
-    assert_eq!(plain.call("_sill/host_control.state", json!({"session_id":stopped})).unwrap()["error"]["data"]["code"], "unsupported");
-    let state = modes.call("_sill/host_control.state", json!({"session_id":stopped})).unwrap();
+    assert_eq!(plain.call(method::HOST_CONTROL_STATE, json!({"session_id":stopped})).unwrap()["error"]["data"]["code"], "unsupported");
+    let state = modes.call(method::HOST_CONTROL_STATE, json!({"session_id":stopped})).unwrap();
     assert_eq!(
         (state["result"]["active"].clone(), state["result"]["generation"].clone(), state["result"]["displaying"].clone()),
         (json!(false), json!(0), json!(0)),
@@ -1538,15 +1539,15 @@ fn host_control_is_an_activation_a_displaying_frontend_holds() {
     );
     // …with the policy's ban where there is one, so a frontend can say so before anyone tries
     assert!(state["result"].get("forbidden").is_none(), "{state}");
-    let banned = modes.call("_sill/host_control.state", json!({"session_id":forbidden})).unwrap();
+    let banned = modes.call(method::HOST_CONTROL_STATE, json!({"session_id":forbidden})).unwrap();
     assert!(banned["result"]["forbidden"].as_str().unwrap().contains("forbidden by the session's policy"), "{banned}");
-    let record = plain.call("_sill/sessions.get", json!({"session_id":stopped})).unwrap();
+    let record = plain.call(method::SESSIONS_GET, json!({"session_id":stopped})).unwrap();
     assert!(record["result"].get("host_control").is_none(), "{record}");
     // revoking needs the capability too; revoking nothing is nothing
-    assert_eq!(plain.call("_sill/host_control.revoke", json!({"session_id":stopped})).unwrap()["error"]["data"]["code"], "unsupported");
-    let revoked = host.call("_sill/host_control.revoke", json!({"session_id":stopped})).unwrap();
+    assert_eq!(plain.call(method::HOST_CONTROL_REVOKE, json!({"session_id":stopped})).unwrap()["error"]["data"]["code"], "unsupported");
+    let revoked = host.call(method::HOST_CONTROL_REVOKE, json!({"session_id":stopped})).unwrap();
     assert_eq!(revoked["result"]["active"], false, "{revoked}");
-    assert_eq!(host.call("_sill/host_control.state", json!({"session_id":"nope"})).unwrap()["error"]["data"]["code"], "not_found");
+    assert_eq!(host.call(method::HOST_CONTROL_STATE, json!({"session_id":"nope"})).unwrap()["error"]["data"]["code"], "not_found");
 }
 
 /// An orderly stop right after the frontend that displayed Host control left: the revocation
@@ -1558,13 +1559,13 @@ fn an_orderly_stop_finishes_a_revocation_under_way() {
         let mut d = Daemon::start();
         let mut modes = d.connect_caps(json!({"sill.permission_modes":1})).unwrap();
         let mut host = d.connect_caps(json!({"sill.permission_modes":1,"sill.host_control":1})).unwrap();
-        let created = modes.call("_sill/sessions.create", json!({"create_id":"orderly","agent":"claude","policy":"default"})).unwrap();
+        let created = modes.call(method::SESSIONS_CREATE, json!({"create_id":"orderly","agent":"claude","policy":"default"})).unwrap();
         let id = created["result"]["session_id"].as_str().unwrap().to_string();
         // a jail's shim socket and bridge directory, as its launcher leaves them
         let runtime = d.dir.join("run/sill").join(&id);
         std::fs::create_dir_all(runtime.join("bridge")).unwrap();
         let _shim = std::os::unix::net::UnixListener::bind(runtime.join("shim.sock")).unwrap();
-        let state = host.call("_sill/host_control.activate", json!({"session_id":id,"operations":["launch"]})).unwrap();
+        let state = host.call(method::HOST_CONTROL_ACTIVATE, json!({"session_id":id,"operations":["launch"]})).unwrap();
         let generation = state["result"]["generation"].as_u64().unwrap_or_else(|| panic!("{state}"));
         let mut bridge = UnixStream::connect(runtime.join("bridge/host.sock")).unwrap();
         bridge.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
@@ -1599,18 +1600,18 @@ fn development_permissions_apply_together_or_not_at_all() {
     let mut create = |name: &str, text: &str, ghost: bool| {
         let path = policies.join(format!("{name}.toml"));
         std::fs::write(&path, format!("name='{name}'\n{text}")).unwrap();
-        let created = modes.call("_sill/sessions.create", json!({"create_id":name,"agent":"claude","policy":path.to_str().unwrap(),"ghost":ghost})).unwrap();
+        let created = modes.call(method::SESSIONS_CREATE, json!({"create_id":name,"agent":"claude","policy":path.to_str().unwrap(),"ghost":ghost})).unwrap();
         created["result"]["session_id"].as_str().unwrap().to_string()
     };
     let plain = create("plain", "[network]\nmode='allow'", false);
     let half = create("half", "[permissions]\nprivate_bus='forbidden'", false);
     let ghost = create("ghost", "", true);
     let state = |view: &Value, capability: &str| view["permissions"].as_array().unwrap().iter().find(|p| p["capability"] == capability).cloned().unwrap();
-    let apply = |c: &mut Conn, session: &str| c.call("_sill/permissions.apply_development", json!({"session_id":session})).unwrap();
+    let apply = |c: &mut Conn, session: &str| c.call(method::PERMISSIONS_APPLY_DEVELOPMENT, json!({"session_id":session})).unwrap();
 
     let refused = apply(&mut bare, &plain);
     assert_eq!(refused["error"]["data"]["details"]["capability"], "sill.permission_modes", "{refused}");
-    let preview = modes.call("_sill/policy.preview", json!({"session_id":plain})).unwrap();
+    let preview = modes.call(method::POLICY_PREVIEW, json!({"session_id":plain})).unwrap();
     let available = ["test_desktop", "private_bus"].iter().all(|c| state(&preview["result"], c)["available"] == true);
     let applied = apply(&mut modes, &plain);
     if available {
@@ -1618,19 +1619,19 @@ fn development_permissions_apply_together_or_not_at_all() {
             let s = state(&applied["result"]["preview"], capability);
             assert_eq!((s["requested"].clone(), s["source"].clone(), s["effective"].clone()), (json!(true), json!("session"), json!(true)), "{s}");
         }
-        let restored = modes.call("_sill/permissions.restore_defaults", json!({"session_id":plain})).unwrap();
+        let restored = modes.call(method::PERMISSIONS_RESTORE_DEFAULTS, json!({"session_id":plain})).unwrap();
         assert_eq!(state(&restored["result"]["preview"], "test_desktop")["requested"], Value::Null);
     } else {
         // this machine lacks Weston or dbus-daemon: the group is refused as a whole, nothing recorded
         assert_eq!(applied["error"]["data"]["code"], "permission_denied", "{applied}");
-        let preview = modes.call("_sill/policy.preview", json!({"session_id":plain})).unwrap();
+        let preview = modes.call(method::POLICY_PREVIEW, json!({"session_id":plain})).unwrap();
         assert!(["test_desktop", "private_bus"].iter().all(|c| state(&preview["result"], c)["requested"].is_null()));
     }
     // a forbidden half refuses the group, naming it, and the other half is not recorded either
     let refused = apply(&mut modes, &half);
     assert_eq!(refused["error"]["data"]["code"], "permission_denied", "{refused}");
     assert!(refused["error"]["message"].as_str().unwrap().contains("private_bus"), "{refused}");
-    let preview = modes.call("_sill/policy.preview", json!({"session_id":half})).unwrap();
+    let preview = modes.call(method::POLICY_PREVIEW, json!({"session_id":half})).unwrap();
     assert_eq!(state(&preview["result"], "test_desktop")["requested"], Value::Null, "{preview}");
     assert_eq!(apply(&mut modes, &ghost)["error"]["data"]["code"], "permission_denied");
 }
@@ -1646,7 +1647,7 @@ fn session_permission_choices_restore_defaults_and_frontend_gate() {
     let mut create = |name: &str, text: &str, ghost: bool| {
         let path = policies.join(format!("{name}.toml"));
         std::fs::write(&path, format!("name='{name}'\n{text}")).unwrap();
-        let created = modes.call("_sill/sessions.create", json!({"create_id":name,"agent":"claude","policy":path.to_str().unwrap(),"ghost":ghost})).unwrap();
+        let created = modes.call(method::SESSIONS_CREATE, json!({"create_id":name,"agent":"claude","policy":path.to_str().unwrap(),"ghost":ghost})).unwrap();
         created["result"]["session_id"].as_str().unwrap().to_string()
     };
     let web = create("web", "[network]\nmode='allow'", false);
@@ -1655,7 +1656,7 @@ fn session_permission_choices_restore_defaults_and_frontend_gate() {
     let ghost = create("ghost", "[network]\nmode='allow'", true);
     let state = |view: &Value, capability: &str| view["permissions"].as_array().unwrap().iter().find(|p| p["capability"] == capability).cloned().unwrap();
     let set = |c: &mut Conn, session: &str, capability: &str, enabled: Value| {
-        c.call("_sill/permissions.set", json!({"session_id":session,"capability":capability,"enabled":enabled})).unwrap()
+        c.call(method::PERMISSIONS_SET, json!({"session_id":session,"capability":capability,"enabled":enabled})).unwrap()
     };
 
     // Only a frontend that shows permission state may change choices.
@@ -1670,7 +1671,7 @@ fn session_permission_choices_restore_defaults_and_frontend_gate() {
         (json!(true), json!(true), json!("session")),
         "{web_state}"
     );
-    let unchanged = modes.call("_sill/policy.preview", json!({"session_id":other})).unwrap();
+    let unchanged = modes.call(method::POLICY_PREVIEW, json!({"session_id":other})).unwrap();
     assert_eq!(state(&unchanged["result"], "public_web")["effective"], false, "grants belong to one session");
 
     // Widening is refused where no backend or a limit blocks it; declining always applies.
@@ -1686,36 +1687,36 @@ fn session_permission_choices_restore_defaults_and_frontend_gate() {
 
     // A newly imposed ceiling blocks the remembered choice instead of being bypassed.
     std::fs::write(policies.join("web.toml"), "name='web'\n[network]\nmode='allow'\nallow_additional_hosts=false").unwrap();
-    let preview = modes.call("_sill/policy.preview", json!({"session_id":web})).unwrap();
+    let preview = modes.call(method::POLICY_PREVIEW, json!({"session_id":web})).unwrap();
     let web_state = state(&preview["result"], "public_web");
     assert_eq!((web_state["effective"].clone(), web_state["blocked"].clone()), (json!(false), json!(true)), "{web_state}");
     std::fs::write(policies.join("web.toml"), "name='web'\n[network]\nmode='allow'").unwrap();
 
     // Restore defaults removes added grants and keeps the selected policy.
-    assert!(bare.call("_sill/policy.allow_host", json!({"session_id":web,"host":"api.example.test"})).unwrap().get("error").is_none());
-    let restored = modes.call("_sill/permissions.restore_defaults", json!({"session_id":web})).unwrap();
+    assert!(bare.call(method::POLICY_ALLOW_HOST, json!({"session_id":web,"host":"api.example.test"})).unwrap().get("error").is_none());
+    let restored = modes.call(method::PERMISSIONS_RESTORE_DEFAULTS, json!({"session_id":web})).unwrap();
     let web_state = state(&restored["result"]["preview"], "public_web");
     assert_eq!((web_state["effective"].clone(), web_state["requested"].clone()), (json!(false), Value::Null), "{web_state}");
     assert!(!restored["result"]["preview"]["text"].as_str().unwrap().contains("api.example.test"));
-    let row = modes.call("_sill/sessions.get", json!({"session_id":web})).unwrap();
+    let row = modes.call(method::SESSIONS_GET, json!({"session_id":web})).unwrap();
     assert!(row["result"]["policy"].as_str().unwrap().ends_with("web.toml"), "{row}");
 
     // A bare client operates Default sessions, never ones requesting Desktop development capabilities.
     for (method, params) in [
-        ("_sill/sessions.submit", json!({"session_id":desktop,"submission_id":"s1","content":[]})),
-        ("_sill/questions.answer", json!({"session_id":desktop,"question_id":"q"})),
-        ("_sill/policy.allow_host", json!({"session_id":desktop,"host":"example.com"})),
-        ("_sill/sessions.start", json!({"session_id":desktop})),
+        (method::SESSIONS_SUBMIT, json!({"session_id":desktop,"submission_id":"s1","content":[]})),
+        (method::QUESTIONS_ANSWER, json!({"session_id":desktop,"question_id":"q"})),
+        (method::POLICY_ALLOW_HOST, json!({"session_id":desktop,"host":"example.com"})),
+        (method::SESSIONS_START, json!({"session_id":desktop})),
     ] {
         let refused = bare.call(method, params).unwrap();
         assert_eq!(refused["error"]["data"]["details"]["capability"], "sill.permission_modes", "{method}: {refused}");
     }
-    let permitted = modes.call("_sill/policy.allow_host", json!({"session_id":desktop,"host":"example.com"})).unwrap();
+    let permitted = modes.call(method::POLICY_ALLOW_HOST, json!({"session_id":desktop,"host":"example.com"})).unwrap();
     assert!(permitted.get("error").is_none(), "{permitted}");
-    assert!(bare.call("_sill/policy.preview", json!({"session_id":desktop})).unwrap().get("error").is_none(), "inspection stays available");
+    assert!(bare.call(method::POLICY_PREVIEW, json!({"session_id":desktop})).unwrap().get("error").is_none(), "inspection stays available");
     // Declining the default makes it a Default session again, operable by a bare client.
     assert!(set(&mut modes, &desktop, "test_desktop", json!(false)).get("error").is_none());
-    assert!(bare.call("_sill/policy.allow_host", json!({"session_id":desktop,"host":"example.org"})).unwrap().get("error").is_none());
+    assert!(bare.call(method::POLICY_ALLOW_HOST, json!({"session_id":desktop,"host":"example.org"})).unwrap().get("error").is_none());
 }
 
 #[test]
@@ -1750,7 +1751,7 @@ fn policy_cli_shows_the_default_and_blocks_jailed_import() {
 #[test]
 fn daemon_only_restart_replaces_process_and_keeps_store() {
     let mut d = Daemon::start();
-    let created = d.connect().unwrap().call("_sill/sessions.create", json!({"create_id":"restart-keeps-session","agent":"claude","policy":"default"})).unwrap();
+    let created = d.connect().unwrap().call(method::SESSIONS_CREATE, json!({"create_id":"restart-keeps-session","agent":"claude","policy":"default"})).unwrap();
     assert!(created.get("error").is_none(), "{created}");
     let before = d.connect().unwrap().call(sill_proto::method::DAEMON_STATUS, json!({})).unwrap();
     let status = Daemon::command(&d.dir).arg("restart").status().unwrap();
@@ -1782,7 +1783,7 @@ fn public_workspaces_without_a_jail() {
     assert!(Command::new("git").args(["init", "-q"]).arg(&repo).status().unwrap().success());
 
     let mut plain = d.connect().unwrap();
-    let refused = plain.call("_sill/workspaces.list", json!({})).unwrap();
+    let refused = plain.call(method::WORKSPACES_LIST, json!({})).unwrap();
     assert_eq!(refused["error"]["data"]["code"], "unsupported", "{refused}");
     assert_eq!(refused["error"]["data"]["details"]["capability"], "sill.workspaces");
 
@@ -1790,7 +1791,7 @@ fn public_workspaces_without_a_jail() {
     let create = |c: &mut Conn, id: &str, workspaces: Value| {
         let made = c
             .call(
-                "_sill/sessions.create",
+                method::SESSIONS_CREATE,
                 json!({"create_id": id, "agent": "claude", "policy": "default", "pins": [HostPath::from_path(&repo)], "workspaces": workspaces}),
             )
             .unwrap();
@@ -1798,26 +1799,26 @@ fn public_workspaces_without_a_jail() {
         made["result"]["session_id"].as_str().unwrap().to_string()
     };
     let chosen = create(&mut c, "ws-on", json!(true));
-    let view = c.call("_sill/workspaces.session", json!({"session_id": chosen})).unwrap();
+    let view = c.call(method::WORKSPACES_SESSION, json!({"session_id": chosen})).unwrap();
     assert_eq!(view["result"]["workspaces_mode"], true, "{view}");
     assert_eq!(view["result"]["workspaces"], json!([]), "made when its jail starts, not before");
     let default = create(&mut c, "ws-default", Value::Null);
-    let view = c.call("_sill/workspaces.session", json!({"session_id": default})).unwrap();
+    let view = c.call(method::WORKSPACES_SESSION, json!({"session_id": default})).unwrap();
     assert_eq!(view["result"]["workspaces_mode"], false, "Automatic workspaces is off unless set");
-    let on = c.call("_sill/settings.patch", json!({"changes": [{"type": "automatic_workspaces", "value": true}]})).unwrap();
+    let on = c.call(method::SETTINGS_PATCH, json!({"changes": [{"type": "automatic_workspaces", "value": true}]})).unwrap();
     assert!(on.get("error").is_none(), "{on}");
     let automatic = create(&mut c, "ws-automatic", Value::Null);
-    let view = c.call("_sill/workspaces.session", json!({"session_id": automatic})).unwrap();
+    let view = c.call(method::WORKSPACES_SESSION, json!({"session_id": automatic})).unwrap();
     assert_eq!(view["result"]["workspaces_mode"], true);
     let live = create(&mut c, "ws-live", json!(false));
-    let view = c.call("_sill/workspaces.session", json!({"session_id": live})).unwrap();
+    let view = c.call(method::WORKSPACES_SESSION, json!({"session_id": live})).unwrap();
     assert_eq!(view["result"]["workspaces_mode"], false, "the live button");
 
-    let listed = c.call("_sill/workspaces.list", json!({})).unwrap();
+    let listed = c.call(method::WORKSPACES_LIST, json!({})).unwrap();
     assert_eq!(listed["result"]["workspaces"], json!([]), "{listed}");
-    let missing = c.call("_sill/workspaces.get", json!({"workspace_id": "ws-none"})).unwrap();
+    let missing = c.call(method::WORKSPACES_GET, json!({"workspace_id": "ws-none"})).unwrap();
     assert_eq!(missing["error"]["data"]["code"], "not_found", "{missing}");
-    let undo = c.call("_sill/workspaces.undo", json!({"operation_id": "u", "discard_id": "wsd-none"})).unwrap();
+    let undo = c.call(method::WORKSPACES_UNDO, json!({"operation_id": "u", "discard_id": "wsd-none"})).unwrap();
     assert_eq!(undo["error"]["data"]["code"], "not_found", "{undo}");
 }
 
@@ -1856,7 +1857,7 @@ fn public_crosscheck_workers_are_hidden_and_cannot_be_widened_or_kept() {
     use sill_proto::sessions::HostPath;
     let d = Daemon::start();
     let mut c = d.connect_caps(json!({"sill.permission_modes":1,"sill.host_control":1})).unwrap();
-    let made = c.call("_sill/sessions.create", json!({"create_id":"internal-review","agent":"claude","policy":"default"})).unwrap();
+    let made = c.call(method::SESSIONS_CREATE, json!({"create_id":"internal-review","agent":"claude","policy":"default"})).unwrap();
     let id = made["result"]["session_id"].as_str().unwrap();
     let store = sill_core::store::Store::open(&d.dir.join("state/sill/sill.db")).unwrap();
     store.conn().execute("INSERT INTO crosscheck_workers VALUES(?1,'run')", [id]).unwrap();
@@ -1866,29 +1867,29 @@ fn public_crosscheck_workers_are_hidden_and_cannot_be_widened_or_kept() {
     let file = repo.join("generated");
     std::fs::write(&file, "disposable").unwrap();
     store.pin(id, &repo).unwrap();
-    let listed = c.call("_sill/sessions.list", json!({})).unwrap();
+    let listed = c.call(method::SESSIONS_LIST, json!({})).unwrap();
     assert_eq!(listed["result"]["sessions"], json!([]), "{listed}");
-    let get = c.call("_sill/sessions.get", json!({"session_id":id})).unwrap();
+    let get = c.call(method::SESSIONS_GET, json!({"session_id":id})).unwrap();
     assert_eq!(get["result"]["session_id"], id, "transcript metadata remains readable: {get}");
     for method in [
-        "_sill/sessions.update",
-        "_sill/sessions.pin",
-        "_sill/sessions.unpin",
-        "_sill/sessions.submit",
-        "_sill/sessions.control",
-        "_sill/sessions.reset",
-        "_sill/permissions.set",
-        "_sill/permissions.apply_development",
-        "_sill/permissions.restore_defaults",
-        "_sill/policy.allow_host",
-        "_sill/host_control.activate",
+        method::SESSIONS_UPDATE,
+        method::SESSIONS_PIN,
+        method::SESSIONS_UNPIN,
+        method::SESSIONS_SUBMIT,
+        method::SESSIONS_CONTROL,
+        method::SESSIONS_RESET,
+        method::PERMISSIONS_SET,
+        method::PERMISSIONS_APPLY_DEVELOPMENT,
+        method::PERMISSIONS_RESTORE_DEFAULTS,
+        method::POLICY_ALLOW_HOST,
+        method::HOST_CONTROL_ACTIVATE,
     ] {
         let refused = c.call(method, json!({"session_id":id})).unwrap();
         assert_eq!(refused["error"]["data"]["code"], "permission_denied", "{method}: {refused}");
     }
-    let changes = c.call("_sill/changes.list", json!({})).unwrap();
+    let changes = c.call(method::CHANGES_LIST, json!({})).unwrap();
     assert_eq!(changes["result"]["entries"], json!([]), "reviewer pins must not become live changes: {changes}");
-    let keep = c.call("_sill/changes.keep", json!({"session_id":id,"items":[{"path":HostPath::from_path(&file),"expected_hash":null}]})).unwrap();
+    let keep = c.call(method::CHANGES_KEEP, json!({"session_id":id,"items":[{"path":HostPath::from_path(&file),"expected_hash":null}]})).unwrap();
     assert_eq!(keep["error"]["data"]["code"], "permission_denied", "{keep}");
     assert_eq!(std::fs::read_to_string(file).unwrap(), "disposable");
 }
@@ -2078,10 +2079,10 @@ fn public_crosscheck_runs_a_whole_review_against_a_scripted_reviewer() {
     let d = Daemon::start_env(dir, &[("SILL_LAUNCHER", "attach")]);
     let fake = FakeReviewers::start(&d.dir);
     let mut c = d.connect_caps(json!({"sill.crosscheck": 1})).unwrap();
-    let made = c.call("_sill/sessions.create", json!({"create_id":"author","agent":"claude","policy":"default"})).unwrap();
+    let made = c.call(method::SESSIONS_CREATE, json!({"create_id":"author","agent":"claude","policy":"default"})).unwrap();
     let author = made["result"]["session_id"].as_str().unwrap().to_string();
     // an agent the person also uses: it reviews when no Reviewer is saved
-    let other = c.call("_sill/sessions.create", json!({"create_id":"other","agent":"codex","policy":"default"})).unwrap()["result"]["session_id"]
+    let other = c.call(method::SESSIONS_CREATE, json!({"create_id":"other","agent":"codex","policy":"default"})).unwrap()["result"]["session_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -2098,7 +2099,7 @@ fn public_crosscheck_runs_a_whole_review_against_a_scripted_reviewer() {
         std::fs::create_dir_all(&snapshots).unwrap();
         std::fs::write(snapshots.join("latest.json"), serde_json::to_vec(&resolution).unwrap()).unwrap();
     }
-    let current = |c: &mut Conn| c.call("_sill/crosscheck.get", json!({"workspace_id":"ws-1"})).unwrap()["result"]["run"].clone();
+    let current = |c: &mut Conn| c.call(method::CROSSCHECK_GET, json!({"workspace_id":"ws-1"})).unwrap()["result"]["run"].clone();
     let wait = |c: &mut Conn, what: &str, done: &dyn Fn(&Value) -> bool| {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -2123,14 +2124,14 @@ fn public_crosscheck_runs_a_whole_review_against_a_scripted_reviewer() {
     assert!(current(&mut c).is_null(), "no review before one is asked for");
 
     // the Reviewer setting: what each agent offers is unknown until one has run
-    let setup = c.call("_sill/crosscheck.reviewers", json!({})).unwrap();
+    let setup = c.call(method::CROSSCHECK_REVIEWERS, json!({})).unwrap();
     assert_eq!(setup["result"]["reviewers"], json!([]), "{setup}");
     let agents: Vec<&str> = setup["result"]["agents"].as_array().unwrap().iter().map(|a| a["agent"].as_str().unwrap()).collect();
     assert!(agents.contains(&"claude") && agents.contains(&"codex"), "{setup}");
     assert!(setup["result"]["agents"].as_array().unwrap().iter().all(|a| a["options"] == json!([])), "{setup}");
 
     // 1. a review that finds a problem. No Reviewer is saved: another agent than the author's.
-    let started = c.call("_sill/crosscheck.start", json!({"operation_id":"press-1","workspace_id":"ws-1"})).unwrap();
+    let started = c.call(method::CROSSCHECK_START, json!({"operation_id":"press-1","workspace_id":"ws-1"})).unwrap();
     let run_id = started["result"]["run_id"].as_str().unwrap_or_else(|| panic!("{started}\n{}", d.log())).to_string();
     assert_eq!(started["result"]["base"], start, "compared with where the work leaves the checkout, not the checkout's tip: {started}");
     assert_eq!(started["result"]["reviewers"][0]["reviewer"]["agent"], "codex", "{started}");
@@ -2146,15 +2147,15 @@ fn public_crosscheck_runs_a_whole_review_against_a_scripted_reviewer() {
     let working = wait(&mut c, "the Reviewer's step", &|run| run["reviewers"][0]["activity"] == json!(["Read src/lib.rs"]));
     assert_eq!((working["state"].as_str(), working["reviewers"][0]["state"].as_str()), (Some("reviewing"), Some("running")), "{working}");
     // the worker is nobody's session: not listed, and a second press starts nothing
-    let listed = c.call("_sill/sessions.list", json!({})).unwrap();
+    let listed = c.call(method::SESSIONS_LIST, json!({})).unwrap();
     let mut ids: Vec<&str> = listed["result"]["sessions"].as_array().unwrap().iter().map(|s| s["session_id"].as_str().unwrap()).collect();
     ids.sort();
     let mut mine = [author.as_str(), other.as_str()];
     mine.sort();
     assert_eq!(ids, mine, "{listed}");
-    let again = c.call("_sill/crosscheck.start", json!({"operation_id":"press-1","workspace_id":"ws-1"})).unwrap();
+    let again = c.call(method::CROSSCHECK_START, json!({"operation_id":"press-1","workspace_id":"ws-1"})).unwrap();
     assert_eq!(again["result"]["run_id"], run_id.as_str(), "{again}");
-    let second = c.call("_sill/crosscheck.start", json!({"operation_id":"press-1b","workspace_id":"ws-1"})).unwrap();
+    let second = c.call(method::CROSSCHECK_START, json!({"operation_id":"press-1b","workspace_id":"ws-1"})).unwrap();
     assert!(second["error"]["message"].as_str().unwrap().contains("already under way"), "{second}");
     fake.answers.send("Done.\n```json\n{\"summary\":\"It does what was asked. One thing to look at.\",\"problems\":[{\"title\":\"one() returns 2.\",\"path\":\"src/lib.rs\",\"line\":1,\"detail\":\"The name says one.\"}]}\n```".into()).unwrap();
     let done = wait(&mut c, "the review", &|run| run["state"] != "reviewing" && run["state"] != "capturing");
@@ -2173,15 +2174,15 @@ fn public_crosscheck_runs_a_whole_review_against_a_scripted_reviewer() {
     std::fs::write(clone.join("src/new.rs"), "pub fn new() { /* fixed */ }\n").unwrap();
     assert_eq!(current(&mut c)["stale"], true);
     // codex has run now: its options are known, and a Reviewer can be saved with one
-    let setup = c.call("_sill/crosscheck.reviewers", json!({})).unwrap();
+    let setup = c.call(method::CROSSCHECK_REVIEWERS, json!({})).unwrap();
     let reviewer = done["reviewers"][0]["reviewer"]["agent"].as_str().unwrap();
     let offered = setup["result"]["agents"].as_array().unwrap().iter().find(|a| a["agent"] == reviewer).unwrap();
     assert_eq!(offered["options"][0]["option_id"], "model", "{setup}");
-    let saved = c.call("_sill/crosscheck.set_reviewers", json!({"reviewers":[{"name":"Careful","agent":reviewer,"options":{"model":"large"}}]})).unwrap();
+    let saved = c.call(method::CROSSCHECK_SET_REVIEWERS, json!({"reviewers":[{"name":"Careful","agent":reviewer,"options":{"model":"large"}}]})).unwrap();
     assert_eq!(saved["result"]["reviewers"][0]["name"], "Careful", "{saved}");
 
     // 2. a review whose answer cannot be read is not "no problems"; it replaces the first
-    let started = c.call("_sill/crosscheck.start", json!({"operation_id":"press-2","workspace_id":"ws-1"})).unwrap();
+    let started = c.call(method::CROSSCHECK_START, json!({"operation_id":"press-2","workspace_id":"ws-1"})).unwrap();
     let second_id = started["result"]["run_id"].as_str().unwrap_or_else(|| panic!("{started}")).to_string();
     assert_ne!(second_id, run_id);
     assert_eq!(started["result"]["reviewers"][0]["reviewer"]["name"], "Careful", "{started}");
@@ -2196,15 +2197,15 @@ fn public_crosscheck_runs_a_whole_review_against_a_scripted_reviewer() {
     wait(&mut c, "the second worker's end", &|_| workers().iter().all(|(_, ended)| *ended) && leftovers() == 0);
 
     // 3. the cross while the Reviewer works: the review is gone and its worker stopped
-    let started = c.call("_sill/crosscheck.start", json!({"operation_id":"press-3","workspace_id":"ws-1"})).unwrap();
+    let started = c.call(method::CROSSCHECK_START, json!({"operation_id":"press-3","workspace_id":"ws-1"})).unwrap();
     let third = started["result"]["run_id"].as_str().unwrap_or_else(|| panic!("{started}")).to_string();
     fake.prompts.recv_timeout(Duration::from_secs(30)).unwrap_or_else(|_| panic!("the third Reviewer was never asked: {}\n{}", current(&mut c), d.log()));
     assert_eq!(workers().iter().filter(|(_, ended)| !ended).count(), 1);
-    let removed = c.call("_sill/crosscheck.remove", json!({"run_id":third})).unwrap();
+    let removed = c.call(method::CROSSCHECK_REMOVE, json!({"run_id":third})).unwrap();
     assert!(removed.get("error").is_none(), "{removed}");
     assert!(current(&mut c).is_null(), "removed at once");
     wait(&mut c, "the cancelled worker's end", &|_| workers().len() == 3 && workers().iter().all(|(_, ended)| *ended) && leftovers() == 0);
-    let twice = c.call("_sill/crosscheck.remove", json!({"run_id":third})).unwrap();
+    let twice = c.call(method::CROSSCHECK_REMOVE, json!({"run_id":third})).unwrap();
     assert!(twice.get("error").is_none(), "a review already gone is not an error: {twice}");
 
     // nothing to review once the work is where the checkout is
@@ -2213,20 +2214,20 @@ fn public_crosscheck_runs_a_whole_review_against_a_scripted_reviewer() {
     git(&source, &["pull", "-q", "--no-rebase", clone.to_str().unwrap(), "sill/ws"]);
     git(&clone, &["fetch", "-q", "origin"]);
     git(&clone, &["reset", "-q", "--hard", "origin/main"]);
-    let nothing = c.call("_sill/crosscheck.start", json!({"operation_id":"press-4","workspace_id":"ws-1"})).unwrap();
+    let nothing = c.call(method::CROSSCHECK_START, json!({"operation_id":"press-4","workspace_id":"ws-1"})).unwrap();
     assert!(nothing["error"]["message"].as_str().unwrap().contains("nothing to review"), "{nothing}");
 
     // 4. Discard while the Reviewer works: the review goes with the work and its worker is
     // stopped, since the line with the cross is gone from the shelf
     std::fs::write(clone.join("src/more.rs"), "pub fn more() {}\n").unwrap();
-    let started = c.call("_sill/crosscheck.start", json!({"operation_id":"press-5","workspace_id":"ws-1"})).unwrap();
+    let started = c.call(method::CROSSCHECK_START, json!({"operation_id":"press-5","workspace_id":"ws-1"})).unwrap();
     assert!(started["result"]["run_id"].is_string(), "{started}\n{}", d.log());
     fake.prompts.recv_timeout(Duration::from_secs(30)).unwrap_or_else(|_| panic!("the fourth Reviewer was never asked: {}\n{}", current(&mut c), d.log()));
     assert_eq!(workers().iter().filter(|(_, ended)| !ended).count(), 1);
     let mut w = d.connect_caps(json!({"sill.workspaces": 1, "sill.crosscheck": 1})).unwrap();
-    let detail = w.call("_sill/workspaces.get", json!({"workspace_id":"ws-1"})).unwrap();
+    let detail = w.call(method::WORKSPACES_GET, json!({"workspace_id":"ws-1"})).unwrap();
     let discarded =
-        w.call("_sill/workspaces.discard", json!({"operation_id":"discard-1","workspace_id":"ws-1","revision":detail["result"]["revision"]})).unwrap();
+        w.call(method::WORKSPACES_DISCARD, json!({"operation_id":"discard-1","workspace_id":"ws-1","revision":detail["result"]["revision"]})).unwrap();
     assert!(discarded.get("error").is_none(), "{discarded}\n{}", d.log());
     assert!(current(&mut c).is_null(), "the review went with the work");
     wait(&mut c, "the discarded work's worker's end", &|_| workers().len() == 4 && workers().iter().all(|(_, ended)| *ended) && leftovers() == 0);
@@ -2237,24 +2238,24 @@ fn public_crosscheck_runs_a_whole_review_against_a_scripted_reviewer() {
 fn storage_cleanup_refuses_a_live_launcher_and_requires_capability() {
     let d = Daemon::start();
     let mut baseline = d.connect().unwrap();
-    let reply = baseline.call("_sill/storage.caches", json!({})).unwrap();
+    let reply = baseline.call(method::STORAGE_CACHES, json!({})).unwrap();
     assert_eq!(reply["error"]["data"]["code"], "unsupported");
     let mut c = d.connect_caps(json!({"sill.storage": 1})).unwrap();
-    let reply = c.call("_sill/sessions.create", json!({"create_id": "storage-active", "agent": "claude", "policy": "default"})).unwrap();
+    let reply = c.call(method::SESSIONS_CREATE, json!({"create_id": "storage-active", "agent": "claude", "policy": "default"})).unwrap();
     let id = reply["result"]["session_id"].as_str().unwrap();
     // A launcher still booting need not have a shim socket. It must still be protected.
     let mut launcher = Command::new("python3").args(["-c", "import time; time.sleep(30)", "launch", "--session", id]).spawn().unwrap();
     let rt = d.dir.join("run/sill").join(id);
     std::fs::create_dir_all(&rt).unwrap();
     std::fs::write(rt.join("launch.pid"), launcher.id().to_string()).unwrap();
-    let reply = c.call("_sill/storage.clear_build_cache", json!({"session_id": id})).unwrap();
+    let reply = c.call(method::STORAGE_CLEAR_BUILD_CACHE, json!({"session_id": id})).unwrap();
     assert!(reply["error"]["message"].as_str().unwrap().contains("running"), "{reply}");
     assert!(launcher.try_wait().unwrap().is_none(), "cleanup must not stop a session");
     launcher.kill().unwrap();
     launcher.wait().unwrap();
-    let reply = c.call("_sill/storage.clear_build_cache", json!({"session_id": "../escape"})).unwrap();
+    let reply = c.call(method::STORAGE_CLEAR_BUILD_CACHE, json!({"session_id": "../escape"})).unwrap();
     assert!(reply.get("error").is_some());
-    let reply = c.call("_sill/storage.clear_build_cache", json!({"session_id": id, "path": "/tmp"})).unwrap();
+    let reply = c.call(method::STORAGE_CLEAR_BUILD_CACHE, json!({"session_id": id, "path": "/tmp"})).unwrap();
     assert_eq!(reply["error"]["code"], -32602);
 }
 
@@ -2264,25 +2265,25 @@ fn provider_limits_capabilities_legacy_saves_and_credential_binding() {
     let mut old = d.connect_caps(json!({"sill.providers":1})).unwrap();
     let mut new = d.connect_caps(json!({"sill.providers":1,"sill.provider_limits":1})).unwrap();
     let provider = json!({"id":"lan","name":"LAN","api":"openai","base_url":"http://server.example:11434/v1","models":["qwen3"],"model_limits":{"qwen3":{"context":32768,"output":4096}}});
-    let denied = old.call("_sill/providers.save", json!({"provider":provider})).unwrap();
+    let denied = old.call(method::PROVIDERS_SAVE, json!({"provider":provider})).unwrap();
     assert!(denied.get("error").is_some(), "{denied}");
     let detect = json!({"base_url":"http://server.example:11434/v1","provider_id":"lan","model":"qwen3"});
-    let denied = old.call("_sill/providers.detect_limits", detect.clone()).unwrap();
+    let denied = old.call(method::PROVIDERS_DETECT_LIMITS, detect.clone()).unwrap();
     assert!(denied.get("error").is_some(), "{denied}");
-    let saved = new.call("_sill/providers.save", json!({"provider":provider,"key":"test-secret"})).unwrap();
+    let saved = new.call(method::PROVIDERS_SAVE, json!({"provider":provider,"key":"test-secret"})).unwrap();
     assert!(saved.get("result").is_some(), "{saved}");
     let mut legacy = provider.clone();
     legacy.as_object_mut().unwrap().remove("model_limits");
     legacy["name"] = json!("Renamed");
-    let saved = old.call("_sill/providers.save", json!({"provider":legacy})).unwrap();
+    let saved = old.call(method::PROVIDERS_SAVE, json!({"provider":legacy})).unwrap();
     assert!(saved.get("result").is_some(), "{saved}");
-    let listed = new.call("_sill/providers.list", json!({})).unwrap();
+    let listed = new.call(method::PROVIDERS_LIST, json!({})).unwrap();
     assert_eq!(listed["result"]["providers"][0]["provider"]["model_limits"], provider["model_limits"]);
     let text = std::fs::read_to_string(d.dir.join("home/.config/sill/providers/lan.toml")).unwrap();
     assert!(text.contains("[model_limits.qwen3]"), "the limits are part of the one record: {text}");
     for address in ["http://other.example:11434/v1", "https://server.example:11434/v1", "http://server.example:11434/other/v1", "http://server.example:8080/v1"]
     {
-        for method in ["_sill/providers.detect_limits", "_sill/providers.test"] {
+        for method in [method::PROVIDERS_DETECT_LIMITS, method::PROVIDERS_TEST] {
             let mut args = detect.clone();
             args["base_url"] = json!(address);
             if method.ends_with(".test") {
@@ -2303,9 +2304,9 @@ fn provider_limits_live_ollama_rpc() {
     let direct = sill_core::providers::detect_context(&url, None, &model).unwrap();
     let d = Daemon::start();
     let mut c = d.connect_caps(json!({"sill.providers":1,"sill.provider_limits":1})).unwrap();
-    let result = c.call("_sill/providers.detect_limits", json!({"base_url":url,"model":model})).unwrap();
+    let result = c.call(method::PROVIDERS_DETECT_LIMITS, json!({"base_url":url,"model":model})).unwrap();
     assert_eq!(result["result"]["context"], direct, "{result}");
-    let saved = c.call("_sill/providers.save", json!({"provider":{"id":"live","name":"Live","api":"openai","base_url":url,"models":[model.clone()],"model_limits":{model.clone():{"context":direct}}}})).unwrap();
+    let saved = c.call(method::PROVIDERS_SAVE, json!({"provider":{"id":"live","name":"Live","api":"openai","base_url":url,"models":[model.clone()],"model_limits":{model.clone():{"context":direct}}}})).unwrap();
     assert!(saved.get("result").is_some(), "{saved}");
     let env = sill_core::providers::agent_env(&d.dir.join("home"), "opencode").unwrap();
     let config: Value = serde_json::from_str(&env["OPENCODE_CONFIG_CONTENT"]).unwrap();
@@ -2338,18 +2339,18 @@ printf '%s\n200' '{"models":[{"name":"qwen3:latest","context_length":32768}]}'
     let d = Daemon::start_env(dir, &[("PATH", &path)]);
     let mut c = d.connect_caps(json!({"sill.providers":1,"sill.provider_limits":1})).unwrap();
     let mut provider = json!({"id":"lan","name":"LAN","api":"openai","base_url":"http://server.example:11434/v1","models":["qwen3"]});
-    let saved = c.call("_sill/providers.save", json!({"provider":provider,"key":"test-secret"})).unwrap();
+    let saved = c.call(method::PROVIDERS_SAVE, json!({"provider":provider,"key":"test-secret"})).unwrap();
     assert!(saved.get("result").is_some(), "{saved}");
-    let result = c.call("_sill/providers.detect_limits", json!({"base_url":provider["base_url"],"provider_id":"lan","model":"qwen3"})).unwrap();
+    let result = c.call(method::PROVIDERS_DETECT_LIMITS, json!({"base_url":provider["base_url"],"provider_id":"lan","model":"qwen3"})).unwrap();
     assert_eq!(result["result"]["context"], 32768, "{result}");
     provider["model_limits"] = json!({"qwen3":{"context":result["result"]["context"],"output":4096}});
-    let saved = c.call("_sill/providers.save", json!({"provider":provider})).unwrap();
+    let saved = c.call(method::PROVIDERS_SAVE, json!({"provider":provider})).unwrap();
     assert!(saved.get("result").is_some(), "{saved}");
     let env = sill_core::providers::agent_env(&d.dir.join("home"), "opencode").unwrap();
     let config: Value = serde_json::from_str(&env["OPENCODE_CONFIG_CONTENT"]).unwrap();
     assert_eq!(config["provider"]["sill-lan"]["models"]["qwen3"]["limit"], json!({"context":32768,"output":4096}));
     provider["model_limits"] = json!({});
-    let saved = c.call("_sill/providers.save", json!({"provider":provider})).unwrap();
+    let saved = c.call(method::PROVIDERS_SAVE, json!({"provider":provider})).unwrap();
     assert!(saved.get("result").is_some(), "{saved}");
     assert!(sill_core::providers::load(&d.dir.join("home")).unwrap()["lan"].model_limits.is_empty());
 }

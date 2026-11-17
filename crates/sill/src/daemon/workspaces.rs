@@ -3,6 +3,7 @@
 //! this module answers the methods, makes a workspace session's workspaces when its jail starts,
 //! gives records the store, the sessions' state and the rebase helper jail, and tells the
 //! connections that asked for `_sill/workspaces.changed`.
+use sill_proto::method;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -147,7 +148,7 @@ impl Hub {
     }
 
     fn workspaces_changed(&self, workspace_id: &str) {
-        let req = sill_proto::rpc::Request::new(None, "_sill/workspaces.changed", json!({"workspace_id": workspace_id}));
+        let req = sill_proto::rpc::Request::new(None, method::WORKSPACES_CHANGED, json!({"workspace_id": workspace_id}));
         let Ok(line) = serde_json::to_string(&req) else { return };
         let conns: Vec<Arc<Conn>> = self.conns.lock().unwrap().iter().filter_map(|w| w.upgrade()).collect();
         for c in conns.into_iter().filter(|c| c.has_capability(api::CAPABILITY)) {
@@ -174,47 +175,47 @@ impl Hub {
         let mut work_gone = false;
         let result = (|| -> Result<(Value, Option<String>)> {
             Ok(match method {
-                "_sill/workspaces.list" => (json!(records::list(&h, &args(params)?)?), None),
-                "_sill/workspaces.session" => (json!(records::session_view(&h, &args::<api::SessionKey>(params)?.session_id)?), None),
-                "_sill/workspaces.get" => (json!(records::get(&h, &args::<api::Key>(params)?.workspace_id)?), None),
-                "_sill/workspaces.diff" => (json!(records::diff(&h, &args(params)?)?), None),
-                "_sill/workspaces.prepare" => {
+                method::WORKSPACES_LIST => (json!(records::list(&h, &args(params)?)?), None),
+                method::WORKSPACES_SESSION => (json!(records::session_view(&h, &args::<api::SessionKey>(params)?.session_id)?), None),
+                method::WORKSPACES_GET => (json!(records::get(&h, &args::<api::Key>(params)?.workspace_id)?), None),
+                method::WORKSPACES_DIFF => (json!(records::diff(&h, &args(params)?)?), None),
+                method::WORKSPACES_PREPARE => {
                     let a: api::Operate = args(params)?;
                     (json!(records::prepare(&h, &a)?), Some(a.workspace_id))
                 }
-                "_sill/workspaces.apply" => {
+                method::WORKSPACES_APPLY => {
                     let a: api::Apply = args(params)?;
                     let first = first(&a.operation_id)?;
                     let done = json!(records::apply(&h, &a)?);
                     work_gone = first;
                     (done, Some(a.workspace_id))
                 }
-                "_sill/workspaces.copy" => {
+                method::WORKSPACES_COPY => {
                     let a: api::Apply = args(params)?;
                     (json!(records::copy(&h, &a)?), Some(a.workspace_id))
                 }
-                "_sill/workspaces.branch" => {
+                method::WORKSPACES_BRANCH => {
                     let a: api::Apply = args(params)?;
                     (json!(records::branch(&h, &a)?), Some(a.workspace_id))
                 }
-                "_sill/workspaces.discard" => {
+                method::WORKSPACES_DISCARD => {
                     let a: api::Apply = args(params)?;
                     let first = first(&a.operation_id)?;
                     let done = json!(records::discard(&h, &a)?);
                     work_gone = first;
                     (done, Some(a.workspace_id))
                 }
-                "_sill/workspaces.undo" => {
+                method::WORKSPACES_UNDO => {
                     let a: api::Undo = args(params)?;
                     let done = records::undo(&h, &a)?;
                     let id = done.workspace.as_ref().map(|w| w.workspace_id.clone());
                     (json!(done), id)
                 }
-                "_sill/workspaces.remove" => {
+                method::WORKSPACES_REMOVE => {
                     let a: api::Operate = args(params)?;
                     (json!(records::remove(&h, &a)?), Some(a.workspace_id))
                 }
-                "_sill/workspaces.abort" => {
+                method::WORKSPACES_ABORT => {
                     let a: api::Operate = args(params)?;
                     (json!(records::abort(&h, &a)?), Some(a.workspace_id))
                 }

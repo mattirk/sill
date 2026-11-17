@@ -13,6 +13,7 @@
 //! A connection per lane, not one shared by every open session: a busy session's stream cannot
 //! hold up another's, a reconnect is per session, and the daemon's limit of eight snapshot leases
 //! per connection never applies across sessions.
+use sill_proto::method;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -228,7 +229,7 @@ impl<S: FnMut(Update) -> bool> Worker<S> {
 
     fn detach(&mut self, client: &Client) {
         if let Some((subscription_id, _)) = self.cursor.take() {
-            let _ = client.call::<Value>("_sill/sessions.detach", Detach { session_id: self.session_id.clone(), subscription_id });
+            let _ = client.call::<Value>(method::SESSIONS_DETACH, Detach { session_id: self.session_id.clone(), subscription_id });
         }
     }
 
@@ -238,7 +239,7 @@ impl<S: FnMut(Update) -> bool> Worker<S> {
             return Ok(true);
         }
         let key = SessionKey { session_id: self.session_id.clone() };
-        match client.call::<Session>("_sill/sessions.get", key) {
+        match client.call::<Session>(method::SESSIONS_GET, key) {
             Ok(s) if s.ended_at.is_some() => {
                 (self.sink)(Update::Gone("the session ended".into()));
                 Err(Next::Exit)
@@ -265,7 +266,7 @@ impl<S: FnMut(Update) -> bool> Worker<S> {
             let since = self.cursor.as_ref().map(|(_, seq)| Cursor { session_id: self.session_id.clone(), seq: seq.to_string() });
             let attach = Attach { session_id: self.session_id.clone(), since };
             // through which sequence a replay goes; none after a snapshot
-            let through = match client.call::<Attached>("_sill/sessions.attach", attach) {
+            let through = match client.call::<Attached>(method::SESSIONS_ATTACH, attach) {
                 Ok(Attached::Snapshot { subscription_id, snapshot }) => {
                     let view = match Conversation::read_snapshot(client, &self.session_id, &subscription_id, &snapshot) {
                         Ok(view) => view,
@@ -329,7 +330,7 @@ impl<S: FnMut(Update) -> bool> Worker<S> {
                     }
                     Input::Lost { .. } => {}
                     Input::Notification { epoch, method, params } => {
-                        if epoch != self.epoch || method != "_sill/session.event" {
+                        if epoch != self.epoch || method != method::SESSION_EVENT {
                             continue;
                         }
                         let event: SessionEvent = match serde_json::from_value(params) {
@@ -394,10 +395,10 @@ mod tests {
 
     /// Answer an attach with a snapshot holding only the session record, at `seq`.
     fn snapshot(peer: &mut Peer, seq: u64) {
-        let attach = peer.expect("_sill/sessions.attach");
+        let attach = peer.expect(method::SESSIONS_ATTACH);
         assert!(attach["params"]["since"].is_null(), "{attach}");
         peer.reply(&attach, lease(seq));
-        let page = peer.expect("_sill/sessions.snapshot");
+        let page = peer.expect(method::SESSIONS_SNAPSHOT);
         peer.reply(
             &page,
             json!({"at":{"session_id":"s","seq":seq.to_string()},
@@ -452,7 +453,7 @@ mod tests {
         assert!(matches!(next(&updates), Update::Live));
         // a duplicate and a foreign subscription's event are dropped; the rest arrive in order
         for event in [appended("sub-1", 3, "old"), appended("other", 4, "foreign"), appended("sub-1", 4, "four"), appended("sub-1", 5, "five")] {
-            peer.notify("_sill/session.event", event);
+            peer.notify(method::SESSION_EVENT, event);
         }
         assert_eq!(text(next(&updates)), "four");
         assert_eq!(text(next(&updates)), "five");
@@ -460,7 +461,7 @@ mod tests {
         drop(peer);
         let Update::Connecting { error, .. } = next(&updates) else { panic!() };
         assert!(error.unwrap().contains("lost"));
-        let attach = again.expect("_sill/sessions.attach");
+        let attach = again.expect(method::SESSIONS_ATTACH);
         assert_eq!(attach["params"]["since"], json!({"session_id":"s", "seq":"5"}));
         again.reply(
             &attach,
@@ -469,8 +470,8 @@ mod tests {
         );
         let Update::Resubscribed { subscription_id } = settled(&updates) else { panic!() };
         assert_eq!(subscription_id, "sub-2");
-        again.notify("_sill/session.event", appended("sub-1", 6, "stale subscription"));
-        again.notify("_sill/session.event", appended("sub-2", 6, "six"));
+        again.notify(method::SESSION_EVENT, appended("sub-1", 6, "stale subscription"));
+        again.notify(method::SESSION_EVENT, appended("sub-2", 6, "six"));
         assert_eq!(text(next(&updates)), "six");
         assert!(matches!(next(&updates), Update::Live), "caught up through 6");
     }
@@ -482,8 +483,8 @@ mod tests {
         snapshot(&mut peer, 3);
         assert!(matches!(settled(&updates), Update::Snapshot(_)));
         assert!(matches!(next(&updates), Update::Live));
-        peer.notify("_sill/session.event", appended("sub-1", 5, "after a gap"));
-        let detach = peer.expect("_sill/sessions.detach");
+        peer.notify(method::SESSION_EVENT, appended("sub-1", 5, "after a gap"));
+        let detach = peer.expect(method::SESSIONS_DETACH);
         assert_eq!(detach["params"]["subscription_id"], "sub-1");
         peer.reply(&detach, json!({}));
         snapshot(&mut peer, 5);
@@ -495,7 +496,7 @@ mod tests {
     fn watching_never_attaches_a_session_that_is_not_running() {
         let (client, mut peer) = pair();
         let (_lane, updates) = open(vec![client], Mode::Watch);
-        let get = peer.expect("_sill/sessions.get");
+        let get = peer.expect(method::SESSIONS_GET);
         peer.reply(
             &get,
             json!({"session_id":"s", "agent":"claude", "title":"t", "title_kind":"", "created_at":"1",
@@ -521,7 +522,7 @@ mod tests {
     fn a_refused_attach_for_a_missing_session_ends_the_lane() {
         let (client, mut peer) = pair();
         let (_lane, updates) = open(vec![client], Mode::Open);
-        let attach = peer.expect("_sill/sessions.attach");
+        let attach = peer.expect(method::SESSIONS_ATTACH);
         peer.refuse(&attach, "not_found", "session not found");
         assert!(matches!(settled(&updates), Update::Gone(_)));
     }

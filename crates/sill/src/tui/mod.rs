@@ -3,6 +3,7 @@
 //! permission request answered on the next line. Nothing here reads the store or a jail: it is a
 //! `sill_proto::Client` and a terminal, the same as a frontend in another language would be.
 
+use sill_proto::method;
 use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
 
@@ -27,7 +28,7 @@ pub fn line_mode(key: &str, fresh: bool, verbose: bool) -> Result<()> {
     let id = s.session_id;
     if fresh {
         // a new agent conversation in the same session, as sill-gui's "fresh" does
-        c.call::<serde_json::Value>("_sill/sessions.reset", sill_proto::sessions::SessionKey { session_id: id.clone() })?;
+        c.call::<serde_json::Value>(method::SESSIONS_RESET, sill_proto::sessions::SessionKey { session_id: id.clone() })?;
     }
     eprintln!("sill: {} — {}; /cancel stops the turn, /quit detaches", id, s.title);
     let pending: Arc<Mutex<Option<Pending>>> = Arc::default();
@@ -47,7 +48,7 @@ pub fn line_mode(key: &str, fresh: bool, verbose: bool) -> Result<()> {
             loop {
                 let c = current.lock().unwrap().clone();
                 while let Ok((method, params)) = c.notifications.lock().unwrap().recv() {
-                    if method != "_sill/session.event" {
+                    if method != method::SESSION_EVENT {
                         continue;
                     }
                     let notification = match serde_json::from_value::<sill_proto::sfp::SessionEvent>(params) {
@@ -126,7 +127,7 @@ pub fn line_mode(key: &str, fresh: bool, verbose: bool) -> Result<()> {
             let question_id = view.lock().unwrap().question_id(q.request).map(str::to_owned);
             if let Some(question_id) = question_id {
                 let input = sill_core::sfp_client::answer(question_id, id.clone(), Answer::Permission(choice));
-                if let Err(e) = current.lock().unwrap().call::<serde_json::Value>("_sill/questions.answer", input) {
+                if let Err(e) = current.lock().unwrap().call::<serde_json::Value>(method::QUESTIONS_ANSWER, input) {
                     eprintln!("sill: {e:#}");
                 }
             }

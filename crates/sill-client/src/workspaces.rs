@@ -2,6 +2,7 @@
 //! has them, what each workspace would bring, and the person's Apply, Discard, Undo and Abort.
 //! Blocking calls for a frontend's worker thread; every mutation carries a fresh `operation_id`,
 //! so a retry of the same request never repeats the work.
+use sill_proto::method;
 use sill_proto::workspaces as api;
 
 use crate::actions::Actions;
@@ -85,9 +86,9 @@ fn details(
 
 pub fn load(actions: &Actions, session: &str) -> anyhow::Result<Loaded> {
     actions.reading(|c| {
-        let mut view: api::SessionView = c.call("_sill/workspaces.session", api::SessionKey { session_id: session.into() })?;
+        let mut view: api::SessionView = c.call(method::WORKSPACES_SESSION, api::SessionKey { session_id: session.into() })?;
         let sent = std::mem::take(&mut view.details);
-        let details = details(|id| c.call("_sill/workspaces.get", api::Key { workspace_id: id.into() }), &view.workspaces, sent, false)?;
+        let details = details(|id| c.call(method::WORKSPACES_GET, api::Key { workspace_id: id.into() }), &view.workspaces, sent, false)?;
         Ok(Loaded { view, details })
     })
 }
@@ -95,9 +96,9 @@ pub fn load(actions: &Actions, session: &str) -> anyhow::Result<Loaded> {
 /// Every workspace and the discarded work still undoable, with each workspace's state.
 pub fn all(actions: &Actions) -> anyhow::Result<(api::Listed, Vec<api::Detail>)> {
     actions.reading(|c| {
-        let mut listed: api::Listed = c.call("_sill/workspaces.list", api::List { session_id: None, after: None, limit: Some(128) })?;
+        let mut listed: api::Listed = c.call(method::WORKSPACES_LIST, api::List { session_id: None, after: None, limit: Some(128) })?;
         let sent = std::mem::take(&mut listed.details);
-        let details = details(|id| c.call("_sill/workspaces.get", api::Key { workspace_id: id.into() }), &listed.workspaces, sent, true)?;
+        let details = details(|id| c.call(method::WORKSPACES_GET, api::Key { workspace_id: id.into() }), &listed.workspaces, sent, true)?;
         Ok((listed, details))
     })
 }
@@ -105,7 +106,7 @@ pub fn all(actions: &Actions) -> anyhow::Result<(api::Listed, Vec<api::Detail>)>
 /// What an Apply would bring, as a unified diff: all of it, or `path`'s alone.
 pub fn diff(actions: &Actions, workspace_id: &str, path: Option<&sill_proto::sessions::HostPath>) -> anyhow::Result<String> {
     let d: api::DiffText = actions.read(
-        "_sill/workspaces.diff",
+        method::WORKSPACES_DIFF,
         serde_json::json!(api::DiffRequest { workspace_id: workspace_id.into(), against: api::Against::Applied, path: path.cloned() }),
     )?;
     Ok(if d.truncated { format!("{}\n… (cut at 4 MiB)", d.text) } else { d.text })
@@ -159,7 +160,7 @@ fn apply_steps(
     seen: &api::Revision,
     how: How,
 ) -> anyhow::Result<ApplyOutcome> {
-    let d: api::Detail = serde_json::from_value(call("_sill/workspaces.get", serde_json::json!(api::Key { workspace_id: workspace_id.into() }))?)?;
+    let d: api::Detail = serde_json::from_value(call(method::WORKSPACES_GET, serde_json::json!(api::Key { workspace_id: workspace_id.into() }))?)?;
     // the person agreed to land on the branch they saw: a checkout switched since is looked at again
     let switched = || anyhow::anyhow!("Your checkout switched branch since you looked: look again, then apply.");
     if d.revision.destination_branch != seen.destination_branch {
@@ -168,7 +169,7 @@ fn apply_steps(
     let mut revision = seen.clone();
     if d.needs_rebase {
         let p: api::Prepared = serde_json::from_value(call(
-            "_sill/workspaces.prepare",
+            method::WORKSPACES_PREPARE,
             serde_json::json!(api::Operate { operation_id: crate::request_id("prepare"), workspace_id: workspace_id.into() }),
         )?)?;
         if p.needs_rebase || !p.conflicts.is_empty() {
@@ -180,8 +181,8 @@ fn apply_steps(
         revision = p.revision;
     }
     let (method, kind) = match how {
-        How::Commits => ("_sill/workspaces.apply", "apply"),
-        How::Uncommitted => ("_sill/workspaces.copy", "copy"),
+        How::Commits => (method::WORKSPACES_APPLY, "apply"),
+        How::Uncommitted => (method::WORKSPACES_COPY, "copy"),
     };
     call(method, serde_json::json!(api::Apply { operation_id: crate::request_id(kind), workspace_id: workspace_id.into(), revision }))?;
     Ok(ApplyOutcome::Applied)
@@ -202,7 +203,7 @@ pub enum BranchOutcome {
 pub fn branch(actions: &Actions, workspace_id: &str, seen: &api::Revision) -> anyhow::Result<BranchOutcome> {
     actions.once(|c| {
         match c.call::<api::Branched>(
-            "_sill/workspaces.branch",
+            method::WORKSPACES_BRANCH,
             serde_json::json!(api::Apply { operation_id: crate::request_id("branch"), workspace_id: workspace_id.into(), revision: seen.clone() }),
         ) {
             Ok(b) => Ok(BranchOutcome::Made(b.branch)),
@@ -214,21 +215,21 @@ pub fn branch(actions: &Actions, workspace_id: &str, seen: &api::Revision) -> an
 
 pub fn discard(actions: &Actions, workspace_id: &str, seen: &api::Revision) -> anyhow::Result<api::Changed> {
     actions.once(|c| {
-        c.call("_sill/workspaces.discard", api::Apply { operation_id: crate::request_id("discard"), workspace_id: workspace_id.into(), revision: seen.clone() })
+        c.call(method::WORKSPACES_DISCARD, api::Apply { operation_id: crate::request_id("discard"), workspace_id: workspace_id.into(), revision: seen.clone() })
     })
 }
 
 pub fn undo(actions: &Actions, discard_id: &str) -> anyhow::Result<api::Changed> {
-    actions.once(|c| c.call("_sill/workspaces.undo", api::Undo { operation_id: crate::request_id("undo"), discard_id: discard_id.into() }))
+    actions.once(|c| c.call(method::WORKSPACES_UNDO, api::Undo { operation_id: crate::request_id("undo"), discard_id: discard_id.into() }))
 }
 
 /// Remove a workspace that cannot be read: folder and record, no Undo.
 pub fn remove(actions: &Actions, workspace_id: &str) -> anyhow::Result<api::Changed> {
-    actions.once(|c| c.call("_sill/workspaces.remove", api::Operate { operation_id: crate::request_id("remove"), workspace_id: workspace_id.into() }))
+    actions.once(|c| c.call(method::WORKSPACES_REMOVE, api::Operate { operation_id: crate::request_id("remove"), workspace_id: workspace_id.into() }))
 }
 
 pub fn abort(actions: &Actions, workspace_id: &str) -> anyhow::Result<api::Changed> {
-    actions.once(|c| c.call("_sill/workspaces.abort", api::Operate { operation_id: crate::request_id("abort"), workspace_id: workspace_id.into() }))
+    actions.once(|c| c.call(method::WORKSPACES_ABORT, api::Operate { operation_id: crate::request_id("abort"), workspace_id: workspace_id.into() }))
 }
 
 #[cfg(test)]
@@ -285,9 +286,9 @@ mod tests {
             |method, params| {
                 calls.push((method.to_string(), params));
                 Ok(match method {
-                    "_sill/workspaces.get" => serde_json::json!({"workspace": workspace, "revision": revision("t1", "b1"),
+                    method::WORKSPACES_GET => serde_json::json!({"workspace": workspace, "revision": revision("t1", "b1"),
                         "summary": {"commits": 0, "files": 1, "added": "1", "removed": "1", "uncommitted": ["f"]}, "needs_rebase": needs_rebase}),
-                    "_sill/workspaces.prepare" => serde_json::json!({"workspace": workspace, "revision": revision("t2", "b1"),
+                    method::WORKSPACES_PREPARE => serde_json::json!({"workspace": workspace, "revision": revision("t2", "b1"),
                         "needs_rebase": !conflicts.is_empty(), "conflicts": conflicts}),
                     _ => serde_json::json!({"workspace": workspace, "operation": null}),
                 })
@@ -303,9 +304,9 @@ mod tests {
     fn apply_without_commit_asks_for_a_copy_after_the_same_rebase() {
         let (out, calls) = run_apply_as(false, &[], How::Uncommitted);
         assert_eq!(out.unwrap(), ApplyOutcome::Applied);
-        assert_eq!(calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(), ["_sill/workspaces.get", "_sill/workspaces.copy"]);
+        assert_eq!(calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(), [method::WORKSPACES_GET, method::WORKSPACES_COPY]);
         let (_, calls) = run_apply_as(true, &[], How::Uncommitted);
-        assert_eq!(calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(), ["_sill/workspaces.get", "_sill/workspaces.prepare", "_sill/workspaces.copy"]);
+        assert_eq!(calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(), [method::WORKSPACES_GET, method::WORKSPACES_PREPARE, method::WORKSPACES_COPY]);
         assert_eq!(calls[2].1["revision"]["tip"], "t2");
     }
 
@@ -320,7 +321,7 @@ mod tests {
             .into()
         };
         assert!(refused_for(&refusal("uncommitted"), "uncommitted"));
-        assert!(refused_for(&refusal("uncommitted").context("_sill/workspaces.apply"), "uncommitted"), "under the method's context too");
+        assert!(refused_for(&refusal("uncommitted").context(method::WORKSPACES_APPLY), "uncommitted"), "under the method's context too");
         assert!(!refused_for(&refusal("source_overlap"), "uncommitted"));
         assert!(!refused_for(&anyhow::anyhow!("connection lost"), "uncommitted"));
     }
@@ -330,7 +331,7 @@ mod tests {
         let (out, calls) = run_apply(true, &[]);
         assert_eq!(out.unwrap(), ApplyOutcome::Applied);
         let methods: Vec<&str> = calls.iter().map(|(m, _)| m.as_str()).collect();
-        assert_eq!(methods, ["_sill/workspaces.get", "_sill/workspaces.prepare", "_sill/workspaces.apply"]);
+        assert_eq!(methods, [method::WORKSPACES_GET, method::WORKSPACES_PREPARE, method::WORKSPACES_APPLY]);
         assert_eq!(calls[2].1["revision"]["tip"], "t2", "applied at the rebased revision, not the one seen before it");
     }
 
@@ -338,10 +339,10 @@ mod tests {
     fn a_stopped_rebase_applies_nothing_and_an_unmoved_checkout_applies_what_was_seen() {
         let (out, calls) = run_apply(true, &["f"]);
         assert_eq!(out.unwrap(), ApplyOutcome::Conflicts(vec!["f".into()]));
-        assert!(calls.iter().all(|(m, _)| m != "_sill/workspaces.apply"));
+        assert!(calls.iter().all(|(m, _)| m != method::WORKSPACES_APPLY));
         let (out, calls) = run_apply(false, &[]);
         assert_eq!(out.unwrap(), ApplyOutcome::Applied);
-        assert_eq!(calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(), ["_sill/workspaces.get", "_sill/workspaces.apply"]);
+        assert_eq!(calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(), [method::WORKSPACES_GET, method::WORKSPACES_APPLY]);
         assert_eq!(calls[1].1["revision"]["tip"], "t1");
     }
 
@@ -350,7 +351,7 @@ mod tests {
         let (out, calls) = run_apply_switched();
         let said = out.unwrap_err().to_string();
         assert!(said.starts_with("Your checkout switched branch"), "{said}");
-        assert!(calls.iter().all(|(m, _)| m != "_sill/workspaces.apply" && m != "_sill/workspaces.prepare"));
+        assert!(calls.iter().all(|(m, _)| m != method::WORKSPACES_APPLY && m != method::WORKSPACES_PREPARE));
         let path = |p: &str| serde_json::json!(sill_proto::sessions::HostPath::from_path(std::path::Path::new(p)));
         let detail = |now: &str| -> api::Detail {
             serde_json::from_value(serde_json::json!({

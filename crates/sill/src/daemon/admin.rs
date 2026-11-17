@@ -3,6 +3,7 @@ use super::Hub;
 use anyhow::Result;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use sill_proto::method;
 use sill_proto::{admin as api, rpc::Error, sessions::HostPath};
 use std::{
     fs,
@@ -343,22 +344,22 @@ const PERMISSION_MODES: &str = "sill.permission_modes";
 fn worker_mutation(method: &str) -> bool {
     matches!(
         method,
-        "_sill/sessions.update"
-            | "_sill/sessions.start"
-            | "_sill/sessions.reset"
-            | "_sill/sessions.pin"
-            | "_sill/sessions.unpin"
-            | "_sill/sessions.submit"
-            | "_sill/sessions.control"
-            | "_sill/submissions.resume"
-            | "_sill/submissions.send_now"
-            | "_sill/questions.answer"
-            | "_sill/permissions.set"
-            | "_sill/permissions.apply_development"
-            | "_sill/permissions.restore_defaults"
-            | "_sill/policy.allow_host"
-            | "_sill/policy.save_host"
-            | "_sill/host_control.activate"
+        method::SESSIONS_UPDATE
+            | method::SESSIONS_START
+            | method::SESSIONS_RESET
+            | method::SESSIONS_PIN
+            | method::SESSIONS_UNPIN
+            | method::SESSIONS_SUBMIT
+            | method::SESSIONS_CONTROL
+            | method::SUBMISSIONS_RESUME
+            | method::SUBMISSIONS_SEND_NOW
+            | method::QUESTIONS_ANSWER
+            | method::PERMISSIONS_SET
+            | method::PERMISSIONS_APPLY_DEVELOPMENT
+            | method::PERMISSIONS_RESTORE_DEFAULTS
+            | method::POLICY_ALLOW_HOST
+            | method::POLICY_SAVE_HOST
+            | method::HOST_CONTROL_ACTIVATE
     )
 }
 
@@ -383,21 +384,21 @@ pub(super) fn frontend_gate(hub: &Hub, conn: &super::Conn, method: &str, params:
         error
     };
     match method {
-        "_sill/permissions.set"
-        | "_sill/permissions.apply_development"
-        | "_sill/permissions.restore_defaults"
-        | "_sill/policy.save_host"
-        | "_sill/host_control.activate"
-        | "_sill/host_control.revoke" => return Err(missing("permission changes need a frontend that shows permission state".into())),
-        "_sill/sessions.submit"
-        | "_sill/sessions.start"
-        | "_sill/sessions.control"
-        | "_sill/submissions.resume"
-        | "_sill/submissions.send_now"
-        | "_sill/questions.answer"
-        | "_sill/policy.allow_host"
-        | "_sill/sessions.pin"
-        | "_sill/sessions.unpin" => {}
+        method::PERMISSIONS_SET
+        | method::PERMISSIONS_APPLY_DEVELOPMENT
+        | method::PERMISSIONS_RESTORE_DEFAULTS
+        | method::POLICY_SAVE_HOST
+        | method::HOST_CONTROL_ACTIVATE
+        | method::HOST_CONTROL_REVOKE => return Err(missing("permission changes need a frontend that shows permission state".into())),
+        method::SESSIONS_SUBMIT
+        | method::SESSIONS_START
+        | method::SESSIONS_CONTROL
+        | method::SUBMISSIONS_RESUME
+        | method::SUBMISSIONS_SEND_NOW
+        | method::QUESTIONS_ANSWER
+        | method::POLICY_ALLOW_HOST
+        | method::SESSIONS_PIN
+        | method::SESSIONS_UNPIN => {}
         _ => return Ok(()),
     }
     // Malformed parameters are the method's own error.
@@ -428,44 +429,44 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
     }
     if !matches!(
         m,
-        "_sill/files.image"
-            | "_sill/desktop.capture"
-            | "_sill/desktop.read"
-            | "_sill/policy.denied"
-            | "_sill/policy.quiet_host"
-            | "_sill/policy.remember_denied"
-            | "_sill/policy.allow_host"
-            | "_sill/policy.save_host"
-            | "_sill/permissions.set"
-            | "_sill/permissions.apply_development"
-            | "_sill/permissions.restore_defaults"
-            | "_sill/files.home"
-            | "_sill/files.metadata"
-            | "_sill/files.list"
-            | "_sill/files.read"
-            | "_sill/files.write"
-            | "_sill/settings.get"
-            | "_sill/usage.active_time"
-            | "_sill/settings.patch"
-            | "_sill/settings.instructions.get"
-            | "_sill/settings.instructions.set"
-            | "_sill/policy.get"
-            | "_sill/policy.list"
-            | "_sill/policy.preview"
-            | "_sill/policy.snapshot"
-            | "_sill/policy.check"
-            | "_sill/policy.import"
-            | "_sill/procs.list"
-            | "_sill/procs.tail"
-            | "_sill/procs.stop"
-            | "_sill/procs.running"
-            | "_sill/procs.stop_command"
-            | "_sill/procs.dismiss"
+        method::FILES_IMAGE
+            | method::DESKTOP_CAPTURE
+            | method::DESKTOP_READ
+            | method::POLICY_DENIED
+            | method::POLICY_QUIET_HOST
+            | method::POLICY_REMEMBER_DENIED
+            | method::POLICY_ALLOW_HOST
+            | method::POLICY_SAVE_HOST
+            | method::PERMISSIONS_SET
+            | method::PERMISSIONS_APPLY_DEVELOPMENT
+            | method::PERMISSIONS_RESTORE_DEFAULTS
+            | method::FILES_HOME
+            | method::FILES_METADATA
+            | method::FILES_LIST
+            | method::FILES_READ
+            | method::FILES_WRITE
+            | method::SETTINGS_GET
+            | method::USAGE_ACTIVE_TIME
+            | method::SETTINGS_PATCH
+            | method::SETTINGS_INSTRUCTIONS_GET
+            | method::SETTINGS_INSTRUCTIONS_SET
+            | method::POLICY_GET
+            | method::POLICY_LIST
+            | method::POLICY_PREVIEW
+            | method::POLICY_SNAPSHOT
+            | method::POLICY_CHECK
+            | method::POLICY_IMPORT
+            | method::PROCS_LIST
+            | method::PROCS_TAIL
+            | method::PROCS_STOP
+            | method::PROCS_RUNNING
+            | method::PROCS_STOP_COMMAND
+            | method::PROCS_DISMISS
     ) {
         return None;
     }
     Some((|| match m {
-        "_sill/desktop.capture" => {
+        method::DESKTOP_CAPTURE => {
             let a: api::DesktopCapture = args(p)?;
             session(hub, &a.session_id)?;
             let dir = sill_core::shim::runtime_dir(&a.session_id)?.join("desktop");
@@ -494,7 +495,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             pictures().lock().unwrap().insert(a.session_id, std::sync::Arc::new(picture));
             bounded(frame)
         }
-        "_sill/desktop.read" => {
+        method::DESKTOP_READ => {
             let a: api::DesktopRead = args(p)?;
             session(hub, &a.session_id)?;
             let picture = pictures()
@@ -518,7 +519,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 revision: picture.revision.clone(),
             })
         }
-        "_sill/files.image" => {
+        method::FILES_IMAGE => {
             let a: api::SessionImage = args(p)?;
             session(hub, &a.session_id)?;
             let image = super::frontend::open_session_image(hub, &a.session_id, &path(&a.path)?, &sill_core::changes::home()?)
@@ -529,8 +530,8 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 .ok_or_else(|| domain("not_found", "image not visible in session"))?;
             bounded(read_open_file(image, &a.offset, a.length, a.revision)?)
         }
-        "_sill/policy.denied" => bounded(denied(hub, args(p)?)?),
-        "_sill/policy.quiet_host" => {
+        method::POLICY_DENIED => bounded(denied(hub, args(p)?)?),
+        method::POLICY_QUIET_HOST => {
             let a: api::NetworkHost = args(p)?;
             session(hub, &a.session_id)?;
             let host = a.host.rsplit_once(':').filter(|(_, port)| port.parse::<u16>().is_ok()).map_or(a.host.as_str(), |(name, _)| name);
@@ -545,7 +546,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             })?;
             Ok(json!({}))
         }
-        "_sill/policy.remember_denied" | "_sill/policy.allow_host" => {
+        method::POLICY_REMEMBER_DENIED | method::POLICY_ALLOW_HOST => {
             let a: api::NetworkHost = args(p)?;
             session(hub, &a.session_id)?;
             if a.host.is_empty() || a.host.len() > 1024 || a.host.chars().any(char::is_control) {
@@ -587,7 +588,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 bounded(api::AllowedHost { agent_name: "this session".into(), live: running })
             }
         }
-        "_sill/policy.save_host" => {
+        method::POLICY_SAVE_HOST => {
             let a: api::NetworkHost = args(p)?;
             if a.host.is_empty() || a.host.len() > 1024 || a.host.chars().any(char::is_control) {
                 return Err(invalid("invalid host"));
@@ -611,7 +612,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             }
             bounded(api::SavedHost { agent_id: agent.id, agent_name: agent.name })
         }
-        "_sill/permissions.set" => {
+        method::PERMISSIONS_SET => {
             let a: api::PermissionChoice = args(p)?;
             let (row, pins) = session_with_pins(hub, &a.session_id)?;
             if row.ghost {
@@ -636,7 +637,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             hub.with_store(|store| store.set_permission_choice(&a.session_id, &a.capability, a.enabled))?;
             bounded(permissions_changed(hub, &a.session_id, false)?)
         }
-        "_sill/permissions.apply_development" => {
+        method::PERMISSIONS_APPLY_DEVELOPMENT => {
             // Apply development permissions: the test desktop and the private bus as one choice,
             // all or nothing; what each one would say alone is the refusal's reason.
             let a: sill_proto::sessions::SessionKey = args(p)?;
@@ -668,7 +669,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             })?;
             bounded(permissions_changed(hub, &a.session_id, false)?)
         }
-        "_sill/permissions.restore_defaults" => {
+        method::PERMISSIONS_RESTORE_DEFAULTS => {
             let a: sill_proto::sessions::SessionKey = args(p)?;
             session(hub, &a.session_id)?;
             hub.with_store(|store| store.restore_default_permissions(&a.session_id))?;
@@ -676,17 +677,17 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             bounded(permissions_changed(hub, &a.session_id, live_revoked)?)
         }
 
-        "_sill/files.home" => {
+        method::FILES_HOME => {
             let _: sill_proto::Empty = args(p)?;
             bounded(HostPath::from_path(&sill_core::changes::home()?))
         }
-        "_sill/files.metadata" => {
+        method::FILES_METADATA => {
             let a: api::FileKey = args(p)?;
             bounded(metadata(&path(&a.path)?)?)
         }
-        "_sill/files.list" => bounded(list(args(p)?)?),
-        "_sill/files.read" => bounded(read(args(p)?)?),
-        "_sill/files.write" => {
+        method::FILES_LIST => bounded(list(args(p)?)?),
+        method::FILES_READ => bounded(read(args(p)?)?),
+        method::FILES_WRITE => {
             let a: api::FileWrite = args(p)?;
             if a.bytes_base64.len() > api::FILE_CHUNK_BYTES.div_ceil(3) * 4 {
                 return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "write exceeds 1 MiB"));
@@ -703,12 +704,12 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             )?;
             Ok(json!({}))
         }
-        "_sill/settings.get" => {
+        method::SETTINGS_GET => {
             let _: sill_proto::Empty = args(p)?;
             let c: api::Settings = serde_json::from_value(json!(sill_core::config::load()))?;
             bounded(c)
         }
-        "_sill/usage.active_time" => {
+        method::USAGE_ACTIVE_TIME => {
             let a: api::ActiveTimeQuery = args(p)?;
             if !(1..=366).contains(&a.days) {
                 return Err(invalid("days must be 1 to 366"));
@@ -717,7 +718,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let hours = hub.with_store(|store| sill_core::sfp::Journal::new(store)?.active_hours(now.saturating_sub(u64::from(a.days) * 86_400_000), now))?;
             Ok(json!(api::ActiveTime { hours: hours.into_iter().map(|(hour, ms)| api::ActiveHour { hour, ms }).collect() }))
         }
-        "_sill/settings.patch" => {
+        method::SETTINGS_PATCH => {
             if serde_json::to_vec(&p)?.len() > api::TEXT_BYTES {
                 return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "settings input exceeds 1 MiB"));
             }
@@ -736,11 +737,11 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             sill_core::config::save(&serde_json::from_value(value)?)?;
             Ok(json!({}))
         }
-        "_sill/settings.instructions.get" => {
+        method::SETTINGS_INSTRUCTIONS_GET => {
             let _: sill_proto::Empty = args(p)?;
             bounded(sill_proto::Text { text: sill_core::instructions::load_global() })
         }
-        "_sill/settings.instructions.set" => {
+        method::SETTINGS_INSTRUCTIONS_SET => {
             let a: api::Text = args(p)?;
             if a.text.len() > api::TEXT_BYTES {
                 return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "instructions exceed 1 MiB"));
@@ -748,7 +749,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             sill_core::instructions::save_global(&a.text)?;
             Ok(json!({}))
         }
-        "_sill/policy.list" => {
+        method::POLICY_LIST => {
             let a: api::NamesList = args(p)?;
             let n = limit(a.limit)?;
             if a.after.as_ref().is_some_and(|s| s.len() > 4096) {
@@ -758,7 +759,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let next = if more { names.last().cloned() } else { None };
             bounded(api::Names { names, next })
         }
-        "_sill/policy.get" => {
+        method::POLICY_GET => {
             let a: api::PolicyKey = args(p)?;
             if a.name.len() > 128 || a.name.contains('/') || a.name == ".." {
                 return Err(invalid("invalid policy name"));
@@ -766,12 +767,12 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let policy = sill_core::policy::Policy::load(&a.name, &sill_core::changes::home()?)?;
             bounded(api::PolicyEntry { name: a.name, text: toml::to_string_pretty(&policy)? })
         }
-        "_sill/policy.preview" => {
+        method::POLICY_PREVIEW => {
             let a: sill_proto::sessions::SessionKey = args(p)?;
             session(hub, &a.session_id)?;
             bounded(preview(hub, &a.session_id)?)
         }
-        "_sill/policy.snapshot" => {
+        method::POLICY_SNAPSHOT => {
             let a: sill_proto::sessions::SessionKey = args(p)?;
             session(hub, &a.session_id)?;
             let snapshot = sill_core::session::policy_snapshot(&a.session_id)?
@@ -782,13 +783,13 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 .transpose()?;
             bounded(api::PolicySnapshot { snapshot, warnings: sill_core::session::launch_warnings(&a.session_id)? })
         }
-        "_sill/policy.check" => {
+        method::POLICY_CHECK => {
             let a: api::PolicyCheck = args(p)?;
             policy_text_bound(&a.text)?;
             let checked = sill_core::policy::Policy::parse(&a.text).map(|_| ());
             bounded(api::PolicyChecked { valid: checked.is_ok(), diagnostics: checked.err().map(|e| vec![format!("{e:#}")]).unwrap_or_default() })
         }
-        "_sill/policy.import" => {
+        method::POLICY_IMPORT => {
             let a: api::PolicyImport = args(p)?;
             policy_text_bound(&a.text)?;
             valid_policy_name(&a.name)?;
@@ -798,7 +799,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             install_policy(&sill_core::changes::home()?, &a.name, &text, a.replace)?;
             bounded(api::PolicyEntry { name: a.name, text })
         }
-        "_sill/procs.list" => {
+        method::PROCS_LIST => {
             let a: api::ProcessesList = args(p)?;
             let n = limit(a.limit)?;
             session(hub, &a.session_id)?;
@@ -849,7 +850,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             processes.truncate(n);
             bounded(api::ProcessesPage { processes, next })
         }
-        "_sill/procs.tail" => {
+        method::PROCS_TAIL => {
             let a: api::ProcessTail = args(p)?;
             session(hub, &a.session_id)?;
             let n = a.lines.unwrap_or(100);
@@ -876,7 +877,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 text: sill_core::shim::Control::connect(&sill_core::session::socket_path(&a.session_id)?)?.proc_tail(&a.name, n as usize)?,
             })
         }
-        "_sill/procs.running" => {
+        method::PROCS_RUNNING => {
             let a: sill_proto::sessions::SessionKey = args(p)?;
             session(hub, &a.session_id)?;
             // no jail to ask is nothing running, not an error
@@ -888,14 +889,14 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 services: report.services.into_iter().map(process).collect(),
             })
         }
-        "_sill/procs.stop_command" => {
+        method::PROCS_STOP_COMMAND => {
             let a: api::CommandKey = args(p)?;
             session(hub, &a.session_id)?;
             let mut c = sill_core::shim::Control::connect(&sill_core::session::socket_path(&a.session_id)?)?;
             c.stop_command(a.pid)?;
             Ok(json!({}))
         }
-        "_sill/procs.stop" | "_sill/procs.dismiss" => {
+        method::PROCS_STOP | method::PROCS_DISMISS => {
             let a: api::ProcessKey = args(p)?;
             session(hub, &a.session_id)?;
             if a.name.is_empty() || a.name.len() > 128 {

@@ -2,6 +2,7 @@
 //! history read, diffs opened, and keep, revert and undo.
 use iced::Task;
 use serde_json::json;
+use sill_proto::method;
 
 use crate::{Act, App, Message, blocking, changes_ui, demo};
 
@@ -17,7 +18,7 @@ impl App {
             move || {
                 let (entries, unreadable) = actions.reading(sill_client::changes::listing).map_err(|e| format!("{e:#}"))?;
                 // unread settings: no countdown rather than a wrong one
-                let minutes = actions.read::<sill_proto::admin::Settings>("_sill/settings.get", json!({})).map_or(0, |s| sill_client::changes::auto_revert(&s));
+                let minutes = actions.read::<sill_proto::admin::Settings>(method::SETTINGS_GET, json!({})).map_or(0, |s| sill_client::changes::auto_revert(&s));
                 Ok((entries, unreadable, minutes))
             },
             |loaded| Message::Changes(Event::Loaded(loaded)),

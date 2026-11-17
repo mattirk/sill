@@ -1,4 +1,5 @@
 //! Public memory access. All pages read live state; refresh traversal after concurrent edits.
+use crate::method;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -104,7 +105,7 @@ impl crate::Client {
         let mut snapshot_id = None;
         loop {
             let page: TextPage = self.call(
-                "_sill/memory.text",
+                method::MEMORY_TEXT,
                 TextRead {
                     snapshot_id: snapshot_id.clone(),
                     session_id: session_id.clone(),
@@ -120,7 +121,7 @@ impl crate::Client {
             offset = page.next;
             fingerprint = Some(page.fingerprint);
             if offset.is_none() {
-                let _: anyhow::Result<crate::Empty> = self.call("_sill/memory.text.close", TextClose { snapshot_id: page.snapshot_id });
+                let _: anyhow::Result<crate::Empty> = self.call(method::MEMORY_TEXT_CLOSE, TextClose { snapshot_id: page.snapshot_id });
                 return Ok(text);
             }
         }

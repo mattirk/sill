@@ -5,6 +5,7 @@
 //! (`_sill/streams.port`), which connects to `127.0.0.1:<port>` inside, only for a port a
 //! running managed process declared. Nothing new becomes reachable from inside the jail; the
 //! bridge lives as long as its value (the frontend drops it when the process ends).
+use sill_proto::method;
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -25,7 +26,7 @@ pub fn list(client: &Client, session: &str) -> Result<Vec<Process>> {
     let mut all = vec![];
     let mut after = None;
     loop {
-        let page: ProcessesPage = client.call("_sill/procs.list", ProcessesList { session_id: session.into(), after, limit: Some(128) })?;
+        let page: ProcessesPage = client.call(method::PROCS_LIST, ProcessesList { session_id: session.into(), after, limit: Some(128) })?;
         all.extend(page.processes);
         after = page.next;
         if after.is_none() {
@@ -40,7 +41,7 @@ pub fn jail(client: &Client, session: &str) -> Result<JailProcesses> {
     if !client.has_capability("sill.jail_processes") {
         return Ok(JailProcesses::default());
     }
-    client.call("_sill/procs.running", SessionKey { session_id: session.into() })
+    client.call(method::PROCS_RUNNING, SessionKey { session_id: session.into() })
 }
 
 pub fn running(p: &Process) -> bool {
@@ -104,11 +105,11 @@ pub fn allows(specs: &[String], port: u16) -> bool {
 /// snapshot, or its named policy when an older session has none. Automatic exposure must use what
 /// is enforced, so a failed read is an error, which grants nothing.
 pub fn session_exposable(client: &Client, session: &str, policy: &str) -> Result<Vec<String>> {
-    let snapshot: PolicySnapshot = client.call("_sill/policy.snapshot", SessionKey { session_id: session.into() })?;
+    let snapshot: PolicySnapshot = client.call(method::POLICY_SNAPSHOT, SessionKey { session_id: session.into() })?;
     let text = match snapshot.snapshot.and_then(|view| view.text) {
         Some(text) => text,
         None => {
-            let entry: PolicyEntry = client.call("_sill/policy.get", PolicyKey { name: policy.into() })?;
+            let entry: PolicyEntry = client.call(method::POLICY_GET, PolicyKey { name: policy.into() })?;
             entry.text
         }
     };
@@ -180,7 +181,7 @@ pub type Opener = Arc<dyn Fn() -> Result<sill_proto::transport::RawStream> + Sen
 pub fn opener(actions: Arc<Actions>, session: String, port: u16) -> Opener {
     Arc::new(move || {
         let opened: sill_proto::host::HostStream =
-            actions.once(|client| client.call("_sill/streams.port", sill_proto::host::PortOpen { session_id: session.clone(), port }))?;
+            actions.once(|client| client.call(method::STREAMS_PORT, sill_proto::host::PortOpen { session_id: session.clone(), port }))?;
         sill_proto::transport::open_stream(&opened.token)
     })
 }

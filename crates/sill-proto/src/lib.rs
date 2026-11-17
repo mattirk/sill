@@ -15,6 +15,7 @@ pub mod host;
 pub mod host_control;
 pub mod initialize;
 pub mod memory;
+pub mod method;
 pub mod rpc;
 pub mod schema;
 pub mod schema_compat;
@@ -27,13 +28,6 @@ pub mod wire;
 pub mod workspaces;
 
 pub use client::Client;
-
-/// Public daemon method names.
-pub mod method {
-    pub const DAEMON_SCHEMA: &str = "_sill/daemon.schema";
-    pub const DAEMON_STATUS: &str = "_sill/daemon.status";
-    pub const DAEMON_SHUTDOWN: &str = "_sill/daemon.shutdown";
-}
 
 /// `$XDG_RUNTIME_DIR/sill/daemon.sock` — the directory is the one the shim sockets live in (0700,
 /// no path inside any jail).

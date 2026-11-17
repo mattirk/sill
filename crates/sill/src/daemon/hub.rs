@@ -317,7 +317,7 @@ impl Hub {
     /// `changes.changed` to every frontend: a sweep reverted, a keep was made (by any client), a
     /// session went or a turn ended — whatever shows the overlays rescans.
     pub fn changes_changed(&self) {
-        let req = sill_proto::rpc::Request::new(None, "_sill/changes.changed", json!({}));
+        let req = sill_proto::rpc::Request::new(None, method::CHANGES_CHANGED, json!({}));
         let Ok(line) = serde_json::to_string(&req) else { return };
         let conns: Vec<Arc<Conn>> = self.conns.lock().unwrap().iter().filter_map(|w| w.upgrade()).collect();
         for c in conns {

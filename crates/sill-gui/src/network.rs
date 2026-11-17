@@ -9,6 +9,7 @@ use iced::widget::{Column, button, container, row, space, text};
 use iced::{Element, Fill, Task};
 use sill_client::actions::Outcome;
 use sill_proto::admin::{DeniedList, NetworkDenied};
+use sill_proto::method;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// How long a note on a network choice stays.
@@ -111,7 +112,7 @@ impl App {
                         let mut after = None;
                         loop {
                             let page: NetworkDenied =
-                                client.call("_sill/policy.denied", DeniedList { session_id: session.clone(), after, limit: Some(128) })?;
+                                client.call(method::POLICY_DENIED, DeniedList { session_id: session.clone(), after, limit: Some(128) })?;
                             all.hosts.extend(page.hosts);
                             all.answered.extend(page.answered);
                             all.quiet.extend(page.quiet);
@@ -144,10 +145,10 @@ impl App {
                 let params = json!({"session_id": session, "host": target});
                 let mut restarted = false;
                 if quiet {
-                    return (actions.call_needing("sill.network_quiet", "_sill/policy.quiet_host", params), false);
+                    return (actions.call_needing("sill.network_quiet", method::POLICY_QUIET_HOST, params), false);
                 }
                 if allow {
-                    let result = actions.call("_sill/policy.allow_host", params.clone());
+                    let result = actions.call(method::POLICY_ALLOW_HOST, params.clone());
                     let Outcome::Done(value) = result else {
                         return (result, restarted);
                     };
@@ -156,18 +157,18 @@ impl App {
                     let live = value["live"].as_bool().unwrap_or(false);
                     if value["agent_name"] != "this session" && !live {
                         let key = json!({"session_id": session});
-                        let stopped = actions.call("_sill/sessions.stop", key.clone());
+                        let stopped = actions.call(method::SESSIONS_STOP, key.clone());
                         if !stopped.is_done() {
                             return (stopped, restarted);
                         }
-                        let started = actions.call("_sill/sessions.start", key);
+                        let started = actions.call(method::SESSIONS_START, key);
                         if !started.is_done() {
                             return (started, restarted);
                         }
                         restarted = true;
                     }
                 }
-                (actions.call("_sill/policy.remember_denied", params), restarted)
+                (actions.call(method::POLICY_REMEMBER_DENIED, params), restarted)
             },
             move |(outcome, restarted)| Message::NetworkDone(id, Choice { host, allow, quiet, restarted }, outcome),
         )
@@ -201,7 +202,7 @@ impl App {
             attachments: vec![],
             purpose: None,
         };
-        self.act(id, crate::Act::CarryOn, "_sill/sessions.submit", json!(submit))
+        self.act(id, crate::Act::CarryOn, method::SESSIONS_SUBMIT, json!(submit))
     }
 
     /// A card per refused host, then the note on the last choice; nothing at all otherwise.
@@ -283,12 +284,12 @@ mod tests {
         session.turn_id = None;
         let fake = std::thread::spawn(move || {
             let mut seen = vec![];
-            let allow = daemon.expect("_sill/policy.allow_host");
+            let allow = daemon.expect(method::POLICY_ALLOW_HOST);
             daemon.reply(&allow, json!({"agent_name": "Codex", "live": true}));
             seen.push("allow".to_string());
-            let remember = daemon.expect("_sill/policy.remember_denied");
+            let remember = daemon.expect(method::POLICY_REMEMBER_DENIED);
             daemon.reply(&remember, json!({}));
-            let submit = daemon.expect("_sill/sessions.submit");
+            let submit = daemon.expect(method::SESSIONS_SUBMIT);
             seen.push(submit["params"]["text"].as_str().unwrap().to_string());
             daemon.reply(&submit, json!({}));
             seen

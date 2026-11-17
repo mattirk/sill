@@ -4,6 +4,7 @@ use crate::{App, Message, settings_ui, style};
 use iced::widget::{column, pick_list, row, scrollable, text, text_input};
 use iced::{Element, Fill, Task};
 use sill_proto::admin as api;
+use sill_proto::method;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -226,7 +227,7 @@ impl App {
                             let mut names = Vec::new();
                             let mut after = None;
                             loop {
-                                let page: api::Names = client.call("_sill/policy.list", api::NamesList { after: after.clone(), limit: Some(128) })?;
+                                let page: api::Names = client.call(method::POLICY_LIST, api::NamesList { after: after.clone(), limit: Some(128) })?;
                                 names.extend(page.names);
                                 anyhow::ensure!(names.len() <= 4096, "Too many policies to display");
                                 let Some(next) = page.next else {
@@ -239,13 +240,13 @@ impl App {
                         })
                         .map_err(|e| format!("{e:#}")),
                     Event::Inspect(name) => {
-                        actions.read::<api::PolicyEntry>("_sill/policy.get", serde_json::json!({"name": name})).map(Reply::Entry).map_err(|e| format!("{e:#}"))
+                        actions.read::<api::PolicyEntry>(method::POLICY_GET, serde_json::json!({"name": name})).map(Reply::Entry).map_err(|e| format!("{e:#}"))
                     }
                     Event::Check => actions
-                        .read::<api::PolicyChecked>("_sill/policy.check", serde_json::to_value(api::PolicyCheck { text }).unwrap())
+                        .read::<api::PolicyChecked>(method::POLICY_CHECK, serde_json::to_value(api::PolicyCheck { text }).unwrap())
                         .map(Reply::Checked)
                         .map_err(|e| format!("{e:#}")),
-                    Event::Import => match actions.call("_sill/policy.import", serde_json::to_value(api::PolicyImport { name, text, replace }).unwrap()) {
+                    Event::Import => match actions.call(method::POLICY_IMPORT, serde_json::to_value(api::PolicyImport { name, text, replace }).unwrap()) {
                         sill_client::actions::Outcome::Done(v) => serde_json::from_value(v)
                             .map(Reply::Imported)
                             .map_err(|e| format!("Import response unreadable; refresh and inspect before retrying: {e}")),

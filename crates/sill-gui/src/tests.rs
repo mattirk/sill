@@ -1,3 +1,4 @@
+use sill_proto::method;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
@@ -44,7 +45,7 @@ impl Daemon {
             // reads that go out beside the one under test (the panel reads Host control's state
             // with its policy views, concurrently; a session's workspaces are read with its files
             // and the Changes page)
-            let incidental = ["_sill/policy.preview", "_sill/host_control.state", "_sill/workspaces.session", "_sill/workspaces.list"];
+            let incidental = [method::POLICY_PREVIEW, method::HOST_CONTROL_STATE, method::WORKSPACES_SESSION, method::WORKSPACES_LIST];
             if incidental.contains(&request["method"].as_str().unwrap_or("")) && request["method"] != method {
                 self.refuse(&request, "unavailable", "not in this test");
                 continue;
@@ -266,7 +267,7 @@ fn fragmented_snapshot_and_live_handoff_over_real_protocol_transport() {
     let source = demo::conversation();
     let server = std::thread::spawn(move || {
         let mut reader = BufReader::new(peer.try_clone().unwrap());
-        let request = read_request(&mut reader, "_sill/sessions.attach");
+        let request = read_request(&mut reader, method::SESSIONS_ATTACH);
         assert_eq!(request["params"]["session_id"], "demo");
         assert!(request["params"]["since"].is_null());
         let cursor = Cursor { session_id: "demo".into(), seq: "3".into() };
@@ -280,9 +281,9 @@ fn fragmented_snapshot_and_live_handoff_over_real_protocol_transport() {
         );
         // Both arrive while the immutable snapshot is still loading.
         for notification in [demo::append(3, "duplicate"), demo::append(4, " live 🦀")] {
-            writeln!(peer, "{}", json!({"jsonrpc":"2.0","method":"_sill/session.event","params":notification})).unwrap();
+            writeln!(peer, "{}", json!({"jsonrpc":"2.0","method":method::SESSION_EVENT,"params":notification})).unwrap();
         }
-        let request = read_request(&mut reader, "_sill/sessions.snapshot");
+        let request = read_request(&mut reader, method::SESSIONS_SNAPSHOT);
         assert_eq!(request["params"]["token"], "lease");
         reply(
             &mut peer,
@@ -298,7 +299,7 @@ fn fragmented_snapshot_and_live_handoff_over_real_protocol_transport() {
         let record = serde_json::to_string(&Record::Item { item: source.item("agent").unwrap().clone() }).unwrap();
         let cut = record.char_indices().nth(record.chars().count() / 2).unwrap().0;
         for (page, offset, fragment, last) in [("first-fragment", 0, &record[..cut], false), ("last-fragment", cut, &record[cut..], true)] {
-            let request = read_request(&mut reader, "_sill/sessions.snapshot");
+            let request = read_request(&mut reader, method::SESSIONS_SNAPSHOT);
             assert_eq!(request["params"]["page"], page);
             reply(
                 &mut peer,
@@ -353,7 +354,7 @@ fn actions_send_the_protocol_requests() {
     type_text(&mut app, "hello agent\nsecond line");
     let task = app.update(in_session(&app, session::Event::Send));
     assert!(demo_view(&app).draft.text().trim().is_empty(), "the composer clears on send");
-    let request = daemon.expect("_sill/sessions.submit");
+    let request = daemon.expect(method::SESSIONS_SUBMIT);
     let params = &request["params"];
     assert_eq!(params["session_id"], "demo");
     assert_eq!(params["text"], "hello agent\nsecond line");
@@ -365,14 +366,14 @@ fn actions_send_the_protocol_requests() {
     assert!(demo_view(&app).outbox.pending().is_empty(), "accepted");
 
     let task = app.update(in_session(&app, session::Event::Stop));
-    let request = daemon.expect("_sill/sessions.cancel");
+    let request = daemon.expect(method::SESSIONS_CANCEL);
     assert_eq!(request["params"], json!({"session_id":"demo", "turn_id":"demo-turn"}));
     daemon.reply(&request, json!({"requested": true}));
     settle_task(&mut app, task);
 
     let task = app.update(in_session(&app, session::Event::Answer { question_id: "q1".into(), option_id: "allow".into() }));
     let again = app.update(in_session(&app, session::Event::Answer { question_id: "q1".into(), option_id: "allow".into() }));
-    let request = daemon.expect("_sill/questions.answer");
+    let request = daemon.expect(method::QUESTIONS_ANSWER);
     assert_eq!(request["params"]["answer"], json!({"type":"permission", "option_id":"allow"}));
     assert!(request["params"]["answer_id"].as_str().unwrap().starts_with("gui-answer-"));
     serde_json::from_value::<AnswerQuestion>(request["params"].clone()).unwrap();
@@ -382,18 +383,18 @@ fn actions_send_the_protocol_requests() {
 
     let pick = |value: &str, boolean| crate::Pick { value: value.into(), title: value.into(), boolean };
     let task = app.update(in_session(&app, session::Event::SetMode(pick("plan", None))));
-    let request = daemon.expect("_sill/sessions.control");
+    let request = daemon.expect(method::SESSIONS_CONTROL);
     assert_eq!(request["params"]["control"], json!({"type":"set_mode", "mode_id":"plan"}), "a second press on an answer in flight sent nothing");
     daemon.reply(&request, json!({}));
     settle_task(&mut app, task);
     let task = app.update(in_session(&app, session::Event::SetOption("web".into(), pick("true", Some(true)))));
-    let request = daemon.expect("_sill/sessions.control");
+    let request = daemon.expect(method::SESSIONS_CONTROL);
     assert_eq!(request["params"]["control"], json!({"type":"set_config", "option_id":"web", "value":{"type":"bool", "value":true}}));
     daemon.reply(&request, json!({}));
     settle_task(&mut app, task);
 
     let task = app.update(in_session(&app, session::Event::Unqueue("s1".into())));
-    let request = daemon.expect("_sill/submissions.cancel");
+    let request = daemon.expect(method::SUBMISSIONS_CANCEL);
     assert_eq!(request["params"], json!({"session_id":"demo", "submission_id":"s1"}));
     daemon.reply(&request, json!({}));
     settle_task(&mut app, task);
@@ -428,7 +429,7 @@ fn send_now_needs_the_capability() {
     let client = initializing.join().unwrap();
     let mut app = live_app(vec![client]);
     let task = app.update(in_session(&app, session::Event::SendNow("s1".into())));
-    let request = daemon.expect("_sill/submissions.send_now");
+    let request = daemon.expect(method::SUBMISSIONS_SEND_NOW);
     assert_eq!(request["params"], json!({"session_id":"demo", "submission_id":"s1"}));
     daemon.reply(&request, json!({}));
     settle_task(&mut app, task);
@@ -451,10 +452,10 @@ fn stop_removes_queued_prompts_before_stopping() {
     let next = event(&view.conversation, Event::SubmissionUpdated { submission });
     view.accept(next);
     let task = app.update(in_session(&app, session::Event::Stop));
-    let first = daemon.expect("_sill/submissions.cancel");
+    let first = daemon.expect(method::SUBMISSIONS_CANCEL);
     assert_eq!(first["params"]["submission_id"], "waiting");
     daemon.reply(&first, json!({}));
-    let second = daemon.expect("_sill/sessions.cancel");
+    let second = daemon.expect(method::SESSIONS_CANCEL);
     daemon.reply(&second, json!({"requested": true}));
     settle_task(&mut app, task);
 }
@@ -470,7 +471,7 @@ fn a_refused_send_gives_the_prompt_back_and_an_uncertain_one_is_checked() {
 
     type_text(&mut app, "keep me");
     let task = app.update(in_session(&app, session::Event::Send));
-    let request = daemon.expect("_sill/sessions.submit");
+    let request = daemon.expect(method::SESSIONS_SUBMIT);
     daemon.refuse(&request, "invalid_state", "the session has ended");
     settle_task(&mut app, task);
     let view = demo_view(&app);
@@ -480,7 +481,7 @@ fn a_refused_send_gives_the_prompt_back_and_an_uncertain_one_is_checked() {
 
     // typed again before the refusal came back: the new text stays, the old prompt waits
     let task = app.update(in_session(&app, session::Event::Send));
-    let request = daemon.expect("_sill/sessions.submit");
+    let request = daemon.expect(method::SESSIONS_SUBMIT);
     assert_eq!(request["params"]["text"], "keep me");
     let id = request["params"]["submission_id"].as_str().unwrap().to_string();
     type_text(&mut app, "newer");
@@ -499,7 +500,7 @@ fn a_refused_send_gives_the_prompt_back_and_an_uncertain_one_is_checked() {
     let task = app.update(in_session(&app, session::Event::Send));
     // Read on the existing connection before closing it. Dropping it before Send raced
     // the client's EOF detection and sometimes never reached the expected next socket.
-    let request = daemon.expect("_sill/sessions.submit");
+    let request = daemon.expect(method::SESSIONS_SUBMIT);
     drop(daemon);
     settle_task(&mut app, task);
     let id = request["params"]["submission_id"].as_str().unwrap().to_string();
@@ -507,7 +508,7 @@ fn a_refused_send_gives_the_prompt_back_and_an_uncertain_one_is_checked() {
     assert!(demo_view(&app).draft.text().trim().is_empty());
     // checking asks for it by identity; never received, it comes back to the composer
     let task = app.update(in_session(&app, session::Event::CheckSend(id.clone())));
-    let request = checker.expect("_sill/submissions.get");
+    let request = checker.expect(method::SUBMISSIONS_GET);
     assert_eq!(request["params"]["submission_id"], id.as_str());
     checker.refuse(&request, "not_found", "submission not found");
     settle_task(&mut app, task);
@@ -2052,23 +2053,23 @@ fn the_menu_starts_a_session_and_opens_it() {
     let (client, mut daemon) = daemon();
     let mut app = live_app(vec![client]);
     let server = std::thread::spawn(move || {
-        let create = daemon.expect("_sill/sessions.create");
+        let create = daemon.expect(method::SESSIONS_CREATE);
         let params = &create["params"];
         assert_eq!((params["agent"].as_str(), params["ghost"].as_bool()), (Some("codex"), Some(true)));
         assert_eq!(params["policy"], "default");
         assert!(params["create_id"].as_str().unwrap().starts_with("gui-create-"));
         daemon.reply(&create, json!({"session_id": "fresh"}));
-        let list = daemon.expect("_sill/sessions.list");
+        let list = daemon.expect(method::SESSIONS_LIST);
         daemon.reply(
             &list,
             json!({"sessions": [session_record("fresh", "new one", false, true),
                                 session_record("demo", "witty-willow", false, false)],
                    "next": null}),
         );
-        let delete = daemon.expect("_sill/sessions.delete");
+        let delete = daemon.expect(method::SESSIONS_DELETE);
         assert_eq!(delete["params"], json!({"session_id": "old"}));
         daemon.reply(&delete, json!({}));
-        let list = daemon.expect("_sill/sessions.list");
+        let list = daemon.expect(method::SESSIONS_LIST);
         daemon.reply(&list, json!({"sessions": [], "next": null}));
     });
     let task = app.update(Message::Menu(Event::New { agent: "codex".into(), ghost: true, workspaces: None }));
@@ -2100,10 +2101,10 @@ fn closing_a_tab_ends_its_session_and_a_ghost_asks_first() {
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(matches!(&messages[..], [Message::CloseTab(id)] if id == "demo"));
     let server = std::thread::spawn(move || {
-        let end = daemon.expect("_sill/sessions.end");
+        let end = daemon.expect(method::SESSIONS_END);
         assert_eq!(end["params"], json!({"session_id": "demo", "reason": "close"}));
         daemon.reply(&end, json!({"pending": false, "deleted": true}));
-        let list = daemon.expect("_sill/sessions.list");
+        let list = daemon.expect(method::SESSIONS_LIST);
         daemon.reply(&list, json!({"sessions": [], "next": null}));
     });
     let task = app.update(Message::CloseTab("demo".into()));
@@ -2144,7 +2145,7 @@ fn a_form_question_is_answered_with_its_values() {
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(matches!(&messages[..], [Message::Session(_, session::Event::SubmitForm(q))] if q == "form"), "{messages:?}");
     let task = app.update(in_session(&app, session::Event::SubmitForm("form".into())));
-    let answer = daemon.expect("_sill/questions.answer");
+    let answer = daemon.expect(method::QUESTIONS_ANSWER);
     assert_eq!(answer["params"]["answer"], json!({"type":"form", "values":{"env":"prod", "why":"release day"}}));
     serde_json::from_value::<AnswerQuestion>(answer["params"].clone()).unwrap();
     daemon.reply(&answer, json!({}));
@@ -2177,7 +2178,7 @@ fn a_held_prompt_can_be_sent_or_discarded() {
         "{messages:?}"
     );
     let task = app.update(in_session(&app, session::Event::ResumeHeld("held1".into())));
-    let resume = daemon.expect("_sill/submissions.resume");
+    let resume = daemon.expect(method::SUBMISSIONS_RESUME);
     assert_eq!(resume["params"], json!({"session_id":"demo", "submission_id":"held1"}));
     daemon.reply(&resume, json!({}));
     settle_task(&mut app, task);
@@ -2459,28 +2460,28 @@ fn changes_actions_are_the_public_requests() {
             for _ in 0..3 {
                 let request = daemon.next();
                 match request["method"].as_str() {
-                    Some("_sill/changes.list") => daemon.reply(&request, json!({"entries": [], "next": null})),
-                    Some("_sill/workspaces.list") => daemon.reply(&request, json!({"workspaces": [], "discarded": [], "next": null})),
-                    Some("_sill/settings.get") => daemon.reply(&request, json!({"theme": "dracula", "auto_revert_minutes": 1440})),
+                    Some(method::CHANGES_LIST) => daemon.reply(&request, json!({"entries": [], "next": null})),
+                    Some(method::WORKSPACES_LIST) => daemon.reply(&request, json!({"workspaces": [], "discarded": [], "next": null})),
+                    Some(method::SETTINGS_GET) => daemon.reply(&request, json!({"theme": "dracula", "auto_revert_minutes": 1440})),
                     other => panic!("unexpected {other:?}"),
                 }
             }
         };
-        let request = daemon.expect("_sill/changes.keep");
+        let request = daemon.expect(method::CHANGES_KEEP);
         assert_eq!(request["params"]["session_id"], "demo");
         assert_eq!(request["params"]["items"][0]["expected_hash"], "demo-hash");
         let path = request["params"]["items"][0]["path"].clone();
         daemon.reply(&request, json!({"done": [{"path": path, "message": ""}], "failed": []}));
         reload(&mut daemon);
-        let request = daemon.expect("_sill/changes.revert");
+        let request = daemon.expect(method::CHANGES_REVERT);
         assert_eq!(request["params"]["paths"].as_array().unwrap().len(), 3);
         daemon.reply(&request, json!({"done": [], "failed": []}));
         reload(&mut daemon);
-        let request = daemon.expect("_sill/changes.git-revert");
+        let request = daemon.expect(method::CHANGES_GIT_REVERT);
         assert!(request["params"]["path"]["display"].as_str().unwrap().ends_with("README.md"));
         daemon.reply(&request, json!({"text": "reverted"}));
         reload(&mut daemon);
-        let request = daemon.expect("_sill/changes.undo");
+        let request = daemon.expect(method::CHANGES_UNDO);
         assert_eq!(request["params"], json!({"session_id":"demo", "keep_ids":["k1"], "force": false}));
         daemon.reply(&request, json!({"done": [], "failed": []}));
         reload(&mut daemon);
@@ -2521,7 +2522,7 @@ fn a_send_goes_to_the_session_it_was_pressed_in() {
     let pressed = in_session(&app, session::Event::Send);
     app.selected = Some("other".into());
     let task = app.update(pressed);
-    let request = daemon.expect("_sill/sessions.submit");
+    let request = daemon.expect(method::SESSIONS_SUBMIT);
     assert_eq!(request["params"]["session_id"], "demo");
     assert_eq!(request["params"]["text"], "from demo");
     daemon.reply(&request, json!({}));
@@ -2830,16 +2831,16 @@ fn session_hotkeys_create_with_current_agent_and_close_current_session() {
     app.tabs[0].agent = "codex".into();
     app.daemon_settings = Some(serde_json::from_value(json!({"remember_pins":true})).unwrap());
     let server = std::thread::spawn(move || {
-        let req = daemon.expect("_sill/sessions.create");
+        let req = daemon.expect(method::SESSIONS_CREATE);
         assert_eq!(req["params"]["agent"], "codex");
         assert_eq!(req["params"]["remember_pins"], true);
         daemon.reply(&req, json!({"session_id":"fresh"}));
-        let req = daemon.expect("_sill/sessions.list");
+        let req = daemon.expect(method::SESSIONS_LIST);
         daemon.reply(&req, json!({"sessions":[session_record("fresh", "Fresh", false, false)], "next":null}));
-        let req = daemon.expect("_sill/sessions.end");
+        let req = daemon.expect(method::SESSIONS_END);
         assert_eq!(req["params"]["session_id"], "fresh");
         daemon.reply(&req, json!({}));
-        let req = daemon.expect("_sill/sessions.list");
+        let req = daemon.expect(method::SESSIONS_LIST);
         daemon.reply(&req, json!({"sessions":[], "next":null}));
     });
     let task = app.update(Message::NewSession);
@@ -2959,7 +2960,7 @@ fn attachment_only_send_keeps_files_on_refusal() {
     let attachment = sill_proto::sfp::Attachment::Uploaded { upload_id: "document".into(), name: "report.pdf".into(), mime: "application/pdf".into() };
     app.views.get_mut("demo").unwrap().attachments.push(attachment.clone().into());
     let task = app.update(in_session(&app, session::Event::Send));
-    let request = daemon.expect("_sill/sessions.submit");
+    let request = daemon.expect(method::SESSIONS_SUBMIT);
     let submit: Submit = serde_json::from_value(request["params"].clone()).unwrap();
     assert!(submit.text.is_empty());
     assert_eq!(submit.attachments, vec![attachment.clone()]);
@@ -2991,7 +2992,7 @@ fn generic_attachment_upload_uses_session_and_preserves_file_bytes() {
     let bytes = b"notes\n\0binary-safe";
     std::fs::write(&path, bytes).unwrap();
     let task = app.attachment_paths("demo".into(), Some(vec![path.clone()]));
-    let request = daemon.expect("_sill/uploads.create");
+    let request = daemon.expect(method::UPLOADS_CREATE);
     let params: sill_proto::sfp::UploadCreate = serde_json::from_value(request["params"].clone()).unwrap();
     assert_eq!(params.session_id, "demo");
     assert_eq!(sill_proto::admin::decode_bytes(&params.data_base64).unwrap(), bytes);
@@ -3011,7 +3012,7 @@ fn markdown_image_is_read_from_session_host_and_decoded() {
         crate::Rendered { source: source.into(), markdown: iced::widget::markdown::Content::parse(source), leaves: std::sync::OnceLock::new() },
     );
     let task = app.load_media("demo");
-    let request = daemon.expect("_sill/files.image");
+    let request = daemon.expect(method::FILES_IMAGE);
     let params: sill_proto::admin::SessionImage = serde_json::from_value(request["params"].clone()).unwrap();
     assert_eq!(params.session_id, "demo");
     assert_eq!(params.path.to_path().unwrap(), std::path::PathBuf::from("/tmp/image one.png"));
@@ -3096,7 +3097,7 @@ fn slow_periodic_refreshes_do_not_accumulate_reads() {
         let mut requests = vec![];
         while requests.len() < 2 {
             let request = daemon.next();
-            if request["method"] == "_sill/policy.preview" {
+            if request["method"] == method::POLICY_PREVIEW {
                 daemon.refuse(&request, "unavailable", "not in this test");
             } else {
                 requests.push(request);
@@ -3106,8 +3107,8 @@ fn slow_periodic_refreshes_do_not_accumulate_reads() {
         held.recv_timeout(Duration::from_secs(5)).unwrap();
         for request in requests {
             match request["method"].as_str().unwrap() {
-                "_sill/sessions.list" => daemon.reply(&request, json!({"sessions": [session], "next": null})),
-                "_sill/settings.get" => daemon.reply(&request, sill_proto::admin::Settings::default()),
+                method::SESSIONS_LIST => daemon.reply(&request, json!({"sessions": [session], "next": null})),
+                method::SETTINGS_GET => daemon.reply(&request, sill_proto::admin::Settings::default()),
                 other => panic!("unexpected refresh request {other}"),
             }
         }
@@ -3137,9 +3138,9 @@ fn explicit_relist_skips_obsolete_results_and_preserves_the_view() {
     type_text(&mut app, "keep this draft");
     let session = session_record("demo", "reopened", false, false);
     let fake = std::thread::spawn(move || {
-        let old = daemon.expect("_sill/sessions.list");
+        let old = daemon.expect(method::SESSIONS_LIST);
         daemon.reply(&old, json!({"sessions": [], "next": null}));
-        let fresh = daemon.expect("_sill/sessions.list");
+        let fresh = daemon.expect(method::SESSIONS_LIST);
         daemon.reply(&fresh, json!({"sessions": [session], "next": null}));
     });
     let task = app.list();

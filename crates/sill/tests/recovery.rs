@@ -515,11 +515,11 @@ fn an_unprompted_session_closed_after_its_frontend_left_goes_jail_and_all() {
     fixture.start();
     {
         let mut frontend = Connection::connect(&fixture.socket()).unwrap();
-        frontend.call("_sill/sessions.attach", json!({"session_id": fixture.session}));
+        frontend.call(method::SESSIONS_ATTACH, json!({"session_id": fixture.session}));
     }
     std::thread::sleep(Duration::from_millis(500));
     let mut closing = Connection::connect(&fixture.socket()).unwrap();
-    let ending = closing.call("_sill/sessions.end", json!({"session_id": fixture.session, "reason": "close"}));
+    let ending = closing.call(method::SESSIONS_END, json!({"session_id": fixture.session, "reason": "close"}));
     assert_eq!(ending["deleted"], true, "{ending}");
     assert!(exits(&mut fixture.launcher, Duration::from_secs(10)), "the deleted session's jail is still running; {}", fixture.logs());
     assert!(exits(&mut fixture.relay, Duration::from_secs(10)), "the deleted session's relay is still running; {}", fixture.logs());
@@ -585,7 +585,7 @@ fn a_relay_that_cannot_be_stopped_never_keeps_the_jail_running() {
     fixture.start();
     assert!(exits(&mut fixture.launcher, Duration::from_secs(15)), "an unstoppable relay kept the jail running; {}", fixture.logs());
     let mut connection = Connection::connect(&fixture.socket()).unwrap();
-    let reply = connection.try_call("_sill/sessions.delete", json!({"session_id": fixture.session}));
+    let reply = connection.try_call(method::SESSIONS_DELETE, json!({"session_id": fixture.session}));
     assert!(reply.get("error").is_some(), "deleting under a relay that still answers succeeded: {reply}");
     assert!(reply["error"].to_string().contains("jail is stopped"), "{reply}");
     assert_eq!(fixture.database().query_row("SELECT count(*) FROM sessions WHERE id=?1", [&fixture.session], |row| row.get::<_, i64>(0)).unwrap(), 1);
@@ -619,10 +619,10 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     fixture.start();
     assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(), "initialize");
     let mut origin = Connection::connect(&fixture.socket()).unwrap();
-    origin.call("_sill/sessions.attach", json!({"session_id":fixture.session}));
+    origin.call(method::SESSIONS_ATTACH, json!({"session_id":fixture.session}));
     let mut follower = Connection::connect(&fixture.socket()).unwrap();
-    follower.call("_sill/sessions.attach", json!({"session_id":fixture.session}));
-    origin.call("_sill/sessions.submit", json!({"session_id":fixture.session,"submission_id":"recovery-turn","text":"work"}));
+    follower.call(method::SESSIONS_ATTACH, json!({"session_id":fixture.session}));
+    origin.call(method::SESSIONS_SUBMIT, json!({"session_id":fixture.session,"submission_id":"recovery-turn","text":"work"}));
     origin.call(method::DAEMON_STATUS, json!({}));
     follower.call(method::DAEMON_STATUS, json!({}));
     for frontend in [&origin, &follower] {
@@ -641,12 +641,12 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     fixture.start();
     fixture.wait("unattended permission recovered", || fixture.snapshot()["pending"].as_object().is_some_and(|questions| questions.len() == 1));
     let mut frontend = Connection::connect(&fixture.socket()).unwrap();
-    let attached = frontend.call("_sill/sessions.attach", json!({"session_id":fixture.session}));
+    let attached = frontend.call(method::SESSIONS_ATTACH, json!({"session_id":fixture.session}));
     let token = attached["snapshot"]["token"].clone();
     let mut page = Value::Null;
     let mut records = Vec::new();
     loop {
-        let result = frontend.call("_sill/sessions.snapshot", json!({"token":token,"page":page}));
+        let result = frontend.call(method::SESSIONS_SNAPSHOT, json!({"token":token,"page":page}));
         records.extend(result["records"].as_array().unwrap().iter().cloned());
         page = result["next_page"].clone();
         if page.is_null() {
@@ -655,7 +655,7 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     }
     let question =
         records.iter().find(|record| record["type"] == "question" && record["question"]["state"] == "open").expect("pending permission delivered in snapshot");
-    frontend.call("_sill/questions.answer", json!({"session_id":fixture.session,"question_id":question["question"]["question_id"],"answer_id":"recovery-answer","answer":{"type":"permission","option_id":"allow"}}));
+    frontend.call(method::QUESTIONS_ANSWER, json!({"session_id":fixture.session,"question_id":question["question"]["question_id"],"answer_id":"recovery-answer","answer":{"type":"permission","option_id":"allow"}}));
     fixture.wait("first turn complete", || fixture.snapshot()["busy"] == false);
     let user: String =
         fixture.database().query_row("SELECT text FROM entries WHERE session_id=?1 AND kind='user'", [&fixture.session], |row| row.get(0)).unwrap();
@@ -669,11 +669,11 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     assert_eq!((count, text.as_str()), (1, "before restart after restart"));
     drop(frontend);
     if adopt_checkpoint {
-        Connection::connect(&fixture.socket()).unwrap().call("_sill/sessions.checkpoint", json!({"session_id":fixture.session}));
+        Connection::connect(&fixture.socket()).unwrap().call(method::SESSIONS_CHECKPOINT, json!({"session_id":fixture.session}));
         fixture.wait("partial checkpoint committed", || fixture.snapshot()["agent_md"].as_str().is_some_and(|text| text.contains("Summary before restart")));
         assert_eq!(summarizing(&fixture), json!("checkpoint"), "the session says its turn is a checkpoint");
     }
-    let ending = Connection::connect(&fixture.socket()).unwrap().call("_sill/sessions.end", json!({"session_id":fixture.session,"reason":"close"}));
+    let ending = Connection::connect(&fixture.socket()).unwrap().call(method::SESSIONS_END, json!({"session_id":fixture.session,"reason":"close"}));
     assert_eq!(ending["pending"], true, "the agent should write the final summary");
     fixture.wait("partial closing summary committed", || fixture.snapshot()["agent_md"].as_str().is_some_and(|text| text.contains("Summary before restart")));
     // an adopted checkpoint is the closing summary from then on
@@ -731,13 +731,13 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
 }
 
 fn public_snapshot(connection: &mut Connection, session: &str) -> (Value, Vec<Value>) {
-    let attached = connection.call("_sill/sessions.attach", json!({"session_id":session}));
+    let attached = connection.call(method::SESSIONS_ATTACH, json!({"session_id":session}));
     assert_eq!(attached["mode"], "snapshot");
     let lease = &attached["snapshot"];
     let mut records = vec![];
     let mut page = Value::Null;
     loop {
-        let response = connection.call("_sill/sessions.snapshot", json!({"token":lease["token"],"page":page}));
+        let response = connection.call(method::SESSIONS_SNAPSHOT, json!({"token":lease["token"],"page":page}));
         assert_eq!(response["at"], lease["at"]);
         records.extend(response["records"].as_array().unwrap().iter().cloned());
         page = response["next_page"].clone();
@@ -758,12 +758,12 @@ fn sfp_submission_question_and_item_identity_survive_main_daemon_restart() {
     let generation = initial.iter().find(|r| r["type"] == "session").unwrap()["session"]["agent_generation_id"].clone();
     // an inline image: stored as an upload, so the identical retry must compare against that
     let input = json!({"session_id":fixture.session,"submission_id":"recovery-submission","text":"work","attachments":[{"type":"inline","name":"dot.png","mime":"image/png","data_base64":"iVBORw0KGgo="}]});
-    let accepted = client.call("_sill/sessions.submit", input.clone());
-    let repeated = client.call("_sill/sessions.submit", input.clone());
+    let accepted = client.call(method::SESSIONS_SUBMIT, input.clone());
+    let repeated = client.call(method::SESSIONS_SUBMIT, input.clone());
     assert_eq!(accepted["submission_id"], repeated["submission_id"]);
     assert_eq!(accepted["accepted_seq"], repeated["accepted_seq"]);
     assert_eq!(accepted["attachments"][0]["type"], "uploaded", "the journal references the image");
-    let image = client.call("_sill/uploads.get", json!({"session_id":fixture.session,"upload_id":accepted["attachments"][0]["upload_id"]}));
+    let image = client.call(method::UPLOADS_GET, json!({"session_id":fixture.session,"upload_id":accepted["attachments"][0]["upload_id"]}));
     assert_eq!(image["data_base64"], "iVBORw0KGgo=");
     let prepared = observed.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(prepared.contains("work") && prepared.contains(sill_core::instructions::BASE));
@@ -778,13 +778,13 @@ fn sfp_submission_question_and_item_identity_survive_main_daemon_restart() {
     fixture.start();
     fixture.wait("SFP unattended question recovered", || fixture.snapshot()["pending"].as_object().is_some_and(|questions| questions.len() == 1));
     let mut client = Connection::connect(&fixture.socket()).unwrap();
-    let attached = client.call("_sill/sessions.attach", json!({"session_id":fixture.session,"since":cursor}));
+    let attached = client.call(method::SESSIONS_ATTACH, json!({"session_id":fixture.session,"since":cursor}));
     assert_eq!(attached["mode"], "replay");
     assert_eq!(attached["after"], cursor);
     assert!(client.events.is_empty(), "attach response precedes this subscription's notifications");
-    client.call("_sill/sessions.get", json!({"session_id":fixture.session})); // drain the replay already queued after attach's reply
+    client.call(method::SESSIONS_GET, json!({"session_id":fixture.session})); // drain the replay already queued after attach's reply
     let replay: Vec<_> =
-        client.events.iter().filter(|e| e["method"] == "_sill/session.event" && e["params"]["subscription_id"] == attached["subscription_id"]).collect();
+        client.events.iter().filter(|e| e["method"] == method::SESSION_EVENT && e["params"]["subscription_id"] == attached["subscription_id"]).collect();
     let mut seq = cursor["seq"].as_str().unwrap().parse::<u64>().unwrap();
     for event in replay {
         seq += 1;
@@ -796,25 +796,25 @@ fn sfp_submission_question_and_item_identity_survive_main_daemon_restart() {
     assert_eq!(recovered_session["agent_generation_id"], generation, "adopting the live relay preserves its generation");
     let recovered_item = &after.iter().find(|r| r["type"] == "item" && r["item"]["item_id"] == agent_item["item_id"]).unwrap()["item"];
     assert_eq!(recovered_item, &agent_item, "replay must not append the first text twice or reidentify its item");
-    let repeated = client.call("_sill/sessions.submit", input);
+    let repeated = client.call(method::SESSIONS_SUBMIT, input);
     assert_eq!(repeated["accepted_seq"], accepted["accepted_seq"], "retry after restart retains original acceptance");
     let question = &after.iter().find(|r| r["type"] == "question" && r["question"]["state"] == "open").unwrap()["question"];
     let answer = json!({"session_id":fixture.session,"question_id":question["question_id"],"answer_id":"recovery-answer","answer":{"type":"permission","option_id":"allow"}});
-    let answered = client.call("_sill/questions.answer", answer.clone());
-    let retried = client.call("_sill/questions.answer", answer);
+    let answered = client.call(method::QUESTIONS_ANSWER, answer.clone());
+    let retried = client.call(method::QUESTIONS_ANSWER, answer);
     assert_eq!(answered["answer_id"], "recovery-answer");
     assert_eq!(retried["answer_id"], answered["answer_id"]);
     fixture.wait("SFP turn complete", || fixture.snapshot()["busy"] == false);
     let (_, completed) = public_snapshot(&mut client, &fixture.session);
     let final_item = &completed.iter().find(|r| r["type"] == "item" && r["item"]["item_id"] == agent_item["item_id"]).unwrap()["item"];
     assert_eq!(final_item["content"][0]["text"], "before restart after restart");
-    let result = client.call("_sill/submissions.get", json!({"session_id":fixture.session,"submission_id":"recovery-submission"}));
+    let result = client.call(method::SUBMISSIONS_GET, json!({"session_id":fixture.session,"submission_id":"recovery-submission"}));
     assert_eq!(result["outcome"], "completed");
     assert_eq!(
         fixture.database().query_row("SELECT count(*) FROM entries WHERE session_id=?1 AND kind='user'", [&fixture.session], |r| r.get::<_, i64>(0)).unwrap(),
         1
     );
-    let ending = client.call("_sill/sessions.end", json!({"session_id":fixture.session,"reason":"close"}));
+    let ending = client.call(method::SESSIONS_END, json!({"session_id":fixture.session,"reason":"close"}));
     assert_eq!(ending["pending"], true);
     fixture.wait("SFP closing summary started", || fixture.snapshot()["agent_md"].as_str().is_some_and(|t| t.contains("Summary before restart")));
     release.send(()).unwrap();

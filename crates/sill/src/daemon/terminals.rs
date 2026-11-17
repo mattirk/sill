@@ -2,6 +2,7 @@
 //! reader that keeps the last [`api::REPLAY_BYTES`] of output; a frontend attaches through a byte
 //! stream, gets that output first and then the live bytes. Closing the stream only detaches: the
 //! shell lives until it exits, its jail stops, `terminals.close` hangs it up or the daemon leaves.
+use sill_proto::method;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
@@ -328,7 +329,7 @@ pub fn handle(method: &str, params: Value) -> Option<Result<Value>> {
     }
     let key = |params: Value| args::<api::TerminalKey>(params).map(|k| k.terminal_id);
     Some(match method {
-        "_sill/terminals.open" => (|| {
+        method::TERMINALS_OPEN => (|| {
             let a: api::Open = args(params)?;
             if let Some(s) = &a.session_id
                 && !sill_core::session::valid_id(s)
@@ -337,15 +338,15 @@ pub fn handle(method: &str, params: Value) -> Option<Result<Value>> {
             }
             Ok(json!(open(a)?))
         })(),
-        "_sill/terminals.list" => args::<api::List>(params).map(|a| json!(list(a.session_id.as_deref()))),
-        "_sill/terminals.get" => key(params).and_then(|id| info(&id)).map(|t| json!(t)),
-        "_sill/terminals.attach" => key(params).and_then(|id| {
+        method::TERMINALS_LIST => args::<api::List>(params).map(|a| json!(list(a.session_id.as_deref()))),
+        method::TERMINALS_GET => key(params).and_then(|id| info(&id)).map(|t| json!(t)),
+        method::TERMINALS_ATTACH => key(params).and_then(|id| {
             info(&id)?;
             Ok(json!(api::Stream { token: super::streams::terminal(&id)? }))
         }),
-        "_sill/terminals.resize" => args::<api::Resize>(params).and_then(resize).map(|()| json!({})),
-        "_sill/terminals.cwd" => key(params).and_then(|id| cwd(&id)).map(|c| json!(c)),
-        "_sill/terminals.close" => key(params).and_then(|id| close(&id)).map(|()| json!({})),
+        method::TERMINALS_RESIZE => args::<api::Resize>(params).and_then(resize).map(|()| json!({})),
+        method::TERMINALS_CWD => key(params).and_then(|id| cwd(&id)).map(|c| json!(c)),
+        method::TERMINALS_CLOSE => key(params).and_then(|id| close(&id)).map(|()| json!({})),
         _ => return None,
     })
 }

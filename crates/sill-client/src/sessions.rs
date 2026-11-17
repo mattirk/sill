@@ -4,6 +4,7 @@
 //! lost connection returns the same session instead of a second one (docs/protocol.md).
 use serde_json::{Value, json};
 use sill_proto::agent_admin::Definition;
+use sill_proto::method;
 use sill_proto::sessions::{Change, Create, End, Session, SessionKey, Update};
 
 /// One request: the method and its parameters.
@@ -22,7 +23,7 @@ pub fn create(agent: &str, ghost: bool, remember_pins: bool, workspaces: Option<
         workspaces: workspaces.filter(|_| !ghost),
         ..Create::default()
     };
-    ("_sill/sessions.create", json!(create))
+    (method::SESSIONS_CREATE, json!(create))
 }
 
 /// *New here*: a new session with an ended one's agent, policy and memory scope,
@@ -39,25 +40,25 @@ pub fn new_here(from: &Session) -> Request {
         ghost: false,
         workspaces: None,
     };
-    ("_sill/sessions.create", json!(create))
+    (method::SESSIONS_CREATE, json!(create))
 }
 
 /// An ended session open again; attaching then starts it.
 pub fn reopen(session_id: &str) -> Request {
     let update = Update { session_id: session_id.into(), change: Change::Reopen };
-    ("_sill/sessions.update", json!(update))
+    (method::SESSIONS_UPDATE, json!(update))
 }
 
 /// End a session as closing its tab does: the summary, or a ghost's deletion.
 pub fn end(session_id: &str) -> Request {
     let end = End { session_id: session_id.into(), reason: "close".into() };
-    ("_sill/sessions.end", json!(end))
+    (method::SESSIONS_END, json!(end))
 }
 
 /// Delete a session and its recorded changes.
 pub fn delete(session_id: &str) -> Request {
     let key = SessionKey { session_id: session_id.into() };
-    ("_sill/sessions.delete", json!(key))
+    (method::SESSIONS_DELETE, json!(key))
 }
 
 /// The session a `sessions.create` answered with.
@@ -90,7 +91,7 @@ pub fn startable(client: &sill_proto::Client) -> anyhow::Result<Vec<Definition>>
     let mut agents = vec![];
     let mut after = None;
     loop {
-        let page: Page = client.call("_sill/agents.list", List { after, limit: Some(64) })?;
+        let page: Page = client.call(method::AGENTS_LIST, List { after, limit: Some(64) })?;
         agents.extend(page.agents.into_iter().filter(|a| a.enabled));
         after = page.next;
         if after.is_none() {
@@ -99,7 +100,7 @@ pub fn startable(client: &sill_proto::Client) -> anyhow::Result<Vec<Definition>>
     }
     let mut startable = vec![];
     for agent in agents {
-        let available: Available = client.call("_sill/agents.available", AgentKey { agent_id: agent.id.clone() })?;
+        let available: Available = client.call(method::AGENTS_AVAILABLE, AgentKey { agent_id: agent.id.clone() })?;
         if available.path.is_some() {
             startable.push(agent);
         }
@@ -144,7 +145,7 @@ mod tests {
     #[test]
     fn requests_have_the_shapes_the_daemon_accepts() {
         let (method, params) = create("codex", true, true, None);
-        assert_eq!(method, "_sill/sessions.create");
+        assert_eq!(method, method::SESSIONS_CREATE);
         let create: Create = serde_json::from_value(params.clone()).unwrap();
         assert!(create.ghost && !create.remember_pins, "a ghost never takes remembered pins");
         assert!(create.create_id.starts_with("gui-create-"));

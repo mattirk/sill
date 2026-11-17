@@ -5,6 +5,7 @@ use crate::{
     media,
 };
 use iced::Point;
+use sill_proto::method;
 use sill_proto::{
     admin,
     sfp::{Attachment, Submit},
@@ -200,7 +201,7 @@ fn annotation_failed_send_restores_editable_markers_and_stable_attachment_identi
     save(&mut app);
     let attachment = app.views["demo"].attachments[0].clone();
     let task = app.update(crate::tests::in_session(&app, crate::session::Event::Send));
-    let request = daemon.expect("_sill/sessions.submit");
+    let request = daemon.expect(method::SESSIONS_SUBMIT);
     let submit: Submit = serde_json::from_value(request["params"].clone()).unwrap();
     assert_eq!(submit.attachments, vec![attachment.attachment.clone()]);
     assert_ne!(submit.attachments[0], original);
@@ -228,7 +229,7 @@ fn annotation_uncertain_retry_preserves_exact_flattened_bytes_and_submission_ide
     save(&mut app);
     let expected = app.views["demo"].attachments[0].attachment.clone();
     let task = app.update(crate::tests::in_session(&app, crate::session::Event::Send));
-    let request = first.expect("_sill/sessions.submit");
+    let request = first.expect(method::SESSIONS_SUBMIT);
     let submit: Submit = serde_json::from_value(request["params"].clone()).unwrap();
     assert_eq!(submit.attachments, vec![expected]);
     drop(first);
@@ -236,7 +237,7 @@ fn annotation_uncertain_retry_preserves_exact_flattened_bytes_and_submission_ide
     assert!(matches!(app.views["demo"].outbox.get(&submit.submission_id).unwrap().state, sill_client::outbox::State::Uncertain(_)));
     assert_eq!(app.views["demo"].pending_attachments[&submit.submission_id][0].annotation.as_ref().unwrap().strokes.len(), 1);
     let retry = app.update(crate::tests::in_session(&app, crate::session::Event::RetrySend(submit.submission_id.clone())));
-    let retried = second.expect("_sill/sessions.submit");
+    let retried = second.expect(method::SESSIONS_SUBMIT);
     assert_eq!(retried["params"], request["params"]);
     second.reply(&retried, serde_json::json!({}));
     settle_task(&mut app, retry);
@@ -265,7 +266,7 @@ fn annotation_accounts_for_original_pixels_and_releases_replaced_or_discarded_pr
     assert_eq!(app.views["demo"].decoded_media_bytes(), 2 * bytes, "replaced preview is released");
     assert!(!app.views["demo"].media.contains_key(&first_key));
     let task = app.update(crate::tests::in_session(&app, crate::session::Event::Send));
-    let request = daemon.expect("_sill/sessions.submit");
+    let request = daemon.expect(method::SESSIONS_SUBMIT);
     let id = request["params"]["submission_id"].as_str().unwrap().to_string();
     assert_eq!(app.views["demo"].decoded_media_bytes(), 2 * bytes, "pending send retains editable original");
     drop(daemon);

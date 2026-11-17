@@ -79,6 +79,7 @@ mod window;
 mod workspaces;
 mod workspaces_ui;
 
+use sill_proto::method;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1710,7 +1711,7 @@ impl App {
         let find_task = if grew && selected { self.find_streamed() } else { Task::none() };
         let snap = grew && selected && !selecting && self.views.get(&session).is_some_and(|v| v.follow_tail && v.conversation_shown());
         let mut tasks: Vec<Task<Message>> =
-            checks.into_iter().map(|(id, key)| self.act(&session, Act::Check(id), "_sill/submissions.get", json!(key))).collect();
+            checks.into_iter().map(|(id, key)| self.act(&session, Act::Check(id), method::SUBMISSIONS_GET, json!(key))).collect();
         tasks.push(find_task);
         if connection_lost {
             if self.daemon.problem.is_none() && !self.daemon.restarting {
@@ -1777,7 +1778,7 @@ impl App {
             for id in wanted {
                 let bytes = (|| -> anyhow::Result<Option<Vec<u8>>> {
                     let installed: sill_proto::agent_admin::Installation =
-                        client.call("_sill/registry.installed", sill_proto::agent_admin::AgentKey { agent_id: id.clone() })?;
+                        client.call(method::REGISTRY_INSTALLED, sill_proto::agent_admin::AgentKey { agent_id: id.clone() })?;
                     let Some(installed) = installed.installed else { return Ok(None) };
                     sill_client::agents::icon(
                         &client,

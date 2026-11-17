@@ -5,6 +5,7 @@
 //! host (its progress in the card, then the session starts again), in a terminal of the jail (the
 //! pane opens with the agent's login command; when it exits the session is told to go on), or as
 //! the agent's own `authenticate`. Once the agent no longer asks, the card says it is logged in.
+use sill_proto::method;
 use std::collections::BTreeMap;
 
 use iced::widget::{Column, button, container, operation, row, text, text_input, tooltip};
@@ -219,7 +220,7 @@ impl App {
 
     fn login_control(&self, session: &str, control: Control) -> Task<Message> {
         let params = SessionControl { session_id: session.to_string(), control };
-        self.act(session, Act::Login, "_sill/sessions.control", json!(params))
+        self.act(session, Act::Login, method::SESSIONS_CONTROL, json!(params))
     }
 
     /// The agent's login command in a terminal of the session's jail, in the terminal pane: the
@@ -423,7 +424,7 @@ mod tests {
         let _ = update(&mut app, Event::Key("sk-secret".into()));
         assert_eq!(format!("{:?}", Event::Key("sk-secret".into())), "Key(…)");
         let task = update(&mut app, Event::SubmitKey);
-        let request = daemon.expect("_sill/sessions.control");
+        let request = daemon.expect(method::SESSIONS_CONTROL);
         assert_eq!(request["params"]["control"], json!({"type": "authenticate", "method_id": "key", "api_key": "sk-secret"}));
         daemon.reply(&request, json!({}));
         settle_task(&mut app, task);
@@ -440,20 +441,20 @@ mod tests {
             "terminal": null}]);
         let mut app = asking(vec![client], methods);
         let fake = std::thread::spawn(move || {
-            let get = daemon.expect("_sill/sessions.get");
+            let get = daemon.expect(method::SESSIONS_GET);
             daemon.reply(
                 &get,
                 json!({"session_id": "demo", "agent": "claude", "title": "t",
                 "title_kind": "", "created_at": "1", "last_used": "1", "ended_at": null}),
             );
-            let agent = daemon.expect("_sill/agents.get");
+            let agent = daemon.expect(method::AGENTS_GET);
             assert_eq!(agent["params"]["agent_id"], "claude");
             daemon.reply(
                 &agent,
                 json!({"id": "claude", "name": "Claude",
                 "command": ["claude-acp"], "home_paths": [{"path": "~/.claude", "kind": "directory"}]}),
             );
-            let control = daemon.expect("_sill/sessions.control");
+            let control = daemon.expect(method::SESSIONS_CONTROL);
             daemon.reply(&control, json!({}));
             control["params"]["control"].clone()
         });
@@ -472,20 +473,20 @@ mod tests {
             "terminal": null}]);
         let mut app = asking(vec![client], methods);
         let fake = std::thread::spawn(move || {
-            let get = daemon.expect("_sill/sessions.get");
+            let get = daemon.expect(method::SESSIONS_GET);
             daemon.reply(
                 &get,
                 json!({"session_id": "demo", "agent": "claude",
                 "running": true, "policy_changed": true}),
             );
-            let agent = daemon.expect("_sill/agents.get");
+            let agent = daemon.expect(method::AGENTS_GET);
             daemon.reply(
                 &agent,
                 json!({"id": "claude", "name": "Claude",
                 "command": ["claude-acp"], "home_paths": [{"path": "~/.claude", "kind": "directory"}]}),
             );
             let mut seen = vec![];
-            for method in ["_sill/sessions.stop", "_sill/sessions.start", "_sill/sessions.control"] {
+            for method in [method::SESSIONS_STOP, method::SESSIONS_START, method::SESSIONS_CONTROL] {
                 let request = daemon.expect(method);
                 daemon.reply(&request, json!({}));
                 seen.push(method);
@@ -510,7 +511,7 @@ mod tests {
         settle_task(&mut app, other);
         assert_eq!(app.views["demo"].login.terminal, Some(7));
         let task = app.update(Message::Terminal("demo".into(), 7, terminal::Event::Ended));
-        let request = daemon.expect("_sill/sessions.control");
+        let request = daemon.expect(method::SESSIONS_CONTROL);
         assert_eq!(request["params"]["control"], json!({"type": "retry_session"}));
         daemon.reply(&request, json!({}));
         settle_task(&mut app, task);

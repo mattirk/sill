@@ -2,6 +2,7 @@
 //! questions, the outbox, the agent's controls and the shell. Each event carries its session's
 //! id from the view that made it: the selection can change between a press and its handling,
 //! and the press must not land on another session.
+use sill_proto::method;
 use std::collections::BTreeSet;
 
 use iced::Task;
@@ -135,7 +136,7 @@ impl App {
                     return Task::none();
                 };
                 let params = SubmissionKey { session_id: view.id.clone(), submission_id };
-                return self.act(&view.id, Act::Unqueue, "_sill/submissions.cancel", json!(params));
+                return self.act(&view.id, Act::Unqueue, method::SUBMISSIONS_CANCEL, json!(params));
             }
             Event::SendNow(submission_id) => {
                 let (Some(view), Some(actions)) = (self.views.get(&id), self.actions.clone()) else {
@@ -144,7 +145,7 @@ impl App {
                 let session = view.id.clone();
                 let params = json!(SubmissionKey { session_id: session.clone(), submission_id });
                 return blocking(
-                    move || actions.call_needing("sill.send_now", "_sill/submissions.send_now", params),
+                    move || actions.call_needing("sill.send_now", method::SUBMISSIONS_SEND_NOW, params),
                     move |outcome| Message::Done(session, Act::SendNow, outcome),
                 );
             }
@@ -197,7 +198,7 @@ impl App {
                 let Some(submit) = view.outbox.retry(&submission) else {
                     return Task::none();
                 };
-                return self.act(&id, Act::Send(submission), "_sill/sessions.submit", json!(submit));
+                return self.act(&id, Act::Send(submission), method::SESSIONS_SUBMIT, json!(submit));
             }
             Event::CheckSend(submission) => {
                 let Some(view) = self.views.get_mut(&id) else {
@@ -206,7 +207,7 @@ impl App {
                 let Some(key) = view.outbox.check(&submission) else {
                     return Task::none();
                 };
-                return self.act(&id, Act::Check(submission), "_sill/submissions.get", json!(key));
+                return self.act(&id, Act::Check(submission), method::SUBMISSIONS_GET, json!(key));
             }
             Event::DiscardSend(submission) => {
                 if let Some(view) = self.views.get_mut(&id) {
@@ -245,14 +246,14 @@ impl App {
                     return Task::none();
                 };
                 let key = SubmissionKey { session_id: view.id.clone(), submission_id };
-                return self.act(&id, Act::Resume, "_sill/submissions.resume", json!(key));
+                return self.act(&id, Act::Resume, method::SUBMISSIONS_RESUME, json!(key));
             }
             Event::DiscardHeld(submission_id) => {
                 let Some(view) = self.views.get(&id) else {
                     return Task::none();
                 };
                 let key = SubmissionKey { session_id: view.id.clone(), submission_id };
-                return self.act(&id, Act::Unqueue, "_sill/submissions.cancel", json!(key));
+                return self.act(&id, Act::Unqueue, method::SUBMISSIONS_CANCEL, json!(key));
             }
             Event::ToggleTerminal | Event::ToggleHostTerminal => {
                 if self.views.get(&id).is_some_and(|v| v.annotation.is_some()) {
@@ -354,7 +355,7 @@ impl App {
             self.open_lane(session, lane::Mode::Open);
         }
         let id = submit.submission_id.clone();
-        Task::batch([self.act(session, Act::Send(id), "_sill/sessions.submit", json!(submit)), operation::snap_to_end("conversation"), self.focus_prompt()])
+        Task::batch([self.act(session, Act::Send(id), method::SESSIONS_SUBMIT, json!(submit)), operation::snap_to_end("conversation"), self.focus_prompt()])
     }
 
     /// Stop the turn. Prompts still queued are removed first: stopping first
@@ -377,12 +378,12 @@ impl App {
                 let mut kept = vec![];
                 for submission_id in queued {
                     let key = SubmissionKey { session_id: session_id.clone(), submission_id };
-                    if let Some(problem) = actions.call("_sill/submissions.cancel", json!(key)).problem() {
+                    if let Some(problem) = actions.call(method::SUBMISSIONS_CANCEL, json!(key)).problem() {
                         kept.push(problem.to_string());
                     }
                 }
                 let cancel = CancelTurn { session_id, turn_id };
-                let outcome = actions.call("_sill/sessions.cancel", json!(cancel));
+                let outcome = actions.call(method::SESSIONS_CANCEL, json!(cancel));
                 if kept.is_empty() || !outcome.is_done() {
                     outcome
                 } else {
@@ -421,7 +422,7 @@ impl App {
         view.failed = None;
         let params = AnswerQuestion { session_id: view.id.clone(), question_id: question_id.clone(), answer_id: sill_client::request_id("answer"), answer };
         let session = view.id.clone();
-        self.act(&session, Act::Answer(question_id), "_sill/questions.answer", json!(params))
+        self.act(&session, Act::Answer(question_id), method::QUESTIONS_ANSWER, json!(params))
     }
 
     fn control(&mut self, session: &str, control: Control) -> Task<Message> {
@@ -434,7 +435,7 @@ impl App {
         view.failed = None;
         let params = SessionControl { session_id: view.id.clone(), control };
         let session = view.id.clone();
-        self.act(&session, Act::Control, "_sill/sessions.control", json!(params))
+        self.act(&session, Act::Control, method::SESSIONS_CONTROL, json!(params))
     }
 
     fn toggle_shell(&mut self, session: &str, host: bool) -> Task<Message> {

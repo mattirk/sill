@@ -415,11 +415,12 @@ pub fn recover(hub: &Hub) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sill_proto::method;
 
     #[test]
     fn bridge_does_not_accept_a_session_selector_or_admin_envelope() {
         assert!(serde_json::from_value::<Request>(json!({"generation":1,"operation":"launch","session_id":"other","args":{}})).is_err());
-        assert!(serde_json::from_value::<Request>(json!({"method":"_sill/host_control.activate","params":{}})).is_err());
+        assert!(serde_json::from_value::<Request>(json!({"method":method::HOST_CONTROL_ACTIVATE,"params":{}})).is_err());
         assert!(serde_json::from_value::<Launch>(json!({"argv":["true"],"cwd":"/","shell":true})).is_err());
     }
 

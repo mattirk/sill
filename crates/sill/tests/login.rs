@@ -6,6 +6,7 @@
 //! When an agent's login behaves in a way none of these scenarios does, add the scenario here
 //! before changing the login code (docs/login.md §2).
 
+use sill_proto::method;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -417,7 +418,7 @@ impl Frontend {
         let mut wait = wait;
         while let Ok((method, params)) = notifications.recv_timeout(wait) {
             wait = Duration::from_millis(20);
-            if method != "_sill/session.event" {
+            if method != method::SESSION_EVENT {
                 continue;
             }
             let event: sill_proto::sfp::SessionEvent = serde_json::from_value(params).unwrap();
@@ -462,20 +463,20 @@ impl Frontend {
 
     fn submit(&self, marker: &str) -> Value {
         self.client
-            .call("_sill/sessions.submit", json!({"session_id": self.session, "submission_id": marker, "text": format!("{marker} please"), "attachments": []}))
+            .call(method::SESSIONS_SUBMIT, json!({"session_id": self.session, "submission_id": marker, "text": format!("{marker} please"), "attachments": []}))
             .unwrap()
     }
 
     fn submission(&self, marker: &str) -> Value {
-        self.client.call("_sill/submissions.get", json!({"session_id": self.session, "submission_id": marker})).unwrap()
+        self.client.call(method::SUBMISSIONS_GET, json!({"session_id": self.session, "submission_id": marker})).unwrap()
     }
 
     fn control(&self, control: Value) {
-        let _: Value = self.client.call("_sill/sessions.control", json!({"session_id": self.session, "control": control})).unwrap();
+        let _: Value = self.client.call(method::SESSIONS_CONTROL, json!({"session_id": self.session, "control": control})).unwrap();
     }
 
     fn resume(&self, marker: &str) {
-        let _: Value = self.client.call("_sill/submissions.resume", json!({"session_id": self.session, "submission_id": marker})).unwrap();
+        let _: Value = self.client.call(method::SUBMISSIONS_RESUME, json!({"session_id": self.session, "submission_id": marker})).unwrap();
     }
 }
 
@@ -726,15 +727,15 @@ fn resetting_an_agent_stops_its_sessions_then_removes_its_home_and_keys() {
     std::fs::write(own.join(".claude/settings.json"), "{}").unwrap();
     std::fs::create_dir_all(fixture.saved_key("api-key").parent().unwrap()).unwrap();
     std::fs::write(fixture.saved_key("api-key"), "sk-saved").unwrap();
-    let out: Value = frontend.client.call("_sill/agents.reset", json!({"agent_id": "claude"})).unwrap();
+    let out: Value = frontend.client.call(method::AGENTS_RESET, json!({"agent_id": "claude"})).unwrap();
     assert_eq!(out["stopped"], json!([fixture.session]), "{out}");
     assert_eq!(out["removed"], 3, "{out}");
     assert!(!own.exists(), "the agent's home is gone");
     assert!(!fixture.saved_key("api-key").exists(), "the saved key is gone");
     fixture.expect("closed");
-    let again: Value = frontend.client.call("_sill/agents.reset", json!({"agent_id": "claude"})).unwrap();
+    let again: Value = frontend.client.call(method::AGENTS_RESET, json!({"agent_id": "claude"})).unwrap();
     assert_eq!((again["removed"].clone(), again["stopped"].clone()), (json!(0), json!([])), "{again}");
-    let unknown = frontend.client.call::<Value>("_sill/agents.reset", json!({"agent_id": "nobody"}));
+    let unknown = frontend.client.call::<Value>(method::AGENTS_RESET, json!({"agent_id": "nobody"}));
     assert!(unknown.is_err_and(|e| format!("{e:#}").contains("agent not found")));
 }
 

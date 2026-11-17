@@ -2,6 +2,7 @@
 //! No store, overlay or daemon type is read: `_sill/sessions.snapshot` and `_sill/session.event`
 //! are the only source. Each applied event says what it changed, so a frontend redraws that item
 //! instead of scanning the whole history.
+use sill_proto::method;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -53,7 +54,7 @@ impl Conversation {
     /// Attach afresh and read the whole snapshot. Notifications arriving meanwhile stay queued on
     /// `client`; apply them afterwards (events through the snapshot's cursor are ignored).
     pub fn attach(client: &Client, session_id: &str) -> Result<Self> {
-        let attached: Attached = client.call("_sill/sessions.attach", Attach { session_id: session_id.into(), since: None })?;
+        let attached: Attached = client.call(method::SESSIONS_ATTACH, Attach { session_id: session_id.into(), since: None })?;
         let Attached::Snapshot { subscription_id, snapshot } = attached else {
             bail!("expected a snapshot for a fresh attachment");
         };
@@ -68,7 +69,7 @@ impl Conversation {
         let mut decoder = SnapshotDecoder::default();
         let mut page = None;
         loop {
-            let part: SnapshotPage = client.call("_sill/sessions.snapshot", SnapshotRequest { token: snapshot.token.clone(), page })?;
+            let part: SnapshotPage = client.call(method::SESSIONS_SNAPSHOT, SnapshotRequest { token: snapshot.token.clone(), page })?;
             ensure!(part.at == snapshot.at, "snapshot cursor changed during pagination");
             for record in decoder.records(&part).map_err(anyhow::Error::msg)? {
                 view.install(record)?;

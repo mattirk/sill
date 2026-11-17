@@ -8,6 +8,7 @@
 //! when the session's launch policy lists the port under `[processes] expose`; otherwise a card
 //! asks once per session. The bridges belong to the session's view: they close when the process
 //! ends, the session stops or its tab goes. sill-client's `processes` does the relaying.
+use sill_proto::method;
 use std::collections::{BTreeMap, BTreeSet};
 
 use iced::widget::{Column, button, column, container, row, rule, scrollable, space, text, text_editor};
@@ -228,7 +229,7 @@ impl App {
                 } else {
                     vec![name]
                 };
-                return self.process_action(id, "_sill/procs.stop", names);
+                return self.process_action(id, method::PROCS_STOP, names);
             }
             Event::StopCommand(id, pid) => {
                 let Some(actions) = self.actions.clone() else {
@@ -236,12 +237,12 @@ impl App {
                 };
                 let session = id.clone();
                 return blocking(
-                    move || actions.call_needing("sill.jail_processes", "_sill/procs.stop_command", json!({"session_id": session, "pid": pid})),
+                    move || actions.call_needing("sill.jail_processes", method::PROCS_STOP_COMMAND, json!({"session_id": session, "pid": pid})),
                     move |outcome| Message::Procs(Event::Done(id, outcome)),
                 );
             }
             Event::Dismiss(id, name) => {
-                return self.process_action(id, "_sill/procs.dismiss", vec![name]);
+                return self.process_action(id, method::PROCS_DISMISS, vec![name]);
             }
             Event::Done(id, outcome) => {
                 let mut tasks = vec![];
@@ -331,7 +332,7 @@ impl App {
                 let name = name.clone();
                 move || {
                     actions
-                        .read::<sill_proto::Text>("_sill/procs.tail", json!({"session_id": session, "name": name, "lines": procs::LOG_LINES}))
+                        .read::<sill_proto::Text>(method::PROCS_TAIL, json!({"session_id": session, "name": name, "lines": procs::LOG_LINES}))
                         .map(|t| t.text)
                         .map_err(|e| format!("{e:#}"))
                 }
@@ -881,7 +882,7 @@ mod tests {
         let fake = std::thread::spawn(move || {
             let mut stopped = vec![];
             for _ in 0..2 {
-                let stop = daemon.expect("_sill/procs.stop");
+                let stop = daemon.expect(method::PROCS_STOP);
                 stopped.push(stop["params"]["name"].as_str().unwrap().to_string());
                 daemon.reply(&stop, json!({}));
             }

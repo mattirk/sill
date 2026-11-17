@@ -9,6 +9,7 @@
 //! Receipts are the shared ones (`crate::operations`): an identical retry never repeats work. On
 //! start [`reconcile`] settles unfinished entries from what is on disk; what it cannot establish
 //! stays `interrupted` and is shown. A later successful Apply or Discard settles interrupted Apply entries.
+use sill_proto::method;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -1062,7 +1063,7 @@ pub fn diff<H: Host>(h: &H, a: &api::DiffRequest) -> Result<api::DiffText> {
 /// only: uncommitted work is committed first ([`commit_leftovers`]), so a conflict in it stops
 /// the rebase like any other. Repeatable: a retry recomputes.
 pub fn prepare<H: Host>(h: &H, a: &api::Operate) -> Result<api::Prepared> {
-    const METHOD: &str = "_sill/workspaces.prepare";
+    const METHOD: &str = method::WORKSPACES_PREPARE;
     let fingerprint = input(a)?;
     let _g = lock();
     let r = settle_session(h, get_row(h, &a.workspace_id)?)?.ok_or_else(|| not_found("workspace"))?;
@@ -1153,7 +1154,7 @@ fn stop_message(stop: &super::Stop) -> String {
 /// the revision they saw; work still uncommitted is committed first ([`commit_leftovers`]). The
 /// workspace goes on from the person's new commit.
 pub fn apply<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
-    const METHOD: &str = "_sill/workspaces.apply";
+    const METHOD: &str = method::WORKSPACES_APPLY;
     let fingerprint = input(a)?;
     let k = key(&a.operation_id);
     let _g = lock();
@@ -1233,7 +1234,7 @@ fn branch_name<H: Host>(h: &H, r: &Row) -> String {
 /// refused (`branch_exists`), never moved. The workspace keeps its work: until the branch is
 /// merged, the checkout's own branch does not have it.
 pub fn branch<H: Host>(h: &H, a: &api::Apply) -> Result<api::Branched> {
-    const METHOD: &str = "_sill/workspaces.branch";
+    const METHOD: &str = method::WORKSPACES_BRANCH;
     let fingerprint = input(a)?;
     let k = key(&a.operation_id);
     let _g = lock();
@@ -1300,7 +1301,7 @@ pub fn branch<H: Host>(h: &H, a: &api::Apply) -> Result<api::Branched> {
 /// for a later Apply. Exactly the revision they saw; a checkout that moved on is rebased onto
 /// first (prepare), as for Apply.
 pub fn copy<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
-    const METHOD: &str = "_sill/workspaces.copy";
+    const METHOD: &str = method::WORKSPACES_COPY;
     let fingerprint = input(a)?;
     let k = key(&a.operation_id);
     let _g = lock();
@@ -1364,7 +1365,7 @@ pub fn copy<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
 /// Discard (§12): the workspace back to what was last applied; the discarded work kept 7 days for
 /// Undo. Only exactly the revision the person saw.
 pub fn discard<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
-    const METHOD: &str = "_sill/workspaces.discard";
+    const METHOD: &str = method::WORKSPACES_DISCARD;
     let fingerprint = input(a)?;
     let _g = lock();
     if h.db(|c| receipts(c)?.existing(&a.operation_id, METHOD, &fingerprint))?.is_some() {
@@ -1446,7 +1447,7 @@ pub fn remove<H: Host>(h: &H, a: &api::Operate) -> Result<api::Changed> {
 /// Undo a Discard: the work back into its workspace when nothing happened there since, or into a
 /// workspace of its own when its session's folder is gone (§12).
 pub fn undo<H: Host>(h: &H, a: &api::Undo) -> Result<api::Changed> {
-    const METHOD: &str = "_sill/workspaces.undo";
+    const METHOD: &str = method::WORKSPACES_UNDO;
     let fingerprint = input(a)?;
     let _g = lock();
     let d = h

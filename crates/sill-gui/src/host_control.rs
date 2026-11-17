@@ -4,6 +4,7 @@
 //! words for a while, its line in the control's colour as long as the control); and a window-level band naming every other session with active control, so switching to
 //! a Default session cannot hide it. sill-gui declares `sill.host_control`: while a tab is
 //! attached to a session, this window displays that session's control and keeps it alive.
+use sill_proto::method;
 use std::collections::BTreeSet;
 
 use iced::widget::{column, container, row, rule, space, text};
@@ -215,7 +216,7 @@ impl App {
                     crate::local_vm::person_asked(&id, &operations);
                 }
                 let params = json!({"session_id": id, "operations": operations});
-                self.host_control_request(id, "_sill/host_control.activate", params)
+                self.host_control_request(id, method::HOST_CONTROL_ACTIVATE, params)
             }
             Event::Read(id, result) => {
                 if let Some(view) = self.views.get_mut(&id)
@@ -231,7 +232,7 @@ impl App {
             }
             Event::Revoke(id) => {
                 let params = json!({"session_id": id});
-                self.host_control_request(id, "_sill/host_control.revoke", params)
+                self.host_control_request(id, method::HOST_CONTROL_REVOKE, params)
             }
             Event::Done(id, serial, outcome) => {
                 let Some(view) = self.views.get_mut(&id) else {
@@ -267,7 +268,7 @@ impl App {
         let id = id.to_string();
         let key = json!({"session_id": id});
         blocking(
-            move || actions.read::<State>("_sill/host_control.state", key).map_err(|e| format!("{e:#}")),
+            move || actions.read::<State>(method::HOST_CONTROL_STATE, key).map_err(|e| format!("{e:#}")),
             move |result| Message::HostControl(Event::Read(id, result)),
         )
     }
@@ -648,7 +649,7 @@ mod tests {
             loop {
                 let request = daemon.next();
                 match request["method"].as_str().unwrap() {
-                    "_sill/host_control.activate" => {
+                    method::HOST_CONTROL_ACTIVATE => {
                         assert_eq!(request["params"], json!({"session_id": "demo", "operations": ["launch", "stop"]}));
                         daemon.reply(
                             &request,
@@ -656,12 +657,12 @@ mod tests {
                             "operations": ["launch", "stop"], "displaying": 1, "since": "1", "ended": null}),
                         );
                     }
-                    "_sill/sessions.list" => {
+                    method::SESSIONS_LIST => {
                         let session = with_control(session_record("demo", "demo", false, false), &["launch", "stop"]);
                         daemon.reply(&request, json!({"sessions": [session], "next": null}));
                         return;
                     }
-                    "_sill/policy.preview" => daemon.refuse(&request, "unavailable", "later"),
+                    method::POLICY_PREVIEW => daemon.refuse(&request, "unavailable", "later"),
                     other => panic!("unexpected {other}"),
                 }
             }
@@ -699,7 +700,7 @@ mod tests {
             loop {
                 let request = daemon.next();
                 match request["method"].as_str().unwrap() {
-                    "_sill/host_control.activate" => {
+                    method::HOST_CONTROL_ACTIVATE => {
                         assert_eq!(request["params"], json!({"session_id": "demo", "operations": all}));
                         daemon.reply(
                             &request,
@@ -711,7 +712,7 @@ mod tests {
                         }
                         listed = true;
                     }
-                    "_sill/sessions.list" => {
+                    method::SESSIONS_LIST => {
                         let session = with_control(session_record("demo", "demo", false, false), &all);
                         daemon.reply(&request, json!({"sessions": [session], "next": null}));
                         if listed {
@@ -719,8 +720,8 @@ mod tests {
                         }
                         listed = true;
                     }
-                    "_sill/host_control.state" => daemon.refuse(&request, "unavailable", "later"),
-                    "_sill/policy.preview" => daemon.refuse(&request, "unavailable", "later"),
+                    method::HOST_CONTROL_STATE => daemon.refuse(&request, "unavailable", "later"),
+                    method::POLICY_PREVIEW => daemon.refuse(&request, "unavailable", "later"),
                     other => panic!("unexpected {other}"),
                 }
             }
