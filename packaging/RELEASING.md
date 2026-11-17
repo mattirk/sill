@@ -16,13 +16,16 @@ ignored by default (`requires working bubblewrap on a host`).
 
 1. Update `[workspace.package].version` in Cargo.toml and regenerate Cargo.lock
    (`cargo check -p sill-proto` also refreshes workspace package versions).
-2. Commit and push private master, then run its publication workflow
+2. Add a `## VERSION — DATE` section to CHANGELOG.md with what changed since the last
+   release. It becomes the release's notes on GitHub; a version without one is not released
+   (`packaging/check-release.py`; `--notes` prints the section).
+3. Commit and push private master, then run its publication workflow
    (`gh workflow run publish`).
 
 That is all. Every push to public `main` starts the `release` workflow. If the
 workspace version has no `vVERSION` tag yet, it runs the tests,
 builds the Linux tar/deb packages and the Apple Silicon DMG, and publishes the
-release with generated notes and one SHA256SUMS; publishing creates the tag at the
+release with its CHANGELOG.md section as notes and one SHA256SUMS; publishing creates the tag at the
 built commit. It then runs `site/install.sh` against the new release on a Linux and
 a Mac runner. A version that is already tagged does nothing, so only a version bump
 releases. Nothing is published unless every package was built; after a failed run,

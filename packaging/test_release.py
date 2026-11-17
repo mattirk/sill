@@ -121,10 +121,22 @@ class ReleaseTests(unittest.TestCase):
         (self.root / "crates/demo/Cargo.toml").write_text('[package]\nname = "demo"\n')
         lock = self.root / "Cargo.lock"
         lock.write_text('[[package]]\nname = "demo"\nversion = "0.1.0"\n')
-        def check(ref):
-            return subprocess.run(["python3", "packaging/check-release.py"], cwd=self.root,
+        changelog = self.root / "CHANGELOG.md"
+        changelog.write_text("# Changelog\n\n## 0.1.0 — 2026-11-16\n\n- New.\n\n## 0.0.9 — 2026-11-15\n\n- Old.\n")
+        def run(ref, *args):
+            return subprocess.run(["python3", "packaging/check-release.py", *args], cwd=self.root,
                                   env=dict(self.env, GITHUB_REF=ref, GITHUB_OUTPUT=str(self.root / "output")),
-                                  capture_output=True).returncode
+                                  capture_output=True, text=True)
+        def check(ref):
+            return run(ref).returncode
+        # the version's section is the release's notes; without one there is no release
+        notes = run("refs/heads/main", "--notes")
+        self.assertEqual((notes.returncode, notes.stdout), (0, "- New.\n"))
+        changelog.write_text("# Changelog\n\n## 0.0.9 — 2026-11-15\n\n- Old.\n")
+        self.assertNotEqual(check("refs/heads/main"), 0)
+        self.assertNotEqual(run("refs/heads/main", "--notes").returncode, 0)
+        self.assertFalse((self.root / "output").exists())
+        changelog.write_text("## 0.1.0\n\n- New.\n")
         self.assertEqual(check("refs/heads/main"), 0)
         self.assertEqual((self.root / "output").read_text(), "version=0.1.0\n")
         self.assertNotEqual(check("refs/heads/other"), 0)

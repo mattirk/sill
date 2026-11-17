@@ -142,6 +142,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - name: Release notes from CHANGELOG.md
+        run: python3 packaging/check-release.py --notes > "$RUNNER_TEMP/notes.md"
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
@@ -156,10 +159,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
-        # gh uploads the packages to a draft and publishes it only when all of them are there
+        # gh uploads the packages to a draft and publishes it only when all of them are there;
+        # the notes are the version's CHANGELOG.md section, with GitHub's compare link after them
         run: |
           gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "sill $VERSION" --generate-notes --latest \
+            --title "sill $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes --latest \
             dist/*.tar.gz dist/*.deb dist/*.dmg dist/SHA256SUMS
   # What the download page tells people to paste, run against the release that was just published.
   install:
