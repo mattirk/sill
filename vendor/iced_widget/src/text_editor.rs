@@ -120,6 +120,8 @@ pub struct TextEditor<
     padding: Padding,
     // sill patch: visible logical line numbers and their scrolled pixel positions.
     line_numbers: Option<fn(&Renderer::Editor) -> Vec<(usize, f32)>>,
+    // sill patch: rectangles (in the text's own coordinates) filled behind the text.
+    marks: Option<Box<dyn Fn(&Renderer::Editor) -> Vec<(Rectangle, Color)> + 'a>>,
     wrapping: Wrapping,
     class: Theme::Class<'a>,
     key_binding: Option<Box<dyn Fn(KeyPress) -> Option<Binding<Message>> + 'a>>,
@@ -153,6 +155,7 @@ where
             max_height: f32::INFINITY,
             padding: Padding::new(5.0),
             line_numbers: None,
+            marks: None,
             wrapping: Wrapping::default(),
             class: <Theme as Catalog>::default(),
             key_binding: None,
@@ -301,6 +304,7 @@ where
             max_height: self.max_height,
             padding: self.padding,
             line_numbers: self.line_numbers,
+            marks: self.marks,
             wrapping: self.wrapping,
             class: self.class,
             key_binding: self.key_binding,
@@ -317,6 +321,16 @@ where
         visible_lines: fn(&Renderer::Editor) -> Vec<(usize, f32)>,
     ) -> Self {
         self.line_numbers = Some(visible_lines);
+        self
+    }
+
+    /// Rectangles filled behind the text, in the text's own coordinates (sill patch): Find's
+    /// matches, which show while the focus is in the find bar rather than in the editor.
+    pub fn marks(
+        mut self,
+        marks: impl Fn(&Renderer::Editor) -> Vec<(Rectangle, Color)> + 'a,
+    ) -> Self {
+        self.marks = Some(Box::new(marks));
         self
     }
 
@@ -1058,6 +1072,22 @@ where
                     style.placeholder,
                     gutter,
                 );
+            }
+        }
+
+        // sill patch: Find's marks, behind the text and clipped to it.
+        if let Some(marks) = &self.marks {
+            let origin = text_bounds.position() - Point::ORIGIN;
+            for (mark, color) in marks(&internal.editor) {
+                if let Some(mark) = text_bounds.intersection(&(mark + origin)) {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: mark,
+                            ..renderer::Quad::default()
+                        },
+                        color,
+                    );
+                }
             }
         }
 

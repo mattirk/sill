@@ -1,4 +1,8 @@
-//! Find (`Ctrl+F`) bar and conversation text index (`docs/find.md`).
+//! Find (`Ctrl+F`) bar, the conversation's text index and the reader's (`docs/find.md`).
+//!
+//! The bar searches one [`Surface`]: the conversation, or the file open in the reader (its
+//! Markdown preview, its diff rows or its source). The reader builds all of its text, so its index
+//! is its leaves (preview, diff) or its lines (source) in order, all in one row.
 //!
 //! The window owns one [`State`]. While the conversation is shown, `index_rows` walks every
 //! conversation row (including folded turns, grouped tool calls, closed tool outputs, long
@@ -15,7 +19,7 @@ use std::ops::Range;
 use iced::advanced::widget::operation::scrollable::{self as scroll, AbsoluteOffset, Scrollable};
 use iced::advanced::widget::operation::{Operation, Outcome};
 use iced::advanced::widget::Id;
-use iced::widget::{container, mouse_area, right, row, text, text_input};
+use iced::widget::{container, mouse_area, right, row, text, text_editor, text_input};
 use iced::{Alignment, Element, Padding, Rectangle, Task, Vector};
 use sill_proto::sfp::{Answer, Item, Question, Tool};
 
@@ -65,6 +69,32 @@ impl OpenKey {
     }
 }
 
+/// What the bar searches, decided when it opens; the bar closes when the window shows another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Surface {
+    Conversation,
+    /// The open file, by its key; `revision` and `edits` say when its text changed.
+    Reader {
+        key: String,
+        mode: ReaderMode,
+        revision: u64,
+        edits: u64,
+    },
+}
+
+/// How the reader shows its file, as `files::reader_ui` decides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReaderMode {
+    /// The rendered Markdown (`markdown-reader`).
+    Preview,
+    /// The numbered diff rows (`diff-reader`).
+    Diff,
+    /// The source editor: the current match is its selection.
+    Source,
+    /// Being read, or unreadable: nothing to search yet.
+    Waiting,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Match {
     pub row: usize,
@@ -76,12 +106,18 @@ pub struct Match {
 #[derive(Default)]
 pub struct State {
     pub shown: bool,
+    /// The surface the bar was opened on.
+    pub surface: Option<Surface>,
     pub query: String,
     pub case_sensitive: bool,
     pub matches: Vec<Match>,
     pub current: Option<usize>,
     /// The conversation's selected text, mirrored by the selection area for Ctrl+F's query.
     pub selected_text: RefCell<Option<String>>,
+    /// The same for the reader's preview and diff, and the file it was selected in: an area
+    /// mirrors only while it holds a selection, so another file's would outlive it.
+    pub reader_selected: RefCell<Option<String>>,
+    reader_file: Option<String>,
     /// The conversation's laid-out leaves, recorded by the selection area on each layout.
     pub visible_leaves: RefCell<Vec<VisibleLeaf>>,
 }
@@ -91,6 +127,7 @@ impl State {
     /// next `Ctrl+F` in this window.
     pub fn close(&mut self) {
         self.shown = false;
+        self.surface = None;
         self.matches.clear();
         self.current = None;
     }
@@ -98,6 +135,39 @@ impl State {
     /// The row of the current match, so [`crate::rows::plan_with_pinned`] always builds it.
     pub fn pinned_row(&self) -> Option<usize> {
         self.current.and_then(|idx| self.matches.get(idx)).map(|m| m.row)
+    }
+
+    /// The query and current match for the reader's preview or diff, whose text is all one row.
+    pub fn reader_query(&self) -> Option<FindQuery> {
+        if !self.shown || self.query.is_empty() {
+            return None;
+        }
+        Some(FindQuery {
+            needle: self.query.clone(),
+            case_sensitive: self.case_sensitive,
+            current: self.current.map(|i| (0, i)),
+        })
+    }
+
+    /// The matches in the reader's source as `(line, byte range, current)`, for the editor's
+    /// marks.
+    pub fn source_marks(&self) -> Vec<(usize, Range<usize>, bool)> {
+        if !self.shown
+            || !matches!(
+                self.surface,
+                Some(Surface::Reader {
+                    mode: ReaderMode::Source,
+                    ..
+                })
+            )
+        {
+            return Vec::new();
+        }
+        self.matches
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.leaf_in_row, m.range.0..m.range.1, self.current == Some(i)))
+            .collect()
     }
 
     /// The query and current visible match to hand to [`crate::selection::Area::find`].
@@ -742,6 +812,105 @@ fn viewport(view: &SessionView, window_height: f32) -> f32 {
     }
 }
 
+/// The reader's text in the order its leaves are built: the preview's Markdown leaves, the diff's
+/// lines, or the source's lines (the editor's own, so a match's line is the editor's).
+fn reader_leaves(view: &SessionView, mode: ReaderMode) -> Vec<String> {
+    let (Some(file), Some(reader)) = (&view.files.reader, &view.reader) else {
+        return Vec::new();
+    };
+    match mode {
+        ReaderMode::Preview => {
+            let mut out = Vec::new();
+            if let Some(markdown) = &reader.markdown {
+                crate::viewer::markdown_leaves(markdown.items(), &mut out);
+            }
+            out
+        }
+        ReaderMode::Diff => crate::diff_ui::numbered_diff(&file.text)
+            .into_iter()
+            .map(|(_, _, line)| line.to_string())
+            .collect(),
+        ReaderMode::Source => (0..reader.content.line_count())
+            .map(|i| {
+                reader
+                    .content
+                    .line(i)
+                    .map_or_else(String::new, |line| line.text.into_owned())
+            })
+            .collect(),
+        ReaderMode::Waiting => Vec::new(),
+    }
+}
+
+/// The reader's first match at or below where it is: in the source, at or after the cursor (the
+/// start of its selection); in the preview or diff, the first at or below the top of the view,
+/// from the leaves laid out last.
+fn reader_first_match(
+    view: &SessionView,
+    mode: ReaderMode,
+    leaves: usize,
+    matches: &[Match],
+    visible_leaves: &[VisibleLeaf],
+) -> usize {
+    let found = match mode {
+        ReaderMode::Source => view.reader.as_ref().and_then(|reader| {
+            let cursor = reader.content.cursor();
+            let key = |p: text_editor::Position| (p.line, p.column);
+            let at = cursor
+                .selection
+                .map_or(key(cursor.position), |s| key(s).min(key(cursor.position)));
+            matches
+                .iter()
+                .position(|m| (m.leaf_in_row, m.range.0) >= at)
+        }),
+        ReaderMode::Preview | ReaderMode::Diff if visible_leaves.len() == leaves => {
+            matches.iter().position(|m| {
+                let leaf = &visible_leaves[m.leaf_in_row];
+                leaf.layout
+                    .highlight_rects(m.range)
+                    .into_iter()
+                    .next()
+                    .is_none_or(|rect| leaf.origin_y + rect.y + rect.height > leaf.view_top + 1.0)
+            })
+        }
+        _ => None,
+    };
+    found.unwrap_or(0)
+}
+
+/// The rectangles of `marks` (`(line, byte range, current)`, in line order) in the lines the
+/// source editor has laid out, in its text's own coordinates.
+pub fn mark_rects(
+    buffer: &iced::advanced::graphics::text::cosmic_text::Buffer,
+    marks: &[(usize, Range<usize>, bool)],
+) -> Vec<(Rectangle, iced::Color)> {
+    use iced::advanced::graphics::text::cosmic_text::Cursor;
+    let mut out = Vec::new();
+    if marks.is_empty() {
+        return out;
+    }
+    for run in buffer.layout_runs() {
+        let first = marks.partition_point(|m| m.0 < run.line_i);
+        for (line, range, current) in marks[first..].iter().take_while(|m| m.0 == run.line_i) {
+            if let Some((x, width)) =
+                run.highlight(Cursor::new(*line, range.start), Cursor::new(*line, range.end))
+                && width > 0.0
+            {
+                out.push((
+                    Rectangle {
+                        x,
+                        y: run.line_top,
+                        width,
+                        height: run.line_height,
+                    },
+                    style::find_match(*current),
+                ));
+            }
+        }
+    }
+    out
+}
+
 impl App {
     /// Whether a running session terminal or host shell currently has keyboard focus.
     pub fn terminal_focused(&self) -> bool {
@@ -755,13 +924,108 @@ impl App {
             })
     }
 
-    /// Whether the conversation, the only surface Find searches so far, is what the window shows.
+    /// Whether the window shows something Find searches.
     pub fn find_available(&self) -> bool {
-        !self.backend_shown()
-            && self.details.is_none()
-            && self
-                .current()
-                .is_some_and(|v| v.conversation_shown() && !v.desktop.shown)
+        self.find_surface().is_some()
+    }
+
+    /// What Find would search now: the reader when a file is open, else the conversation. Pages,
+    /// session details, an annotation and the test desktop are not searched (yet).
+    pub fn find_surface(&self) -> Option<Surface> {
+        if self.backend_shown() || self.details.is_some() {
+            return None;
+        }
+        let view = self.current()?;
+        if view.annotation.is_some() {
+            return None;
+        }
+        if let Some(file) = &view.files.reader {
+            let reader = view.reader.as_ref();
+            let mode = if file.error.is_some() || file.pending.is_some() {
+                ReaderMode::Waiting
+            } else if file.source {
+                ReaderMode::Source
+            } else if file.repo.is_some() {
+                ReaderMode::Diff
+            } else if reader.is_some_and(|r| r.markdown.is_some()) {
+                ReaderMode::Preview
+            } else {
+                ReaderMode::Waiting
+            };
+            return Some(Surface::Reader {
+                key: sill_client::files::key(&file.path).into(),
+                mode,
+                revision: file.revision,
+                edits: reader.map_or(0, |r| r.edits),
+            });
+        }
+        (!view.desktop.shown).then_some(Surface::Conversation)
+    }
+
+    /// After every message: the bar closes when the window shows another surface (another tab,
+    /// another file, a page; docs/find.md, decision 3), and looks again when the same file is
+    /// shown another way or its text changed.
+    pub fn find_follow(&mut self, prior_session: &Option<String>) -> Task<Message> {
+        let file = self
+            .current()
+            .and_then(|v| v.files.reader.as_ref())
+            .map(|f| sill_client::files::key(&f.path).to_string());
+        if file != self.find.reader_file {
+            self.find.reader_file = file;
+            self.find.reader_selected.take();
+        }
+        if !self.find.shown {
+            return Task::none();
+        }
+        let now = self.find_surface();
+        if *prior_session != self.selected || now.is_none() {
+            self.find.close();
+            return Task::none();
+        }
+        if now == self.find.surface {
+            return Task::none();
+        }
+        match (&self.find.surface, &now) {
+            (
+                Some(Surface::Reader {
+                    key: was,
+                    mode: was_mode,
+                    revision: was_revision,
+                    ..
+                }),
+                Some(Surface::Reader {
+                    key,
+                    mode,
+                    revision,
+                    ..
+                }),
+            ) if was == key => {
+                let keep = was_mode == mode;
+                // the file read again is a new editor, its cursor at the start: the kept match is
+                // its selection again (an edit keeps the editor, and the cursor where it is typed)
+                let replaced = keep && *mode == ReaderMode::Source && was_revision != revision;
+                self.find.surface = now;
+                let task = self.recompute_find(keep);
+                if replaced {
+                    Task::batch([task, self.activate_current_match()])
+                } else {
+                    task
+                }
+            }
+            _ => {
+                self.find.close();
+                Task::none()
+            }
+        }
+    }
+
+    /// Text streamed into the conversation: its matches again, the current one kept.
+    pub fn find_streamed(&mut self) -> Task<Message> {
+        if self.find.surface == Some(Surface::Conversation) {
+            self.recompute_find(true)
+        } else {
+            Task::none()
+        }
     }
 
     pub fn find_event(&mut self, event: Event) -> Task<Message> {
@@ -770,7 +1034,10 @@ impl App {
         }
         match event {
             Event::Open => {
-                if !self.find_available() || self.terminal_focused() {
+                let Some(surface) = self.find_surface() else {
+                    return Task::none();
+                };
+                if self.terminal_focused() {
                     return Task::none();
                 }
                 if let Some(pane) = self.current_mut().and_then(|v| v.terminal.as_mut()) {
@@ -780,21 +1047,39 @@ impl App {
                 if self.find.shown {
                     return focus;
                 }
-                if let Some(selected) = self.find.selected_text.borrow().as_ref()
+                let selected = match &surface {
+                    Surface::Reader {
+                        mode: ReaderMode::Source,
+                        ..
+                    } => self
+                        .current()
+                        .and_then(|v| v.reader.as_ref())
+                        .and_then(|r| r.content.selection()),
+                    Surface::Reader { .. } => self.find.reader_selected.borrow().clone(),
+                    Surface::Conversation => self.find.selected_text.borrow().clone(),
+                };
+                if let Some(selected) = selected
+                    && !selected.is_empty()
                     && selected.chars().count() <= 120
                     && !selected.contains(['\n', '\r'])
                 {
-                    self.find.query = selected.clone();
+                    self.find.query = selected;
                 }
                 self.find.shown = true;
+                self.find.surface = Some(surface);
                 Task::batch([focus, self.recompute_find(false)])
             }
             Event::Close => {
+                let surface = self.find.surface.clone();
                 self.find.close();
-                if self.find_available() {
-                    iced::widget::operation::focus("prompt")
-                } else {
-                    Task::none()
+                match surface {
+                    Some(Surface::Conversation) => iced::widget::operation::focus("prompt"),
+                    // the cursor stays on the last match (docs/find.md, the reader)
+                    Some(Surface::Reader {
+                        mode: ReaderMode::Source,
+                        ..
+                    }) => iced::widget::operation::focus("file-reader"),
+                    _ => Task::none(),
                 }
             }
             Event::Input(query) => {
@@ -821,20 +1106,31 @@ impl App {
         }
     }
 
-    /// Recomputes the matches for the query. With `keep_current` (text streamed in), the current
-    /// match stays where it is; otherwise the first match from the top of the view becomes current
-    /// and is revealed.
+    /// Recomputes the matches for the query. With `keep_current` (text streamed in, a file read
+    /// again), the current match stays where it is; otherwise the first match from the top of the
+    /// view (in the source, from the cursor) becomes current and is revealed.
     pub fn recompute_find(&mut self, keep_current: bool) -> Task<Message> {
-        if !self.find.shown || !self.find_available() {
+        if !self.find.shown {
             return Task::none();
         }
+        let Some(surface) = self.find.surface.clone() else {
+            return Task::none();
+        };
         let Some(view) = self.current() else {
             return Task::none();
         };
-        let rows = if self.find.query.is_empty() {
-            Vec::new()
-        } else {
-            index_rows(view)
+        let rows = match (&surface, self.find.query.is_empty()) {
+            (_, true) => Vec::new(),
+            (Surface::Conversation, false) => index_rows(view),
+            (Surface::Reader { mode, .. }, false) => vec![
+                reader_leaves(view, *mode)
+                    .into_iter()
+                    .map(|text| IndexedLeaf {
+                        text,
+                        open_keys: Vec::new(),
+                    })
+                    .collect(),
+            ],
         };
         let matches = collect_matches(&rows, &self.find.query, self.find.case_sensitive);
         if matches.is_empty() {
@@ -858,24 +1154,59 @@ impl App {
             self.find.current = Some(current);
             return Task::none();
         }
-        let initial = first_match_at_or_below_top(
-            view,
-            viewport(view, self.height),
-            &rows,
-            &matches,
-            &self.find.visible_leaves.borrow(),
-        );
+        let initial = match &surface {
+            Surface::Conversation => first_match_at_or_below_top(
+                view,
+                viewport(view, self.height),
+                &rows,
+                &matches,
+                &self.find.visible_leaves.borrow(),
+            ),
+            Surface::Reader { mode, .. } => reader_first_match(
+                view,
+                *mode,
+                rows[0].len(),
+                &matches,
+                &self.find.visible_leaves.borrow(),
+            ),
+        };
         self.find.matches = matches;
         self.find.current = Some(initial);
         self.activate_current_match()
     }
 
-    /// Opens what hides the current match, scrolls its row into the built range and reveals the
-    /// match once it is laid out.
+    /// Brings the current match into view: in the conversation, opens what hides it and scrolls
+    /// its row into the built range; in the reader's source, makes it the editor's selection.
     fn activate_current_match(&mut self) -> Task<Message> {
         let Some(m) = self.find.current.and_then(|i| self.find.matches.get(i)).cloned() else {
             return Task::none();
         };
+        match self.find.surface {
+            Some(Surface::Conversation) => {}
+            Some(Surface::Reader { mode, .. }) => {
+                return match mode {
+                    ReaderMode::Preview => reveal_match("markdown-reader"),
+                    ReaderMode::Diff => reveal_match("diff-reader"),
+                    ReaderMode::Source => {
+                        let Some(reader) = self.current_mut().and_then(|v| v.reader.as_mut())
+                        else {
+                            return Task::none();
+                        };
+                        let at = |column| text_editor::Position {
+                            line: m.leaf_in_row,
+                            column,
+                        };
+                        reader.content.select(text_editor::Cursor {
+                            position: at(m.range.1),
+                            selection: Some(at(m.range.0)),
+                        });
+                        crate::files::reveal_caret(reader)
+                    }
+                    ReaderMode::Waiting => Task::none(),
+                };
+            }
+            None => return Task::none(),
+        }
         let window_height = self.height;
         let Some(view) = self.current_mut() else {
             return Task::none();
@@ -901,15 +1232,29 @@ impl App {
 struct ScrollFrame {
     id: Option<Id>,
     bounds: Rectangle,
-    content_height: f32,
+    content: iced::Size,
     translation: Vector,
+}
+
+/// Where a scrollable should be scrolled along one axis for `[start, end]` (content coordinates)
+/// to show: as it is when the match is inside the view, away from its edges; otherwise with the
+/// match a third of the way in.
+fn reveal_axis(start: f32, end: f32, scroll: f32, view: f32, content: f32) -> f32 {
+    let margin = (view * 0.1).min(48.0);
+    let max_scroll = (content - view).max(0.0);
+    if start < scroll + margin || end > scroll + view - margin {
+        (start - view / 3.0).clamp(0.0, max_scroll)
+    } else {
+        scroll.clamp(0.0, max_scroll)
+    }
 }
 
 struct RevealMatch {
     id: Id,
     entered: Option<ScrollFrame>,
     frames: Vec<ScrollFrame>,
-    target: Option<(Id, f32)>,
+    /// The scrollable and its offset; `x` only when it is wider than its view (the diff).
+    target: Option<(Id, Option<f32>, f32)>,
 }
 
 impl Operation for RevealMatch {
@@ -935,7 +1280,7 @@ impl Operation for RevealMatch {
         self.entered = Some(ScrollFrame {
             id: id.cloned(),
             bounds,
-            content_height: content_bounds.height,
+            content: content_bounds.size(),
             translation,
         });
     }
@@ -959,28 +1304,33 @@ impl Operation for RevealMatch {
             return;
         };
         let origin = selectable.origin(bounds);
-        let match_top = origin.y + rect.y - frame.bounds.y;
-        let match_bottom = match_top + rect.height;
-        let current_scroll = frame.translation.y;
-        let viewport = frame.bounds.height;
-        let margin = (viewport * 0.1).min(48.0);
-        let max_scroll = (frame.content_height - viewport).max(0.0);
-        let target_y = if match_top < current_scroll + margin
-            || match_bottom > current_scroll + viewport - margin
-        {
-            (match_top - viewport / 3.0).clamp(0.0, max_scroll)
-        } else {
-            current_scroll.clamp(0.0, max_scroll)
-        };
-        self.target = Some((self.id.clone(), target_y));
+        let top = origin.y + rect.y - frame.bounds.y;
+        let y = reveal_axis(
+            top,
+            top + rect.height,
+            frame.translation.y,
+            frame.bounds.height,
+            frame.content.height,
+        );
+        let x = (frame.content.width > frame.bounds.width + 0.5).then(|| {
+            let left = origin.x + rect.x - frame.bounds.x;
+            reveal_axis(
+                left,
+                left + rect.width,
+                frame.translation.x,
+                frame.bounds.width,
+                frame.content.width,
+            )
+        });
+        self.target = Some((self.id.clone(), x, y));
     }
 
     fn finish(&self) -> Outcome<()> {
         match &self.target {
-            Some((id, y)) => Outcome::Chain(Box::new(scroll::scroll_to(
+            Some((id, x, y)) => Outcome::Chain(Box::new(scroll::scroll_to(
                 id.clone(),
                 AbsoluteOffset {
-                    x: None,
+                    x: *x,
                     y: Some(*y),
                 },
             ))),

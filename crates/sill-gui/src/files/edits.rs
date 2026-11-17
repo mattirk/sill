@@ -18,6 +18,8 @@ pub struct ReaderView {
     pub dirty: bool,
     pub saving: Option<u64>,
     pub notice: Option<String>,
+    /// Counts the person's edits to the source, so Find knows to look again.
+    pub edits: u64,
 }
 
 /// Source Code Pro uses fixed-width cells; tabs advance to eight-column stops.
@@ -103,6 +105,7 @@ impl SessionView {
                 dirty: false,
                 saving: None,
                 notice: None,
+                edits: 0,
             });
         }
         let reader = self.reader.as_mut().unwrap();
@@ -150,30 +153,27 @@ pub(super) fn edit_source(view: &mut SessionView, action: Action) -> Option<Task
             reader.dirty = text != reader.saved;
             reader.markdown = None;
             reader.notice = None;
+            reader.edits += 1;
         }
         if reveal {
-            let cursor = reader.content.cursor().position;
-            let columns = reader.content.line(cursor.line).map_or(0, |line| {
-                source_columns(
-                    line.text.get(..cursor.column).unwrap_or(&line.text),
-                )
-            });
-            let digits = reader.content.line_count().max(1).ilog10() + 1;
-            return Some(iced_runtime::task::effect(iced_runtime::Action::widget(
-                RevealSourceCaret {
-                    id: iced::advanced::widget::Id::from(format!(
-                        "source-horizontal-{}",
-                        reader.key
-                    )),
-                    x: 12.0
-                        + (columns as f32 + digits.max(2) as f32 + 2.0)
-                            * crate::style::MONO
-                            * 0.6,
-                },
-            )));
+            return Some(reveal_caret(reader));
         }
     }
     None
+}
+
+/// Scrolls the source's sideways scrollbar to the caret (the editor brings it into view
+/// vertically itself).
+pub(crate) fn reveal_caret(reader: &ReaderView) -> Task<Message> {
+    let cursor = reader.content.cursor().position;
+    let columns = reader.content.line(cursor.line).map_or(0, |line| {
+        source_columns(line.text.get(..cursor.column).unwrap_or(&line.text))
+    });
+    let digits = reader.content.line_count().max(1).ilog10() + 1;
+    iced_runtime::task::effect(iced_runtime::Action::widget(RevealSourceCaret {
+        id: iced::advanced::widget::Id::from(format!("source-horizontal-{}", reader.key)),
+        x: 12.0 + (columns as f32 + digits.max(2) as f32 + 2.0) * crate::style::MONO * 0.6,
+    }))
 }
 
 impl App {

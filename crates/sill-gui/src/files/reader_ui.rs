@@ -1,6 +1,7 @@
 //! The reader: the open file's bar, its source editor, Markdown preview or diff.
 use iced::widget::{
-    button, column, container, markdown, responsive, row, rule, scrollable, text, text_editor,
+    button, column, container, markdown, responsive, row, rule, scrollable, stack, text,
+    text_editor,
 };
 use iced::{Alignment, Element, Fill, Font, Padding};
 
@@ -117,7 +118,9 @@ impl App {
             let width =
                 (rendering.source_columns as f32 + digits.max(2) as f32 + 4.0) * style::MONO * 0.6
                     + 24.0;
+            let marks = self.find.source_marks();
             responsive(move |size| {
+                let marks = marks.clone();
                 let editor = text_editor(&rendering.content)
                     .id("file-reader")
                     .height(Fill)
@@ -144,6 +147,7 @@ impl App {
                             })
                             .collect()
                     })
+                    .marks(move |editor| crate::find::mark_rects(editor.buffer(), &marks))
                     .on_action(|a| msg(Action::Text(a)))
                     .key_binding(crate::ui::reading_keys)
                     .highlight(
@@ -165,8 +169,9 @@ impl App {
             .into()
         } else if is_diff {
             let diff = crate::diff_ui::diff_rows(&file.text, &file.path.display);
+            // the reader's text is one row for Find (`find::reader_leaves`)
             selection::area(
-                scrollable(container(diff).padding(12))
+                scrollable(crate::rows::scoped(0, container(diff).padding(12)))
                     .id("diff-reader")
                     .height(Fill)
                     .direction(scrollable::Direction::Both {
@@ -176,10 +181,14 @@ impl App {
                     .style(style::feed_scroll),
             )
             .on_copy(Message::Copy)
+            .selection(&self.find.reader_selected)
+            .find(self.find.reader_query())
+            .visible_leaves(&self.find.visible_leaves)
             .into()
         } else if let Some(markdown) = &rendering.markdown {
             selection::area(
-                scrollable(
+                scrollable(crate::rows::scoped(
+                    0,
                     container(
                         markdown::view_with(
                             markdown.items(),
@@ -200,13 +209,16 @@ impl App {
                         }),
                     )
                     .padding(16),
-                )
+                ))
                 .direction(scrollable::Direction::Vertical(style::bar()))
                 .id("markdown-reader")
                 .height(Fill)
                 .style(style::feed_scroll),
             )
             .on_copy(Message::Copy)
+            .selection(&self.find.reader_selected)
+            .find(self.find.reader_query())
+            .visible_leaves(&self.find.visible_leaves)
             .into()
         } else {
             container(text("Reading…").size(style::TEXT).color(P.fg_dim))
@@ -243,7 +255,15 @@ impl App {
                     .style(style::fill(style::alpha(P.warning, 0.10))),
             );
         }
-        page = page.push(body);
+        // the body stays the stack's first layer with the bar open or closed, so the editor and
+        // the scrollables keep their state (where they are scrolled to, the cursor)
+        let finding = self.find.shown
+            && matches!(self.find.surface, Some(crate::find::Surface::Reader { .. }));
+        page = page.push(if finding {
+            stack![body, self.find.bar()]
+        } else {
+            stack![body]
+        });
         if is_diff {
             page = page.push(
                 container(

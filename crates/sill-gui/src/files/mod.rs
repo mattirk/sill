@@ -21,6 +21,7 @@ mod reader_ui;
 mod ui;
 
 pub use edits::ReaderView;
+pub(crate) use edits::reveal_caret;
 #[cfg(test)]
 pub(crate) use edits::source_columns;
 
