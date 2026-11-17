@@ -222,10 +222,10 @@ impl Hub {
         }
         let mut first_error = None;
         for (rules, base, ghosts) in groups {
-            if let Err(e) = sync.reconcile(&rules, &base, &ghosts) {
-                if first_error.is_none() {
-                    first_error = Some(e);
-                }
+            if let Err(e) = sync.reconcile(&rules, &base, &ghosts)
+                && first_error.is_none()
+            {
+                first_error = Some(e);
             }
         }
         match first_error {
@@ -573,10 +573,10 @@ impl Hub {
             let existing = self.runners.lock().unwrap().get(id).cloned();
             if let Some(r) = existing {
                 r.retire(self)?;
-            } else if sill_proto::runtime_dir()?.join(id).join("relay.sock").exists() {
-                if let Ok(r) = self.ensure_runner(id, false) {
-                    r.retire(self)?;
-                }
+            } else if sill_proto::runtime_dir()?.join(id).join("relay.sock").exists()
+                && let Ok(r) = self.ensure_runner(id, false)
+            {
+                r.retire(self)?;
             }
         }
         let _one_at_a_time = self.starting.lock().unwrap();
@@ -908,10 +908,10 @@ impl Hub {
             }
             eprintln!("sill daemon: ghost {}: reverted {n} of {} path(s) an hour after their last write", s.id, due.len());
             self.changes_changed();
-            if n > 0 {
-                if let Err(error) = self.sfp_lifecycle(&s.id, None, Some(format!("ghost: {n} path(s) reverted, an hour after their last write"))) {
-                    eprintln!("sill daemon: publishing ghost revert notice: {error:#}");
-                }
+            if n > 0
+                && let Err(error) = self.sfp_lifecycle(&s.id, None, Some(format!("ghost: {n} path(s) reverted, an hour after their last write")))
+            {
+                eprintln!("sill daemon: publishing ghost revert notice: {error:#}");
             }
         }
     }

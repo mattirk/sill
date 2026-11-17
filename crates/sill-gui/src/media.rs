@@ -476,7 +476,7 @@ impl App {
             return Task::none();
         }
         let home = view.files.home.as_ref().and_then(|p| p.to_path().ok());
-        let mut keys: Vec<String> = view.conversation.items().iter().flat_map(|(_, i)| item_keys(i)).collect();
+        let mut keys: Vec<String> = view.conversation.items().values().flat_map(item_keys).collect();
         for submission in view.conversation.submissions.values() {
             for a in &submission.attachments {
                 if matches!(a, Attachment::Uploaded { mime, .. } if mime.starts_with("image/")) {
@@ -559,6 +559,37 @@ impl App {
         }
         Task::batch(tasks)
     }
+}
+
+/// A full-window image viewer; the opaque layer prevents clicks reaching the conversation.
+pub fn expanded<'a>(view: &crate::SessionView, key: &str) -> Element<'a, Message> {
+    let content: Element<'a, Message> = match view.media.get(key) {
+        Some(Some(Ok(pic))) => image(pic.handle.clone()).width(iced::Fill).height(iced::Fill).content_fit(iced::ContentFit::Contain).into(),
+        _ => text("Loading image…").into(),
+    };
+    iced::widget::opaque(
+        container(
+            column![
+                iced::widget::row![
+                    text("Image").size(style::SMALL),
+                    iced::widget::space().width(iced::Fill),
+                    quiet_button("Copy image", Some(Message::Media(Event::Copy(view.id.clone(), key.into())))),
+                    quiet_button(
+                        if view.image_viewer_mode.is_some() { "Exit full screen" } else { "Full screen" },
+                        Some(Message::Media(Event::Fullscreen(view.id.clone())))
+                    ),
+                    quiet_button("Close · Esc", Some(Message::Media(Event::Close))),
+                ]
+                .spacing(12),
+                content,
+            ]
+            .spacing(12),
+        )
+        .padding(16)
+        .width(iced::Fill)
+        .height(iced::Fill)
+        .style(|_| container::Style { background: Some(style::P.code_bg.into()), ..Default::default() }),
+    )
 }
 
 #[cfg(test)]
@@ -658,35 +689,4 @@ mod tests {
         assert!(decode(b"not an image").is_err());
         assert!(make_image("huge.png".into(), vec![0; LIMIT + 1], "image/png").is_err());
     }
-}
-
-/// A full-window image viewer; the opaque layer prevents clicks reaching the conversation.
-pub fn expanded<'a>(view: &crate::SessionView, key: &str) -> Element<'a, Message> {
-    let content: Element<'a, Message> = match view.media.get(key) {
-        Some(Some(Ok(pic))) => image(pic.handle.clone()).width(iced::Fill).height(iced::Fill).content_fit(iced::ContentFit::Contain).into(),
-        _ => text("Loading image…").into(),
-    };
-    iced::widget::opaque(
-        container(
-            column![
-                iced::widget::row![
-                    text("Image").size(style::SMALL),
-                    iced::widget::space().width(iced::Fill),
-                    quiet_button("Copy image", Some(Message::Media(Event::Copy(view.id.clone(), key.into())))),
-                    quiet_button(
-                        if view.image_viewer_mode.is_some() { "Exit full screen" } else { "Full screen" },
-                        Some(Message::Media(Event::Fullscreen(view.id.clone())))
-                    ),
-                    quiet_button("Close · Esc", Some(Message::Media(Event::Close))),
-                ]
-                .spacing(12),
-                content,
-            ]
-            .spacing(12),
-        )
-        .padding(16)
-        .width(iced::Fill)
-        .height(iced::Fill)
-        .style(|_| container::Style { background: Some(style::P.code_bg.into()), ..Default::default() }),
-    )
 }

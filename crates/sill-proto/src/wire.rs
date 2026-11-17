@@ -186,7 +186,7 @@ mod stored_path {
         Text(String),
         Bytes { bytes_base64: String },
     }
-    pub fn serialize<S: serde::Serializer>(path: &PathBuf, serializer: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: serde::Serializer>(path: &std::path::Path, serializer: S) -> Result<S::Ok, S::Error> {
         use std::os::unix::ffi::OsStrExt;
         match path.to_str() {
             Some(text) => Encoding::Text(text.into()),

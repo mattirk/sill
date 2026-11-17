@@ -218,7 +218,7 @@ fn tab_texture(id: &str, custom: Option<&[u8]>, color: iced::Color) -> iced::adv
             let [r, g, b, a] = color.into_rgba8();
             // a registry icon: drawn as the others are, a silhouette in the tab's colour
             if let Some(pixels) = custom.and_then(|bytes| std::str::from_utf8(bytes).ok()).and_then(|svg| crate::tray::rgba(svg, 104)) {
-                let tinted: Vec<u8> = pixels.chunks_exact(4).flat_map(|px| [r, g, b, (u16::from(px[3]) * u16::from(a) / 255) as u8]).collect();
+                let tinted: Vec<u8> = pixels.as_chunks::<4>().0.iter().flat_map(|px| [r, g, b, (u16::from(px[3]) * u16::from(a) / 255) as u8]).collect();
                 return Image::from_rgba(104, 104, tinted);
             }
             let path = match id {

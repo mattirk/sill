@@ -39,10 +39,12 @@ pub struct Vm {
     queue: DispatchRetained<DispatchQueue>,
     /// Held while the VM is this process's: a second owner of the same disks is refused.
     _lock: std::fs::File,
-    /// The ports the guest may connect to (`listen`), each listener with its delegate: the
-    /// framework holds the delegate weakly, so it lives here.
-    listeners: std::sync::Mutex<Vec<OnQueue<(Retained<VZVirtioSocketListener>, Retained<Accepting>)>>>,
+    /// The ports the guest may connect to (`listen`).
+    listeners: std::sync::Mutex<Vec<Listener>>,
 }
+
+/// A listener with its delegate: the framework holds the delegate weakly, so it lives beside it.
+type Listener = OnQueue<(Retained<VZVirtioSocketListener>, Retained<Accepting>)>;
 
 /// What a connection from the guest is handed to, on a thread of its own.
 pub type Accept = Arc<dyn Fn(UnixStream) + Send + Sync>;
@@ -102,21 +104,6 @@ impl ConnectionPermit {
     fn acquire(active: Arc<std::sync::atomic::AtomicUsize>) -> Option<Self> {
         active.fetch_update(std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire, |n| (n < 32).then_some(n + 1)).ok()?;
         Some(Self(active))
-    }
-}
-
-#[cfg(test)]
-mod connection_tests {
-    use super::*;
-    #[test]
-    fn capacity_is_reclaimed_when_a_worker_or_failed_spawn_drops_its_permit() {
-        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut held: Vec<_> = (0..32).map(|_| ConnectionPermit::acquire(active.clone()).unwrap()).collect();
-        assert!(ConnectionPermit::acquire(active.clone()).is_none());
-        held.pop();
-        assert!(ConnectionPermit::acquire(active.clone()).is_some());
-        drop(held);
-        assert_eq!(active.load(std::sync::atomic::Ordering::Acquire), 0);
     }
 }
 
@@ -565,5 +552,20 @@ fn identity(path: &Path) -> Result<Retained<VZGenericMachineIdentifier>> {
         let id = VZGenericMachineIdentifier::new();
         std::fs::write(path, id.dataRepresentation().to_vec())?;
         Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    #[test]
+    fn capacity_is_reclaimed_when_a_worker_or_failed_spawn_drops_its_permit() {
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut held: Vec<_> = (0..32).map(|_| ConnectionPermit::acquire(active.clone()).unwrap()).collect();
+        assert!(ConnectionPermit::acquire(active.clone()).is_none());
+        held.pop();
+        assert!(ConnectionPermit::acquire(active.clone()).is_some());
+        drop(held);
+        assert_eq!(active.load(std::sync::atomic::Ordering::Acquire), 0);
     }
 }

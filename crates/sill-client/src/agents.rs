@@ -213,10 +213,11 @@ pub fn domain_pattern(input: &str) -> Option<String> {
             None => (pattern.as_str(), None),
         }
     };
-    if let Some(port) = port {
-        if port != "*" && !port.parse::<u16>().is_ok_and(|p| p > 0) {
-            return None;
-        }
+    if let Some(port) = port
+        && port != "*"
+        && !port.parse::<u16>().is_ok_and(|p| p > 0)
+    {
+        return None;
     }
     let host = host.strip_prefix("*.").unwrap_or(host);
     let valid = host.parse::<std::net::IpAddr>().is_ok()

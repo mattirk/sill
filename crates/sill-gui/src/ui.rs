@@ -1082,7 +1082,6 @@ impl App {
                 button(line).padding([3, 6]).width(Fill).style(style::row_button),
                 session::message(&view.id, session::Event::ToggleTool(action.key.clone())),
             )
-            .into()
         };
         let details = |action: &crate::host_runs::Action<'a>, indent: f32| -> Element<'a, Message> {
             let mut body = Column::new().spacing(4);
@@ -2444,6 +2443,13 @@ fn spin_epoch() -> Instant {
     *START.get_or_init(Instant::now)
 }
 
+/// The colour of a session's work: accent for the agent's own, success green while it writes
+/// sill's summary (a checkpoint or the closing one) — warning and error are taken by trouble,
+/// and link is accent in some themes (2026-11-10).
+fn work_color(attention: &Attention) -> Color {
+    if attention.summarizing { P.success } else { P.accent }
+}
+
 #[cfg(test)]
 mod timer_tests {
     use super::*;
@@ -2464,11 +2470,4 @@ mod timer_tests {
         assert!(clock_width(35999000) < clock_width(36000000));
         assert!(clock_width(360000000) > clock_width(36000000));
     }
-}
-
-/// The colour of a session's work: accent for the agent's own, success green while it writes
-/// sill's summary (a checkpoint or the closing one) — warning and error are taken by trouble,
-/// and link is accent in some themes (2026-11-10).
-fn work_color(attention: &Attention) -> Color {
-    if attention.summarizing { P.success } else { P.accent }
 }

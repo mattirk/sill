@@ -464,6 +464,7 @@ fn socket_identity(socket: &Path) -> Option<(u64, u64)> {
     std::fs::symlink_metadata(socket).ok().map(|m| (m.dev(), m.ino()))
 }
 
+#[expect(clippy::too_many_arguments, reason = "the relay's start-up inputs, each from a different place")]
 fn run_with(
     session: &str,
     socket: &Path,

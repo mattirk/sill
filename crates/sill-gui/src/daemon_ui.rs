@@ -339,8 +339,7 @@ mod tests {
         app.daemon.status = Some(status());
         app.daemon.problem = Some("Daemon stopped: local socket refused the connection".into());
         app.daemon.stopped = true;
-        let mut page = crate::settings_ui::SettingsPage::default();
-        page.snapshot = Some(Err("Settings are unavailable while disconnected.".into()));
+        let page = crate::settings_ui::SettingsPage { snapshot: Some(Err("Settings are unavailable while disconnected.".into())), ..Default::default() };
         app.settings_page = Some(page);
         crate::snapshots::render(&app, "daemon-card-offline.png");
         crate::snapshots::render_size(&app, "daemon-card-narrow.png", (420.0, 680.0));

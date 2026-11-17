@@ -757,6 +757,17 @@ fn home_relative(path: &std::path::Path) -> String {
     crate::settings_ui::home_relative(&path.display().to_string())
 }
 
+/// Warn below 10% available, or below 2 GiB even on a large disk.
+fn low_space(disk: &sill_proto::storage::DiskSpace) -> bool {
+    disk.available < (2 << 30) || disk.available < disk.total / 10
+}
+fn space_label(disk: &sill_proto::storage::DiskSpace) -> String {
+    format!("{} available · {} used of {}", readable_size(disk.available), readable_size(disk.used), readable_size(disk.total))
+}
+pub(crate) fn storage_error(why: &str) -> bool {
+    why.contains("No space left on device") || why.contains("os error 28")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,15 +863,4 @@ mod tests {
         }
         crate::snapshots::render_size(&app, "vm-narrow", (420.0, 900.0));
     }
-}
-
-/// Warn below 10% available, or below 2 GiB even on a large disk.
-fn low_space(disk: &sill_proto::storage::DiskSpace) -> bool {
-    disk.available < (2 << 30) || disk.available < disk.total / 10
-}
-fn space_label(disk: &sill_proto::storage::DiskSpace) -> String {
-    format!("{} available · {} used of {}", readable_size(disk.available), readable_size(disk.used), readable_size(disk.total))
-}
-pub(crate) fn storage_error(why: &str) -> bool {
-    why.contains("No space left on device") || why.contains("os error 28")
 }

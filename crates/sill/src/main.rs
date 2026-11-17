@@ -635,7 +635,7 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
                     break;
                 }
             }
-            rows.sort_by(|a, b| b.ended_at.parse::<i64>().unwrap_or(0).cmp(&a.ended_at.parse::<i64>().unwrap_or(0)));
+            rows.sort_by_key(|r| std::cmp::Reverse(r.ended_at.parse::<i64>().unwrap_or(0)));
             if rows.is_empty() {
                 println!("no ended sessions yet (a session ends when its tab is closed)");
             }
@@ -719,12 +719,12 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
 fn policy_cmd(cmd: Option<PolicyCmd>) -> Result<()> {
     use sill_proto::{admin as api, sessions::SessionKey};
     let cmd = cmd.unwrap_or(PolicyCmd::Show { name: "default".into() });
-    if let PolicyCmd::Show { name } = &cmd {
-        if sill_proto::transport::selected()?.is_none() {
-            let policy = Policy::load(name, &home()?)?;
-            print!("{}", toml::to_string_pretty(&policy)?);
-            return Ok(());
-        }
+    if let PolicyCmd::Show { name } = &cmd
+        && sill_proto::transport::selected()?.is_none()
+    {
+        let policy = Policy::load(name, &home()?)?;
+        print!("{}", toml::to_string_pretty(&policy)?);
+        return Ok(());
     }
     if std::env::var_os("SILL_SESSION").is_some() && matches!(&cmd, PolicyCmd::Import { .. }) {
         bail!("policy import is a host administrative action");
@@ -1443,7 +1443,7 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
                 // stderr is the session's journald stream or its jail.log (docs/daemon.md §3.1)
                 eprintln!("proxy: {l}");
                 // what an allow would let through, for the frontend's offer (`proxy::denial_offer`)
-                if let Some(offer) = sill_core::proxy::denial_offer(&l)
+                if let Some(offer) = sill_core::proxy::denial_offer(l)
                     && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&denied)
                 {
                     use std::io::Write;

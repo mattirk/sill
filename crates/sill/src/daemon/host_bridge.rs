@@ -124,12 +124,11 @@ fn stop_group(p: &sill_core::store::HostProcess) -> Result<()> {
     // Each target is pinned by pidfd before its start-time check. Never signal a reused PID.
     // Descendants that deliberately escape the managed group are unrestricted host code.
     for entry in std::fs::read_dir("/proc")?.flatten() {
-        if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
-            if let Ok((ticks, group)) = identity(pid) {
-                if group == p.pid {
-                    let _ = signal(pid, ticks);
-                }
-            }
+        if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>()
+            && let Ok((ticks, group)) = identity(pid)
+            && group == p.pid
+        {
+            let _ = signal(pid, ticks);
         }
     }
     if identity(p.pid).is_ok_and(|(ticks, _)| ticks == p.start_ticks) {
@@ -220,11 +219,11 @@ fn action(hub: &Arc<Hub>, session: &str, generation: u64, r: &Request, _gate: Mu
                 if processes.len() >= 4096 {
                     break;
                 }
-                if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
-                    if let Ok((ticks, _)) = identity(pid) {
-                        let comm = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
-                        processes.push(json!({"pid":pid,"start_ticks":ticks,"name":comm.trim()}));
-                    }
+                if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>()
+                    && let Ok((ticks, _)) = identity(pid)
+                {
+                    let comm = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+                    processes.push(json!({"pid":pid,"start_ticks":ticks,"name":comm.trim()}));
                 }
             }
             Ok(json!({"processes":processes,"managed":managed,"location":"host"}))

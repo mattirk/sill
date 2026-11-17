@@ -345,7 +345,7 @@ pub fn serve_with_session_grants(
                 // out of fds, out of memory, a transient refusal: wait a moment and go on; the
                 // listener is the session's only way out and must not die with one bad accept
                 failures += 1;
-                if failures <= 3 || failures % 100 == 0 {
+                if failures <= 3 || failures.is_multiple_of(100) {
                     log(&format!("accept error: {e} ({failures} in a row)"));
                 }
                 std::thread::sleep(Duration::from_millis(100.min(10 * failures as u64).max(10)));

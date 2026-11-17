@@ -677,7 +677,7 @@ mod tests {
         let c = Some(PathBuf::from("/Users/a/three"));
         let folders = vec![a.clone(), None, c.clone()];
         assert_eq!(super::free_slot(&folders), Some(1));
-        assert_eq!(super::free_slot(&[a.clone()]), Some(1));
+        assert_eq!(super::free_slot(std::slice::from_ref(&a)), Some(1));
         assert_eq!(super::trimmed(vec![a.clone(), None, None]), vec![a.clone()]);
         let full = vec![a.clone(); sill_vm::SHARE_SLOTS];
         assert_eq!(super::free_slot(&full), None);
@@ -963,8 +963,11 @@ fn granted(session: &str, generation: u64, operation: &str) -> Result<(), String
     Ok(())
 }
 
-/// A target's description and its place on the desktop in points (x, y, width, height), now.
-fn locate(target: &crate::mac_screen::Target) -> Result<(serde_json::Value, (f64, f64, f64, f64)), String> {
+/// A place on the desktop in points: x, y, width, height.
+type Place = (f64, f64, f64, f64);
+
+/// A target's description and its place on the desktop, now.
+fn locate(target: &crate::mac_screen::Target) -> Result<(serde_json::Value, Place), String> {
     use crate::mac_screen::Target;
     match *target {
         Target::Display(id) => {

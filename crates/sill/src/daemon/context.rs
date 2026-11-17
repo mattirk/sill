@@ -415,14 +415,14 @@ mod tests {
         save(&peer.id, serde_json::json!({"ready":["agent",false],"busy":true}));
         save(&stopped.id, serde_json::json!({"ended":true}));
         let live = vec![own.id.clone(), peer.id.clone(), unrelated.id, ghost.id, stopped.id];
-        let notice = || parallel_notice(&store, &own.id, &[pin.clone()], &live).unwrap();
+        let notice = || parallel_notice(&store, &own.id, std::slice::from_ref(&pin), &live).unwrap();
         let mut context = Context::default();
-        let first = context.prepare_parts(&format!("{}first", notice()), "standing\n".into(), &[pin.clone()]);
+        let first = context.prepare_parts(&format!("{}first", notice()), "standing\n".into(), std::slice::from_ref(&pin));
         assert!(first.text.contains("rapid-fire") && first.text.contains("working"));
         assert!(!first.text.contains("secret") && !first.text.contains("stopped") && !first.text.contains("elsewhere"));
         context.commit(first);
         // The live notice is repeated even after the standing block has been consumed.
-        let second = context.prepare_parts(&format!("{}second", notice()), "standing\n".into(), &[pin.clone()]);
+        let second = context.prepare_parts(&format!("{}second", notice()), "standing\n".into(), std::slice::from_ref(&pin));
         assert!(second.text.contains("rapid-fire") && !second.text.contains("standing"));
         save(&peer.id, serde_json::json!({"ready":["agent",false],"pending":{"1":{}}}));
         assert!(notice().contains("waiting for input"));
@@ -469,7 +469,7 @@ mod tests {
     fn pins_follow_each_prompt_even_when_standing_is_unchanged() {
         let mut context = Context::default();
         let pin = PathBuf::from("/tmp/sill-a-pinned-file");
-        let prompt = context.prepare_parts("first", "standing\n".into(), &[pin.clone()]);
+        let prompt = context.prepare_parts("first", "standing\n".into(), std::slice::from_ref(&pin));
         context.commit(prompt);
         let second = context.prepare_parts("second", "standing\n".into(), &[pin]);
         assert!(!second.text.contains("standing"));

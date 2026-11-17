@@ -196,6 +196,94 @@ pub fn owned_dir(dir: &Path, uid: u32, create: bool) -> Result<OwnedFd> {
     Ok(fd)
 }
 
+/// Stat a direct child of `dir` without following a symlink; `None` when absent.
+pub fn stat_nofollow_at(dir: &OwnedFd, name: &std::ffi::OsStr) -> Result<Option<FileType>> {
+    match rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(st) => Ok(Some(FileType::from_raw_mode(st.st_mode as RawMode))),
+        Err(Errno::NOENT) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Open the regular file `rel` below an already-opened directory without following any link on
+/// the way or blocking on a FIFO. Missing files return `Ok(None)`.
+pub fn open_regular_at(root: &OwnedFd, rel: &Path) -> Result<Option<std::fs::File>> {
+    let fd = match openat2(root, rel, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC, Mode::empty(), RESOLVE) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("open {} (no symlinks)", rel.display())),
+    };
+    let st = fstat(&fd)?;
+    if FileType::from_raw_mode(st.st_mode as RawMode) != FileType::RegularFile {
+        bail!("{}: not a regular file", rel.display());
+    }
+    Ok(Some(std::fs::File::from(fd)))
+}
+
+/// Read a bounded regular file below an already-opened directory descriptor without following any
+/// link or blocking on a FIFO. Missing files return `Ok(None)`.
+pub fn read_regular_at(root: &OwnedFd, rel: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let Some(file) = open_regular_at(root, rel)? else {
+        return Ok(None);
+    };
+    if file.metadata()?.len() > limit {
+        bail!("{}: file exceeds {limit} bytes", rel.display());
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        bail!("{}: file exceeds {limit} bytes", rel.display());
+    }
+    Ok(Some(bytes))
+}
+
+/// Read the bounded regular file at `path`, the last component never followed as a link and never
+/// a FIFO to wait on (the directories on the way are the caller's to trust). Missing is `Ok(None)`.
+pub fn read_regular(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
+    let name = path.file_name().with_context(|| format!("{}: no file name", path.display()))?;
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let dir = match open(parent, OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty()) {
+        Ok(d) => d,
+        Err(Errno::NOENT) => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("open {}", parent.display())),
+    };
+    read_regular_at(&dir, Path::new(name), limit)
+}
+
+/// Read a bounded regular file without following any link, including intermediate components.
+/// Missing files are distinct from unsafe paths and I/O failures.
+pub fn read_file_beneath(root: &Path, rel: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
+    read_regular_at(&open_root(root)?, rel, limit)
+}
+
+/// Atomic private-file replacement anchored to directory descriptors throughout.
+pub fn replace_private_beneath(root: &Path, rel: &Path, bytes: &[u8]) -> Result<()> {
+    use rustix::fs::{renameat, statat};
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = open_dir_beneath(root, rel.parent().unwrap_or(Path::new("")), true)?;
+    let name = rel.file_name().context("no file name")?;
+    match statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(st) if FileType::from_raw_mode(st.st_mode as RawMode) != FileType::RegularFile => bail!("not a regular file"),
+        Ok(_) | Err(Errno::NOENT) => {}
+        Err(e) => return Err(e.into()),
+    }
+    let tmp = format!(".sill-credential-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let fd =
+        openat2(&dir, tmp.as_str(), OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::from_raw_mode(0o600), RESOLVE)?;
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::File::from(fd);
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        renameat(&dir, tmp.as_str(), &dir, name)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = unlinkat(&dir, tmp.as_str(), AtFlags::empty());
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -293,92 +381,4 @@ mod tests {
         assert!(owned_dir(&root.join("link"), me, false).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
-}
-
-/// Stat a direct child of `dir` without following a symlink; `None` when absent.
-pub fn stat_nofollow_at(dir: &OwnedFd, name: &std::ffi::OsStr) -> Result<Option<FileType>> {
-    match rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(st) => Ok(Some(FileType::from_raw_mode(st.st_mode as RawMode))),
-        Err(Errno::NOENT) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// Open the regular file `rel` below an already-opened directory without following any link on
-/// the way or blocking on a FIFO. Missing files return `Ok(None)`.
-pub fn open_regular_at(root: &OwnedFd, rel: &Path) -> Result<Option<std::fs::File>> {
-    let fd = match openat2(root, rel, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC, Mode::empty(), RESOLVE) {
-        Ok(fd) => fd,
-        Err(Errno::NOENT) => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("open {} (no symlinks)", rel.display())),
-    };
-    let st = fstat(&fd)?;
-    if FileType::from_raw_mode(st.st_mode as RawMode) != FileType::RegularFile {
-        bail!("{}: not a regular file", rel.display());
-    }
-    Ok(Some(std::fs::File::from(fd)))
-}
-
-/// Read a bounded regular file below an already-opened directory descriptor without following any
-/// link or blocking on a FIFO. Missing files return `Ok(None)`.
-pub fn read_regular_at(root: &OwnedFd, rel: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
-    use std::io::Read;
-    let Some(file) = open_regular_at(root, rel)? else {
-        return Ok(None);
-    };
-    if file.metadata()?.len() > limit {
-        bail!("{}: file exceeds {limit} bytes", rel.display());
-    }
-    let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        bail!("{}: file exceeds {limit} bytes", rel.display());
-    }
-    Ok(Some(bytes))
-}
-
-/// Read the bounded regular file at `path`, the last component never followed as a link and never
-/// a FIFO to wait on (the directories on the way are the caller's to trust). Missing is `Ok(None)`.
-pub fn read_regular(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
-    let name = path.file_name().with_context(|| format!("{}: no file name", path.display()))?;
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let dir = match open(parent, OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty()) {
-        Ok(d) => d,
-        Err(Errno::NOENT) => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("open {}", parent.display())),
-    };
-    read_regular_at(&dir, Path::new(name), limit)
-}
-
-/// Read a bounded regular file without following any link, including intermediate components.
-/// Missing files are distinct from unsafe paths and I/O failures.
-pub fn read_file_beneath(root: &Path, rel: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
-    read_regular_at(&open_root(root)?, rel, limit)
-}
-
-/// Atomic private-file replacement anchored to directory descriptors throughout.
-pub fn replace_private_beneath(root: &Path, rel: &Path, bytes: &[u8]) -> Result<()> {
-    use rustix::fs::{renameat, statat};
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let dir = open_dir_beneath(root, rel.parent().unwrap_or(Path::new("")), true)?;
-    let name = rel.file_name().context("no file name")?;
-    match statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(st) if FileType::from_raw_mode(st.st_mode as RawMode) != FileType::RegularFile => bail!("not a regular file"),
-        Ok(_) | Err(Errno::NOENT) => {}
-        Err(e) => return Err(e.into()),
-    }
-    let tmp = format!(".sill-credential-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-    let fd =
-        openat2(&dir, tmp.as_str(), OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::from_raw_mode(0o600), RESOLVE)?;
-    let result = (|| -> Result<()> {
-        let mut file = std::fs::File::from(fd);
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        renameat(&dir, tmp.as_str(), &dir, name)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = unlinkat(&dir, tmp.as_str(), AtFlags::empty());
-    }
-    result
 }

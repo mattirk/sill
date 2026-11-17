@@ -40,10 +40,10 @@ impl App {
             }
             Ok(LinkTarget::File(path, fragment)) => self.update(Message::Files(Action::Navigate { session, path, fragment, history: true })),
             Err(error) => {
-                if let Some(view) = self.views.get_mut(&session) {
-                    if let Some(reader) = &mut view.reader {
-                        reader.notice = Some(error);
-                    }
+                if let Some(view) = self.views.get_mut(&session)
+                    && let Some(reader) = &mut view.reader
+                {
+                    reader.notice = Some(error);
                 }
                 Task::none()
             }

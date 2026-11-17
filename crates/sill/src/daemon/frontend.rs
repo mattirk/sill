@@ -165,96 +165,8 @@ pub(super) fn find_files(bases: &[std::path::PathBuf], q: &str, cap: usize, visi
     (found, cut)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    /// A search finds by name, by path with a slash, skips noise folders, and says when cut.
-    #[test]
-    fn find_files_by_name_and_path() {
-        let d = std::env::temp_dir().join(format!("sill-find-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        for f in ["src/main.rs", "src/ui/tree.rs", "docs/Tree.md", "target/debug/tree.d", "node_modules/x/tree.js"] {
-            let p = d.join(f);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(&p, "").unwrap();
-        }
-        let (found, cut) = find_files(&[d.clone()], "tree", 100, 10_000);
-        let rel: Vec<String> = found.iter().map(|p| p.strip_prefix(&d).unwrap().display().to_string()).collect();
-        assert_eq!(rel, vec!["docs/Tree.md", "src/ui/tree.rs"], "noise folders skipped, case folded");
-        assert!(!cut);
-        let (found, _) = find_files(&[d.clone()], "ui/tr", 100, 10_000);
-        assert_eq!(found, vec![d.join("src/ui/tree.rs")]);
-        let (found, cut) = find_files(&[d.clone()], "", 2, 10_000);
-        assert_eq!(found.len(), 2);
-        assert!(cut);
-        std::fs::remove_dir_all(&d).unwrap();
-    }
-
-    #[test]
-    fn find_files_includes_explicit_file_bases() {
-        let d = std::env::temp_dir().join(format!("sill-find-file-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(d.join("notes")).unwrap();
-        let file = d.join("notes/Plan.md");
-        std::fs::write(&file, "").unwrap();
-        for q in ["plan", "notes/plan"] {
-            assert_eq!(find_files(&[file.clone()], q, 100, 10_000), (vec![file.clone()], false));
-        }
-        assert_eq!(find_files(&[file.clone()], "absent", 100, 10_000), (vec![], false));
-        assert_eq!(find_files(&[d.clone(), file.clone()], "plan", 100, 10_000), (vec![file], false));
-        let link = d.join("Plan-link.md");
-        std::os::unix::fs::symlink("notes/Plan.md", &link).unwrap();
-        assert_eq!(find_files(&[link], "plan", 100, 10_000), (vec![], false));
-        std::fs::remove_dir_all(&d).unwrap();
-    }
-
-    #[test]
-    fn find_files_explicit_files_respect_limits() {
-        let d = std::env::temp_dir().join(format!("sill-find-file-limits-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        let file = d.join("Plan.md");
-        std::fs::write(&file, "").unwrap();
-        assert_eq!(find_files(&[file.clone()], "plan", 0, 100), (vec![], true));
-        assert_eq!(find_files(&[file.clone()], "plan", 100, 0), (vec![], true));
-        assert_eq!(find_files(&[file.clone()], "plan", 1, 1), (vec![file], false));
-        std::fs::remove_dir_all(&d).unwrap();
-    }
-
-    /// The root row's checkout label: a branch by name, a detached HEAD by its short hash, a
-    /// worktree through its gitdir file.
-    #[test]
-    fn head_label_reads_the_checkout() {
-        let d = std::env::temp_dir().join(format!("sill-head-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(d.join("repo/.git")).unwrap();
-        std::fs::write(d.join("repo/.git/HEAD"), "ref: refs/heads/feature/x\n").unwrap();
-        assert_eq!(head_label(&d.join("repo")), Some(("feature/x".to_string(), false)));
-        std::fs::write(d.join("repo/.git/HEAD"), "a8cf233deadbeef0123456789abcdef012345678\n").unwrap();
-        assert_eq!(head_label(&d.join("repo")), Some(("a8cf233".to_string(), true)));
-        std::fs::create_dir_all(d.join("wt")).unwrap();
-        std::fs::write(d.join("wt/.git"), format!("gitdir: {}\n", d.join("repo/.git").display())).unwrap();
-        assert_eq!(head_label(&d.join("wt")), Some(("a8cf233".to_string(), true)));
-        assert_eq!(head_label(&d.join("none")), None);
-        std::fs::remove_dir_all(&d).unwrap();
-    }
-
-    #[test]
-    fn metadata_never_follows_a_link() {
-        use std::os::unix::fs::symlink;
-        let dir = std::env::temp_dir().join(format!("sill-front-meta-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("file"), "abc").unwrap();
-        symlink("file", dir.join("link")).unwrap();
-        let m = metadata(&dir.join("link")).unwrap();
-        assert!(m.symlink);
-        assert!(!m.file);
-        assert_eq!(m.target, Some("file".into()));
-        assert!(metadata(&dir.join("file")).unwrap().file);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-}
+/// A file's lines added and removed: none for a binary file or a new one that is too large to count.
+pub(super) type LineCounts = Option<(u64, u64)>;
 
 /// What differs from HEAD in a repository, or in one file of it.
 pub(super) struct GitSummary {
@@ -262,8 +174,8 @@ pub(super) struct GitSummary {
     pub removed: u64,
     pub untracked: u64,
     /// When asked for: each changed file's lines added and removed, in the order `repos.status`
-    /// lists them — none for a binary file or a new one that is too large to count.
-    pub files: Option<Vec<(std::path::PathBuf, Option<(u64, u64)>)>>,
+    /// lists them.
+    pub files: Option<Vec<(std::path::PathBuf, LineCounts)>>,
     /// More files changed than `files` holds.
     pub truncated: bool,
 }
@@ -309,7 +221,7 @@ pub(super) fn git_summary(path: &std::path::Path, files: bool) -> Option<GitSumm
     let mut truncated = false;
     let files = files.then(|| {
         // tracked rows carry their counts; a new file is counted only once it is within the cap
-        let mut rows: Vec<(std::path::PathBuf, Option<Option<(u64, u64)>>)> = tracked
+        let mut rows: Vec<(std::path::PathBuf, Option<LineCounts>)> = tracked
             .into_iter()
             .map(|(p, lines)| (repo.join(p), Some(lines)))
             .chain(new.iter().map(|p| (repo.join(std::ffi::OsStr::from_bytes(p)), None)))
@@ -360,4 +272,95 @@ fn new_file_lines(path: &std::path::Path) -> Option<(u64, u64)> {
     }
     let lines = bytes.iter().filter(|b| **b == b'\n').count() as u64 + u64::from(bytes.last().is_some_and(|b| *b != b'\n'));
     Some((lines, 0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// A search finds by name, by path with a slash, skips noise folders, and says when cut.
+    #[test]
+    fn find_files_by_name_and_path() {
+        let d = std::env::temp_dir().join(format!("sill-find-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for f in ["src/main.rs", "src/ui/tree.rs", "docs/Tree.md", "target/debug/tree.d", "node_modules/x/tree.js"] {
+            let p = d.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "").unwrap();
+        }
+        let (found, cut) = find_files(std::slice::from_ref(&d), "tree", 100, 10_000);
+        let rel: Vec<String> = found.iter().map(|p| p.strip_prefix(&d).unwrap().display().to_string()).collect();
+        assert_eq!(rel, vec!["docs/Tree.md", "src/ui/tree.rs"], "noise folders skipped, case folded");
+        assert!(!cut);
+        let (found, _) = find_files(std::slice::from_ref(&d), "ui/tr", 100, 10_000);
+        assert_eq!(found, vec![d.join("src/ui/tree.rs")]);
+        let (found, cut) = find_files(std::slice::from_ref(&d), "", 2, 10_000);
+        assert_eq!(found.len(), 2);
+        assert!(cut);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn find_files_includes_explicit_file_bases() {
+        let d = std::env::temp_dir().join(format!("sill-find-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("notes")).unwrap();
+        let file = d.join("notes/Plan.md");
+        std::fs::write(&file, "").unwrap();
+        for q in ["plan", "notes/plan"] {
+            assert_eq!(find_files(std::slice::from_ref(&file), q, 100, 10_000), (vec![file.clone()], false));
+        }
+        assert_eq!(find_files(std::slice::from_ref(&file), "absent", 100, 10_000), (vec![], false));
+        assert_eq!(find_files(&[d.clone(), file.clone()], "plan", 100, 10_000), (vec![file], false));
+        let link = d.join("Plan-link.md");
+        std::os::unix::fs::symlink("notes/Plan.md", &link).unwrap();
+        assert_eq!(find_files(&[link], "plan", 100, 10_000), (vec![], false));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn find_files_explicit_files_respect_limits() {
+        let d = std::env::temp_dir().join(format!("sill-find-file-limits-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join("Plan.md");
+        std::fs::write(&file, "").unwrap();
+        assert_eq!(find_files(std::slice::from_ref(&file), "plan", 0, 100), (vec![], true));
+        assert_eq!(find_files(std::slice::from_ref(&file), "plan", 100, 0), (vec![], true));
+        assert_eq!(find_files(std::slice::from_ref(&file), "plan", 1, 1), (vec![file], false));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// The root row's checkout label: a branch by name, a detached HEAD by its short hash, a
+    /// worktree through its gitdir file.
+    #[test]
+    fn head_label_reads_the_checkout() {
+        let d = std::env::temp_dir().join(format!("sill-head-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("repo/.git")).unwrap();
+        std::fs::write(d.join("repo/.git/HEAD"), "ref: refs/heads/feature/x\n").unwrap();
+        assert_eq!(head_label(&d.join("repo")), Some(("feature/x".to_string(), false)));
+        std::fs::write(d.join("repo/.git/HEAD"), "a8cf233deadbeef0123456789abcdef012345678\n").unwrap();
+        assert_eq!(head_label(&d.join("repo")), Some(("a8cf233".to_string(), true)));
+        std::fs::create_dir_all(d.join("wt")).unwrap();
+        std::fs::write(d.join("wt/.git"), format!("gitdir: {}\n", d.join("repo/.git").display())).unwrap();
+        assert_eq!(head_label(&d.join("wt")), Some(("a8cf233".to_string(), true)));
+        assert_eq!(head_label(&d.join("none")), None);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn metadata_never_follows_a_link() {
+        use std::os::unix::fs::symlink;
+        let dir = std::env::temp_dir().join(format!("sill-front-meta-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("file"), "abc").unwrap();
+        symlink("file", dir.join("link")).unwrap();
+        let m = metadata(&dir.join("link")).unwrap();
+        assert!(m.symlink);
+        assert!(!m.file);
+        assert_eq!(m.target, Some("file".into()));
+        assert!(metadata(&dir.join("file")).unwrap().file);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

@@ -1225,10 +1225,10 @@ impl App {
             Message::Tick => self.now = Instant::now(),
             Message::NetworkPoll => return self.poll_network(),
             Message::FilesPoll => {
-                if !self.backend_shown() {
-                    if let Some(id) = self.selected.clone() {
-                        return self.files_refresh(&id);
-                    }
+                if !self.backend_shown()
+                    && let Some(id) = self.selected.clone()
+                {
+                    return self.files_refresh(&id);
                 }
             }
             Message::Procs(event) => return self.processes_event(event),
@@ -1316,10 +1316,10 @@ impl App {
                         if let Some(pane) = &mut view.terminal {
                             pane.accept(event);
                         }
-                    } else if let Some((pane, parked_generation)) = &mut view.parked_terminal {
-                        if generation == *parked_generation {
-                            pane.accept(event);
-                        }
+                    } else if let Some((pane, parked_generation)) = &mut view.parked_terminal
+                        && generation == *parked_generation
+                    {
+                        pane.accept(event);
                     }
                 }
                 if let Some(failed) = closed {

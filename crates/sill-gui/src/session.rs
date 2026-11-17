@@ -103,17 +103,17 @@ impl App {
                 }
             }
             Event::Prompt(action) => {
-                if let Some(view) = self.views.get_mut(&id) {
-                    if view.annotation.is_none() {
-                        view.draft.perform(action);
-                    }
+                if let Some(view) = self.views.get_mut(&id)
+                    && view.annotation.is_none()
+                {
+                    view.draft.perform(action);
                 }
             }
             Event::PromptHistory(redo) => {
-                if let Some(view) = self.views.get_mut(&id) {
-                    if view.annotation.is_none() {
-                        view.draft.history(redo);
-                    }
+                if let Some(view) = self.views.get_mut(&id)
+                    && view.annotation.is_none()
+                {
+                    view.draft.history(redo);
                 }
             }
             Event::PromptNewline => {

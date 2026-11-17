@@ -40,7 +40,7 @@ pub fn jail(client: &Client, session: &str) -> Result<JailProcesses> {
     if !client.has_capability("sill.jail_processes") {
         return Ok(JailProcesses::default());
     }
-    Ok(client.call("_sill/procs.running", SessionKey { session_id: session.into() })?)
+    client.call("_sill/procs.running", SessionKey { session_id: session.into() })
 }
 
 pub fn running(p: &Process) -> bool {

@@ -520,31 +520,31 @@ fn render_session(session: &SessionState, previous: Option<&SessionState>) -> Ve
     if session.summary.is_some() && previous.is_some_and(|old| old.summary != session.summary || old.title != session.title) {
         out.push(wire::Event::Summarized { text: session.summary.clone(), title: session.title.clone() });
     }
-    if previous.is_none() || previous.is_some_and(|old| old.controls != session.controls) {
-        if let Some(c) = &session.controls {
-            let controls = wire::Controls {
-                modes: c.current_mode.as_ref().map(|current| (current.clone(), c.modes.iter().map(|m| (m.value.clone(), m.title.clone())).collect())),
-                options: c
-                    .options
-                    .iter()
-                    .map(|o| wire::ConfigOption {
-                        id: o.option_id.clone(),
-                        name: o.title.clone(),
-                        category: o.category.clone(),
-                        kind: match &o.value {
-                            ControlValue::Id { value } => {
-                                wire::ConfigKind::Select(value.clone(), o.choices.iter().map(|c| (c.value.clone(), c.title.clone())).collect())
-                            }
-                            ControlValue::Boolean { value } => wire::ConfigKind::Boolean(*value),
-                        },
-                    })
-                    .collect(),
-            };
-            if previous.is_none() || previous.is_some_and(|old| old.controls.is_none()) {
-                out.push(wire::Event::Ready { session_id: session.agent_generation_id.clone(), resumed: true, controls });
-            } else {
-                out.push(wire::Event::Controls(controls));
-            }
+    if (previous.is_none() || previous.is_some_and(|old| old.controls != session.controls))
+        && let Some(c) = &session.controls
+    {
+        let controls = wire::Controls {
+            modes: c.current_mode.as_ref().map(|current| (current.clone(), c.modes.iter().map(|m| (m.value.clone(), m.title.clone())).collect())),
+            options: c
+                .options
+                .iter()
+                .map(|o| wire::ConfigOption {
+                    id: o.option_id.clone(),
+                    name: o.title.clone(),
+                    category: o.category.clone(),
+                    kind: match &o.value {
+                        ControlValue::Id { value } => {
+                            wire::ConfigKind::Select(value.clone(), o.choices.iter().map(|c| (c.value.clone(), c.title.clone())).collect())
+                        }
+                        ControlValue::Boolean { value } => wire::ConfigKind::Boolean(*value),
+                    },
+                })
+                .collect(),
+        };
+        if previous.is_none() || previous.is_some_and(|old| old.controls.is_none()) {
+            out.push(wire::Event::Ready { session_id: session.agent_generation_id.clone(), resumed: true, controls });
+        } else {
+            out.push(wire::Event::Controls(controls));
         }
     }
     if previous.is_none() || previous.is_some_and(|old| old.capabilities != session.capabilities) {

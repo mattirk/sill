@@ -37,6 +37,7 @@ pub const SPACING: f32 = 12.0;
 /// become gaps. `spacing` is the column's gap between children, which a gap of k rows keeps:
 /// k heights and k − 1 spacings, so the column is as tall as with every row built. With no
 /// viewport known yet, every row is built.
+#[cfg(test)]
 pub fn plan(heights: &[Option<f32>], spacing: f32, offset: f32, viewport: f32, follow_tail: bool) -> Vec<Slot> {
     plan_with_pinned(heights, spacing, offset, viewport, follow_tail, None)
 }

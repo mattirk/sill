@@ -133,6 +133,7 @@ pub struct DomainData {
 /// `details` by code. Only the codes listed in [`detail_codes`] carry details; for those, the
 /// record shape is fixed by sfp/1 and may only gain optional fields. Clients ignore unknown fields.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[expect(clippy::large_enum_variant, reason = "made once for a failed request; a Box would only add an allocation")]
 #[serde(untagged)]
 pub enum DomainDetails {
     Incompatible(IncompatibleDetails),

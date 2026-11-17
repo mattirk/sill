@@ -94,6 +94,7 @@ fn prompt(id: &str, text: String, attachments: Vec<Attachment>) -> std::result::
     protocol(json!({"sessionId":id,"prompt":blocks}))
 }
 
+#[expect(clippy::large_enum_variant, reason = "one message at a time through the session's loop")]
 enum Inbound {
     Update(v2::UpdateSessionNotification),
     Event { session_id: String, event: Event },
@@ -246,6 +247,7 @@ async fn drive(
     let mut observed_active = false;
     let mut deferred_idle = None;
     loop {
+        #[expect(clippy::large_enum_variant, reason = "one per turn of the loop, matched at once")]
         enum Next {
             Command(Option<Command>),
             Update(Option<Inbound>),
@@ -298,10 +300,10 @@ async fn drive(
                     continue;
                 }
                 let update = json(notification.update)?;
-                if update["sessionUpdate"] == "usage_update" {
-                    if let (Some(used), Some(size)) = (update["used"].as_u64(), update["size"].as_u64()) {
-                        let _ = events.send(Event::Usage { used, size }).await;
-                    }
+                if update["sessionUpdate"] == "usage_update"
+                    && let (Some(used), Some(size)) = (update["used"].as_u64(), update["size"].as_u64())
+                {
+                    let _ = events.send(Event::Usage { used, size }).await;
                 }
                 if update["sessionUpdate"] == "config_option_update" {
                     let _ = events.send(Event::Controls(controls(&update["configOptions"]))).await;

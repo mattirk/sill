@@ -51,10 +51,10 @@ pub fn start(socket: &Path) -> Result<()> {
     cmd.arg("--nofork").arg("--nopidfile").arg(format!("--config-file={}", conf.display())).stdin(Stdio::null()).stdout(Stdio::null());
     // the agent's own service files live under its HOME; dbus-daemon looks under XDG_DATA_HOME
     // or, failing that, the passwd home, which is not this HOME in every setup
-    if std::env::var_os("XDG_DATA_HOME").is_none() {
-        if let Some(home) = std::env::var_os("HOME") {
-            cmd.env("XDG_DATA_HOME", Path::new(&home).join(".local/share"));
-        }
+    if std::env::var_os("XDG_DATA_HOME").is_none()
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        cmd.env("XDG_DATA_HOME", Path::new(&home).join(".local/share"));
     }
     let mut child = cmd.spawn().context("starting dbus-daemon for the private bus")?;
     let deadline = Instant::now() + READY;

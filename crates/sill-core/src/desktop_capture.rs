@@ -190,7 +190,7 @@ pub fn revision(raw: &Raw) -> String {
 /// `raw` as an RGB PNG, quickly (fdeflate): a few tens of milliseconds for a HiDPI desktop.
 pub fn png(raw: &Raw) -> Result<Vec<u8>> {
     let mut rgb = Vec::with_capacity(raw.width as usize * raw.height as usize * 3);
-    for px in raw.bgrx.chunks_exact(4) {
+    for px in raw.bgrx.as_chunks::<4>().0 {
         rgb.extend_from_slice(&[px[2], px[1], px[0]]);
     }
     let mut out = Vec::new();

@@ -121,7 +121,7 @@ pub fn view(args: &Value) -> Result<View> {
     let mut bgrx = image.data;
     anyhow::ensure!(bgrx.len() == width as usize * height as usize * 4, "short picture");
     if conn.setup().image_byte_order == x11rb::protocol::xproto::ImageOrder::MSB_FIRST {
-        for px in bgrx.chunks_exact_mut(4) {
+        for px in bgrx.as_chunks_mut::<4>().0 {
             px.reverse();
         }
     }

@@ -43,6 +43,7 @@ const ROWS: &[(&str, &str, &str)] = &[
     ("gpu", "GPU rendering", "Intel/AMD render device access, including GPU driver ioctls and shared GPU resources. Requires restart."),
 ];
 
+#[expect(clippy::large_enum_variant, reason = "a window message: made once, handled once, never kept in bulk")]
 #[derive(Debug, Clone)]
 pub enum Event {
     /// Show or hide the panel.

@@ -558,7 +558,7 @@ fn unreadable_entries_do_not_make_the_workspace_cold() {
     write(&blocked[0].join("hidden"), "inaccessible");
     write(&blocked[1], "inaccessible artifact");
     for path in &blocked {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o0)).unwrap();
     }
     assert!(std::fs::read_dir(&blocked[0]).is_err(), "test must run without permission bypass");
     let to = path_for(&d.0.join("ws"), &src, "w2", "partial");

@@ -154,8 +154,8 @@ pub fn write_snapshot(src: &Path, dir: &Path, kept: &[(String, PathBuf, String)]
         }
         let excluded: std::collections::HashSet<String> = {
             let mut st = tx.prepare("SELECT id FROM excluded")?;
-            let ids = st.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<std::collections::HashSet<String>>>()?;
-            ids
+
+            st.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<std::collections::HashSet<String>>>()?
         };
         tx.execute_batch("DROP TABLE excluded;")?;
         {
@@ -718,9 +718,9 @@ pub fn show(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, String)], home
 
 /// Stream formatted memory without accumulating the complete output.
 pub fn show_to(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, String)], home: &Path, out: &mut impl std::fmt::Write) -> Result<()> {
-    write!(
+    writeln!(
         out,
-        "{}  “{}”  {}  started {}{}\n",
+        "{}  “{}”  {}  started {}{}",
         s.id,
         s.title,
         s.agent,
@@ -731,12 +731,12 @@ pub fn show_to(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, String)], h
         }
     )?;
     if !s.pins.is_empty() {
-        write!(out, "pinned: {}\n", s.pins.iter().map(|p| tilde(p, home)).collect::<Vec<_>>().join(", "))?;
+        writeln!(out, "pinned: {}", s.pins.iter().map(|p| tilde(p, home)).collect::<Vec<_>>().join(", "))?;
     }
     if !kept.is_empty() {
-        write!(out, "kept to the host ({}): {}\n", kept.len(), kept.iter().map(|(p, w)| format!("{w} {}", tilde(p, home))).collect::<Vec<_>>().join(", "))?;
+        writeln!(out, "kept to the host ({}): {}", kept.len(), kept.iter().map(|(p, w)| format!("{w} {}", tilde(p, home))).collect::<Vec<_>>().join(", "))?;
     }
-    write!(out, "{} prompts, {} tool calls (times are UTC)\n", count_kind(conn, &s.id, "user"), count_kind(conn, &s.id, "tool"))?;
+    writeln!(out, "{} prompts, {} tool calls (times are UTC)", count_kind(conn, &s.id, "user"), count_kind(conn, &s.id, "tool"))?;
     if s.summary.trim().is_empty() {
         out.write_str("\nno summary yet\n")?;
     } else {
@@ -764,7 +764,7 @@ pub fn transcript_to(conn: &Connection, s: &SessionInfo, grep: Option<&str>, out
     let words: Vec<String> = grep.map(|g| g.split_whitespace().map(str::to_lowercase).collect()).unwrap_or_default();
     let mut st = conn.prepare("SELECT seq, ts, kind, text FROM entries WHERE session_id = ?1 AND kind IN ('user', 'agent', 'tool') ORDER BY seq")?;
     let rows = st.query_map(params![s.id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))?;
-    write!(out, "{}  “{}”  {}, times UTC\n", s.id, s.title, s.agent)?;
+    writeln!(out, "{}  “{}”  {}, times UTC", s.id, s.title, s.agent)?;
     let mut shown = 0;
     for row in rows {
         let (seq, ts, kind, text) = row?;
@@ -778,13 +778,13 @@ pub fn transcript_to(conn: &Connection, s: &SessionInfo, grep: Option<&str>, out
         let at = datetime(ts);
         let at = if words.is_empty() { at[11..].to_string() } else { format!("{at} #{seq}") };
         match kind.as_str() {
-            "tool" => write!(out, "{at}   tool: {}\n", text.lines().next().unwrap_or(""))?,
+            "tool" => writeln!(out, "{at}   tool: {}", text.lines().next().unwrap_or(""))?,
             _ => {
                 let who = if kind == "user" { "person" } else { "agent" };
                 let mut lines = text.trim().lines();
-                write!(out, "{at} {who}: {}\n", lines.next().unwrap_or(""))?;
+                writeln!(out, "{at} {who}: {}", lines.next().unwrap_or(""))?;
                 for l in lines {
-                    write!(out, "    {l}\n")?;
+                    writeln!(out, "    {l}")?;
                 }
             }
         }
@@ -809,16 +809,16 @@ pub fn export_markdown_to(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, 
     write!(out, "# {}\n\n", s.title)?;
     write!(out, "- session `{}`, agent {}\n- started {}", s.id, s.agent, datetime(s.created_at))?;
     match s.ended_at {
-        Some(t) => write!(out, ", ended {} ({})\n", datetime(t), duration(t - s.created_at))?,
+        Some(t) => writeln!(out, ", ended {} ({})", datetime(t), duration(t - s.created_at))?,
         None => out.write_str(", still open\n")?,
     }
     if !s.pins.is_empty() {
-        write!(out, "- pinned: {}\n", s.pins.iter().map(|p| format!("`{}`", tilde(p, home))).collect::<Vec<_>>().join(", "))?;
+        writeln!(out, "- pinned: {}", s.pins.iter().map(|p| format!("`{}`", tilde(p, home))).collect::<Vec<_>>().join(", "))?;
     }
     if !kept.is_empty() {
-        write!(out, "- kept to the host: {}\n", kept.iter().map(|(p, w)| format!("{w} `{}`", tilde(p, home))).collect::<Vec<_>>().join(", "))?;
+        writeln!(out, "- kept to the host: {}", kept.iter().map(|(p, w)| format!("{w} `{}`", tilde(p, home))).collect::<Vec<_>>().join(", "))?;
     }
-    write!(out, "- {} prompts, {} tool calls; times UTC\n", count_kind(conn, &s.id, "user"), count_kind(conn, &s.id, "tool"))?;
+    writeln!(out, "- {} prompts, {} tool calls; times UTC", count_kind(conn, &s.id, "user"), count_kind(conn, &s.id, "tool"))?;
     if !s.summary.trim().is_empty() {
         write!(out, "\n## Summary ({})\n\n{}\n", summary_by(&s.summary_kind), s.summary.trim_end())?;
     }

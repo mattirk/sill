@@ -76,10 +76,10 @@ fn declared_paths<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result
             entries
                 .into_iter()
                 .map(|entry| {
-                    if let Some(object) = entry.as_object() {
-                        if let Some(key) = object.keys().find(|key| !["path", "kind", "initial_content"].contains(&key.as_str())) {
-                            return Err(D::Error::custom(format!("unknown home_paths field {key}")));
-                        }
+                    if let Some(object) = entry.as_object()
+                        && let Some(key) = object.keys().find(|key| !["path", "kind", "initial_content"].contains(&key.as_str()))
+                    {
+                        return Err(D::Error::custom(format!("unknown home_paths field {key}")));
                     }
                     serde_json::from_value(entry).map_err(D::Error::custom)
                 })

@@ -71,10 +71,10 @@ impl App {
             }
             Event::Done(token, id, text, result) => {
                 // A successful write stays relevant even if its editor was closed meanwhile.
-                if result.is_ok() {
-                    if let Some(s) = self.all_sessions.iter_mut().find(|s| s.session_id == id) {
-                        s.name = Some(text);
-                    }
+                if result.is_ok()
+                    && let Some(s) = self.all_sessions.iter_mut().find(|s| s.session_id == id)
+                {
+                    s.name = Some(text);
                 }
                 if self.name_editor.as_ref().is_some_and(|e| e.token == token) {
                     match result {

@@ -81,6 +81,27 @@ pub fn sill_backups(state_base: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+/// Sill's state directory of a home (`$XDG_STATE_HOME/sill`).
+pub fn sill_state(home: &Path) -> PathBuf {
+    state_base(home).join("sill")
+}
+
+fn state_base(home: &Path) -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/state"))
+}
+
+/// Sill's own files, hidden in every jail whatever its policy says and never covered by a pin: a
+/// session's mounts, allowed domains and binaries are made of them. Its configuration, its state
+/// directory and that directory's backups, and the user's journal — readable by ACL, it holds
+/// every session's proxy lines and agent stderr (security.md S15).
+pub fn sill_own(home: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config"));
+    let state = state_base(home);
+    let mut own = vec![config.join("sill"), state.join("sill"), PathBuf::from("/var/log/journal")];
+    own.extend(sill_backups(&state)?);
+    Ok(own)
+}
+
 #[cfg(test)]
 mod backup_tests {
     use super::*;
@@ -102,25 +123,4 @@ mod backup_tests {
         assert_eq!(sill_backups(&base).unwrap(), vec![base.join("sill.bak-20261103")]);
         std::fs::remove_dir_all(base).unwrap();
     }
-}
-
-/// Sill's state directory of a home (`$XDG_STATE_HOME/sill`).
-pub fn sill_state(home: &Path) -> PathBuf {
-    state_base(home).join("sill")
-}
-
-fn state_base(home: &Path) -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/state"))
-}
-
-/// Sill's own files, hidden in every jail whatever its policy says and never covered by a pin: a
-/// session's mounts, allowed domains and binaries are made of them. Its configuration, its state
-/// directory and that directory's backups, and the user's journal — readable by ACL, it holds
-/// every session's proxy lines and agent stderr (security.md S15).
-pub fn sill_own(home: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config"));
-    let state = state_base(home);
-    let mut own = vec![config.join("sill"), state.join("sill"), PathBuf::from("/var/log/journal")];
-    own.extend(sill_backups(&state)?);
-    Ok(own)
 }

@@ -423,7 +423,7 @@ mod tests {
         drop(store);
         let store = Store::open(&path).unwrap();
         let code = |result: Result<api::SessionKey>| {
-            let error = result.err().expect("request must fail");
+            let error = result.expect_err("request must fail");
             failure(error).data.unwrap()["code"].as_str().unwrap().to_owned()
         };
         let mut fresh = input.clone();

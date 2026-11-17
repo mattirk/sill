@@ -810,6 +810,71 @@ pub fn timestamp(seconds: i64) -> String {
     format!("{year:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", day_seconds / 3600, day_seconds / 60 % 60, day_seconds % 60)
 }
 
+/// Carry the durable total forward even when a producer holds an older state copy.
+/// Returns the working interval this update completed, in Unix milliseconds.
+fn update_active_time(previous: &SessionState, next: &mut SessionState, now: u64) -> Option<(u64, u64)> {
+    next.active_ms = previous.active_ms;
+    next.active_since_ms = previous.active_since_ms;
+    let working = next.activity == "working" && next.lifecycle == "open";
+    let mut completed = None;
+    if (!working || previous.agent_generation_id != next.agent_generation_id)
+        && let Some(start) = next.active_since_ms.take()
+    {
+        next.active_ms = next.active_ms.saturating_add(now.saturating_sub(start));
+        completed = Some((start, now));
+    }
+    if working && next.active_since_ms.is_none() {
+        next.active_since_ms = Some(now);
+    }
+    completed
+}
+
+const HOUR_MS: u64 = 3_600_000;
+
+/// A working interval as its share of each UTC hour it covers: (Unix hour, milliseconds).
+fn hour_shares(start: u64, end: u64) -> Vec<(u64, u64)> {
+    let mut shares = Vec::new();
+    let mut at = start;
+    while at < end {
+        let next = ((at / HOUR_MS + 1) * HOUR_MS).min(end);
+        shares.push((at / HOUR_MS, next - at));
+        at = next;
+    }
+    shares
+}
+
+/// The retry identity of a request record that may gain optional fields within sfp/1.
+///
+/// Object members at their default (null, false, 0, "", [] or {}) are dropped, recursively,
+/// and keys are sorted, so a field added later with a default that means "absent" leaves every
+/// earlier fingerprint unchanged. Array elements keep their positions. The `sfp-request/1`
+/// prefix versions this form; changing it would orphan every durable receipt.
+pub fn canonical_fingerprint(value: &serde_json::Value) -> String {
+    fn prune(value: &serde_json::Value) -> Option<serde_json::Value> {
+        use serde_json::Value;
+        match value {
+            Value::Null | Value::Bool(false) => None,
+            Value::Number(n) if n.as_f64() == Some(0.0) => None,
+            Value::String(s) if s.is_empty() => None,
+            Value::Array(a) if a.is_empty() => None,
+            Value::Array(a) => Some(Value::Array(a.iter().map(|v| prune(v).unwrap_or(Value::Null)).collect())),
+            Value::Object(o) => {
+                let kept: std::collections::BTreeMap<_, _> = o.iter().filter_map(|(k, v)| Some((k.clone(), prune(v)?))).collect();
+                (!kept.is_empty()).then(|| Value::Object(kept.into_iter().collect()))
+            }
+            other => Some(other.clone()),
+        }
+    }
+    let canonical = prune(value).unwrap_or(serde_json::Value::Null);
+    create_fingerprint(&format!("sfp-request/1\n{canonical}"))
+}
+
+/// A create retry retains only the input fingerprint, never pins or ghost configuration.
+pub fn create_fingerprint(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(input.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     /// Codex's form (2026-11-03): a choice and an optional note. Left empty, the note is absent;
@@ -1264,69 +1329,4 @@ mod tests {
         assert_eq!(timestamp(951827696), "2000-02-29T12:34:56Z");
         assert_eq!(timestamp(-1), "1969-12-31T23:59:59Z");
     }
-}
-
-/// Carry the durable total forward even when a producer holds an older state copy.
-/// Returns the working interval this update completed, in Unix milliseconds.
-fn update_active_time(previous: &SessionState, next: &mut SessionState, now: u64) -> Option<(u64, u64)> {
-    next.active_ms = previous.active_ms;
-    next.active_since_ms = previous.active_since_ms;
-    let working = next.activity == "working" && next.lifecycle == "open";
-    let mut completed = None;
-    if !working || previous.agent_generation_id != next.agent_generation_id {
-        if let Some(start) = next.active_since_ms.take() {
-            next.active_ms = next.active_ms.saturating_add(now.saturating_sub(start));
-            completed = Some((start, now));
-        }
-    }
-    if working && next.active_since_ms.is_none() {
-        next.active_since_ms = Some(now);
-    }
-    completed
-}
-
-const HOUR_MS: u64 = 3_600_000;
-
-/// A working interval as its share of each UTC hour it covers: (Unix hour, milliseconds).
-fn hour_shares(start: u64, end: u64) -> Vec<(u64, u64)> {
-    let mut shares = Vec::new();
-    let mut at = start;
-    while at < end {
-        let next = ((at / HOUR_MS + 1) * HOUR_MS).min(end);
-        shares.push((at / HOUR_MS, next - at));
-        at = next;
-    }
-    shares
-}
-
-/// The retry identity of a request record that may gain optional fields within sfp/1.
-///
-/// Object members at their default (null, false, 0, "", [] or {}) are dropped, recursively,
-/// and keys are sorted, so a field added later with a default that means "absent" leaves every
-/// earlier fingerprint unchanged. Array elements keep their positions. The `sfp-request/1`
-/// prefix versions this form; changing it would orphan every durable receipt.
-pub fn canonical_fingerprint(value: &serde_json::Value) -> String {
-    fn prune(value: &serde_json::Value) -> Option<serde_json::Value> {
-        use serde_json::Value;
-        match value {
-            Value::Null | Value::Bool(false) => None,
-            Value::Number(n) if n.as_f64() == Some(0.0) => None,
-            Value::String(s) if s.is_empty() => None,
-            Value::Array(a) if a.is_empty() => None,
-            Value::Array(a) => Some(Value::Array(a.iter().map(|v| prune(v).unwrap_or(Value::Null)).collect())),
-            Value::Object(o) => {
-                let kept: std::collections::BTreeMap<_, _> = o.iter().filter_map(|(k, v)| Some((k.clone(), prune(v)?))).collect();
-                (!kept.is_empty()).then(|| Value::Object(kept.into_iter().collect()))
-            }
-            other => Some(other.clone()),
-        }
-    }
-    let canonical = prune(value).unwrap_or(serde_json::Value::Null);
-    create_fingerprint(&format!("sfp-request/1\n{canonical}"))
-}
-
-/// A create retry retains only the input fingerprint, never pins or ghost configuration.
-pub fn create_fingerprint(input: &str) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(input.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }

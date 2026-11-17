@@ -216,10 +216,10 @@ impl Runner {
             session = journal.session(&self.id)?;
         }
         let source = (seq > 0).then(|| Source { generation_id: st.generation_id.clone(), seq });
-        if let Some(source) = &source {
-            if journal.source_seen(&self.id, source)? {
-                return Ok(out);
-            }
+        if let Some(source) = &source
+            && journal.source_seen(&self.id, source)?
+        {
+            return Ok(out);
         }
         // ACP v1 session/load replay has no durable source identities. Existing history stays;
         // do not invent mappings from matching text or create duplicate history.
@@ -465,7 +465,7 @@ impl Runner {
             if let Err(e) = self.sfp_dispatch(store, hub, &mut st) {
                 eprintln!("sill daemon: SFP dispatch {}: {e:#}", self.id);
             }
-            Ok(journal.submission(&self.id, &submission.submission_id)?)
+            journal.submission(&self.id, &submission.submission_id)
         })
     }
     pub(super) fn sfp_dispatch(&self, store: &Store, hub: &Hub, st: &mut State) -> Result<()> {
@@ -776,7 +776,7 @@ mod tests {
         let limit = sill_proto::initialize::MAX_INLINE_BYTES;
         let data = acp::base64(&vec![0; limit]);
         let inline = p::Attachment::Inline { name: "large.png".into(), mime: "image/png".into(), data_base64: data.clone() };
-        assert!(validate_attachments(&store, &session.id, &[inline.clone()]).is_ok());
+        assert!(validate_attachments(&store, &session.id, std::slice::from_ref(&inline)).is_ok());
         let extra = p::Attachment::Inline { name: "extra.png".into(), mime: "image/png".into(), data_base64: "AA==".into() };
         assert!(validate_attachments(&store, &session.id, &[inline.clone(), extra.clone()]).is_err());
         // A maximum image plus a maximum text prompt fits the control transport.
@@ -796,7 +796,7 @@ mod tests {
         )
         .unwrap();
         let uploaded = p::Attachment::Uploaded { upload_id: "large".into(), name: "large.png".into(), mime: "image/png".into() };
-        assert!(validate_attachments(&store, &session.id, &[uploaded.clone()]).is_ok());
+        assert!(validate_attachments(&store, &session.id, std::slice::from_ref(&uploaded)).is_ok());
         assert!(validate_attachments(&store, &session.id, &[uploaded.clone(), extra]).is_err());
         assert!(validate_attachments(&store, &session.id, &[uploaded.clone(), uploaded]).is_err());
         drop(store);
@@ -1082,8 +1082,7 @@ mod tests {
     }
     #[test]
     fn ending_summary_and_authentication_block_queue_dispatch() {
-        let mut st = State::default();
-        st.ready = Some(("agent".into(), false));
+        let mut st = State { ready: Some(("agent".into(), false)), ..Default::default() };
         assert!(dispatch_ready(&st));
         st.completed = Some(SummaryDone { kind: SummaryKind::End, text: Some("summary".into()) });
         assert!(!dispatch_ready(&st), "end completion must retire before another prompt");

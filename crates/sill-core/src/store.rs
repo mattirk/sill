@@ -740,8 +740,7 @@ impl Store {
         v.reverse();
         // A page must include the delegations its children refer to. Otherwise the UI would
         // drop their text or render their calls as root steps at a history boundary.
-        loop {
-            let Some(first) = v.first().map(|e| e.seq) else { break };
+        while let Some(first) = v.first().map(|e| e.seq) {
             let mut start = first;
             for e in &v {
                 if !e.parent.is_empty() {

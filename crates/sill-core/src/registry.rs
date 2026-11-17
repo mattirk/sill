@@ -957,6 +957,7 @@ const LOGIN_ENV: &[&str] = &[
 /// `advertised` is a command the agent's answer asked to run instead (a terminal login): it runs
 /// in that same jail and adds nothing to it, so a path or a link the agent chose shows nothing
 /// of the person's. One that the jail does not hold is refused.
+#[expect(clippy::too_many_arguments, reason = "each is a separate input of the login's jail")]
 pub fn login_jail(
     program: &str,
     advertised: Option<&str>,
@@ -1287,10 +1288,11 @@ pub fn credential_candidates(scratch: &Path, proposals: &[Proposal]) -> Vec<Stri
                 if !incidental(&name) && !["logs", "log", "tmp", "cache"].contains(&name.as_str()) {
                     walk(root, &entry.path(), out);
                 }
-            } else if meta.is_file() && !incidental(&name) {
-                if let Ok(rel) = entry.path().strip_prefix(root) {
-                    out.push(rel.to_string_lossy().into_owned());
-                }
+            } else if meta.is_file()
+                && !incidental(&name)
+                && let Ok(rel) = entry.path().strip_prefix(root)
+            {
+                out.push(rel.to_string_lossy().into_owned());
             }
         }
     }

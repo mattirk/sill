@@ -538,7 +538,8 @@ fn initialized_connections_receive_public_change_notifications_only_after_handsh
     }
     assert!(changed, "initialized subscriber receives the public change notification");
     assert_eq!(public.read().unwrap()["method"], "_sill/changes.changed");
-    for mut conn in [uninitialized] {
+    {
+        let mut conn = uninitialized;
         let error = conn.read().unwrap_err();
         assert!(matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut), "{error}");
     }
@@ -1416,7 +1417,7 @@ fn policy_preview_follows_today_and_the_launch_snapshot_stays() {
         .any(|rule| rule["behavior"] == "pin" && rule["target"]["display"] == root.to_str().unwrap());
     assert!(pinned, "{preview}");
     let base = sill_core::policy::Policy::load(policy.to_str().unwrap(), &d.dir.join("home")).unwrap();
-    let resolution = sill_core::session::resolve(&base, &[root.clone()]).unwrap();
+    let resolution = sill_core::session::resolve(&base, std::slice::from_ref(&root)).unwrap();
     // A fixture snapshot tests the public read boundary; no jail is launched in this test.
     let snapshots = d.dir.join("state/sill/policy-snapshots").join(id);
     std::fs::create_dir_all(&snapshots).unwrap();

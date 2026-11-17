@@ -269,7 +269,7 @@ fn named_terminal(
                 "_sill/terminals.open",
                 api::Open {
                     session_id,
-                    label: label.into(),
+                    label,
                     argv,
                     // the frontend emulates xterm, whatever the jail's default is
                     env: [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).chain(env).collect(),

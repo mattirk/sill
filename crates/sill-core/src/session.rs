@@ -1095,13 +1095,13 @@ mod tests {
         git(&["commit", "-qm", "one"]);
         let (env, pins) = (repo.join("conf/.env"), vec![repo.clone()]);
         // ignored and never committed: the mask is all there is to it; outside any pin nothing is asked
-        masks_git_cannot_undo(&[env.clone()], &pins, &[]).unwrap();
+        masks_git_cannot_undo(std::slice::from_ref(&env), &pins, &[]).unwrap();
         masks_git_cannot_undo(&[repo.join("tracked")], &[], &[]).unwrap();
         // a whole masked folder with nothing of Git's in it
         masks_git_cannot_undo(&[repo.join("conf")], &[], &pins).unwrap();
         // staged, then committed, then deleted: Git has it each time
         git(&["add", "-f", "conf/.env"]);
-        assert!(masks_git_cannot_undo(&[env.clone()], &pins, &[]).unwrap_err().to_string().contains("Git has it"));
+        assert!(masks_git_cannot_undo(std::slice::from_ref(&env), &pins, &[]).unwrap_err().to_string().contains("Git has it"));
         git(&["commit", "-qm", "two"]);
         assert!(masks_git_cannot_undo(&[repo.join("conf")], &[], &pins).is_err(), "a workspace's repository, the folder masked");
         git(&["rm", "-q", "--cached", "conf/.env"]);

@@ -5,6 +5,7 @@ use iced::{Element, Fill, Task};
 use serde_json::json;
 use sill_proto::{memory::Note, sessions::Session};
 
+#[expect(clippy::large_enum_variant, reason = "a window message: made once, handled once, never kept in bulk")]
 #[derive(Debug, Clone)]
 pub enum Event {
     Open(String),

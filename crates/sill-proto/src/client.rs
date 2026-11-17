@@ -453,7 +453,7 @@ impl Client {
             }
         }
         let v = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(v) => v.with_context(|| format!("{method}"))?,
+            Ok(v) => v.with_context(|| method.to_string())?,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return lost("the daemon went away"),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return self.timed_out(id, method, timeout),
         };

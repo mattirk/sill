@@ -245,10 +245,10 @@ impl Hub {
             };
             // the turn may have written anything: whatever shows the overlays rescans
             hub.changes_changed();
-            if !msg.is_empty() {
-                if let Err(error) = hub.sfp_lifecycle(&id, None, Some(msg)) {
-                    eprintln!("sill daemon: publishing Changes notice: {error:#}");
-                }
+            if !msg.is_empty()
+                && let Err(error) = hub.sfp_lifecycle(&id, None, Some(msg))
+            {
+                eprintln!("sill daemon: publishing Changes notice: {error:#}");
             }
         });
     }

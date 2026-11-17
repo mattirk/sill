@@ -212,55 +212,6 @@ pub fn install(host: &str, source: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn a_box_is_named_after_its_host() {
-        assert_eq!(default_name("matti@192.168.1.50"), "192.168.1.50");
-        assert_eq!(default_name("my-server"), "my-server");
-        assert_eq!(default_name("ssh://me@host.example:2222"), "host.example-2222");
-        assert_eq!(default_name("me@fe80::1"), "fe80--1");
-        assert_eq!(default_name("local"), "box");
-        for host in ["matti@192.168.1.50", "ssh://me@host.example:2222", "me@fe80::1", "local"] {
-            validate_name(&default_name(host)).unwrap();
-        }
-    }
-    #[test]
-    fn session_connections_ride_the_shared_connection_and_never_prompt() {
-        let args = ssh_base("example.test").unwrap().get_args().map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>();
-        assert!(args.contains(&"BatchMode=yes".into()));
-        assert!(args.contains(&"ControlMaster=no".into()), "only boxlink starts a master");
-        assert!(args.contains(&"ConnectTimeout=10".into()));
-        assert_eq!(args.iter().find(|a| a.starts_with("ControlPath=")), Some(&crate::boxlink::control_path().unwrap()));
-    }
-
-    #[test]
-    fn remote_executable_is_one_shell_word() {
-        assert_eq!(binary_command("~/a'b/sill").unwrap(), "\"$HOME\"/'a'\\''b/sill'");
-        assert_eq!(binary_command("/tmp/a; touch /tmp/no").unwrap(), "'/tmp/a; touch /tmp/no'");
-        assert!(ssh_base("-oProxyCommand=bad").is_err());
-        assert!(ssh_base("host\ncommand").is_err());
-        assert!(validate_name("local").is_err());
-    }
-    #[test]
-    fn closing_pipe_input_preserves_the_response_direction() {
-        use std::io::{Read, Write};
-        use std::sync::{Arc, Mutex};
-        let mut child =
-            Command::new("/bin/sh").args(["-c", "cat; printf done"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
-        let input = Arc::new(Mutex::new(child.stdin.take()));
-        let mut writer = PipeInput(input.clone());
-        writer.write_all(b"request").unwrap();
-        input.lock().unwrap().take(); // the RawStream shutdown_write callback
-        let mut output = String::new();
-        child.stdout.take().unwrap().read_to_string(&mut output).unwrap();
-        assert_eq!(output, "requestdone");
-        assert_eq!(writer.write(b"late").unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
-        assert!(child.wait().unwrap().success());
-    }
-}
-
 /// An unframed byte connection, used for terminals and ports after its one-time token line.
 /// Keep this value alive while its halves are used; `interrupt` closes both directions.
 pub struct RawStream {
@@ -336,4 +287,53 @@ pub fn open_stream(token: &str) -> Result<RawStream> {
         return Err(error).context("opening the daemon stream");
     }
     Ok(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn a_box_is_named_after_its_host() {
+        assert_eq!(default_name("matti@192.168.1.50"), "192.168.1.50");
+        assert_eq!(default_name("my-server"), "my-server");
+        assert_eq!(default_name("ssh://me@host.example:2222"), "host.example-2222");
+        assert_eq!(default_name("me@fe80::1"), "fe80--1");
+        assert_eq!(default_name("local"), "box");
+        for host in ["matti@192.168.1.50", "ssh://me@host.example:2222", "me@fe80::1", "local"] {
+            validate_name(&default_name(host)).unwrap();
+        }
+    }
+    #[test]
+    fn session_connections_ride_the_shared_connection_and_never_prompt() {
+        let args = ssh_base("example.test").unwrap().get_args().map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert!(args.contains(&"BatchMode=yes".into()));
+        assert!(args.contains(&"ControlMaster=no".into()), "only boxlink starts a master");
+        assert!(args.contains(&"ConnectTimeout=10".into()));
+        assert_eq!(args.iter().find(|a| a.starts_with("ControlPath=")), Some(&crate::boxlink::control_path().unwrap()));
+    }
+
+    #[test]
+    fn remote_executable_is_one_shell_word() {
+        assert_eq!(binary_command("~/a'b/sill").unwrap(), "\"$HOME\"/'a'\\''b/sill'");
+        assert_eq!(binary_command("/tmp/a; touch /tmp/no").unwrap(), "'/tmp/a; touch /tmp/no'");
+        assert!(ssh_base("-oProxyCommand=bad").is_err());
+        assert!(ssh_base("host\ncommand").is_err());
+        assert!(validate_name("local").is_err());
+    }
+    #[test]
+    fn closing_pipe_input_preserves_the_response_direction() {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, Mutex};
+        let mut child =
+            Command::new("/bin/sh").args(["-c", "cat; printf done"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let input = Arc::new(Mutex::new(child.stdin.take()));
+        let mut writer = PipeInput(input.clone());
+        writer.write_all(b"request").unwrap();
+        input.lock().unwrap().take(); // the RawStream shutdown_write callback
+        let mut output = String::new();
+        child.stdout.take().unwrap().read_to_string(&mut output).unwrap();
+        assert_eq!(output, "requestdone");
+        assert_eq!(writer.write(b"late").unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+        assert!(child.wait().unwrap().success());
+    }
 }

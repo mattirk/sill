@@ -410,10 +410,10 @@ pub(super) fn frontend_gate(hub: &Hub, conn: &super::Conn, method: &str, params:
 }
 fn session_uses_modes(hub: &Hub, id: &str) -> Result<bool> {
     let Some(row) = hub.with_store(|store| store.session_exact(id))? else { return Ok(false) };
-    if sill_core::session::is_running(id) {
-        if let Some(launch) = sill_core::session::policy_snapshot(id)? {
-            return Ok(launch.policy.permissions.uses_modes());
-        }
+    if sill_core::session::is_running(id)
+        && let Some(launch) = sill_core::session::policy_snapshot(id)?
+    {
+        return Ok(launch.policy.permissions.uses_modes());
     }
     let (pins, workspace) = hub.with_store(|store| Ok((store.jail_pins(id)?, store.workspace_mask(id)?)))?;
     Ok(sill_core::session::next_build(&row, &sill_core::changes::home()?, &pins, &workspace)?.policy.permissions.uses_modes())
@@ -976,7 +976,7 @@ fn denied(hub: &Hub, a: api::DeniedList) -> Result<api::NetworkDenied> {
             }
         }
     }
-    let row = hub.with_store(|s| Ok(s.session_exact(&a.session_id)?.ok_or_else(|| domain("not_found", "session not found"))?))?;
+    let row = hub.with_store(|s| s.session_exact(&a.session_id)?.ok_or_else(|| domain("not_found", "session not found")))?;
     let home = sill_core::changes::home()?;
     let quiet = sill_core::policy::Policy::load(&row.policy, &home).map(|p| p.network.quiet).unwrap_or_else(|_| sill_core::policy::quiet_default());
     for host in quiet.into_iter().chain(sill_core::config::load().network_quiet_hosts) {

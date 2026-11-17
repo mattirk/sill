@@ -78,14 +78,14 @@ fn copy_entry(src: &Path, dst: &Path, how: How, itself: &Path) -> Result<()> {
         let dir = File::open(dst)?;
         dir.set_times(times(&md)?)?;
         dir.set_permissions(Permissions::from_mode(md.permissions().mode()))?;
-    } else if kind.is_file() {
-        if let Err(error) = file(src, dst, &md, how) {
-            // Never leave an empty or partially copied artifact for the build tool to use.
-            if dst.exists() {
-                std::fs::remove_file(dst).context("remove incomplete seed file")?;
-            }
-            return Err(error.context(format!("copy {}", src.display())));
+    } else if kind.is_file()
+        && let Err(error) = file(src, dst, &md, how)
+    {
+        // Never leave an empty or partially copied artifact for the build tool to use.
+        if dst.exists() {
+            std::fs::remove_file(dst).context("remove incomplete seed file")?;
         }
+        return Err(error.context(format!("copy {}", src.display())));
     }
     Ok(())
 }

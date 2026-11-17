@@ -240,7 +240,7 @@ pub(super) fn decode_limited(text: &str, max: usize) -> Result<Vec<u8>> {
     if text.len() > max.div_ceil(3) * 4 {
         return Err(too_large());
     }
-    if text.len() % 4 != 0 {
+    if !text.len().is_multiple_of(4) {
         return Err(Error::invalid_params("base64 must use canonical padding").into());
     }
     let value = |b: u8| -> Result<u8> {
@@ -254,9 +254,9 @@ pub(super) fn decode_limited(text: &str, max: usize) -> Result<Vec<u8>> {
         }
     };
     let mut out = Vec::with_capacity(text.len() / 4 * 3);
-    let groups = text.as_bytes().chunks_exact(4);
+    let groups = text.as_bytes().as_chunks::<4>().0;
     let count = groups.len();
-    for (i, c) in groups.enumerate() {
+    for (i, c) in groups.iter().enumerate() {
         let a = value(c[0])?;
         let b = value(c[1])?;
         out.push((a << 2) | (b >> 4));

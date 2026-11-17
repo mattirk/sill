@@ -152,7 +152,7 @@ pub(crate) fn settle_task(app: &mut App, task: Task<Message>) {
 
 fn type_text(app: &mut App, text: &str) {
     use iced::widget::text_editor::{Action, Edit};
-    let _ = app.update(in_session(&app, session::Event::Prompt(Action::Edit(Edit::Paste(Arc::new(text.to_string()))))));
+    let _ = app.update(in_session(app, session::Event::Prompt(Action::Edit(Edit::Paste(Arc::new(text.to_string()))))));
 }
 
 fn demo_view(app: &App) -> &SessionView {
@@ -2889,9 +2889,11 @@ fn configured_shortcuts_intercept_inputs_and_release_old_bindings() {
 #[test]
 fn policy_errors_remain_visible_with_the_group_collapsed() {
     let (mut app, _) = App::new(true, None);
-    let mut page = crate::settings_ui::SettingsPage::default();
-    page.snapshot = Some(Ok(sill_client::settings::Snapshot::default()));
-    page.category = crate::settings_ui::Category::AgentBehaviour;
+    let mut page = crate::settings_ui::SettingsPage {
+        snapshot: Some(Ok(sill_client::settings::Snapshot::default())),
+        category: crate::settings_ui::Category::AgentBehaviour,
+        ..Default::default()
+    };
     page.policies.status = "Policy validation failed: invalid TOML".into();
     let view = app.settings_view(&page);
     let mut ui = iced_test::Simulator::with_size(crate::snapshots::settings(), (720.0, 5000.0), view);

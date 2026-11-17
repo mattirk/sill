@@ -32,6 +32,7 @@ pub struct Editor {
     pub error: Option<String>,
 }
 
+#[expect(clippy::large_enum_variant, reason = "a window message: made once, handled once, never kept in bulk")]
 #[derive(Debug, Clone)]
 pub enum Event {
     Scoped(String, Box<Event>),
@@ -351,7 +352,7 @@ pub fn render(original: &Attachment, picture: &Picture, strokes: &[Stroke]) -> R
         }
     }
     let mut rgba = picture.rgba.as_ref().clone();
-    for (pixel, marker) in rgba.chunks_exact_mut(4).zip(marks.data().chunks_exact(4)) {
+    for (pixel, marker) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(marks.data().as_chunks::<4>().0) {
         let alpha = marker[3] as f32 / 255.0;
         if alpha == 0.0 {
             continue;

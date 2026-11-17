@@ -76,6 +76,7 @@ pub fn intercept_shortcuts<'a>(content: impl Into<Element<'a, Message>>) -> Elem
     wrapper.into()
 }
 
+#[cfg(test)]
 pub fn configured_shortcuts<'a>(content: impl Into<Element<'a, Message>>, bindings: &'a crate::shortcuts::Bindings) -> Element<'a, Message> {
     window_shortcuts(content, bindings, false, false)
 }

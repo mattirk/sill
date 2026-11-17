@@ -82,10 +82,10 @@ impl LimitInputs {
         };
         let context = parse(&self.context)?;
         let output = parse(&self.output)?;
-        if let (Some(context), Some(output)) = (context, output) {
-            if output >= context {
-                return Err("Output must be smaller than context.");
-            }
+        if let (Some(context), Some(output)) = (context, output)
+            && output >= context
+        {
+            return Err("Output must be smaller than context.");
         }
         Ok(api::ModelLimits { context, output })
     }

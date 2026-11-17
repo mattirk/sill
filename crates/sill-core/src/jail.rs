@@ -921,7 +921,7 @@ impl JailSpec {
         let read_only: Vec<PathBuf> = binds.iter().filter(|(_, ro)| **ro).map(|(p, _)| p.clone()).collect();
         let mut fds = Vec::new();
         let mut again = Vec::new();
-        for (path, _) in &binds {
+        for path in binds.keys() {
             let b = home_of(path).expect("a path inside a bound folder");
             // binding a folder again shows the host's own tree below it: never over sill's own
             // tree in a host path's place, a workspace or another agent's files

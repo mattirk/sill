@@ -903,6 +903,7 @@ fn summary(r: &Row, m: &flow::Mirror) -> Result<(api::Summary, Vec<api::FileChan
 }
 
 /// A workspace after one look (`detail`).
+#[expect(clippy::large_enum_variant, reason = "a return value, matched once where it is made")]
 enum Settled {
     /// Its session had ended with nothing left: the folder is gone.
     Freed,

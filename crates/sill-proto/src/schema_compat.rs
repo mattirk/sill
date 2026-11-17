@@ -304,7 +304,9 @@ mod tests {
 
     #[test]
     fn removals_retypes_and_new_requirements_break() {
-        let cases: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+        /// One edit to a schema.
+        type Edit = Box<dyn Fn(&mut Value)>;
+        let cases: Vec<(&str, Edit)> = vec![
             (
                 "field removed",
                 Box::new(|d| {

@@ -338,10 +338,10 @@ mod tests {
         let dir = shared.join(format!("sill-mac-procs-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // outside every shared folder: refused
-        let refused = super::handle("s1", &json!({"run":{"argv":["/bin/echo","x"],"cwd":"/"}}), &[dir.clone()]);
+        let refused = super::handle("s1", &json!({"run":{"argv":["/bin/echo","x"],"cwd":"/"}}), std::slice::from_ref(&dir));
         assert!(refused.unwrap_err().contains("not inside a folder shared"));
         // a quick one: its output and its end
-        let done = super::handle("s1", &json!({"run":{"argv":["/bin/echo","hello from the Mac"],"cwd":dir}}), &[dir.clone()]).unwrap();
+        let done = super::handle("s1", &json!({"run":{"argv":["/bin/echo","hello from the Mac"],"cwd":dir}}), std::slice::from_ref(&dir)).unwrap();
         let name = done["name"].as_str().unwrap().to_string();
         std::thread::sleep(std::time::Duration::from_millis(300));
         let out = super::handle("s1", &json!({"output": name}), &[]).unwrap();
@@ -351,7 +351,7 @@ mod tests {
         // another session sees nothing of it
         assert!(super::handle("s2", &json!({"output": name}), &[]).is_err());
         // a long one with a child: stopping takes the group
-        let long = super::handle("s1", &json!({"run":{"argv":["/bin/sh","-c","sleep 60 & sleep 60"],"cwd":dir}}), &[dir.clone()]).unwrap();
+        let long = super::handle("s1", &json!({"run":{"argv":["/bin/sh","-c","sleep 60 & sleep 60"],"cwd":dir}}), std::slice::from_ref(&dir)).unwrap();
         let long = long["name"].as_str().unwrap().to_string();
         std::thread::sleep(std::time::Duration::from_millis(200));
         let stopped = super::handle("s1", &json!({"stop": long}), &[]).unwrap();
@@ -360,7 +360,7 @@ mod tests {
         // it answers to macOS for itself, not as the process that started it (Sill's consents)
         let check = "import ctypes,os;print(ctypes.CDLL(None).responsibility_get_pid_responsible_for_pid(os.getpid())==os.getpid())";
         if std::path::Path::new("/usr/bin/python3").exists() {
-            let own = super::handle("s1", &json!({"run":{"argv":["/usr/bin/python3","-c",check],"cwd":dir}}), &[dir.clone()]).unwrap();
+            let own = super::handle("s1", &json!({"run":{"argv":["/usr/bin/python3","-c",check],"cwd":dir}}), std::slice::from_ref(&dir)).unwrap();
             for _ in 0..50 {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 let out = super::handle("s1", &json!({"output": own["name"]}), &[]).unwrap();
@@ -373,14 +373,14 @@ mod tests {
         // what a program leaves in the background ends with it
         let pidfile = dir.join("background.pid");
         let script = format!("sleep 60 & echo $! > {}", pidfile.display());
-        super::handle("s1", &json!({"run":{"argv":["/bin/sh","-c",script],"cwd":dir}}), &[dir.clone()]).unwrap();
+        super::handle("s1", &json!({"run":{"argv":["/bin/sh","-c",script],"cwd":dir}}), std::slice::from_ref(&dir)).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(500));
         let background: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
         // SAFETY: signal 0 only asks whether the process exists
         assert_eq!(unsafe { libc::kill(background, 0) }, -1, "the background child is gone");
         // the VM shut down or Sill quitting: every session's programs, together
-        let a = super::handle("s1", &json!({"run":{"argv":["/bin/sleep","60"],"cwd":dir}}), &[dir.clone()]).unwrap();
-        let b = super::handle("s3", &json!({"run":{"argv":["/bin/sleep","60"],"cwd":dir}}), &[dir.clone()]).unwrap();
+        let a = super::handle("s1", &json!({"run":{"argv":["/bin/sleep","60"],"cwd":dir}}), std::slice::from_ref(&dir)).unwrap();
+        let b = super::handle("s3", &json!({"run":{"argv":["/bin/sleep","60"],"cwd":dir}}), std::slice::from_ref(&dir)).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
         let started = std::time::Instant::now();
         super::stop_all();

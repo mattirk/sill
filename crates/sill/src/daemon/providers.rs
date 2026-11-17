@@ -73,15 +73,15 @@ pub fn handle(conn: &super::Conn, m: &str, p: Value) -> Option<Result<Value>> {
                 let saved = core::load(&home)?;
                 // An old frontend cannot edit limits, so leaving them out must not erase them:
                 // they stay with the models it kept, at the address they were measured for.
-                if !conn.has_capability(api::LIMITS_CAPABILITY) {
-                    if let Some(saved) = saved.get(&a.provider.id).filter(|saved| saved.base_url == a.provider.base_url) {
-                        a.provider.model_limits = saved
-                            .model_limits
-                            .iter()
-                            .filter(|(model, _)| a.provider.models.contains(model))
-                            .map(|(model, limits)| (model.clone(), limits.clone()))
-                            .collect();
-                    }
+                if !conn.has_capability(api::LIMITS_CAPABILITY)
+                    && let Some(saved) = saved.get(&a.provider.id).filter(|saved| saved.base_url == a.provider.base_url)
+                {
+                    a.provider.model_limits = saved
+                        .model_limits
+                        .iter()
+                        .filter(|(model, _)| a.provider.models.contains(model))
+                        .map(|(model, limits)| (model.clone(), limits.clone()))
+                        .collect();
                 }
                 if saved.len() >= 64 && !saved.contains_key(&a.provider.id) {
                     return Err(Error::domain("limit_exceeded", "at most 64 model providers").into());

@@ -1104,10 +1104,10 @@ fn is_delegation(name: Option<&str>, title: &str, input: Option<&serde_json::Val
     if matches!(name.as_str(), "task" | "agent" | "subagent" | "spawn_agent" | "spawnagent" | "delegate" | "run_agent") || name.contains("subagent") {
         return true;
     }
-    if let Some(serde_json::Value::Object(m)) = input {
-        if m.contains_key("subagent_type") || m.contains_key("agent_type") || (m.contains_key("prompt") && m.contains_key("description")) {
-            return true;
-        }
+    if let Some(serde_json::Value::Object(m)) = input
+        && (m.contains_key("subagent_type") || m.contains_key("agent_type") || (m.contains_key("prompt") && m.contains_key("description")))
+    {
+        return true;
     }
     let t = title.to_lowercase();
     matches!(t.as_str(), "spawnagent" | "spawn_agent")
@@ -1153,7 +1153,7 @@ fn tool_detail(input: Option<&serde_json::Value>, content: Option<&[ToolCallCont
     fn clip(s: String) -> String {
         if s.chars().count() > LIMIT {
             let mut t: String = s.chars().take(LIMIT).collect();
-            t.push_str("…");
+            t.push('…');
             t
         } else {
             s

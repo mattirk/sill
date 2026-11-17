@@ -715,11 +715,11 @@ mod tests {
                     if o.get("additionalProperties") == Some(&Value::Bool(false)) {
                         closed.push(at.to_string());
                     }
-                    if let Some(name) = o.get("$ref").and_then(Value::as_str).and_then(|r| r.strip_prefix("#/$defs/")) {
-                        if !seen.iter().any(|s| s == name) {
-                            seen.push(name.to_string());
-                            walk(&defs[name], defs, seen, closed, name);
-                        }
+                    if let Some(name) = o.get("$ref").and_then(Value::as_str).and_then(|r| r.strip_prefix("#/$defs/"))
+                        && !seen.iter().any(|s| s == name)
+                    {
+                        seen.push(name.to_string());
+                        walk(&defs[name], defs, seen, closed, name);
                     }
                     for v in o.values() {
                         walk(v, defs, seen, closed, at);

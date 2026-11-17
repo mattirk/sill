@@ -138,11 +138,11 @@ impl AdapterState {
                 }
                 _ => {
                     next.activity = "unknown".into();
-                    if let Some(turn) = self.turn.as_mut() {
-                        if turn.activity != "unknown" {
-                            turn.activity = "unknown".into();
-                            out.push(sfp::Event::TurnUpdated { turn: turn.clone() });
-                        }
+                    if let Some(turn) = self.turn.as_mut()
+                        && turn.activity != "unknown"
+                    {
+                        turn.activity = "unknown".into();
+                        out.push(sfp::Event::TurnUpdated { turn: turn.clone() });
                     }
                 }
             }
@@ -369,6 +369,7 @@ impl AdapterState {
             });
         }
     }
+    #[expect(clippy::too_many_arguments, reason = "the fields of one ACP permission request, beside the state they change")]
     pub(super) fn v2_permission(
         &mut self,
         next: &mut sfp::SessionState,

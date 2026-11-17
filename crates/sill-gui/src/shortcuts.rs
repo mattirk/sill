@@ -28,7 +28,7 @@ pub const ACTIONS: &[(&str, &str, &str)] = &[
     ("find", "Find", "Ctrl+F"),
 ];
 pub type Bindings = std::collections::BTreeMap<String, String>;
-pub fn value<'a>(bindings: &'a Bindings, index: usize) -> &'a str {
+pub fn value(bindings: &Bindings, index: usize) -> &str {
     bindings.get(ACTIONS[index].0).map(String::as_str).unwrap_or(ACTIONS[index].2)
 }
 #[derive(Debug, PartialEq, Eq)]

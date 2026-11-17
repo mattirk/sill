@@ -411,7 +411,7 @@ impl AdapterState {
                     let mut said = format!("The agent stopped: {error}");
                     let tail = agent_stderr_tail(&session.session_id);
                     if !tail.is_empty() {
-                        said.push_str("\n");
+                        said.push('\n');
                         said.push_str(&tail);
                     }
                     let mut content = sfp::Content::text(said);
@@ -624,6 +624,31 @@ pub(crate) fn session_controls(controls: &acp::Controls) -> sfp::SessionControls
     }
 }
 
+/// The last lines the session's agent wrote to its stderr: the shim puts them in the session's
+/// journal as `agent[PID]: …` (sill-shim). Empty where there is no journal to read.
+fn agent_stderr_tail(session_id: &str) -> String {
+    const LINES: usize = 8;
+    if session_id.is_empty() || !session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return String::new();
+    }
+    let Ok(out) = std::process::Command::new("journalctl")
+        .args(["--user", "--no-pager", "-q", "-o", "cat", "-n", "200", "-t"])
+        .arg(format!("sill-{session_id}"))
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return String::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("agent[").and_then(|r| r.split_once("]: ")).map(|(_, rest)| rest))
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    lines[lines.len().saturating_sub(LINES)..].join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -758,7 +783,7 @@ mod tests {
         let block = &created(&events).content[0];
         assert_eq!(block.kind, "image");
         assert_eq!(block.extra["mime"], "image/webp");
-        assert!(block.extra.get("data").is_none() && block.extra.contains_key("upload_id"));
+        assert!(!block.extra.contains_key("data") && block.extra.contains_key("upload_id"));
         assert_eq!(adapter.take_media()[0].bytes, b"abc");
     }
     #[test]
@@ -896,29 +921,4 @@ mod tests {
         adapter.project(&session, &relay::Event::TurnStarted, None);
         assert!(matches!(adapter.project(&session, &relay::Event::Text("new text".into()), None)[0], sfp::Event::ItemCreated { .. }));
     }
-}
-
-/// The last lines the session's agent wrote to its stderr: the shim puts them in the session's
-/// journal as `agent[PID]: …` (sill-shim). Empty where there is no journal to read.
-fn agent_stderr_tail(session_id: &str) -> String {
-    const LINES: usize = 8;
-    if session_id.is_empty() || !session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-        return String::new();
-    }
-    let Ok(out) = std::process::Command::new("journalctl")
-        .args(["--user", "--no-pager", "-q", "-o", "cat", "-n", "200", "-t"])
-        .arg(format!("sill-{session_id}"))
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-    else {
-        return String::new();
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let lines: Vec<&str> = text
-        .lines()
-        .filter_map(|l| l.strip_prefix("agent[").and_then(|r| r.split_once("]: ")).map(|(_, rest)| rest))
-        .filter(|l| !l.trim().is_empty())
-        .collect();
-    lines[lines.len().saturating_sub(LINES)..].join("\n")
 }
