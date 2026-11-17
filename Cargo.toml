@@ -5,7 +5,7 @@ members = ["crates/sill-core", "crates/sill-memory", "crates/sill-proto", "crate
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
 repository = "https://github.com/mattirk/sill"
 license = "Apache-2.0"
