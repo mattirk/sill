@@ -1049,7 +1049,7 @@ fn jail_cmd(cmd: JailCmd) -> Result<()> {
             let mut spec = build_spec(a.jail, a.command)?;
             let _seccomp = seccomp_fd(&mut spec)?; // inherited by the exec below
             let plan = spec.plan()?;
-            for w in &plan.warnings {
+            for w in plan.warnings.iter().chain(&spec.live_sockets(&plan)) {
                 eprintln!("sill: warning: {w}");
             }
             jail::prepare(&plan)?;
@@ -1352,7 +1352,7 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
     };
     let seccomp = seccomp_fd(&mut spec)?;
     let plan = spec.plan()?;
-    for w in &plan.warnings {
+    for w in plan.warnings.iter().chain(&spec.live_sockets(&plan)) {
         eprintln!("sill launch: warning: {w}");
     }
     jail::prepare(&plan)?;

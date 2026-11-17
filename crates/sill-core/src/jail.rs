@@ -75,6 +75,10 @@ pub const BRIDGE_SOCKET: &str = "host.sock";
 /// Under [`BRIDGE_DIR`]: the session's host processes for the jail's `sill-proc` (`processes.json`
 /// and `<id>.log`), kept after revocation; and `view/`, the pictures Host control's `view` took.
 pub const BRIDGE_HOST_DIR: &str = "host";
+/// How many directory entries a launch looks at for sockets in its live folders, and how many of
+/// the sockets found its warning names ([`JailSpec::live_sockets`]).
+const SOCKET_SEARCH: usize = 50_000;
+const SOCKETS_NAMED: usize = 8;
 /// Loopback port the shim forwards to the proxy socket.
 pub const PROXY_PORT: u16 = 3128;
 
@@ -158,6 +162,9 @@ pub struct JailPlan {
     pub expanded: Vec<PathBuf>,
     pub masked: Vec<PathBuf>,
     pub direct: Vec<PathBuf>,
+    /// The host's own trees bound as they are: pins and the policy's `direct` and `ro` paths.
+    /// What listens on a socket in one is reachable from the jail ([`JailSpec::live_sockets`]).
+    pub live: Vec<PathBuf>,
     pub warnings: Vec<String>,
 }
 
@@ -297,9 +304,13 @@ pub fn layout(policy: &Policy, home: &Path, state_dir: &Path, mounts: &[Mount], 
                         continue; // unreadable (e.g. root-only): absent in the jail
                     }
                     self.dir(&child);
-                } else {
+                } else if md.is_file() {
                     self.out.ro_binds.push(child);
                 }
+                // a socket, a FIFO or a device stays out: a bind is the host's own inode, so
+                // the jail could connect to the service listening there, past the network
+                // namespace (audit A11). In an overlay the same file is a dead name: the
+                // kernel finds a listener by the inode, and the overlay's is not the host's.
             }
         }
     }
@@ -447,6 +458,9 @@ impl JailSpec {
         }
         let ro_paths = paths.read_only.iter().map(|p| p.to_path()).collect::<Result<Vec<_>>>()?;
         let mut direct = self.lay_binds(&mut a, &paths, &ro_paths, &masked, &sill_own, &mut mount_fds)?;
+        let mut live: Vec<PathBuf> = paths.direct.iter().map(|p| p.to_path()).collect::<Result<_>>()?;
+        live.extend(ro_paths.iter().cloned());
+        live.extend(self.binds.iter().filter(|(host, inside)| host == inside).map(|(host, _)| host.clone()));
 
         if let Some(sock) = &self.proxy_socket {
             push(&mut a, &[&"--ro-bind", sock, &PROXY_SOCKET]);
@@ -476,7 +490,66 @@ impl JailSpec {
         }
         a.extend(self.command.iter().cloned());
 
-        Ok(JailPlan { argv: a, mount_fds, layers, expanded, masked: all_masked, direct, warnings })
+        Ok(JailPlan { argv: a, mount_fds, layers, expanded, masked: all_masked, direct, live, warnings })
+    }
+
+    /// A launch warning naming the host's sockets inside the plan's live folders, if it has any
+    /// (audit A11). A bind is the host's own inode, so the jail can connect to what listens
+    /// there whatever its network rules say; everywhere else the jail sees the host through an
+    /// overlay, where a socket is a dead name. Nothing is hidden or changed: the person pinned
+    /// the folder, this tells them what came with it.
+    ///
+    /// The search goes level by level and stops after [`SOCKET_SEARCH`] entries, so a launch
+    /// does not wait on a large tree: a socket deep in one can go unnamed, and one made after
+    /// the launch always does. Masked folders and a workspace's repository are not the host's
+    /// files in the jail and are left out.
+    pub fn live_sockets(&self, plan: &JailPlan) -> Option<String> {
+        let hidden = |p: &Path| plan.masked.iter().any(|m| p == m) || self.workspace_mask.iter().any(|(source, _, _)| p == source);
+        let mut found: Vec<PathBuf> = Vec::new();
+        let mut seen = 0usize;
+        let mut queue: std::collections::VecDeque<PathBuf> = Default::default();
+        let mut roots = plan.live.clone();
+        roots.sort();
+        roots.dedup();
+        for root in roots {
+            // a root inside another is found from there
+            if plan.live.iter().any(|other| *other != root && is_under(&root, other)) || hidden(&root) {
+                continue;
+            }
+            match root.symlink_metadata() {
+                Ok(md) if std::os::unix::fs::FileTypeExt::is_socket(&md.file_type()) => found.push(root),
+                Ok(md) if md.is_dir() => queue.push_back(root),
+                _ => {}
+            }
+        }
+        'search: while let Some(dir) = queue.pop_front() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for e in entries.filter_map(Result::ok) {
+                seen += 1;
+                if seen > SOCKET_SEARCH {
+                    break 'search;
+                }
+                // the entry's own type, from the directory: no link is followed
+                let Ok(kind) = e.file_type() else { continue };
+                if std::os::unix::fs::FileTypeExt::is_socket(&kind) {
+                    found.push(e.path());
+                } else if kind.is_dir() && !hidden(&e.path()) {
+                    queue.push_back(e.path());
+                }
+            }
+        }
+        if found.is_empty() {
+            return None;
+        }
+        found.sort();
+        let shown = found.iter().take(SOCKETS_NAMED).map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
+        let more = found.len().saturating_sub(SOCKETS_NAMED);
+        Some(format!(
+            "{} in a pinned folder or a `direct`/`ro` path: the agent can connect to whatever listens there, past the network rules: {shown}{}{}",
+            if found.len() == 1 { "a host socket lies" } else { "host sockets lie" },
+            if more > 0 { format!(" and {more} more") } else { String::new() },
+            if seen > SOCKET_SEARCH { format!(" (the search stopped after {SOCKET_SEARCH} entries)") } else { String::new() },
+        ))
     }
 
     /// The upper trees must not be reachable through a layer of the jail they belong to.
@@ -1000,6 +1073,55 @@ mod tests {
         s.mounts = vec![Mount {mount_point:dir.join("a/b"),fstype:"ext4".into(),source:"test".into(),device:String::new(),root:"/".into()}];
         assert!(s.plan().unwrap_err().to_string().contains("overlay state name collision"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Audit A11: beside a mount point every plain file is bound one by one, and a bound socket
+    /// is the host's listener itself.
+    #[test]
+    fn a_host_socket_beside_a_mount_point_is_not_bound() {
+        let tree = TempTree::new();
+        let dir = &tree.0;
+        std::fs::create_dir_all(dir.join("mounted")).unwrap();
+        std::fs::write(dir.join("plain"), "").unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(dir.join("service.sock")).unwrap();
+        rustix::fs::mknodat(rustix::fs::CWD, dir.join("pipe"), rustix::fs::FileType::Fifo, rustix::fs::Mode::from_raw_mode(0o600), 0).unwrap();
+        let mut s = spec();
+        s.root_entries = vec![RootEntry { name: dir.strip_prefix("/").unwrap().as_os_str().to_os_string(), symlink: None, is_dir: true, readable: true }];
+        s.mounts = vec![Mount { mount_point: dir.join("mounted"), fstype: "ext4".into(), source: "test".into(), device: String::new(), root: "/".into() }];
+        let plan = s.plan().unwrap();
+        assert!(plan.expanded.contains(dir), "{:?}", plan.expanded);
+        let bound = |name: &str| plan.argv.windows(3).filter(|w| w[0] == "--ro-bind" && w[1] == dir.join(name)).count();
+        assert_eq!(bound("plain"), 2, "the jail and the host view");
+        assert_eq!(bound("service.sock"), 0);
+        assert_eq!(bound("pipe"), 0);
+        assert!(!plan.argv.iter().any(|a| Path::new(a).ends_with("service.sock") || Path::new(a).ends_with("pipe")));
+    }
+
+    /// Audit A11: a pin is a bind, so a socket in it is the host's listener.
+    #[test]
+    fn a_launch_names_the_host_sockets_in_its_pins() {
+        let tree = TempTree::new();
+        let pin = tree.0.join("pin");
+        let other = tree.0.join("other");
+        for d in [pin.join("deep/er"), pin.join("secret"), pin.join("repo"), other.clone()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let listen = |p: PathBuf| std::os::unix::net::UnixListener::bind(p).unwrap();
+        let mut s = spec();
+        s.binds.push((pin.clone(), pin.clone()));
+        assert_eq!(s.live_sockets(&s.plan().unwrap()), None, "no socket, no warning");
+
+        let _held = [listen(pin.join("deep/er/agent.sock")), listen(pin.join("secret/hidden.sock")), listen(pin.join("repo/clone.sock")), listen(other.join("unpinned.sock"))];
+        std::os::unix::fs::symlink(&other, pin.join("link")).unwrap();
+        s.masks.push(pin.join("secret"));
+        s.workspace_mask.push((pin.join("repo"), tree.0.join("clone"), pin.join("repo/.git/objects")));
+        std::fs::create_dir_all(pin.join("repo/.git/objects")).unwrap();
+        std::fs::create_dir_all(tree.0.join("clone")).unwrap();
+        let w = s.live_sockets(&s.plan().unwrap()).unwrap();
+        assert!(w.starts_with("a host socket lies") && w.ends_with(&format!(": {}", pin.join("deep/er/agent.sock").display())), "{w}");
+        for absent in ["hidden.sock", "clone.sock", "unpinned.sock", "stopped"] {
+            assert!(!w.contains(absent), "{w}");
+        }
     }
 
     #[test]
