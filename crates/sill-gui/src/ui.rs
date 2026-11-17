@@ -1288,6 +1288,9 @@ impl App {
             .push(responsive(move |size| crate::permissions::panel(view, session, size.width < crate::permissions::NARROW)).height(Shrink))
             .push(crate::processes::panel(view))
             .push(self.network_prompt(view));
+        if let Some(subagents) = crate::subagents::panel(view) {
+            composer = composer.push(subagents);
+        }
         if !view.attachments.is_empty() {
             let mut strip = row![].spacing(6).align_y(Alignment::Center);
             for (index, attachment) in view.attachments.iter().enumerate() {
@@ -2319,6 +2322,8 @@ pub(crate) fn one_line(text: &str, max: usize) -> String {
 /// The spinner's size and stroke, and its arc: one turn a second.
 const SPIN_SIZE: f32 = 15.0;
 const SPIN_LINE: f32 = 2.0;
+const SMALL_SPIN_SIZE: f32 = 11.0;
+const SMALL_SPIN_LINE: f32 = 1.5;
 const SPIN_ARC: f32 = 1.3 * std::f32::consts::PI / 2.0;
 /// The gap between the clock and the spinner, and how long the clock takes to slide out.
 const CLOCK_GAP: f32 = 8.0;
@@ -2353,6 +2358,11 @@ pub(crate) fn spinner<'a>(color: Color) -> Element<'a, Message> {
     activity_canvas(Indicator::Spinner(color), None)
 }
 
+/// The spinner a little smaller, for a row of a list (a running subagent's).
+pub(crate) fn small_spinner<'a>(color: Color) -> Element<'a, Message> {
+    canvas(Busy { indicator: Indicator::Spinner(color), clock: None, size: SMALL_SPIN_SIZE, line: SMALL_SPIN_LINE }).width(SMALL_SPIN_SIZE).height(16).into()
+}
+
 /// A status dot the size of the spinner.
 pub(crate) fn dot<'a>(color: Color) -> Element<'a, Message> {
     activity_canvas(Indicator::Dot(color), None)
@@ -2361,7 +2371,7 @@ pub(crate) fn dot<'a>(color: Color) -> Element<'a, Message> {
 /// The activity: its indicator, with the timer beside it when shown.
 fn activity_canvas<'a>(indicator: Indicator, clock: Option<Clock>) -> Element<'a, Message> {
     let width = clock.map_or(SPIN_SIZE, |c| c.width + CLOCK_GAP + SPIN_SIZE);
-    canvas(Busy { indicator, clock }).width(width).height(22).into()
+    canvas(Busy { indicator, clock, size: SPIN_SIZE, line: SPIN_LINE }).width(width).height(22).into()
 }
 
 /// Drawn every frame from the clock's time, so it turns smoothly without the window building a
@@ -2369,6 +2379,9 @@ fn activity_canvas<'a>(indicator: Indicator, clock: Option<Clock>) -> Element<'a
 struct Busy {
     indicator: Indicator,
     clock: Option<Clock>,
+    /// The spinner's diameter and its stroke.
+    size: f32,
+    line: f32,
 }
 
 impl Busy {
@@ -2395,9 +2408,9 @@ impl canvas::Program<Message> for Busy {
     fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: iced::mouse::Cursor) -> Vec<canvas::Geometry> {
         let now = Instant::now();
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let center = iced::Point::new(bounds.width - SPIN_SIZE / 2.0, bounds.height / 2.0);
-        let radius = SPIN_SIZE / 2.0 - SPIN_LINE;
-        let stroke = |color: Color| canvas::Stroke::default().with_width(SPIN_LINE).with_color(color).with_line_cap(canvas::LineCap::Round);
+        let center = iced::Point::new(bounds.width - self.size / 2.0, bounds.height / 2.0);
+        let radius = self.size / 2.0 - self.line;
+        let stroke = |color: Color| canvas::Stroke::default().with_width(self.line).with_color(color).with_line_cap(canvas::LineCap::Round);
         match self.indicator {
             Indicator::Spinner(color) => {
                 frame.stroke(&canvas::Path::circle(center, radius), stroke(alpha(color, 0.18)));

@@ -65,6 +65,7 @@ mod shortcuts;
 mod snapshots;
 mod start_ui;
 mod style;
+mod subagents;
 mod syntax;
 mod terminal;
 #[cfg(test)]

@@ -355,6 +355,45 @@ fn render_network() {
 }
 
 #[test]
+#[ignore = "writes the subagent list PNG for review"]
+fn render_subagents() {
+    use sill_proto::sfp::{Item, Tool};
+    let (mut app, _) = App::new(true, None);
+    for _ in 0..=demo::CHUNKS.len() {
+        let _ = app.update(crate::Message::DemoTick);
+    }
+    let conversation = &mut app.views.get_mut("demo").unwrap().conversation;
+    conversation.questions.clear();
+    let generation = conversation.session.as_ref().unwrap().agent_generation_id.clone();
+    let mut card = |id: &str, seq: u64, kind: &str, title: &str, status: &str, parent: Option<&str>| {
+        conversation.insert_item(Item {
+            item_id: id.into(),
+            created_seq: seq.to_string(),
+            turn_id: Some("demo-turn".into()),
+            submission_id: None,
+            agent_generation_id: generation.clone(),
+            kind: "tool".into(),
+            content: vec![],
+            tool: Some(Tool {
+                title: title.into(),
+                kind: kind.into(),
+                status: status.into(),
+                detail: String::new(),
+                diff: String::new(),
+                parent_item_id: parent.map(str::to_string),
+                command: None,
+            }),
+        });
+    };
+    card("sub-a", 900, "Delegate", "sub-agent · Review the proxy's allow-list", "InProgress", None);
+    card("sub-b", 901, "Delegate", "sub-agent · Find every caller of run_session", "InProgress", None);
+    card("sub-a1", 902, "Read", "Read crates/sill-core/src/proxy.rs", "Completed", Some("sub-a"));
+    card("sub-b1", 903, "Search", "grep -rn run_session crates", "InProgress", Some("sub-b"));
+    card("sub-c", 904, "Delegate", "sub-agent · Check the tests", "Pending", Some("sub-b"));
+    render(&app, "19-subagents");
+}
+
+#[test]
 #[ignore = "writes managed-process PNGs for review"]
 fn render_processes() {
     use crate::processes::Event;
