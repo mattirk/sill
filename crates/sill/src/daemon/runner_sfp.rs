@@ -132,7 +132,7 @@ impl Runner {
     pub(in crate::daemon) fn sfp_cancel_turn(&self, hub: &Hub, turn_id: &str) -> Result<()> {
         hub.with_store(|store| {
             let mut st = self.st.lock().unwrap();
-            if st.adapter.turn_id() != Some(turn_id) || !st.busy {
+            if st.adapter.turn_id() != Some(turn_id) || !st.working() {
                 return Err(Error::domain("invalid_state", "target turn is no longer active").into());
             }
             self.commit_command(store, &hub.home, &mut st, wire::Command::Cancel, &[])?;
@@ -1250,6 +1250,54 @@ mod tests {
         assert!(f.runner.sfp_project(&f.store, &mut st, &dump, 1).unwrap().is_empty());
         let failure = relay::Event::Other("set mode failed: internal error".into());
         assert_eq!(f.runner.sfp_project(&f.store, &mut st, &failure, 2).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_turn_the_agent_starts_itself_is_working_until_it_ends_and_takes_no_queued_purpose() {
+        let f = Fixture::new();
+        let j = Journal::new(&f.store).unwrap();
+        let mut st = f.runner.st.lock().unwrap();
+        f.runner.sfp_project(&f.store, &mut st, &relay::Event::Ready { session_id: "s".into(), resumed: false, controls: Default::default() }, 1).unwrap();
+        st.adapter.prompt_purpose(Some("commit".into()));
+        f.runner.sfp_project(&f.store, &mut st, &relay::Event::AgentTurn(acp::AgentTurn::Started), 2).unwrap();
+        let session = j.session(&f.runner.id).unwrap();
+        assert_eq!(session.activity, "working");
+        let turn = session.turn_id.clone().expect("an open turn");
+        assert!(st.adapter.agent_turn() && !st.busy, "the runner stays free for the person's prompt");
+        assert!(st.working(), "housekeeping and summaries see the agent at work");
+        f.runner.sfp_project(&f.store, &mut st, &relay::Event::Text("the task finished".into()), 3).unwrap();
+        let ended = f.runner.sfp_project(&f.store, &mut st, &relay::Event::AgentTurn(acp::AgentTurn::Ended), 4).unwrap();
+        let session = j.session(&f.runner.id).unwrap();
+        assert_eq!((session.activity.as_str(), session.turn_id.as_deref()), ("idle", None));
+        assert!(!st.adapter.agent_turn() && !st.working());
+        let ended = ended
+            .into_iter()
+            .filter_map(|e| match e.event {
+                p::Event::TurnUpdated { turn } => Some(turn),
+                _ => None,
+            })
+            .rfind(|t| t.turn_id == turn)
+            .unwrap();
+        assert_eq!((ended.outcome.as_str(), ended.purpose.as_deref()), ("completed", None));
+        f.runner.sfp_project(&f.store, &mut st, &relay::Event::TurnStarted, 5).unwrap();
+        assert_eq!(j.session(&f.runner.id).unwrap().activity, "working");
+        assert!(!st.adapter.agent_turn(), "a prompt's turn is not the agent's own");
+        f.runner.sfp_project(&f.store, &mut st, &relay::Event::Stopped(acp::StopReason::EndTurn), 6).unwrap();
+        // Stop on the agent's own turn ends it as cancelled; a prompt accepted meanwhile is untouched
+        f.runner.sfp_project(&f.store, &mut st, &relay::Event::AgentTurn(acp::AgentTurn::Started), 7).unwrap();
+        let (submission, _) = j.accept(&f.input(), "queued").unwrap();
+        f.runner.sfp_commit_submission(&f.store, &f.dir, &mut st, submission, &[]).unwrap();
+        let stopped = f.runner.sfp_project(&f.store, &mut st, &relay::Event::AgentTurn(acp::AgentTurn::Cancelled), 8).unwrap();
+        assert_eq!(j.submission(&f.runner.id, "submission").unwrap().outcome, "pending");
+        assert!(st.busy, "the prompt on its way keeps the runner busy");
+        st.busy = false;
+        let outcome = stopped.into_iter().find_map(|e| match e.event {
+            p::Event::TurnUpdated { turn } => Some(turn.outcome),
+            _ => None,
+        });
+        assert_eq!(outcome.as_deref(), Some("cancelled"));
+        assert!(!st.working());
+        assert_eq!(j.session(&f.runner.id).unwrap().activity, "idle");
     }
 
     #[test]

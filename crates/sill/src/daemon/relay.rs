@@ -35,7 +35,7 @@ const QUIT_PATIENCE: Duration = Duration::from_secs(10);
 /// daemon that finds a relay of another version after a deploy replaces it (`evict`) instead of
 /// leaving the session with a worker it cannot talk to (docs/daemon.md §3.9 item 1). Bump it with
 /// any change to those types; a change to the frontend protocol's `wire` types alone needs none.
-pub(crate) const RELAY_PROTOCOL: u32 = 3;
+pub(crate) const RELAY_PROTOCOL: u32 = 4;
 
 /// The relay answered but will not cooperate: another version, a cursor it no longer retains, an
 /// answer that is not a Hello. Not a transport failure — the socket answers — so the hub evicts it.
@@ -99,6 +99,8 @@ pub(crate) enum Event {
         reason: String,
     },
     TurnStarted,
+    /// A step of a turn the agent started with no prompt open (acp's [`acp::Event::AgentTurn`]).
+    AgentTurn(acp::AgentTurn),
     UserText(String),
     Text(String),
     Thought(String),
@@ -258,6 +260,7 @@ fn event_from_acp(event: acp::Event, request: u64) -> (Event, Option<Reply>) {
         A::Controls(c) => Event::Controls(c),
         A::ControlFailed { setting, reason } => Event::ControlFailed { setting, reason },
         A::TurnStarted => Event::TurnStarted,
+        A::AgentTurn(step) => Event::AgentTurn(step),
         A::UserText(t) => Event::UserText(t),
         A::Text(t) => Event::Text(t),
         A::Thought(t) => Event::Thought(t),

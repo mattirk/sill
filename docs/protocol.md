@@ -12,6 +12,19 @@ Since 2026-11-10 a tool item carries the shell command its agent declared
 The command travels from the agent through the relay, so the private relay protocol is now 3:
 the first daemon with it replaces each running session's relay, restarting that session's agent.
 
+Since 2026-11-17 a turn an agent starts itself, with no prompt open, is an ordinary turn with
+`purpose` null: the session is `working` until the agent says it is idle. The daemon treats it
+as work everywhere (idle timeout, auto-revert, jail rebuild, summaries), except that a prompt may
+join it. Stop sends the cancel and ends the turn at once as `cancelled`, since no prompt is open
+whose answer would end it; an agent that works on regardless is shown working again.
+ACP v2 says this in the protocol (`state_update`). ACP v1 does not, so the v1 loop reads the
+agent's own word where it has one, chosen by the name the agent gives at `initialize`:
+claude-agent-acp forwards Claude Code's `session_state_changed` messages when asked with session
+`_meta.claudeCode.emitRawSDKMessages`; codex-acp sends `_meta.codex.threadStatus` in
+`session_info_update`. An agent with neither is never shown working outside a prompt: sill does
+not guess from output or open tool calls. The relay carries the new event, so the private relay
+protocol is now 4.
+
 The 2026-11-07 agent-directory cutover changes `home_paths` to typed records and removes
 `state_dirs`, `seed_files` and `shared_files`. The development schema baseline is deliberately
 re-recorded with the daemon and clients updated together; it is not a stable-SFP compatibility

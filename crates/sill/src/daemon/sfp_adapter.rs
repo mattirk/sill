@@ -29,6 +29,8 @@ pub(crate) struct AdapterState {
     /// The purpose of the turn the next prompt starts (`sfp::Turn::purpose`), set when the runner
     /// queues that prompt and taken by the turn it starts.
     next_purpose: Option<String>,
+    /// `turn` is one the agent started itself (`relay::Event::AgentTurn`).
+    agent_turn: bool,
     /// Update kinds the ACP loop dumped instead of rendering, logged once each.
     unhandled: std::collections::BTreeSet<String>,
     /// Image bytes the last `project` referenced; the runner keeps them in the same transaction.
@@ -109,6 +111,10 @@ impl AdapterState {
     pub fn turn_id(&self) -> Option<&str> {
         self.turn.as_ref().map(|t| t.turn_id.as_str())
     }
+    /// The open turn is one the agent started itself, which the runner is not busy with.
+    pub fn agent_turn(&self) -> bool {
+        self.agent_turn && self.turn.is_some()
+    }
     pub fn take_media(&mut self) -> Vec<AgentMedia> {
         std::mem::take(&mut self.media)
     }
@@ -186,6 +192,7 @@ impl AdapterState {
                 self.thought_item = None;
                 self.plan_item = None;
                 self.subagent_items.clear();
+                self.agent_turn = false;
                 let turn = self.new_turn(if self.is_v2() { "unknown" } else { "working" });
                 next.turn_id = Some(turn.turn_id.clone());
                 next.activity = turn.activity.clone();
@@ -194,6 +201,46 @@ impl AdapterState {
                     self.v2.last_turn = Some(turn.turn_id.clone());
                 }
                 out.push(sfp::Event::TurnUpdated { turn });
+            }
+            // A turn the agent started itself, with no prompt open: working until it ends.
+            relay::Event::AgentTurn(acp::AgentTurn::Started) => {
+                if self.turn.is_none() {
+                    self.replaying = false;
+                    self.text_item = None;
+                    self.thought_item = None;
+                    self.plan_item = None;
+                    self.subagent_items.clear();
+                    // neither the person's nor sill's: a queued prompt keeps its purpose for its own turn
+                    let queued = self.next_purpose.take();
+                    let turn = self.new_turn("working");
+                    self.next_purpose = queued;
+                    next.turn_id = Some(turn.turn_id.clone());
+                    next.activity = turn.activity.clone();
+                    self.turn = Some(turn.clone());
+                    self.agent_turn = true;
+                    out.push(sfp::Event::TurnUpdated { turn });
+                }
+            }
+            // Only the agent's own turn: a prompt's turn ends at its stop reason.
+            relay::Event::AgentTurn(end) => {
+                if std::mem::take(&mut self.agent_turn)
+                    && let Some(mut turn) = self.turn.take()
+                {
+                    self.text_item = None;
+                    self.thought_item = None;
+                    self.subagent_items.clear();
+                    let (outcome, code, message) = if *end == acp::AgentTurn::Cancelled {
+                        ("cancelled", "cancelled", "The person stopped a turn the agent started itself")
+                    } else {
+                        ("completed", "agent_idle", "The agent became idle after a turn it started itself")
+                    };
+                    turn.activity = "idle".into();
+                    turn.outcome = outcome.into();
+                    turn.reason = Some(sfp::Reason { code: code.into(), message: message.into() });
+                    out.push(sfp::Event::TurnUpdated { turn });
+                    next.turn_id = None;
+                    next.activity = if next.question_ids.is_empty() { "idle" } else { "waiting" }.into();
+                }
             }
             relay::Event::UserText(_) => {
                 // ACP v1 echoes/replays user text without identities. The submit path creates

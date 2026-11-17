@@ -5,6 +5,9 @@
 //! With `ACP_PROBE_PROMPT=hi` it sends one prompt instead — against `fake-agent.py` next to this
 //! file, which answers with a usage update and an update kind sill doesn't know, both of which the
 //! loop must survive.
+//! `ACP_PROBE_WAIT=seconds` keeps the session open that long after Ready (6 by default) and
+//! `ACP_PROBE_ALLOW=1` allows every permission once: with a prompt that starts a background task,
+//! the turn the agent starts itself afterwards shows as `AgentTurn(Started)` … `AgentTurn(Ended)`.
 use std::os::unix::net::UnixStream;
 use std::process::{Command as Proc, Stdio};
 
@@ -36,8 +39,10 @@ fn main() {
     let (cmd_tx, cmd_rx) = async_channel::unbounded();
     let (ev_tx, ev_rx) = async_channel::unbounded();
     let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
+    let auto = if std::env::var_os("ACP_PROBE_ALLOW").is_some() { AutoPermission::AllowOnce } else { AutoPermission::Ask };
+    let wait = std::env::var("ACP_PROBE_WAIT").ok().and_then(|s| s.parse().ok()).unwrap_or(6);
     let t = std::thread::spawn(move || {
-        let _ = sill_core::acp::run_session(ours, SessionOptions { cwd: home, roots: vec![], auto: AutoPermission::Ask, resume: None }, cmd_rx, ev_tx);
+        let _ = sill_core::acp::run_session(ours, SessionOptions { cwd: home, roots: vec![], auto, resume: None }, cmd_rx, ev_tx);
     });
     let started = std::time::Instant::now();
     while let Ok(ev) = ev_rx.recv_blocking() {
@@ -61,7 +66,7 @@ fn main() {
                 }
                 let tx = cmd_tx.clone();
                 std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(6));
+                    std::thread::sleep(std::time::Duration::from_secs(wait));
                     let _ = tx.send_blocking(Command::Quit);
                 });
             }

@@ -107,6 +107,14 @@ struct State {
     summary_deadline: Option<i64>,
 }
 
+impl State {
+    /// The agent works: in a prompt's turn (`busy`, which holds the next prompt back) or in one it
+    /// started itself, which a prompt may join but nothing else should disturb.
+    fn working(&self) -> bool {
+        self.busy || self.adapter.agent_turn()
+    }
+}
+
 impl Runner {
     pub fn load(id: &str, store: &Store) -> Result<serde_json::Value> {
         use rusqlite::OptionalExtension;
@@ -371,6 +379,17 @@ impl Runner {
                     store.update_tool(&id, seq, title.as_deref(), status.as_deref(), detail.as_deref(), diff.as_deref())?;
                 }
             }
+            // a turn the agent started itself: `busy` stays for prompts, so one the person sends
+            // meanwhile goes out (the agent takes it into that turn), while housekeeping and
+            // summaries see the work (`State::working`); its text is kept when it ends
+            relay::Event::AgentTurn(acp::AgentTurn::Started) => {
+                st.replaying = false;
+                st.turns += 1;
+            }
+            relay::Event::AgentTurn(acp::AgentTurn::Ended | acp::AgentTurn::Cancelled) => {
+                st.last_turn_end = Some(sill_core::store::now());
+                flush(store, &id, st)?;
+            }
             relay::Event::Stopped(reason) => {
                 st.busy = false;
                 if !matches!(reason, acp::StopReason::Other(r) if r == "_sill_prompt_error") {
@@ -511,12 +530,12 @@ impl Runner {
     /// The agent is up and between turns: it can be asked one more thing.
     pub fn agent_idle(&self) -> bool {
         let st = self.st.lock().unwrap();
-        st.ready.is_some() && !st.busy && !st.ended && !st.retired
+        st.ready.is_some() && !st.working() && !st.ended && !st.retired
     }
 
-    /// A turn is running (a summary turn included).
+    /// A turn is running: a prompt's (a summary turn included) or one the agent started itself.
     pub fn busy(&self) -> bool {
-        self.st.lock().unwrap().busy
+        self.st.lock().unwrap().working()
     }
 
     /// When the last turn stopped, if one did in this runner's life.
@@ -571,7 +590,8 @@ impl Runner {
             if st.ended || st.retired || st.ready.is_none() {
                 bail!("the agent is not running");
             }
-            if st.busy {
+            // a summary sent into a turn the agent started itself would be taken into that work
+            if st.working() {
                 bail!("the agent is busy");
             }
             if st.summary.is_some() {

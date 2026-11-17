@@ -260,6 +260,10 @@ pub enum Event {
     },
     /// A prompt turn started.
     TurnStarted,
+    /// A turn the agent started with no prompt open, as the agent itself says ([`ActivitySource`]):
+    /// Claude Code answering a background task's notification, a Codex goal turn. Only between
+    /// prompt turns, and apart from them: no `TurnStarted` or `Stopped` belongs to it.
+    AgentTurn(AgentTurn),
     /// Replayed user message (only after a `session/load`).
     UserText(String),
     Text(String),
@@ -597,6 +601,7 @@ pub fn run_session(stream: UnixStream, opts: SessionOptions, commands: async_cha
                 let caps = ClientCapabilities::new().auth(auth_caps).elicitation(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()));
                 let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1).client_capabilities(caps)).block_task().await?;
                 let can_load = init.agent_capabilities.load_session;
+                let source = ActivitySource::of(init.agent_info.as_ref().map(|agent| agent.name.as_str()));
                 let roots = if init.agent_capabilities.session_capabilities.additional_directories.is_some() { opts.roots.clone() } else { vec![] };
                 let _ = events_loop.send(Event::Capabilities { images: init.agent_capabilities.prompt_capabilities.image }).await;
                 let auth_methods: Vec<AuthMethodInfo> = init.auth_methods.iter().map(auth_method_info).collect();
@@ -610,7 +615,9 @@ pub fn run_session(stream: UnixStream, opts: SessionOptions, commands: async_cha
                     let attempt: Result<(), agent_client_protocol::Error> = match resume {
                         Some(id) => match cx
                             .load_session_from(
-                                agent_client_protocol::schema::v1::LoadSessionRequest::new(id, opts.cwd.as_path()).additional_directories(roots.clone()),
+                                agent_client_protocol::schema::v1::LoadSessionRequest::new(id, opts.cwd.as_path())
+                                    .additional_directories(roots.clone())
+                                    .meta(source.session_meta()),
                             )
                             .block_task()
                             .start_session()
@@ -618,15 +625,15 @@ pub fn run_session(stream: UnixStream, opts: SessionOptions, commands: async_cha
                         {
                             Ok(restored) => {
                                 let mut session = restored.into_session();
-                                drive(&mut session, true, &auth_methods, &commands, &events_loop).await
+                                drive(&mut session, true, source, &auth_methods, &commands, &events_loop).await
                             }
                             Err(e) if e.code == ErrorCode::AuthRequired => Err(e),
                             Err(e) => {
                                 tracing::warn!("session/load failed, starting fresh: {e}");
-                                open_fresh(&cx, &opts.cwd, &roots, &auth_methods, &commands, &events_loop).await
+                                open_fresh(&cx, &opts.cwd, &roots, source, &auth_methods, &commands, &events_loop).await
                             }
                         },
-                        None => open_fresh(&cx, &opts.cwd, &roots, &auth_methods, &commands, &events_loop).await,
+                        None => open_fresh(&cx, &opts.cwd, &roots, source, &auth_methods, &commands, &events_loop).await,
                     };
                     match attempt {
                         Ok(()) => return Ok(()),
@@ -676,6 +683,133 @@ pub fn run_session(stream: UnixStream, opts: SessionOptions, commands: async_cha
     result.map_err(|e| anyhow!("acp: {e}"))
 }
 
+/// A step of a turn the agent started itself ([`Event::AgentTurn`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentTurn {
+    Started,
+    /// The agent said it is idle, or a prompt went out and took the turn over.
+    Ended,
+    /// The person stopped it. No prompt is open whose answer would say so, so the cancel is sent
+    /// and the turn ends at once.
+    Cancelled,
+}
+
+/// What an agent says of its own work: ACP v2's `state_update`, which v1 lacks. On v1 only an
+/// agent's own extension can say it, read by an [`ActivitySource`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Activity {
+    Running,
+    Idle,
+}
+
+/// Where an ACP v1 agent says that it works with no prompt open (a turn it starts itself, for a
+/// background task's notification or a goal). Chosen by the name the agent gives at `initialize`.
+/// An agent without one is never shown working outside a prompt: sill does not guess from output
+/// or open tool calls (a background command keeps its call open across turns).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivitySource {
+    None,
+    /// claude-agent-acp, asked with session `_meta.claudeCode.emitRawSDKMessages`, forwards Claude
+    /// Code's `session_state_changed` messages as `_claude/sdkMessage` notifications.
+    Claude,
+    /// codex-acp sends each thread status as `session_info_update` with `_meta.codex.threadStatus`.
+    Codex,
+}
+
+impl ActivitySource {
+    fn of(agent: Option<&str>) -> Self {
+        match agent.unwrap_or_default().rsplit('/').next().unwrap_or_default() {
+            "claude-agent-acp" | "claude-code-acp" => Self::Claude,
+            "codex-acp" => Self::Codex,
+            _ => Self::None,
+        }
+    }
+
+    /// `_meta` for `session/new` and `session/load`, when the agent must be asked for its state.
+    fn session_meta(self) -> Option<serde_json::Map<String, serde_json::Value>> {
+        (self == Self::Claude).then(|| {
+            let mut meta = serde_json::Map::new();
+            meta.insert("claudeCode".into(), serde_json::json!({"emitRawSDKMessages": [{"type": "system", "subtype": "session_state_changed"}]}));
+            meta
+        })
+    }
+
+    /// The state in a message that is no session update (Claude's `_claude/sdkMessage`).
+    fn notification(self, dispatch: &agent_client_protocol::Dispatch) -> Option<Activity> {
+        let agent_client_protocol::Dispatch::Notification(n) = dispatch else { return None };
+        if self != Self::Claude || n.method() != "_claude/sdkMessage" {
+            return None;
+        }
+        let message = n.params().get("message")?;
+        if message.get("type")? != "system" || message.get("subtype")? != "session_state_changed" {
+            return None;
+        }
+        // `requires_action` (a permission asked) is work too; the question itself makes it waiting
+        Some(if message.get("state")?.as_str()? == "idle" { Activity::Idle } else { Activity::Running })
+    }
+
+    /// The state a session update carries (Codex's thread status). `active` is a running turn,
+    /// with flags one that waits for an approval; every other status has none.
+    fn update(self, update: &SessionUpdate) -> Option<Activity> {
+        let SessionUpdate::SessionInfoUpdate(info) = update else { return None };
+        if self != Self::Codex {
+            return None;
+        }
+        let status = info.meta.as_ref()?.get("codex")?.get("threadStatus")?.get("type")?.as_str()?;
+        Some(if status == "active" { Activity::Running } else { Activity::Idle })
+    }
+}
+
+/// The turns an agent starts itself, from what it says of its state ([`Activity`]) and what the
+/// loop knows of its own prompt. Each method answers with the [`Event::AgentTurn`] to send, if any.
+#[derive(Debug, Default)]
+struct AgentTurns {
+    /// The agent's last word: it works.
+    running: bool,
+    /// A turn of the agent's own is open.
+    open: bool,
+}
+
+impl AgentTurns {
+    /// The agent said its state. Its running while a prompt is open is that prompt's.
+    fn said(&mut self, activity: Activity, in_prompt: bool) -> Option<AgentTurn> {
+        let was = std::mem::replace(&mut self.running, activity == Activity::Running);
+        match activity {
+            Activity::Running if !was && !in_prompt && !self.open => {
+                self.open = true;
+                Some(AgentTurn::Started)
+            }
+            Activity::Idle if self.open => {
+                self.open = false;
+                Some(AgentTurn::Ended)
+            }
+            _ => None,
+        }
+    }
+
+    /// The model spoke or called a tool. An agent that never said idle after its prompt (Claude
+    /// Code holds it back while background agents run) starts its next turn without a new running:
+    /// by its own word it works, and this output is that turn's.
+    fn output(&mut self, in_prompt: bool) -> Option<AgentTurn> {
+        (self.running && !in_prompt && !self.open).then(|| {
+            self.open = true;
+            AgentTurn::Started
+        })
+    }
+
+    /// A prompt goes out: the agent takes it into the turn it runs, which is the prompt's from here.
+    fn prompt(&mut self) -> Option<AgentTurn> {
+        std::mem::take(&mut self.open).then_some(AgentTurn::Ended)
+    }
+
+    /// The person stopped the agent's own turn: it ends here, not at an idle the agent may never
+    /// say. An agent that works on regardless still says it runs, and its next output opens a
+    /// turn again ([`Self::output`]).
+    fn stopped(&mut self) -> Option<AgentTurn> {
+        std::mem::take(&mut self.open).then_some(AgentTurn::Cancelled)
+    }
+}
+
 /// How long `session/new` may take before the agent is assumed to be waiting for a login it
 /// started on its own (Antigravity opens a browser flow at startup when it has no token and blocks
 /// the request until the callback arrives — which never happens inside the jail).
@@ -692,6 +826,7 @@ async fn open_fresh(
     cx: &agent_client_protocol::ConnectionTo<Agent>,
     cwd: &Path,
     roots: &[std::path::PathBuf],
+    source: ActivitySource,
     auth_methods: &[AuthMethodInfo],
     commands: &async_channel::Receiver<Command>,
     events_loop: &async_channel::Sender<Event>,
@@ -699,12 +834,12 @@ async fn open_fresh(
     let opened = std::rc::Rc::new(std::cell::Cell::new(false));
     let session = {
         let opened = opened.clone();
-        cx.build_session_from(agent_client_protocol::schema::v1::NewSessionRequest::new(cwd).additional_directories(roots.to_vec())).block_task().run_until(
-            async move |mut s| {
+        cx.build_session_from(agent_client_protocol::schema::v1::NewSessionRequest::new(cwd).additional_directories(roots.to_vec()).meta(source.session_meta()))
+            .block_task()
+            .run_until(async move |mut s| {
                 opened.set(true);
-                drive(&mut s, false, auth_methods, commands, events_loop).await
-            },
-        )
+                drive(&mut s, false, source, auth_methods, commands, events_loop).await
+            })
     };
     let stall = async {
         let timeout = session_open_timeout();
@@ -758,6 +893,7 @@ fn is_prompt_auth_error(msg: &str) -> bool {
 async fn drive(
     session: &mut ActiveSession<'_, Agent>,
     resumed: bool,
+    source: ActivitySource,
     auth_methods: &[AuthMethodInfo],
     commands: &async_channel::Receiver<Command>,
     events_loop: &async_channel::Sender<Event>,
@@ -775,6 +911,8 @@ async fn drive(
     type PromptFut = std::pin::Pin<Box<dyn std::future::Future<Output = Result<PromptResponse, agent_client_protocol::Error>>>>;
     let mut pending: Option<PromptFut> = None;
     let mut in_turn = false;
+    // turns the agent starts itself, as its `source` tells them (`Event::AgentTurn`)
+    let agent_turns = std::cell::RefCell::new(AgentTurns::default());
     // update kinds this build can't parse, each noted once
     let mut unknown_kinds: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
@@ -862,6 +1000,10 @@ async fn drive(
                     let _ = events_loop.send(Event::Other("busy: prompt dropped".into())).await;
                     continue;
                 }
+                let ended = agent_turns.borrow_mut().prompt();
+                if let Some(step) = ended {
+                    let _ = events_loop.send(Event::AgentTurn(step)).await;
+                }
                 let sid = session.session_id().clone();
                 let conn = session.connection().clone();
                 // the text first, then the attachments: images inline, files as a resource link
@@ -916,12 +1058,16 @@ async fn drive(
                 }
             }
             Next::Cmd(Some(Command::Cancel)) => {
-                if !in_turn {
+                if !in_turn && !agent_turns.borrow().open {
                     continue;
                 }
                 let sid = session.session_id().clone();
                 if let Err(e) = session.connection().send_notification(CancelNotification::new(sid)) {
                     let _ = events_loop.send(Event::Other(format!("cancel failed: {e}"))).await;
+                }
+                let stopped = agent_turns.borrow_mut().stopped();
+                if let Some(step) = stopped {
+                    let _ = events_loop.send(Event::AgentTurn(step)).await;
                 }
             }
             Next::Cmd(Some(Command::Quit)) | Next::Cmd(None) => break,
@@ -931,6 +1077,13 @@ async fn drive(
                     let _ = events_loop.send(Event::Stopped(stop_reason(reason))).await;
                 }
                 SessionMessage::SessionMessage(dispatch) => {
+                    if let Some(activity) = source.notification(&dispatch) {
+                        let step = agent_turns.borrow_mut().said(activity, in_turn);
+                        if let Some(step) = step {
+                            let _ = events_loop.send(Event::AgentTurn(step)).await;
+                        }
+                        continue;
+                    }
                     let events = events_loop.clone();
                     let modes_cell = std::cell::RefCell::new(&mut last_modes);
                     let options_cell = std::cell::RefCell::new(&mut last_options);
@@ -950,7 +1103,18 @@ async fn drive(
                                     let _ = events.send(Event::Controls(c)).await;
                                 }
                                 other => {
-                                    let _ = events.send(to_event(other)).await;
+                                    let said = source.update(&other).and_then(|activity| agent_turns.borrow_mut().said(activity, in_turn));
+                                    let event = to_event(other);
+                                    let spoke = matches!(event, Event::Text(_) | Event::Thought(_) | Event::ToolCall { .. });
+                                    let step = said.or_else(|| spoke.then(|| agent_turns.borrow_mut().output(in_turn)).flatten());
+                                    // a start goes before what the update itself shows, an end after
+                                    if step == Some(AgentTurn::Started) {
+                                        let _ = events.send(Event::AgentTurn(AgentTurn::Started)).await;
+                                    }
+                                    let _ = events.send(event).await;
+                                    if let Some(step) = step.filter(|step| *step != AgentTurn::Started) {
+                                        let _ = events.send(Event::AgentTurn(step)).await;
+                                    }
                                 }
                             }
                             Ok(())
@@ -1321,5 +1485,195 @@ mod tests {
         assert!(matches!(&f.iter().find(|x| x.key == "q2").unwrap().kind, FieldKind::Choices(o) if o.len() == 2));
         assert!(matches!(f.iter().find(|x| x.key == "ok").unwrap().kind, FieldKind::Bool));
         assert!(matches!(f.iter().find(|x| x.key == "n").unwrap().kind, FieldKind::Number));
+    }
+
+    /// A scripted ACP v1 agent named `name` on a socket pair: after each prompt's answer, and once
+    /// the test has seen it, `after(prompt number)` gives the lines it sends on its own. Returns
+    /// what the loop reported: turns, stops, agent turns and text. With `stop`, the test cancels
+    /// the first agent turn as it starts, and the agent goes on only once the cancel reached it.
+    fn agent_turns_seen(name: &'static str, prompts: usize, stop: bool, after: fn(usize) -> Vec<serde_json::Value>) -> Vec<String> {
+        use std::io::{BufRead, Write};
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let agent = std::thread::spawn(move || {
+            let mut out = theirs.try_clone().unwrap();
+            let mut send = |v: serde_json::Value| writeln!(out, "{v}").unwrap();
+            let mut prompt = 0;
+            let mut lines = std::io::BufReader::new(theirs).lines();
+            while let Some(line) = lines.next() {
+                let m: serde_json::Value = serde_json::from_str(&line.unwrap()).unwrap();
+                let id = m["id"].clone();
+                match m["method"].as_str() {
+                    Some("initialize") => send(
+                        serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[],"agentInfo":{"name":name,"version":"1"}}}),
+                    ),
+                    Some("session/new") => {
+                        // only Claude is asked for its state messages
+                        let asked = m["params"]["_meta"]["claudeCode"]["emitRawSDKMessages"][0]["subtype"] == "session_state_changed";
+                        assert_eq!(asked, name.ends_with("claude-agent-acp"), "{}", m["params"]);
+                        send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"sessionId":"s1"}}));
+                    }
+                    Some("session/prompt") => {
+                        prompt += 1;
+                        send(said(name, "running"));
+                        send(text("answer"));
+                        send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}));
+                        go_rx.recv().unwrap();
+                        for line in after(prompt) {
+                            send(line);
+                        }
+                        if stop {
+                            let cancel: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+                            assert_eq!(cancel["method"], "session/cancel");
+                            send(text("still working"));
+                        }
+                        send(text("end"));
+                    }
+                    _ if !id.is_null() => send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{}})),
+                    _ => {}
+                }
+            }
+        });
+        let (cmd_tx, cmd_rx) = async_channel::unbounded();
+        let (ev_tx, ev_rx) = async_channel::unbounded();
+        let opts = SessionOptions { cwd: std::env::temp_dir(), roots: vec![], auto: AutoPermission::Reject, resume: None };
+        let worker = std::thread::spawn(move || run_session(ours, opts, cmd_rx, ev_tx));
+        let mut seen = Vec::new();
+        let cancelled = std::cell::Cell::new(false);
+        let until = |seen: &mut Vec<String>, done: &dyn Fn(&Event) -> bool| loop {
+            let ev = ev_rx.recv_blocking().unwrap();
+            let last = done(&ev);
+            match ev {
+                Event::TurnStarted => seen.push("turn".into()),
+                Event::Stopped(_) => seen.push("stopped".into()),
+                Event::AgentTurn(step) => {
+                    seen.push(format!("agent {step:?}").to_lowercase());
+                    if step == AgentTurn::Started && stop && !cancelled.replace(true) {
+                        cmd_tx.send_blocking(Command::Cancel).unwrap();
+                    }
+                }
+                Event::Text(t) if t != "end" => seen.push(t),
+                _ => {}
+            }
+            if last {
+                break;
+            }
+        };
+        for _ in 0..prompts {
+            cmd_tx.send_blocking(Command::Prompt("hi".into(), vec![])).unwrap();
+            until(&mut seen, &|e| matches!(e, Event::Stopped(_)));
+            go_tx.send(()).unwrap();
+            until(&mut seen, &|e| matches!(e, Event::Text(t) if t == "end"));
+        }
+        cmd_tx.send_blocking(Command::Quit).unwrap();
+        worker.join().unwrap().unwrap();
+        drop(agent);
+        seen
+    }
+
+    fn text(t: &str) -> serde_json::Value {
+        serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":t}}}})
+    }
+
+    /// The agent's own word of its state, in the form its adapter sends it.
+    fn said(name: &str, state: &str) -> serde_json::Value {
+        if name.ends_with("codex-acp") {
+            let status = if state == "running" { serde_json::json!({"type":"active","activeFlags":[]}) } else { serde_json::json!({"type":state}) };
+            serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"session_info_update","_meta":{"codex":{"threadStatus":status}}}}})
+        } else {
+            serde_json::json!({"jsonrpc":"2.0","method":"_claude/sdkMessage","params":{"sessionId":"s1","message":{"type":"system","subtype":"session_state_changed","state":state}}})
+        }
+    }
+
+    const CLAUDE: &str = "@agentclientprotocol/claude-agent-acp";
+    const CODEX: &str = "@agentclientprotocol/codex-acp";
+
+    /// Claude Code's turn after its prompt returned (a background task's notification) is an
+    /// `AgentTurn`: from its own `running` to `idle`, or from the model's output when Claude Code
+    /// held its idle back (background agents) and so never said `running` again.
+    #[test]
+    fn a_turn_claude_starts_after_its_prompt_is_shown_until_idle() {
+        let seen = agent_turns_seen(CLAUDE, 2, false, |prompt| {
+            if prompt == 1 {
+                vec![said(CLAUDE, "idle"), said(CLAUDE, "running"), text("the task finished"), said(CLAUDE, "idle")]
+            } else {
+                vec![text("the agent finished"), said(CLAUDE, "idle")]
+            }
+        });
+        assert_eq!(
+            seen,
+            [
+                "turn",
+                "answer",
+                "stopped",
+                "agent started",
+                "the task finished",
+                "agent ended",
+                "turn",
+                "answer",
+                "stopped",
+                "agent started",
+                "the agent finished",
+                "agent ended"
+            ]
+        );
+    }
+
+    /// Codex says its thread status: a turn it starts itself (a goal) runs from `active` to `idle`,
+    /// and one waiting for an approval (`active` with flags) is still that turn.
+    #[test]
+    fn a_turn_codex_starts_after_its_prompt_is_shown_until_idle() {
+        let seen = agent_turns_seen(CODEX, 1, false, |_| {
+            let waiting = serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":
+                {"sessionUpdate":"session_info_update","_meta":{"codex":{"threadStatus":{"type":"active","activeFlags":["waitingOnApproval"]}}}}}});
+            vec![said(CODEX, "idle"), said(CODEX, "running"), text("working on the goal"), waiting, said(CODEX, "running"), said(CODEX, "idle")]
+        });
+        assert_eq!(seen, ["turn", "answer", "stopped", "agent started", "working on the goal", "agent ended"]);
+    }
+
+    /// An agent with no word of its own state is never shown working outside a prompt, whatever it
+    /// sends there; and another agent's signals mean nothing from it.
+    #[test]
+    fn an_agent_without_a_state_of_its_own_starts_no_turn() {
+        let seen =
+            agent_turns_seen("opencode", 1, false, |_| vec![said(CLAUDE, "idle"), said(CLAUDE, "running"), said(CODEX, "running"), text("woken by a shell")]);
+        assert_eq!(seen, ["turn", "answer", "stopped", "woken by a shell"]);
+    }
+
+    /// Stop on the agent's own turn sends the cancel and ends the turn at once: no prompt is open
+    /// whose answer would end it. An agent that works on regardless is shown working again.
+    #[test]
+    fn stop_ends_the_agents_own_turn_and_an_agent_that_goes_on_opens_another() {
+        let seen = agent_turns_seen(CODEX, 1, true, |_| vec![said(CODEX, "idle"), said(CODEX, "running")]);
+        assert_eq!(seen, ["turn", "answer", "stopped", "agent started", "agent cancelled", "agent started", "still working"]);
+    }
+
+    #[test]
+    fn the_activity_source_is_chosen_by_the_agents_name() {
+        assert_eq!(ActivitySource::of(Some(CLAUDE)), ActivitySource::Claude);
+        assert_eq!(ActivitySource::of(Some("@zed-industries/claude-code-acp")), ActivitySource::Claude);
+        assert_eq!(ActivitySource::of(Some(CODEX)), ActivitySource::Codex);
+        assert_eq!(ActivitySource::of(Some("codex-acp")), ActivitySource::Codex);
+        assert_eq!(ActivitySource::of(Some("OpenCode")), ActivitySource::None);
+        assert_eq!(ActivitySource::of(None), ActivitySource::None);
+    }
+
+    /// A running said while the prompt is open is the prompt's, and stays so when the idle after
+    /// it comes late; a prompt sent into the agent's own turn takes that turn over.
+    #[test]
+    fn the_prompts_own_running_starts_no_agent_turn() {
+        let mut turns = AgentTurns::default();
+        assert_eq!(turns.said(Activity::Running, true), None);
+        assert_eq!(turns.said(Activity::Idle, false), None, "the idle after the prompt returned");
+        assert_eq!(turns.said(Activity::Running, false), Some(AgentTurn::Started));
+        assert_eq!(turns.said(Activity::Running, false), None, "said again");
+        assert_eq!(turns.output(false), None, "its output is that turn's");
+        assert_eq!(turns.prompt(), Some(AgentTurn::Ended));
+        assert_eq!(turns.said(Activity::Idle, false), None, "the prompt's turn ends at its stop reason");
+        assert_eq!(turns.output(false), None, "nothing runs: output alone starts no turn");
+        assert_eq!(turns.stopped(), None, "no turn of the agent's to stop");
+        assert_eq!(turns.said(Activity::Running, false), Some(AgentTurn::Started));
+        assert_eq!(turns.stopped(), Some(AgentTurn::Cancelled));
+        assert_eq!(turns.said(Activity::Idle, false), None, "the idle the cancel brings ends nothing twice");
     }
 }
