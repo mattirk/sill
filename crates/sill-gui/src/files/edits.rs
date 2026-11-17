@@ -23,6 +23,13 @@ pub struct ReaderView {
     pub edits: u64,
 }
 
+pub(super) fn source_scroll_metrics(editor: &<iced::Renderer as iced::advanced::text::Renderer>::Editor) -> (f32, f32) {
+    let buffer = editor.buffer();
+    let scroll = buffer.scroll();
+    let line_height = buffer.metrics().line_height;
+    (scroll.line as f32 + scroll.vertical / line_height, line_height)
+}
+
 /// Source Code Pro uses fixed-width cells; tabs advance to eight-column stops.
 pub(crate) fn source_columns(text: &str) -> usize {
     use unicode_width::UnicodeWidthStr;
@@ -113,6 +120,11 @@ pub(super) fn edit_source(view: &mut SessionView, action: Action) -> Option<Task
         match action {
             Action::Text(action) => reader.content.perform(action),
             Action::History(redo) => reader.content.history(redo),
+            Action::ScrollSourceTo(fraction) => {
+                if let Some(action) = reader.content.scroll_to_fraction(fraction, source_scroll_metrics) {
+                    reader.content.perform(action);
+                }
+            }
             _ => unreachable!(),
         }
         if editing {

@@ -122,6 +122,8 @@ pub struct TextEditor<
     line_numbers: Option<fn(&Renderer::Editor) -> Vec<(usize, f32)>>,
     // sill patch: rectangles (in the text's own coordinates) filled behind the text.
     marks: Option<Box<dyn Fn(&Renderer::Editor) -> Vec<(Rectangle, Color)> + 'a>>,
+    // sill patch: a vertical scrollbar for unwrapped editors that scroll internally.
+    scrollbar: Option<ScrollbarStyle<'a, Renderer::Editor, Message>>,
     wrapping: Wrapping,
     class: Theme::Class<'a>,
     key_binding: Option<Box<dyn Fn(KeyPress) -> Option<Binding<Message>> + 'a>>,
@@ -156,6 +158,7 @@ where
             padding: Padding::new(5.0),
             line_numbers: None,
             marks: None,
+            scrollbar: None,
             wrapping: Wrapping::default(),
             class: <Theme as Catalog>::default(),
             key_binding: None,
@@ -305,6 +308,7 @@ where
             padding: self.padding,
             line_numbers: self.line_numbers,
             marks: self.marks,
+            scrollbar: self.scrollbar,
             wrapping: self.wrapping,
             class: self.class,
             key_binding: self.key_binding,
@@ -332,6 +336,60 @@ where
     ) -> Self {
         self.marks = Some(Box::new(marks));
         self
+    }
+
+    /// Shows a vertical scrollbar on hover for an unwrapped editor (sill patch).
+    /// Metrics are the renderer's vertical offset in logical lines and the
+    /// height of one line in pixels. The action receives an absolute fraction.
+    pub fn vertical_scrollbar(
+        mut self,
+        color: Color,
+        metrics: fn(&Renderer::Editor) -> (f32, f32),
+        on_scroll: impl Fn(f32) -> Message + 'a,
+    ) -> Self {
+        self.scrollbar = Some(ScrollbarStyle {
+            color,
+            metrics,
+            on_scroll: Box::new(on_scroll),
+        });
+        self
+    }
+
+    fn scrollbar_geometry(
+        &self,
+        bounds: Rectangle,
+        viewport: &Rectangle,
+    ) -> Option<EditorScrollbar> {
+        let style = self.scrollbar.as_ref()?;
+        let visible = bounds.intersection(viewport)?;
+        let (offset, visible_lines, max_offset) =
+            self.content.vertical_scroll_metrics(style.metrics);
+        let width = 3.0;
+
+        // Leave the bottom corner to the parent horizontal scrollbar.
+        let track = Rectangle {
+            x: visible.x + visible.width - width,
+            y: visible.y,
+            width,
+            height: visible.height - width,
+        };
+        if max_offset <= 0.0 || visible.width < width || track.height <= width {
+            return None;
+        }
+
+        let min_height = 12.0_f32.min(track.height / 2.0);
+        let height = (track.height * visible_lines / (visible_lines + max_offset))
+            .clamp(min_height, track.height - 1.0);
+        let thumb = Rectangle {
+            y: track.y + (track.height - height) * offset.clamp(0.0, max_offset) / max_offset,
+            height,
+            ..track
+        };
+        Some(EditorScrollbar {
+            color: style.color,
+            track,
+            thumb,
+        })
     }
 
     fn text_padding(&self, renderer: &Renderer) -> Padding {
@@ -453,6 +511,40 @@ where
         internal.editor.perform(action);
     }
 
+    // sill patch: metrics for an unwrapped editor, in logical lines.
+    fn vertical_scroll_metrics(
+        &self,
+        metrics: fn(&R::Editor) -> (f32, f32),
+    ) -> (f32, f32, f32) {
+        let internal = self.0.borrow();
+        let editor = &internal.editor;
+        let (offset, line_height) = metrics(editor);
+        let visible_lines = editor.bounds().height / line_height;
+        let max_offset = (editor.line_count() as f32 - visible_lines).max(0.0);
+        (offset, visible_lines, max_offset)
+    }
+
+    /// Builds a scroll action for a fraction of an unwrapped editor's vertical range (sill patch).
+    /// Metrics are the current offset in logical lines and the line height in pixels.
+    pub fn scroll_to_fraction(
+        &self,
+        fraction: f32,
+        metrics: fn(&R::Editor) -> (f32, f32),
+    ) -> Option<Action> {
+        let (offset, _, max_offset) = self.vertical_scroll_metrics(metrics);
+        let fraction = fraction.clamp(0.0, 1.0);
+        let delta = fraction * max_offset - offset;
+        // The editor scrolls in whole lines and clamps at the ends.
+        let lines = if fraction == 0.0 {
+            delta.floor()
+        } else if fraction == 1.0 {
+            delta.ceil()
+        } else {
+            delta.round()
+        } as i32;
+        (lines != 0).then_some(Action::Scroll { lines })
+    }
+
     /// Moves the current cursor to reflect the given one.
     pub fn move_to(&mut self, cursor: Cursor) {
         let internal = self.0.get_mut();
@@ -557,6 +649,27 @@ where
     }
 }
 
+// sill patch: renderer offset and color for the opt-in scrollbar.
+struct ScrollbarStyle<'a, Editor, Message> {
+    color: Color,
+    metrics: fn(&Editor) -> (f32, f32),
+    on_scroll: Box<dyn Fn(f32) -> Message + 'a>,
+}
+
+// sill patch: geometry shared by drawing and hit testing.
+struct EditorScrollbar {
+    color: Color,
+    track: Rectangle,
+    thumb: Rectangle,
+}
+
+impl EditorScrollbar {
+    fn fraction(&self, y: f32, grab_offset: f32) -> f32 {
+        let travel = self.track.height - self.thumb.height;
+        ((y - self.track.y - grab_offset) / travel).clamp(0.0, 1.0)
+    }
+}
+
 /// The state of a [`TextEditor`].
 #[derive(Debug)]
 pub struct State<Highlighter: text::Highlighter> {
@@ -565,6 +678,8 @@ pub struct State<Highlighter: text::Highlighter> {
     last_click: Option<mouse::Click>,
     drag_click: Option<mouse::click::Kind>,
     partial_scroll: f32,
+    // sill patch: distance from the thumb top to the pointer while dragging.
+    scrollbar_grab: Option<f32>,
     // sill patch: let a horizontal parent handle sideways source scrolling.
     modifiers: keyboard::Modifiers,
     last_theme: RefCell<Option<String>>,
@@ -642,6 +757,7 @@ where
             last_click: None,
             drag_click: None,
             partial_scroll: 0.0,
+            scrollbar_grab: None,
             modifiers: keyboard::Modifiers::default(),
             last_theme: RefCell::default(),
             highlighter: RefCell::new(Highlighter::new(
@@ -726,13 +842,54 @@ where
         renderer: &Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
-        _viewport: &Rectangle,
+        viewport: &Rectangle,
     ) {
         let Some(on_edit) = self.on_edit.as_ref() else {
             return;
         };
 
         let state = tree.state.downcast_mut::<State<Highlighter>>();
+        // sill patch: handle the scrollbar before text clicks and selection drags.
+        match event {
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+            | Event::Window(window::Event::Unfocused) => {
+                if state.scrollbar_grab.take().is_some() {
+                    shell.request_redraw();
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+            | Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                let pressing = matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_)));
+                let position = if pressing {
+                    cursor.position()
+                } else {
+                    cursor.land().position()
+                };
+                if (pressing || state.scrollbar_grab.is_some())
+                    && let Some(position) = position
+                    && let Some(style) = &self.scrollbar
+                    && let Some(bar) = self.scrollbar_geometry(layout.bounds(), viewport)
+                {
+                    if pressing && bar.track.contains(position) {
+                        if bar.thumb.contains(position) {
+                            state.scrollbar_grab = Some(position.y - bar.thumb.y);
+                            shell.capture_event();
+                            shell.request_redraw();
+                            return;
+                        }
+                        state.scrollbar_grab = Some(bar.thumb.height / 2.0);
+                    }
+                    if let Some(grab_offset) = state.scrollbar_grab {
+                        let fraction = bar.fraction(position.y, grab_offset);
+                        shell.publish((style.on_scroll)(fraction));
+                        shell.capture_event();
+                        shell.request_redraw();
+                        return;
+                    }
+                }
+            }
+            _ => {}
+        }
         // sill patch: unwrapped source editors delegate sideways scrolling to their parent.
         if let Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) = event {
             state.modifiers = *modifiers;
@@ -1002,8 +1159,8 @@ where
         theme: &Theme,
         _defaults: &renderer::Style,
         layout: Layout<'_>,
-        _cursor: mouse::Cursor,
-        _viewport: &Rectangle,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
     ) {
         let bounds = layout.bounds();
         let padding = self.text_padding(renderer);
@@ -1167,17 +1324,42 @@ where
                 Selection::Caret(_) => {}
             }
         }
+
+        drop(internal);
+        // sill patch: place the thumb at the visible edge, even when the editor is wider.
+        if (cursor.is_over(*viewport) || state.scrollbar_grab.is_some())
+            && let Some(bar) = self.scrollbar_geometry(bounds, viewport)
+        {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: bar.thumb,
+                    ..renderer::Quad::default()
+                },
+                bar.color,
+            );
+        }
     }
 
     fn mouse_interaction(
         &self,
-        _tree: &widget::Tree,
+        tree: &widget::Tree,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
-        _viewport: &Rectangle,
+        viewport: &Rectangle,
         _renderer: &Renderer,
     ) -> mouse::Interaction {
         let is_disabled = self.on_edit.is_none();
+
+        if !is_disabled && self.scrollbar.is_some() {
+            if tree.state.downcast_ref::<State<Highlighter>>().scrollbar_grab.is_some() {
+                return mouse::Interaction::Grabbing;
+            }
+            if self.scrollbar_geometry(layout.bounds(), viewport)
+                .is_some_and(|bar| cursor.is_over(bar.track))
+            {
+                return mouse::Interaction::Grab;
+            }
+        }
 
         if cursor.is_over(layout.bounds()) {
             if is_disabled {

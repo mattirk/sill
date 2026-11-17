@@ -224,3 +224,87 @@ fn source_scrolls_down_right_after_scrolling_sideways() {
     assert_eq!(scrolled(vec![wheel(-80.0, -3.0)]), 0, "a sideways scroll is the scrollable's");
     assert_eq!(scrolled(vec![wheel(-80.0, 0.0), wheel(-2.0, -80.0)]), 1, "down right after sideways");
 }
+
+#[test]
+fn source_scrollbars_share_window_edges_with_resize_handles() {
+    use iced::mouse::{Button, Event, ScrollDelta};
+
+    let mut app = app();
+    open_source(&mut app);
+    app.layout.mode = crate::layout::Mode::Full;
+    let size = (1000.0, 700.0);
+
+    let viewport = |ui: &mut iced_test::Simulator<'_, Message>, app: &App| {
+        let reader = app.views["demo"].reader.as_ref().unwrap();
+        let id = format!("source-horizontal-{}", reader.key);
+        ui.find(iced_test::selector::id(id)).expect("the source viewport").bounds()
+    };
+    let press = |ui: &mut iced_test::Simulator<'_, Message>, position| {
+        ui.point_at(position);
+        let _ = ui.simulate([iced::Event::Mouse(Event::ButtonPressed(Button::Left))]);
+    };
+
+    {
+        let mut ui = crate::tests::simulator(&app, size);
+        let bounds = viewport(&mut ui, &app);
+        assert_eq!(bounds.x + bounds.width, size.0);
+        assert_eq!(bounds.y + bounds.height, size.1);
+        press(&mut ui, iced::Point::new(size.0 - 1.0, bounds.center_y()));
+        assert!(ui.into_messages().any(|message| matches!(message, Message::ResizeWindow(iced::window::Direction::East))));
+    }
+
+    let long = format!("{}\n", "x".repeat(600)).repeat(200);
+    let reader = app.views.get_mut("demo").unwrap().reader.as_mut().unwrap();
+    reader.content = crate::editor::Editor::with_text(&long);
+    reader.source_columns = source_columns(&long);
+
+    {
+        let mut ui = crate::tests::simulator(&app, size);
+        let bounds = viewport(&mut ui, &app);
+        press(&mut ui, iced::Point::new(bounds.center_x(), size.1 - 1.0));
+        let id = format!("source-horizontal-{}", app.views["demo"].reader.as_ref().unwrap().key);
+        let scrollable = ui.find(iced_test::selector::id(id)).unwrap();
+        assert!(matches!(scrollable, iced_test::selector::Target::Scrollable { translation, .. } if translation.x > 0.0));
+        assert!(!ui.into_messages().any(|message| matches!(message, Message::ResizeWindow(_))));
+    }
+
+    let final_fraction = {
+        let mut ui = crate::tests::simulator(&app, size);
+        let bounds = viewport(&mut ui, &app);
+        ui.point_at(iced::Point::new(bounds.center_x(), bounds.center_y()));
+        let _ = ui.simulate([iced::Event::Mouse(Event::WheelScrolled { delta: ScrollDelta::Pixels { x: -80.0, y: 0.0 } })]);
+        let x = size.0 - 1.0;
+        press(&mut ui, iced::Point::new(x, bounds.y + 4.0));
+        for y in [bounds.y + bounds.height * 0.25, bounds.center_y()] {
+            let position = iced::Point::new(x, y);
+            ui.point_at(position);
+            let _ = ui.simulate([iced::Event::Mouse(Event::CursorMoved { position })]);
+        }
+        let messages: Vec<_> = ui.into_messages().collect();
+        assert!(matches!(messages.as_slice(),
+            [Message::Files(Action::ScrollSourceTo(first)), Message::Files(Action::ScrollSourceTo(second))]
+            if (0.25..0.35).contains(first) && (0.55..0.65).contains(second)));
+        let mut last = 0.0;
+        for message in messages {
+            if let Message::Files(Action::ScrollSourceTo(fraction)) = message {
+                last = fraction;
+                act(&mut app, Action::ScrollSourceTo(fraction));
+            }
+        }
+        last
+    };
+
+    // Both messages have been applied, and the editor is already at the last target.
+    let content = &app.views["demo"].reader.as_ref().unwrap().content;
+    assert!(content.scroll_to_fraction(final_fraction, crate::files::edits::source_scroll_metrics).is_none());
+
+    app.layout.mode = crate::layout::Mode::Drawer;
+    app.drawer.shown = true;
+    let mut ui = crate::tests::simulator(&app, size);
+    let bounds = viewport(&mut ui, &app);
+    let crate::layout::Drawer::Beside(width) = app.layout.drawer(true, size.0) else {
+        panic!("the drawer should fit beside the source");
+    };
+    assert_eq!(bounds.x + bounds.width + width + crate::layout::HANDLE, size.0);
+    assert_eq!(bounds.y + bounds.height, size.1);
+}

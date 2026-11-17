@@ -114,7 +114,7 @@ impl App {
                 view.files.toggle_source();
                 vec![]
             }
-            action @ (Action::Text(_) | Action::History(_)) => {
+            action @ (Action::Text(_) | Action::History(_) | Action::ScrollSourceTo(_)) => {
                 if let Some(task) = edit_source(view, action) {
                     return task;
                 }

@@ -84,6 +84,7 @@ pub enum Action {
     CancelDiscard,
     Source,
     Text(text_editor::Action),
+    ScrollSourceTo(f32),
     History(bool),
     Path(String),
     BrowsePath,

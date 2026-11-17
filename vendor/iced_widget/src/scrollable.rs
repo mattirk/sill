@@ -78,6 +78,7 @@ pub struct Scrollable<
     height: Length,
     direction: Direction,
     auto_scroll: bool,
+    scrollbar_grab_cursor: bool,
     content: Element<'a, Message, Theme, Renderer>,
     on_scroll: Option<Box<dyn Fn(Viewport) -> Message + 'a>>,
     class: Theme::Class<'a>,
@@ -107,12 +108,19 @@ where
             height: Length::Shrink,
             direction: direction.into(),
             auto_scroll: false,
+            scrollbar_grab_cursor: false,
             content: content.into(),
             on_scroll: None,
             class: Theme::default(),
             last_status: None,
         }
         .enclose()
+    }
+
+    /// Shows a grab cursor over the active scrollbar (sill patch).
+    pub fn scrollbar_grab_cursor(mut self) -> Self {
+        self.scrollbar_grab_cursor = true;
+        self
     }
 
     fn enclose(mut self) -> Self {
@@ -1356,6 +1364,17 @@ where
 
         let (mouse_over_y_scrollbar, mouse_over_x_scrollbar) =
             scrollbars.is_mouse_over(cursor);
+
+        if self.scrollbar_grab_cursor {
+            if state.scrollers_grabbed() {
+                return mouse::Interaction::Grabbing;
+            }
+            if (mouse_over_x_scrollbar && !scrollbars.is_x_disabled())
+                || (mouse_over_y_scrollbar && !scrollbars.is_y_disabled())
+            {
+                return mouse::Interaction::Grab;
+            }
+        }
 
         if state.scrollers_grabbed() {
             return mouse::Interaction::None;

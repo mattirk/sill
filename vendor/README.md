@@ -29,6 +29,11 @@ once upstream has an equivalent.
   events to a parent horizontal scrollbar: an event whose larger axis is sideways (a trackpad
   reports both axes in nearly every event), the rest scrolls the editor. Default editors stay
   unchanged.
+- `src/text_editor.rs`: optional vertical scrollbar for unwrapped source editors, drawn at the
+  visible edge and driven by the renderer's internal scroll offset. Drag and track clicks send
+  absolute targets so queued pointer events cannot accumulate stale relative offsets.
+- `src/stack.rs` and `src/scrollable.rs`: opt-in grab interactions give active source scrollbars
+  priority over the custom window's resize handles where they overlap.
 - `src/text_editor.rs`: optional `marks`, a callback giving rectangles (in the text's own
   coordinates) with their colours, filled behind the text. sill-gui's Find draws its matches in the
   reader's source with it (`find::mark_rects`): upstream draws the selection only while the editor

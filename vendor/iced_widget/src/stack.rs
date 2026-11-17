@@ -27,6 +27,8 @@ pub struct Stack<'a, Message, Theme = crate::Theme, Renderer = crate::Renderer>
     children: Vec<Element<'a, Message, Theme, Renderer>>,
     clip: bool,
     base_layer: usize,
+    // sill patch: let a scrollbar claim the pointer over window resize handles.
+    prefer_base_grab: bool,
 }
 
 impl<'a, Message, Theme, Renderer> Stack<'a, Message, Theme, Renderer>
@@ -68,7 +70,64 @@ where
             children,
             clip: false,
             base_layer: 0,
+            prefer_base_grab: false,
         }
+    }
+
+    /// Gives grab interactions in the base layer priority over window resize
+    /// handles (sill patch).
+    pub fn prefer_base_grab(mut self) -> Self {
+        self.prefer_base_grab = true;
+        self
+    }
+
+    fn base_has_grab(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> bool {
+        self.prefer_base_grab
+            && cursor.is_over(layout.bounds())
+            && self.children.get(self.base_layer).is_some_and(|base| {
+                matches!(
+                    base.as_widget().mouse_interaction(
+                        &tree.children[self.base_layer],
+                        layout.children().nth(self.base_layer).unwrap(),
+                        cursor,
+                        viewport,
+                        renderer,
+                    ),
+                    mouse::Interaction::Grab | mouse::Interaction::Grabbing
+                )
+            })
+    }
+
+    fn pointer_layer(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> Option<(usize, mouse::Interaction)> {
+        let base_has_grab = self.base_has_grab(tree, layout, cursor, viewport, renderer);
+        self.children
+            .iter()
+            .zip(&tree.children)
+            .zip(layout.children())
+            .enumerate()
+            .rev()
+            .find_map(|(index, ((child, tree), layout))| {
+                let interaction = child.as_widget().mouse_interaction(
+                    tree, layout, cursor, viewport, renderer,
+                );
+                (interaction != mouse::Interaction::None
+                    && !(base_has_grab && index > self.base_layer && is_window_resize(interaction)))
+                    .then_some((index, interaction))
+            })
     }
 
     /// Sets the width of the [`Stack`].
@@ -139,6 +198,17 @@ where
     fn default() -> Self {
         Self::new()
     }
+}
+
+// sill patch: resize overlays yield to a scrollbar under the pointer.
+fn is_window_resize(interaction: mouse::Interaction) -> bool {
+    matches!(
+        interaction,
+        mouse::Interaction::ResizingHorizontally
+            | mouse::Interaction::ResizingVertically
+            | mouse::Interaction::ResizingDiagonallyUp
+            | mouse::Interaction::ResizingDiagonallyDown
+    )
 }
 
 impl<'a, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
@@ -245,6 +315,7 @@ where
 
         let is_over = cursor.is_over(layout.bounds());
         let end = self.children.len() - 1;
+        let base_has_grab = self.base_has_grab(tree, layout, cursor, viewport, renderer);
 
         for (i, ((child, tree), layout)) in self
             .children
@@ -254,6 +325,14 @@ where
             .zip(layout.children().rev())
             .enumerate()
         {
+            if base_has_grab
+                && end - i > self.base_layer
+                && is_window_resize(child.as_widget().mouse_interaction(
+                    tree, layout, cursor, viewport, renderer,
+                ))
+            {
+                continue;
+            }
             child.as_widget_mut().update(
                 tree, event, layout, cursor, renderer, clipboard, shell,
                 viewport,
@@ -283,17 +362,8 @@ where
         viewport: &Rectangle,
         renderer: &Renderer,
     ) -> mouse::Interaction {
-        self.children
-            .iter()
-            .rev()
-            .zip(tree.children.iter().rev())
-            .zip(layout.children().rev())
-            .map(|((child, tree), layout)| {
-                child
-                    .as_widget()
-                    .mouse_interaction(tree, layout, cursor, viewport, renderer)
-            })
-            .find(|&interaction| interaction != mouse::Interaction::None)
+        self.pointer_layer(tree, layout, cursor, viewport, renderer)
+            .map(|(_, interaction)| interaction)
             .unwrap_or_default()
     }
 
@@ -315,19 +385,8 @@ where
             };
 
             let layers_under = if cursor.is_over(layout.bounds()) {
-                self.children
-                    .iter()
-                    .rev()
-                    .zip(tree.children.iter().rev())
-                    .zip(layout.children().rev())
-                    .position(|((layer, tree), layout)| {
-                        let interaction = layer.as_widget().mouse_interaction(
-                            tree, layout, cursor, viewport, renderer,
-                        );
-
-                        interaction != mouse::Interaction::None
-                    })
-                    .map(|i| self.children.len() - i - 1)
+                self.pointer_layer(tree, layout, cursor, viewport, renderer)
+                    .map(|(index, _)| index)
                     .unwrap_or_default()
             } else {
                 0

@@ -138,6 +138,9 @@ impl App {
         // Keep the conversation at the same tree position when the menu opens/closes.
         // Wrapping it in a stack only while open discards its scroll and selection state.
         let mut layers = stack![window];
+        if !self.layout.plain && self.current().and_then(|view| view.files.reader.as_ref()).is_some_and(|file| file.source) {
+            layers = layers.prefer_base_grab();
+        }
         if let Some(menu) = &self.menu {
             layers = layers.push(self.session_menu(menu));
         }
