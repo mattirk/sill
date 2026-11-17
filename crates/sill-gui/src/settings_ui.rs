@@ -597,6 +597,13 @@ impl App {
             let editor = text_editor(&page.instructions)
                 .on_action(|a| event(Event::Instructions(a)))
                 .key_binding(|press| {
+                    // Cmd/Ctrl+S saves the instructions, as the Save button does
+                    if press.modifiers.command()
+                        && matches!(press.status, text_editor::Status::Focused { .. })
+                        && matches!(press.key.as_ref(), iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("s"))
+                    {
+                        return Some(text_editor::Binding::Custom(event(Event::SaveInstructions)));
+                    }
                     crate::ui::list_keys(&press, false)
                         .map(|key| {
                             text_editor::Binding::Custom(event(match key {
