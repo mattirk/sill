@@ -779,6 +779,8 @@ struct AgentTurns {
     running: bool,
     /// A turn of the agent's own is open.
     open: bool,
+    /// The person stopped the agent, and it has neither gone idle nor been prompted since.
+    halted: bool,
 }
 
 impl AgentTurns {
@@ -790,9 +792,9 @@ impl AgentTurns {
                 self.open = true;
                 Some(AgentTurn::Started)
             }
-            Activity::Idle if self.open => {
-                self.open = false;
-                Some(AgentTurn::Ended)
+            Activity::Idle => {
+                self.halted = false;
+                std::mem::take(&mut self.open).then_some(AgentTurn::Ended)
             }
             _ => None,
         }
@@ -804,19 +806,30 @@ impl AgentTurns {
     fn output(&mut self, in_prompt: bool) -> Option<AgentTurn> {
         (self.running && !in_prompt && !self.open).then(|| {
             self.open = true;
+            self.halted = false;
             AgentTurn::Started
         })
     }
 
+    /// A subagent called a tool: the agent's work too, as [`Self::output`]. Not after a stop:
+    /// a subagent that the cancel did not reach works on alone, and its calls are no turn of
+    /// the agent's until the agent itself speaks.
+    fn subagent_output(&mut self, in_prompt: bool) -> Option<AgentTurn> {
+        if self.halted { None } else { self.output(in_prompt) }
+    }
+
     /// A prompt goes out: the agent takes it into the turn it runs, which is the prompt's from here.
     fn prompt(&mut self) -> Option<AgentTurn> {
+        self.halted = false;
         std::mem::take(&mut self.open).then_some(AgentTurn::Ended)
     }
 
-    /// The person stopped the agent's own turn: it ends here, not at an idle the agent may never
-    /// say. An agent that works on regardless still says it runs, and its next output opens a
-    /// turn again ([`Self::output`]).
+    /// The person stopped the agent. Its own turn, if one is open, ends here, not at an idle the
+    /// agent may never say. An agent that works on regardless still says it runs, and its next
+    /// output opens a turn again ([`Self::output`]); its subagents' calls do not
+    /// ([`Self::subagent_output`]).
     fn stopped(&mut self) -> Option<AgentTurn> {
+        self.halted = true;
         std::mem::take(&mut self.open).then_some(AgentTurn::Cancelled)
     }
 }
@@ -876,6 +889,10 @@ struct Subagent {
     parent: Option<String>,
     title: Option<String>,
     description: Option<String>,
+    /// It takes a `session/cancel` of its own (its `cancel` capability).
+    cancel: bool,
+    /// Its last state was idle: its work ended.
+    idle: bool,
 }
 
 impl Subagent {
@@ -949,6 +966,14 @@ impl Subagents {
         let known = self.by_session.contains_key(&session);
         let subagent = self.by_session.entry(session).or_insert_with(|| Subagent { parent: announcer.map(str::to_string), ..Subagent::default() });
         let renamed = patch(&mut subagent.title, update.title) | patch(&mut subagent.description, update.description);
+        match &update.capabilities {
+            MaybeUndefined::Undefined => {}
+            MaybeUndefined::Null => subagent.cancel = false,
+            MaybeUndefined::Value(capabilities) => subagent.cancel = capabilities.cancel.is_some(),
+        }
+        if let MaybeUndefined::Value(state) = &update.state {
+            subagent.idle = matches!(state, acp_v1::StateUpdate::Idle(_));
+        }
         if !known {
             return vec![Event::ToolCall {
                 id,
@@ -973,6 +998,15 @@ impl Subagents {
             diff: None,
             command: None,
         }]
+    }
+
+    /// The subagent sessions a stop must reach: those still at work that take a cancel. The
+    /// open session's cancel is not theirs (an agent may let a background subagent run on).
+    fn to_cancel(&self) -> Vec<String> {
+        let mut sessions: Vec<String> =
+            self.by_session.iter().filter(|(_, subagent)| subagent.cancel && !subagent.idle).map(|(session, _)| session.clone()).collect();
+        sessions.sort();
+        sessions
     }
 
     /// A message between sessions, as `session`'s transcript has it (whole: content replaces).
@@ -1316,12 +1350,16 @@ async fn drive(
                 }
             }
             Next::Cmd(Some(Command::Cancel)) => {
-                if !in_turn && !agent_turns.borrow().open {
+                let children = subagents.borrow().to_cancel();
+                if !in_turn && !agent_turns.borrow().open && children.is_empty() {
                     continue;
                 }
+                // the session's own, then each subagent's that is still at work
                 let sid = session.session_id().clone();
-                if let Err(e) = session.connection().send_notification(CancelNotification::new(sid)) {
-                    let _ = events_loop.send(Event::Other(format!("cancel failed: {e}"))).await;
+                for sid in std::iter::once(sid).chain(children.into_iter().map(Into::into)) {
+                    if let Err(e) = session.connection().send_notification(CancelNotification::new(sid)) {
+                        let _ = events_loop.send(Event::Other(format!("cancel failed: {e}"))).await;
+                    }
                 }
                 let stopped = agent_turns.borrow_mut().stopped();
                 if let Some(step) = stopped {
@@ -1353,7 +1391,7 @@ async fn drive(
                     let shown = shown.into_inner();
                     // a subagent's call is the agent's work too ([`AgentTurns::output`])
                     let called = shown.iter().any(|event| matches!(event, Event::ToolCall { .. }));
-                    let step = called.then(|| agent_turns.borrow_mut().output(in_turn)).flatten();
+                    let step = called.then(|| agent_turns.borrow_mut().subagent_output(in_turn)).flatten();
                     if let Some(step) = step {
                         let _ = events_loop.send(Event::AgentTurn(step)).await;
                     }
@@ -1793,7 +1831,10 @@ mod tests {
     /// A scripted ACP v1 agent named `name` on a socket pair: after each prompt's answer, and once
     /// the test has seen it, `after(prompt number)` gives the lines it sends on its own. Returns
     /// what the loop reported: turns, stops, agent turns and text. With `stop`, the test cancels
-    /// the first agent turn as it starts, and the agent goes on only once the cancel reached it.
+    /// the first agent turn as it starts, and the agent goes on only once the cancel reached it:
+    /// the session's, then one for each subagent `after` announced with the `cancel` capability,
+    /// which the agent then reports idle as cancelled. A subagent `c2` calls a tool before the
+    /// agent itself speaks again.
     fn agent_turns_seen(name: &'static str, prompts: usize, stop: bool, after: fn(usize) -> Vec<serde_json::Value>) -> Vec<String> {
         use std::io::{BufRead, Write};
         let (ours, theirs) = UnixStream::pair().unwrap();
@@ -1822,12 +1863,34 @@ mod tests {
                         send(text("answer"));
                         send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}));
                         go_rx.recv().unwrap();
+                        // the subagents a stop must cancel: announced with `cancel`, not idle since
+                        let mut children = std::collections::BTreeSet::new();
                         for line in after(prompt) {
+                            let update = &line["params"]["update"];
+                            if let Some(child) = update["sessionId"].as_str() {
+                                if update["capabilities"]["cancel"].is_object() {
+                                    children.insert(child.to_string());
+                                }
+                                if update["state"]["state"] == "idle" {
+                                    children.remove(child);
+                                }
+                            }
                             send(line);
                         }
                         if stop {
                             let cancel: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
                             assert_eq!(cancel["method"], "session/cancel");
+                            assert_eq!(cancel["params"]["sessionId"], "s1");
+                            for child in children {
+                                let cancel: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+                                assert_eq!(cancel["method"], "session/cancel");
+                                assert_eq!(cancel["params"]["sessionId"], child);
+                                send(sent(
+                                    "s1",
+                                    serde_json::json!({"sessionUpdate":"subagent_update","sessionId":child,"state":{"state":"idle","stopReason":"cancelled"}}),
+                                ));
+                            }
+                            send(sent("c2", call("late")));
                             send(text("still working"));
                         }
                         send(text("end"));
@@ -1941,6 +2004,11 @@ mod tests {
     }
 
     /// A session update as `session` sends it.
+    /// A tool call, as a session's update.
+    fn call(id: &str) -> serde_json::Value {
+        serde_json::json!({"sessionUpdate":"tool_call","toolCallId":id,"title":"sleep","kind":"execute","status":"pending"})
+    }
+
     fn sent(session: &str, update: serde_json::Value) -> serde_json::Value {
         serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session,"update":update}})
     }
@@ -2023,6 +2091,48 @@ mod tests {
         assert_eq!(seen, ["turn", "answer", "stopped", "agent started", "agent cancelled", "agent started", "still working"]);
     }
 
+    /// Stop reaches the subagents too: each one still at work that takes a cancel gets its own
+    /// (the session's cancel is not theirs: Claude Code lets a background subagent run on,
+    /// probed 2026-11-17). One that takes none works on, and its calls open no turn of the
+    /// agent's after the stop; the agent's own word does.
+    #[test]
+    fn stop_cancels_the_subagents_at_work_and_their_calls_open_no_turn_after_it() {
+        let seen = agent_turns_seen(CLAUDE, 1, true, |_| {
+            let announce = |session: &str, more: serde_json::Value| {
+                let mut update = serde_json::json!({"sessionUpdate":"subagent_update","sessionId":session,"title":session});
+                update.as_object_mut().unwrap().extend(more.as_object().unwrap().clone());
+                sent("s1", update)
+            };
+            vec![
+                announce("c0", serde_json::json!({"capabilities":{"cancel":{}},"state":{"state":"running"}})),
+                // done before the stop: no cancel for it
+                sent("s1", serde_json::json!({"sessionUpdate":"subagent_update","sessionId":"c0","state":{"state":"idle","stopReason":"end_turn"}})),
+                announce("c1", serde_json::json!({"capabilities":{"cancel":{}},"state":{"state":"running"}})),
+                announce("c2", serde_json::json!({"state":{"state":"running"}})),
+                sent("c1", call("t1")),
+            ]
+        });
+        assert_eq!(
+            seen,
+            [
+                "turn",
+                "answer",
+                "stopped",
+                "call subagent:c0 [sub-agent · c0] InProgress in -",
+                "update subagent:c0 Completed -",
+                "call subagent:c1 [sub-agent · c1] InProgress in -",
+                "call subagent:c2 [sub-agent · c2] InProgress in -",
+                "agent started",
+                "call t1 [sleep] Pending in subagent:c1",
+                "agent cancelled",
+                "update subagent:c1 Failed -",
+                "call late [sleep] Pending in subagent:c2",
+                "agent started",
+                "still working",
+            ]
+        );
+    }
+
     #[test]
     fn the_activity_source_is_chosen_by_the_agents_name() {
         assert_eq!(ActivitySource::of(Some(CLAUDE)), ActivitySource::Claude);
@@ -2049,6 +2159,11 @@ mod tests {
         assert_eq!(turns.stopped(), None, "no turn of the agent's to stop");
         assert_eq!(turns.said(Activity::Running, false), Some(AgentTurn::Started));
         assert_eq!(turns.stopped(), Some(AgentTurn::Cancelled));
+        assert_eq!(turns.subagent_output(false), None, "a subagent the stop did not reach opens no turn");
+        assert_eq!(turns.output(false), Some(AgentTurn::Started), "the agent's own word does");
+        assert_eq!(turns.stopped(), Some(AgentTurn::Cancelled));
         assert_eq!(turns.said(Activity::Idle, false), None, "the idle the cancel brings ends nothing twice");
+        assert_eq!(turns.said(Activity::Running, false), Some(AgentTurn::Started));
+        assert_eq!(turns.subagent_output(false), None, "its subagents' calls are that turn's");
     }
 }
