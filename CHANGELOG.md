@@ -3,6 +3,48 @@
 What changed in each release of sill. A release's notes on GitHub are its section here
 (`packaging/check-release.py --notes`); a version without a section is not released.
 
+## 0.0.6 — 2026-11-17
+
+### Added
+
+- **Subagents**: an agent's subagents (Claude Code, Codex) are shown in the conversation as
+  delegation cards with their brief, calls and words, each with its status and elapsed time.
+  The subagents at work are listed above the prompt.
+- **Always Apply** sessions, switched on in a session's settings: the session's file changes
+  are staged for review, and its host control is restricted.
+- VM storage is shown by session, and the jail files of ended sessions can be reclaimed.
+- Cmd/Ctrl+S saves an agent's instructions from the instructions editor.
+- Flush, draggable scrollbars in the source reader.
+- In Mark mode, a pen cursor is drawn over the image, anchored at its tip.
+
+### Changed
+
+- A session shows as working while Claude Code or Codex runs a turn it started itself (a
+  background task's notification, a goal turn). Stop ends such a turn too.
+- Latest in the conversation is a caret-down button that stays legible in every theme.
+- The drawer has one edge when it opens over the conversation; the strip before its line is
+  gone.
+- Session details opens without waiting for the Changes listing.
+
+### Security
+
+- The host's view of a repository reads the parts an agent can write (`.git`, `gitdir:`,
+  `commondir`, HEAD, the index, config) without following links or waiting on FIFOs, each
+  bounded in size. An untracked link or special file is named in the diff instead of read.
+- Ghost and Crosscheck sessions are left out of memory snapshots while copying, so their text
+  does not remain in the file's free pages.
+
+### Fixed
+
+- Stop also cancels the subagents still at work; they no longer run on and show the session
+  as working again.
+- The Changes listing no longer reads ignored package caches in session overlays, which could
+  hold the daemon for seconds with many sessions.
+- A daemon shutdown could miss a revocation that had just begun and leave its host process
+  running; a host job that had just finished could refuse the next one as busy.
+- The debug build's window no longer panics at start.
+- The daemon names its socket when it cannot make it private.
+
 ## 0.0.5 — 2026-11-16
 
 ### Added
