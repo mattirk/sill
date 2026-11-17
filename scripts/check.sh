@@ -5,7 +5,8 @@
 #   scripts/check.sh -p sill-core           one crate, while working on it
 # In the Mac app's Linux jail: scripts/dev-jail.sh scripts/check.sh [PACKAGES...]
 #
-# Steps: formatting, the release scripts' tests, the Rust tests. A step that fails stops the run.
+# Steps: formatting, Clippy (a warning fails), the release scripts' tests, the Rust tests. A step
+# that fails stops the run.
 # Tests marked #[ignore] need something a plain machine lacks (their reason says what) and are
 # not run here.
 set -eu
@@ -21,6 +22,13 @@ fi
 
 step() { echo "== $*"; "$@"; }
 step cargo fmt --all --check
+step cargo clippy --locked "$@" --all-targets -- -D warnings
+# Mac-only code is not compiled on Linux. Where the Mac target is installed
+# (`rustup target add aarch64-apple-darwin`), lint the crates the Mac builds (build.yml's macOS
+# packages) for it too: Clippy only checks, so no Apple SDK is needed.
+if [ "$(uname -s)" = Linux ] && [ "$*" = --workspace ] && rustup target list --installed 2>/dev/null | grep -qx aarch64-apple-darwin; then
+    step cargo clippy --locked --target aarch64-apple-darwin -p sill-gui -p sill-vm -p sill-client -p sill-proto --all-targets -- -D warnings
+fi
 step python3 packaging/test_release.py
 # One test at a time, as CI has always run them; SILL_TEST_THREADS overrides it.
 step cargo test --locked "$@" -- --test-threads="${SILL_TEST_THREADS:-1}"

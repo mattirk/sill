@@ -35,7 +35,8 @@ case "${1:-doctor}" in
             chmod +x "$installer/rustup-init"
             "$installer/rustup-init" -y --no-modify-path --default-toolchain none
         fi
-        rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+        # the Mac target is for linting only (scripts/check.sh): Mac-only code is not compiled on Linux
+        rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy --target aarch64-apple-darwin
         rustc --version
         cargo --version
         ;;

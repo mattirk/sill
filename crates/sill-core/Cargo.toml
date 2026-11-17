@@ -29,3 +29,6 @@ sill-memory.workspace = true
 sill-proto.workspace = true
 rand = "0.10.3"
 similar = "3.2.1"
+
+[lints]
+workspace = true

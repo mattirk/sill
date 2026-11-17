@@ -17,3 +17,6 @@ rusqlite.workspace = true
 
 [dev-dependencies]
 sill-core.workspace = true
+
+[lints]
+workspace = true

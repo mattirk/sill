@@ -28,3 +28,6 @@ rusqlite.workspace = true
 x11rb = "0.14"
 async-channel = "2"
 futures = "0.3"
+
+[lints]
+workspace = true

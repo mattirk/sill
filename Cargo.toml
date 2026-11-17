@@ -9,7 +9,14 @@ version = "0.0.5"
 edition = "2024"
 repository = "https://github.com/mattirk/sill"
 license = "Apache-2.0"
-rust-version = "1.90"
+# the Rust that rust-toolchain.toml pins: the code is built and linted with no other
+rust-version = "1.100"
+
+# One set of lints for every crate (each has `[lints] workspace = true`). Clippy's default set,
+# with warnings failing scripts/check.sh and so CI. An exception is an `#[allow(...)]` or
+# `#[expect(...)]` at the site with its reason, not an entry here.
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
 
 [workspace.dependencies]
 sill-core = { path = "crates/sill-core" }

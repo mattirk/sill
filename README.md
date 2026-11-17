@@ -35,7 +35,7 @@ curl -fsSL https://mattirk.github.io/sill/install.sh | sh
 
 ## Build from source
 
-**Linux desktop** — bubblewrap, cgroup v2, kernel ≥ 6.2, Rust ≥ 1.90:
+**Linux desktop** — bubblewrap, cgroup v2, kernel ≥ 6.2, Rust ≥ 1.100:
 
 ```bash
 sudo apt install bubblewrap libwayland-dev libxkbcommon-dev
