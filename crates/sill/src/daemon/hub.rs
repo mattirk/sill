@@ -955,7 +955,7 @@ impl Hub {
 
     /// [`Self::session_changes`] without what the policy's ignore patterns match (package caches,
     /// build output outside a repository): for listing and counting what is pending.
-    fn session_pending(&self, s: &sill_core::store::Session, uid: u32) -> Result<Vec<sill_core::ledger::Change>> {
+    pub(super) fn session_pending(&self, s: &sill_core::store::Session, uid: u32) -> Result<Vec<sill_core::ledger::Change>> {
         self.session_scan(s, uid, true)
     }
 

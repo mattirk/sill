@@ -5625,6 +5625,23 @@
       ],
       "type": "object"
     },
+    "Reclaim": {
+      "additionalProperties": false,
+      "properties": {
+        "ended_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "ended_at"
+      ],
+      "type": "object"
+    },
     "Record": {
       "oneOf": [
         {
@@ -6552,6 +6569,54 @@
         "activity",
         "question_ids",
         "capabilities"
+      ],
+      "type": "object"
+    },
+    "SessionUsage": {
+      "description": "Allocated bytes in each session-owned directory. An unreadable directory blocks reclaim.",
+      "properties": {
+        "blocked": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "directories": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "ended_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "title",
+        "directories"
       ],
       "type": "object"
     },
@@ -8194,7 +8259,7 @@
   "capabilities": {
     "offered": [
       {
-        "doc": "Daemon-host free space and inactive-session build-cache cleanup.",
+        "doc": "Daemon-host free space, build-cache cleanup and ended-session storage reclaim.",
         "name": "sill.storage",
         "version": 1
       },
@@ -8338,6 +8403,37 @@
     "snapshot_ttl_seconds": 60
   },
   "methods": [
+    {
+      "capabilities": {
+        "sill.storage": 1
+      },
+      "doc": "Measure session-owned directories and report reclaim eligibility.",
+      "kind": "request",
+      "name": "_sill/storage.sessions",
+      "params": {
+        "$ref": "#/$defs/Empty"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/SessionUsage"
+        },
+        "type": "array"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.storage": 1
+      },
+      "doc": "Reclaim an ended session's jail after its work has been settled.",
+      "kind": "request",
+      "name": "_sill/storage.reclaim",
+      "params": {
+        "$ref": "#/$defs/Reclaim"
+      },
+      "result": {
+        "type": "object"
+      }
+    },
     {
       "capabilities": {
         "sill.storage": 1

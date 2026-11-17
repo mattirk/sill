@@ -1044,8 +1044,10 @@ frontend folds only that prompt to its first line; the turn it starts is the age
 | `_sill/storage.space` | `{}` | Used, total and user-available bytes on the daemon host's home and state filesystems. |
 | `_sill/storage.caches` | `{}` | Known private build-cache paths, allocated bytes, session identity and active status; scan failures are reported per cache. |
 | `_sill/storage.clear_build_cache` | `session_id` | `{}`; rechecks inactivity while serialized with startup, then detaches the known cache before removal. |
+| `_sill/storage.sessions` | `{}` | Session directories and allocated bytes, largest sessions first, with eligibility or a reason to review outstanding work. |
+| `_sill/storage.reclaim` | `session_id`, `ended_at` | Recheck the ended session and pending work, then remove its jail files. Preserve the session row and transcript. |
 
-Cleanup accepts a session ID, never a caller-supplied path. It clears only
+Build-cache cleanup accepts a session ID, never a caller-supplied path. It clears only
 `private/home%sill%.cache/sill-dev/target` within that session's state directory.
 Running jails (including launchers still starting or stopping) are refused. Symlinks
 in parent directories and mount traversal are refused; links within the target are

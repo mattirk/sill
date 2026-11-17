@@ -749,7 +749,7 @@ impl App {
             feed = feed.push(
                 rows::key("storage"),
                 column![
-                    text("The VM has run out of storage. Check free space and clear unused build caches in Settings → System → Virtual machine.")
+                    text("The VM has run out of storage. Check session storage and reclaim space in Settings → System → Virtual machine.")
                         .size(style::SMALL)
                         .color(P.warning),
                     crate::settings_ui::quiet_button("Open VM storage", Some(Message::Vm(crate::vm_ui::Event::OpenStorage))),

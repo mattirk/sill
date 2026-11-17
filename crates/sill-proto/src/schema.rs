@@ -60,6 +60,18 @@ const fn notification<P: JsonSchema>(name: &'static str, doc: &'static str) -> M
 
 /// Every method the daemon answers and every notification it sends, in the order of docs/protocol.md.
 pub const METHODS: &[Method] = &[
+    req_needing::<crate::Empty, Vec<crate::storage::SessionUsage>>(
+        method::STORAGE_SESSIONS,
+        "sill.storage",
+        1,
+        "Measure session-owned directories and report reclaim eligibility.",
+    ),
+    req_empty_needing::<crate::storage::Reclaim>(
+        method::STORAGE_RECLAIM,
+        "sill.storage",
+        1,
+        "Reclaim an ended session's jail after its work has been settled.",
+    ),
     req_needing::<crate::Empty, crate::storage::Space>(
         method::STORAGE_SPACE,
         "sill.storage",

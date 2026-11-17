@@ -2269,8 +2269,14 @@ fn storage_cleanup_refuses_a_live_launcher_and_requires_capability() {
     let reply = baseline.call(method::STORAGE_CACHES, json!({})).unwrap();
     assert_eq!(reply["error"]["data"]["code"], "unsupported");
     let mut c = d.connect_caps(json!({"sill.storage": 1})).unwrap();
+    let report = c.call(method::STORAGE_SESSIONS, json!({})).unwrap();
+    assert!(report["result"].is_array(), "{report}");
     let reply = c.call(method::SESSIONS_CREATE, json!({"create_id": "storage-active", "agent": "claude", "policy": "default"})).unwrap();
     let id = reply["result"]["session_id"].as_str().unwrap();
+    let reply = c.call(method::STORAGE_RECLAIM, json!({"session_id": id, "ended_at": 1})).unwrap();
+    assert!(reply["error"]["message"].as_str().unwrap().contains("changed since scan"), "{reply}");
+    let reply = c.call(method::STORAGE_RECLAIM, json!({"session_id": id, "ended_at": 1, "path": "/tmp"})).unwrap();
+    assert_eq!(reply["error"]["code"], -32602);
     // A launcher still booting need not have a shim socket. It must still be protected.
     let mut launcher = Command::new("python3").args(["-c", "import time; time.sleep(30)", "launch", "--session", id]).spawn().unwrap();
     let rt = d.dir.join("run/sill").join(id);

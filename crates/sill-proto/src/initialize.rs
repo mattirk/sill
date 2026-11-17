@@ -22,7 +22,7 @@ pub struct Capability {
 /// Every capability this daemon offers. The baseline sfp/1 contract needs none of them; later
 /// compatible additions arrive here (docs/protocol.md, Compatibility and errors).
 pub const CAPABILITIES: &[Capability] = &[
-    Capability { name: "sill.storage", version: 1, doc: "Daemon-host free space and inactive-session build-cache cleanup." },
+    Capability { name: "sill.storage", version: 1, doc: "Daemon-host free space, build-cache cleanup and ended-session storage reclaim." },
     Capability {
         name: "sill.crosscheck",
         version: 1,

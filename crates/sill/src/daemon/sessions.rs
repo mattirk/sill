@@ -222,6 +222,8 @@ impl Hub {
                     if serde_json::to_vec(&a.change)?.len() > 1024 * 1024 {
                         return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "session update exceeds 1 MiB").into());
                     }
+                    // Reopen and storage reclaim must agree which ended session owns the files.
+                    let _starting = matches!(&a.change, api::Change::Reopen).then(|| self.starting.lock().unwrap());
                     let refresh = matches!(&a.change, api::Change::Name { .. } | api::Change::Title { .. } | api::Change::Summary { .. });
                     self.with_store(|store| {
                         let row = exact(store, &a.session_id)?;
@@ -319,7 +321,13 @@ impl Hub {
                     }
                     match method {
                         method::SESSIONS_START => {
-                            let s = self.start_session(&a.session_id)?;
+                            let s = {
+                                let _starting = self.starting.lock().unwrap();
+                                if self.with_store(|store| exact(store, &a.session_id))?.ended_at.is_some() {
+                                    return Err(Error::domain("invalid_state", "session has ended; reopen it explicitly").into());
+                                }
+                                self.start_session(&a.session_id)?
+                            };
                             self.ensure_runner(&a.session_id, false)?;
                             Ok(json!(api::Started { session_id: a.session_id, fresh: s.fresh }))
                         }

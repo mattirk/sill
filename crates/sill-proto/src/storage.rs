@@ -1,4 +1,4 @@
-//! Daemon-host filesystem space and explicitly disposable session build caches.
+//! Daemon-host space, private build caches and ended-session storage reclaim.
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -32,4 +32,21 @@ pub struct Caches {
 #[serde(deny_unknown_fields)]
 pub struct ClearBuildCache {
     pub session_id: String,
+}
+
+/// Allocated bytes in each session-owned directory. An unreadable directory blocks reclaim.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SessionUsage {
+    pub session_id: String,
+    pub title: String,
+    pub directories: Vec<(String, u64)>,
+    pub ended_at: Option<i64>,
+    pub blocked: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Reclaim {
+    pub session_id: String,
+    pub ended_at: i64,
 }

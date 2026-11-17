@@ -235,6 +235,14 @@ fn of_session(conn: &Connection, session: &str) -> Result<Vec<Row>> {
     Ok(rows)
 }
 
+/// Inventory without settling or freeing workspaces during a storage scan.
+pub fn storage_paths(conn: &Connection, session: &str) -> Result<Vec<PathBuf>> {
+    if !has_tables(conn)? {
+        return Ok(Vec::new());
+    }
+    Ok(of_session(conn, session)?.into_iter().map(|row| row.path).collect())
+}
+
 fn save(conn: &Connection, r: &Row) -> Result<()> {
     conn.execute(
         &format!("INSERT OR REPLACE INTO workspaces({COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)"),

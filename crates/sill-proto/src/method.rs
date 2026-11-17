@@ -17,6 +17,8 @@ names! {
     INITIALIZE = "_sill/initialize";
 
     // storage
+    STORAGE_SESSIONS = "_sill/storage.sessions";
+    STORAGE_RECLAIM = "_sill/storage.reclaim";
     STORAGE_SPACE = "_sill/storage.space";
     STORAGE_CACHES = "_sill/storage.caches";
     STORAGE_CLEAR_BUILD_CACHE = "_sill/storage.clear_build_cache";

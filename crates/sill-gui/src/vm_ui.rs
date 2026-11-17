@@ -79,6 +79,11 @@ pub enum Event {
     Read,
     ReadSpace,
     Space(Result<sill_proto::storage::Space, String>),
+    ScanSessions,
+    Sessions(Result<Vec<sill_proto::storage::SessionUsage>, String>),
+    Reclaim(String, i64),
+    Reclaimed(Result<(), String>),
+    CancelReclaim,
     ScanCaches,
     Caches(Result<sill_proto::storage::Caches, String>),
     ClearCaches,
@@ -109,6 +114,9 @@ pub struct State {
     space_reading: bool,
     scanning: bool,
     clearing: bool,
+    sessions: Option<Result<Vec<sill_proto::storage::SessionUsage>, String>>,
+    scanning_sessions: bool,
+    armed_session: crate::armed::Armed<(String, i64)>,
     armed_clear: crate::armed::Armed<()>,
     space_read_at: Option<std::time::Instant>,
     /// What is under way ("Restarting…"); the buttons wait for it.
@@ -259,6 +267,81 @@ impl App {
                 self.vm.space_reading = false;
                 self.vm.space = Some(result);
             }
+            Event::ScanSessions => {
+                if self.vm.scanning_sessions || self.vm.clearing {
+                    return Task::none();
+                }
+                self.vm.armed_session.clear();
+                if self.demo {
+                    self.vm.sessions = Some(Ok(vec![sill_proto::storage::SessionUsage {
+                        session_id: "604fd5e1".into(),
+                        title: "Earlier build".into(),
+                        directories: vec![("private".into(), 7_500 << 20)],
+                        ended_at: Some(1),
+                        blocked: None,
+                    }]));
+                    return Task::none();
+                }
+                let Some(connect) = self.connect.clone() else {
+                    return Task::none();
+                };
+                self.vm.scanning_sessions = true;
+                return blocking(
+                    move || {
+                        let client = connect().map_err(|e| format!("{e:#}"))?;
+                        client.call_within(method::STORAGE_SESSIONS, sill_proto::Empty {}, std::time::Duration::from_secs(300)).map_err(|e| format!("{e:#}"))
+                    },
+                    |r| msg(Event::Sessions(r)),
+                );
+            }
+            Event::Sessions(result) => {
+                self.vm.scanning_sessions = false;
+                self.vm.sessions = Some(result);
+            }
+            Event::CancelReclaim => self.vm.armed_session.clear(),
+            Event::Reclaim(id, ended_at) => {
+                let eligible = self
+                    .vm
+                    .sessions
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .is_some_and(|rows| rows.iter().any(|row| row.session_id == id && row.ended_at == Some(ended_at) && row.blocked.is_none()));
+                if !eligible {
+                    return Task::none();
+                }
+                if self.vm.clearing || self.vm.scanning_sessions || !self.vm.armed_session.press((id.clone(), ended_at)) {
+                    return Task::none();
+                }
+                if self.demo {
+                    self.vm.said = Some(Err(DEMO.into()));
+                    return Task::none();
+                }
+                let Some(connect) = self.connect.clone() else {
+                    return Task::none();
+                };
+                self.vm.clearing = true;
+                return blocking(
+                    move || {
+                        connect()
+                            .map_err(|e| format!("{e:#}"))?
+                            .call_within::<serde_json::Value>(
+                                method::STORAGE_RECLAIM,
+                                sill_proto::storage::Reclaim { session_id: id, ended_at },
+                                std::time::Duration::from_secs(300),
+                            )
+                            .map(|_| ())
+                            .map_err(|e| format!("{e:#}"))
+                    },
+                    |r| msg(Event::Reclaimed(r)),
+                );
+            }
+            Event::Reclaimed(result) => {
+                self.vm.clearing = false;
+                self.vm.said = Some(result.map(|()| "Session files reclaimed.".into()));
+                self.vm.sessions = None;
+                self.vm.caches = None;
+                return Task::batch([self.vm_event(Event::ReadSpace), self.vm_event(Event::ScanSessions)]);
+            }
             Event::ScanCaches => {
                 if self.vm.scanning || self.vm.clearing {
                     return Task::none();
@@ -342,6 +425,8 @@ impl App {
             }
             Event::Cleared(result) => {
                 self.vm.clearing = false;
+                self.vm.sessions = None;
+                self.vm.armed_session.clear();
                 self.vm.said = Some(result.map(|()| "All eligible build caches cleared.".into()));
                 // Never retry a timed-out deletion. A fresh scan shows what remains.
                 self.vm.caches = None;
@@ -478,7 +563,7 @@ impl App {
                     body = body.push(crate::daemon_ui::detail_row(label, space_label(disk)));
                     if low_space(disk) {
                         body = body.push(
-                            text(format!("{label} is low on space. Clear unused build caches or make room before starting more work."))
+                            text(format!("{label} is low on space. Review session storage and reclaim space before starting more work."))
                                 .size(style::SMALL)
                                 .color(P.warning),
                         );
@@ -489,6 +574,50 @@ impl App {
             _ => body = body.push(text(if ready { "Reading free space…" } else { "Start the VM to read its free space." }).size(style::SMALL).color(P.fg_dim)),
         }
         let supported = vm.space.as_ref().is_some_and(|r| r.is_ok()) && ready;
+        body = body.push(quiet_button(
+            if vm.scanning_sessions { "Measuring sessions…" } else { "Scan session storage" },
+            (supported && !vm.scanning_sessions && !vm.clearing).then(|| msg(Event::ScanSessions)),
+        ));
+        match &vm.sessions {
+            Some(Ok(rows)) => {
+                if rows.is_empty() {
+                    body = body.push(text("No session files found."));
+                }
+                if rows.iter().any(|session| session.ended_at.is_some() && session.blocked.is_some()) {
+                    body = body.push(quiet_button("Open Changes", Some(Message::ShowPage(crate::Page::Changes))));
+                }
+                for session in rows {
+                    let total = session.directories.iter().map(|(_, n)| n).sum();
+                    body = body.push(text(format!("{} · {} · {}", session.title, session.session_id, readable_size(total))));
+                    for (path, size) in &session.directories {
+                        body = body.push(text(format!("{}   {path}", readable_size(*size))).size(style::TINY));
+                    }
+                    if let Some(reason) = &session.blocked {
+                        body = body.push(text(reason).size(style::SMALL));
+                    } else if let Some(end) = session.ended_at {
+                        let armed = vm.armed_session.is(&(session.session_id.clone(), end));
+                        if armed {
+                            body = body.push(text("Permanently remove this session’s jail files, including private tool data and Changes undo backups? Its Sill transcript and summary stay available.").size(style::SMALL));
+                        }
+                        body = body.push(quiet_button(
+                            if vm.clearing {
+                                "Clearing…"
+                            } else if armed {
+                                "Confirm reclaim"
+                            } else {
+                                "Reclaim session files"
+                            },
+                            (supported && !vm.scanning_sessions && !vm.clearing).then(|| msg(Event::Reclaim(session.session_id.clone(), end))),
+                        ));
+                        if armed {
+                            body = body.push(quiet_button("Cancel", Some(msg(Event::CancelReclaim))));
+                        }
+                    }
+                }
+            }
+            Some(Err(e)) => body = body.push(text(e).color(P.warning)),
+            None => (),
+        }
         body = body.push(
             row![
                 quiet_button(if vm.space_reading { "Refreshing…" } else { "Refresh space" }, (ready && !vm.space_reading).then(|| msg(Event::ReadSpace))),
@@ -801,6 +930,19 @@ mod tests {
     }
 
     #[test]
+    fn reclaim_confirmation_belongs_to_the_scanned_ended_session() {
+        let (mut app, _) = App::new(true, None);
+        let _ = app.vm_event(Event::ScanSessions);
+        let key = ("604fd5e1".to_owned(), 1);
+        let _ = app.vm_event(Event::Reclaim(key.0.clone(), 2));
+        assert!(app.vm.armed_session.get().is_none());
+        let _ = app.vm_event(Event::Reclaim(key.0.clone(), key.1));
+        assert!(app.vm.armed_session.is(&key));
+        let _ = app.vm_event(Event::ScanSessions);
+        assert!(app.vm.armed_session.get().is_none());
+    }
+
+    #[test]
     fn storage_warning_and_confirmation() {
         use sill_proto::storage::DiskSpace;
         assert!(low_space(&DiskSpace { total: 64 << 30, used: 63 << 30, available: 0 }));
@@ -825,6 +967,7 @@ mod tests {
     fn render_vm_storage() {
         let (mut app, _) = App::new(true, None);
         let _ = app.vm_event(Event::Read);
+        let _ = app.vm_event(Event::ScanSessions);
         let _ = app.vm_event(Event::ScanCaches);
         let disk = &mut app.vm.space.as_mut().unwrap().as_mut().unwrap().state;
         disk.used = 62 << 30;
