@@ -875,7 +875,13 @@ fast-forward — and the workspace goes on. `_sill/workspaces.copy` (added 2026-
 without commit") takes the same parameters and writes that revision's whole state, committed or
 not, into the checkout's working tree as uncommitted changes for the person to try: no commit on
 either side, the checkout's branch and index untouched, the workspace's work still there for a
-later apply, which takes the copied files over. `_sill/workspaces.discard`
+later apply, which takes the copied files over. `_sill/workspaces.branch` (added 2026-11-16,
+"Apply as branch") takes the same parameters and makes a new branch in the checkout at that
+revision's commits without switching to it — the checkout's branch, index and files untouched,
+no rebase first — and answers its name (`Branched.branch`): the branch the agent works on, or the
+session's title in snake_case when the workspace is on sill's own branch. Commits only, as for
+apply; a name already holding other commits is refused as `branch_exists` and never moved.
+`_sill/workspaces.discard`
 resets the workspace to what the person has and keeps the work 7 days; `_sill/workspaces.undo` puts it
 back. `_sill/workspaces.remove` removes a workspace that cannot be read (its repository was
 replaced by another), folder and record, with no Undo. `_sill/workspaces.changed` (notification, this capability only) invalidates one workspace.
@@ -1009,7 +1015,7 @@ review; a frontend never shows any other state as "no problems".
 - **Apply and Discard.** A completed `_sill/workspaces.apply` or `_sill/workspaces.discard`
   removes the workspace's review as `remove` does, one under way included. A repeat of an
   earlier request, answered from its receipt, removes nothing.
-  `_sill/workspaces.copy` does not.
+  `_sill/workspaces.copy` and `_sill/workspaces.branch` do not.
 - **Worker sessions** are not listed (`sessions.list`), have no Changes, are left out of memory,
   and refuse the requests that would widen or redirect them (`permission_denied`).
 

@@ -253,6 +253,14 @@ pub struct Changed {
     pub discarded: Option<Discarded>,
 }
 
+/// What `_sill/workspaces.branch` made: the branch's name in the person's checkout.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Branched {
+    pub workspace: Option<Workspace>,
+    pub operation: Option<Operation>,
+    pub branch: String,
+}
+
 /// `_sill/workspaces.changed`: refresh the workspace (invalidation only).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Notice {

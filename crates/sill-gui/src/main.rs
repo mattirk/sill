@@ -2364,6 +2364,7 @@ impl App {
                     };
                     // an Apply's request to commit that never reached the agent is not waited for
                     view.workspaces.committing = None;
+                    view.workspaces.branch_after_commit = false;
                     view.draft = editor::Editor::with_text(pending.text());
                     view.attachments = view.pending_attachments.remove(&id).unwrap_or_else(|| pending.submit.attachments.into_iter().map(Into::into).collect());
                     view.failed = Some(format!(

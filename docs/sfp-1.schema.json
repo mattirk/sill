@@ -591,6 +591,38 @@
       },
       "type": "object"
     },
+    "Branched": {
+      "description": "What `_sill/workspaces.branch` made: the branch's name in the person's checkout.",
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "operation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Operation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Workspace"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "branch"
+      ],
+      "type": "object"
+    },
     "Brief": {
       "description": "Active Host control on a session record, for a window-level indication of every such session.",
       "properties": {
@@ -8879,6 +8911,20 @@
       },
       "result": {
         "$ref": "#/$defs/Changed"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.workspaces": 1
+      },
+      "doc": "Apply as branch: make a new branch in the person's checkout at the workspace's commits, exactly this revision's work, without switching to it: the checkout's branch, index and files are untouched. The name is the branch the agent works on, or the session's title in snake_case when the workspace is on sill's own branch. Commits only, as for apply. Repeating it with the branch already there at those commits does nothing. Refusals: invalid_state with reason branch_exists (the name holds other commits; never moved), stale_revision, uncommitted, no_identity, workspace_detached, writer_active, rebase_in_progress.",
+      "kind": "request",
+      "name": "_sill/workspaces.branch",
+      "params": {
+        "$ref": "#/$defs/Apply"
+      },
+      "result": {
+        "$ref": "#/$defs/Branched"
       }
     },
     {

@@ -193,6 +193,10 @@ impl Hub {
                     let a: api::Apply = args(params)?;
                     (json!(records::copy(&h, &a)?), Some(a.workspace_id))
                 }
+                "_sill/workspaces.branch" => {
+                    let a: api::Apply = args(params)?;
+                    (json!(records::branch(&h, &a)?), Some(a.workspace_id))
+                }
                 "_sill/workspaces.discard" => {
                     let a: api::Apply = args(params)?;
                     let first = first(&a.operation_id)?;

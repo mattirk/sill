@@ -123,6 +123,18 @@ impl App {
                     .spacing(6)
                     .align_y(Alignment::Center),
                 );
+                shelf = shelf.push(
+                    row![
+                        text("Makes a new branch in your checkout with the workspace's commits, named for the work. Your checkout stays on its branch, its files untouched; the work stays here to apply.")
+                            .size(style::TINY)
+                            .color(P.fg_dim)
+                            .width(Fill)
+                            .wrapping(text::Wrapping::WordOrGlyph),
+                        quiet_button("Apply as branch", ev(Event::Branch(session.clone(), id.clone()))),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                );
             }
             let notice = state.notices.get(&id).map(|(said, bad)| (said.as_str(), if *bad { P.error } else { P.fg_dim }))
                 .or_else(|| d.workspace.operation.as_ref().map(|op| (op.detail.as_str(), P.warning)));

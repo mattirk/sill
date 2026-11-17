@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use iced::Task;
-use sill_client::workspaces::{self as ws, ApplyOutcome, How, Loaded};
+use sill_client::workspaces::{self as ws, ApplyOutcome, BranchOutcome, How, Loaded};
 use sill_proto::workspaces as api;
 
 use crate::armed::Armed;
@@ -40,6 +40,9 @@ pub struct State {
     pub committed: Option<String>,
     /// The workspace whose Apply menu is open (the caret beside Apply).
     pub menu: Option<String>,
+    /// The commit turn being waited for ([`State::committing`]) was asked for by Apply as
+    /// branch: the branch, not an Apply, follows it.
+    pub branch_after_commit: bool,
 }
 
 impl State {
@@ -86,9 +89,13 @@ pub enum Event {
     Menu(String, String),
     /// Apply without commit: the workspace's state into the checkout, uncommitted, to try.
     Copy(String, String),
+    /// Apply as branch: the workspace's commits as a new branch in the checkout, not checked out.
+    Branch(String, String),
     /// An Apply found uncommitted changes: ask the session's agent to commit them; the Apply
     /// follows at its turn's end.
     Commit(String, String),
+    /// Apply as branch found uncommitted changes: [`Event::Commit`], then the branch.
+    CommitForBranch(String, String),
     /// The turn after that prompt ended: the session's workspaces read afresh.
     Committed(String, Result<Loaded, String>),
     /// The Changes page's Apply found uncommitted changes in this workspace.
@@ -400,9 +407,44 @@ impl App {
                     Message::Workspaces,
                 )
             }
+            Event::Branch(session, workspace) => {
+                let after_commit = self.views.get_mut(&session).and_then(|v| {
+                    v.workspaces.menu = None;
+                    v.workspaces.committed.take()
+                }).is_some_and(|w| w == workspace);
+                let Some((actions, seen)) = self.workspace_action(&session, &workspace) else { return Task::none() };
+                blocking(
+                    move || match ws::branch(&actions, &workspace, &seen) {
+                        Ok(BranchOutcome::Made(name)) => Event::Done(
+                            session,
+                            workspace,
+                            format!("Branch {name} is in your checkout, not checked out; your checkout is unchanged. The work is still here to apply."),
+                            false,
+                        ),
+                        Ok(BranchOutcome::Uncommitted) if after_commit => {
+                            Event::Done(session, workspace, "Sill still finds uncommitted changes after the agent's commit, so no branch was made: look at the workspace, then try again.".to_string(), true)
+                        }
+                        Ok(BranchOutcome::Uncommitted) => Event::CommitForBranch(session, workspace),
+                        Err(e) => Event::Done(session, workspace, ws::message(&e), true),
+                    },
+                    Message::Workspaces,
+                )
+            }
+            Event::CommitForBranch(session, workspace) => {
+                let task = self.workspaces_event(Event::Commit(session.clone(), workspace.clone()));
+                // the branch follows only the commit turn asked for here, if one was
+                if let Some(view) = self.views.get_mut(&session)
+                    && view.workspaces.committing.as_ref().is_some_and(|(w, _)| *w == workspace)
+                {
+                    view.workspaces.branch_after_commit = true;
+                }
+                task
+            }
             Event::Commit(session, workspace) => {
                 let Some(view) = self.views.get_mut(&session) else { return Task::none() };
                 view.workspaces.running = None;
+                // an Apply follows unless Apply as branch asked ([`Event::CommitForBranch`])
+                view.workspaces.branch_after_commit = false;
                 let Some(d) = view.workspaces.loaded.as_ref().and_then(|l| l.detail(&workspace)) else { return Task::none() };
                 if view.conversation.busy() {
                     view.workspaces.notices.insert(workspace, ("The agent is working; apply after its turn.".into(), true));
@@ -416,6 +458,8 @@ impl App {
             Event::Committed(session, loaded) => {
                 let Some(view) = self.views.get_mut(&session) else { return Task::none() };
                 let Some((workspace, seen)) = view.workspaces.committing.take() else { return Task::none() };
+                // what follows this turn, decided once: a failed or changed turn leaves nothing behind
+                let then_branch = std::mem::take(&mut view.workspaces.branch_after_commit);
                 let Ok(loaded) = loaded else {
                     view.workspaces.notices.insert(workspace, ("The workspace could not be read after the agent's turn: look again, then apply.".into(), true));
                     return Task::none();
@@ -425,6 +469,9 @@ impl App {
                 let said = match now {
                     Some((true, true)) => {
                         view.workspaces.committed = Some(workspace.clone());
+                        if then_branch {
+                            return Task::done(Message::Workspaces(Event::Branch(session, workspace)));
+                        }
                         return Task::done(Message::Workspaces(Event::Apply(session, workspace)));
                     }
                     Some((false, _)) => "The agent left changes uncommitted, so nothing was applied.",
