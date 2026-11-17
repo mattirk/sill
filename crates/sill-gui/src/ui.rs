@@ -1129,17 +1129,22 @@ impl App {
                     ),
                 )
             });
-        // the scrollable stays the stack's first layer whether or not "↓ Latest" is over it:
+        // the scrollable stays the stack's first layer whether or not the Latest button is over it:
         // were it the root one moment and a layer the next, its state (where it is scrolled to)
         // would be new each time tail-follow turned off
         let mut layers = stack![scroll];
         if !view.follow_tail {
             layers = layers.push(
-                right(keys::press(
-                    button(text("↓ Latest").size(style::SMALL))
-                        .padding([4, 10])
-                        .style(style::solid(P.surface)),
-                    session::message(&view.id, session::Event::Latest),
+                right(bar_tip(
+                    keys::press(
+                        button(center(icons::glyph("chevron-down", 14.0, P.fg)))
+                            .width(28)
+                            .height(28)
+                            .padding(0)
+                            .style(style::floating),
+                        session::message(&view.id, session::Event::Latest),
+                    ),
+                    "Latest",
                 ))
                 .padding(Padding {
                     top: 0.0,

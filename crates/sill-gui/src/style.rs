@@ -514,6 +514,33 @@ pub fn solid(color: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
     }
 }
 
+/// A floating button over scrolling content (the jump-to-latest caret): raised surface with a
+/// subtle border and shadow, bright on hover.
+pub fn floating(_: &Theme, status: button::Status) -> button::Style {
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    button::Style {
+        background: Some(
+            if hovered {
+                mix(P.surface, P.fg, 0.08)
+            } else {
+                P.surface
+            }
+            .into(),
+        ),
+        text_color: if hovered { P.fg } else { alpha(P.fg, 0.85) },
+        border: Border {
+            radius: CONTROL.into(),
+            ..square(P.border, 1.0)
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+            offset: iced::Vector::new(0.0, 2.0),
+            blur_radius: 8.0,
+        },
+        snap: true,
+    }
+}
+
 /// The theme's warning turned yellow: the lesser caution, beside the warning itself (development
 /// and VM access against Host control; the person, 2026-11-13).
 pub fn yellow() -> Color {

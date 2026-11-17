@@ -169,6 +169,7 @@ pub struct Gesture {
     owner: String,
     active: Option<Stroke>,
     bounds: Size,
+    cursor_inside: bool,
 }
 
 impl Gesture {
@@ -196,9 +197,11 @@ impl canvas::Program<Message> for Editor {
         if state.owner != self.revision {
             state.owner.clone_from(&self.revision);
             state.active = None;
+            state.cursor_inside = false;
         }
         if self.saving {
             state.active = None;
+            state.cursor_inside = false;
             return None;
         }
         // Switching sessions can replace the widget tree while a button is held.
@@ -223,6 +226,7 @@ impl canvas::Program<Message> for Editor {
                 if !fitted.contains(at) {
                     return None;
                 }
+                state.cursor_inside = true;
                 state.bounds = bounds.size();
                 state.active = Some(Stroke {
                     points: vec![source_point(at, fitted, image)],
@@ -238,6 +242,7 @@ impl canvas::Program<Message> for Editor {
             }
             iced::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.active.is_some() => {
                 let Some(at) = cursor.position_from(bounds.position()) else {
+                    state.cursor_inside = false;
                     return state.finish();
                 };
                 let stroke = state.active.as_mut().unwrap();
@@ -248,14 +253,42 @@ impl canvas::Program<Message> for Editor {
                     stroke.points.push(end);
                 }
                 if !fitted.contains(at) || stroke.points.len() >= 100_000 {
+                    state.cursor_inside = fitted.contains(at);
                     state.finish()
                 } else {
+                    state.cursor_inside = true;
                     Some(canvas::Action::request_redraw().and_capture())
+                }
+            }
+            iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                let inside = cursor
+                    .position_in(bounds)
+                    .is_some_and(|at| fitted.contains(at));
+                let was_inside = std::mem::replace(&mut state.cursor_inside, inside);
+                if inside || was_inside {
+                    Some(canvas::Action::request_redraw())
+                } else {
+                    None
                 }
             }
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
             | iced::Event::Mouse(mouse::Event::CursorLeft)
-            | iced::Event::Window(iced::window::Event::Unfocused) => state.finish(),
+            | iced::Event::Window(iced::window::Event::Unfocused) => {
+                if state.active.is_some() {
+                    if matches!(
+                        event,
+                        iced::Event::Mouse(mouse::Event::CursorLeft)
+                            | iced::Event::Window(iced::window::Event::Unfocused)
+                    ) {
+                        state.cursor_inside = false;
+                    }
+                    state.finish()
+                } else if std::mem::take(&mut state.cursor_inside) {
+                    Some(canvas::Action::request_redraw())
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -266,7 +299,7 @@ impl canvas::Program<Message> for Editor {
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
-        _cursor: mouse::Cursor,
+        cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let image = Size::new(self.picture.width as f32, self.picture.height as f32);
         let fitted = fit_rect(image, bounds.size());
@@ -283,7 +316,15 @@ impl canvas::Program<Message> for Editor {
             for stroke in self.strokes.iter().chain(active) {
                 draw_stroke(&mut marks, stroke, scale);
             }
-            return vec![marks.into_geometry()];
+            let mut layers = vec![marks.into_geometry()];
+            if !self.saving
+                && let Some(at) = cursor.position_in(bounds).filter(|at| fitted.contains(*at))
+            {
+                let mut pointer = canvas::Frame::new(renderer, bounds.size());
+                draw_pen_cursor(&mut pointer, at);
+                layers.push(pointer.into_geometry());
+            }
+            return layers;
         }
         vec![]
     }
@@ -303,11 +344,65 @@ impl canvas::Program<Message> for Editor {
                 .position_in(bounds)
                 .is_some_and(|at| fitted.contains(at))
         {
-            mouse::Interaction::Crosshair
+            mouse::Interaction::Hidden
         } else {
             mouse::Interaction::default()
         }
     }
+}
+
+/// Draw a pen cursor anchored with its tip at `tip`, visible on both light and dark images.
+fn draw_pen_cursor(frame: &mut canvas::Frame, tip: Point) {
+    let scale = 20.0 / 24.0;
+    let pt = |x: f32, y: f32| Point::new(tip.x + (x - 3.0) * scale, tip.y + (y - 21.0) * scale);
+    let outline = canvas::Path::new(|p| {
+        p.move_to(pt(3.0, 21.0));
+        p.line_to(pt(4.0, 16.5));
+        p.line_to(pt(16.5, 4.0));
+        p.line_to(pt(18.5, 3.0));
+        p.line_to(pt(21.0, 5.5));
+        p.line_to(pt(20.0, 7.5));
+        p.line_to(pt(7.5, 20.0));
+        p.close();
+    });
+    let nib = canvas::Path::new(|p| {
+        p.move_to(pt(3.0, 21.0));
+        p.line_to(pt(4.0, 16.5));
+        p.line_to(pt(7.5, 20.0));
+        p.close();
+    });
+    let details = canvas::Path::new(|p| {
+        p.move_to(pt(4.0, 16.5));
+        p.line_to(pt(7.5, 20.0));
+        p.move_to(pt(15.0, 5.5));
+        p.line_to(pt(18.5, 9.0));
+    });
+    let dark = Color::from_rgb(0.10, 0.10, 0.10);
+    frame.stroke(
+        &outline,
+        canvas::Stroke::default()
+            .with_color(Color::from_rgba(0.05, 0.05, 0.05, 0.9))
+            .with_width(2.8)
+            .with_line_cap(canvas::LineCap::Round)
+            .with_line_join(canvas::LineJoin::Round),
+    );
+    frame.fill(&outline, Color::WHITE);
+    frame.fill(&nib, RED);
+    frame.stroke(
+        &outline,
+        canvas::Stroke::default()
+            .with_color(dark)
+            .with_width(1.1)
+            .with_line_cap(canvas::LineCap::Round)
+            .with_line_join(canvas::LineJoin::Round),
+    );
+    frame.stroke(
+        &details,
+        canvas::Stroke::default()
+            .with_color(dark)
+            .with_width(1.1)
+            .with_line_cap(canvas::LineCap::Round),
+    );
 }
 
 fn draw_stroke(frame: &mut canvas::Frame, stroke: &Stroke, scale: f32) {
@@ -725,6 +820,96 @@ mod tests {
         assert_eq!(
             &saved.rgba[(10 * 20 + 10) * 4..(10 * 20 + 10) * 4 + 4],
             &[255, 0, 0, 255]
+        );
+    }
+
+    #[test]
+    fn pen_cursor_hides_os_pointer_and_tracks_image_hover() {
+        use canvas::Program;
+        let (original, picture) = sample();
+        let mut editor = Editor {
+            attachment_id: "a".into(),
+            revision: "r".into(),
+            original,
+            picture,
+            strokes: vec![],
+            saving: false,
+            drawing: false,
+            error: None,
+        };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let mut state = Gesture::default();
+        assert_eq!(
+            editor.mouse_interaction(
+                &state,
+                bounds,
+                mouse::Cursor::Available(Point::new(10.0, 50.0))
+            ),
+            mouse::Interaction::default(),
+            "letterbox keeps default cursor"
+        );
+        assert_eq!(
+            editor.mouse_interaction(
+                &state,
+                bounds,
+                mouse::Cursor::Available(Point::new(100.0, 50.0))
+            ),
+            mouse::Interaction::Hidden,
+            "image area hides OS cursor for the drawn pen pointer"
+        );
+        let moved = iced::Event::Mouse(mouse::Event::CursorMoved {
+            position: Point::new(100.0, 50.0),
+        });
+        assert!(
+            editor
+                .update(
+                    &mut state,
+                    &moved,
+                    bounds,
+                    mouse::Cursor::Available(Point::new(100.0, 50.0))
+                )
+                .is_some()
+        );
+        assert!(state.cursor_inside);
+        // Leaving into letterbox requests one redraw so the pen disappears.
+        assert!(
+            editor
+                .update(
+                    &mut state,
+                    &iced::Event::Mouse(mouse::Event::CursorMoved {
+                        position: Point::new(10.0, 50.0)
+                    }),
+                    bounds,
+                    mouse::Cursor::Available(Point::new(10.0, 50.0))
+                )
+                .is_some()
+        );
+        assert!(!state.cursor_inside);
+        assert!(
+            editor
+                .update(
+                    &mut state,
+                    &iced::Event::Mouse(mouse::Event::CursorMoved {
+                        position: Point::new(5.0, 50.0)
+                    }),
+                    bounds,
+                    mouse::Cursor::Available(Point::new(5.0, 50.0))
+                )
+                .is_none()
+        );
+        editor.saving = true;
+        assert_eq!(
+            editor.mouse_interaction(
+                &state,
+                bounds,
+                mouse::Cursor::Available(Point::new(100.0, 50.0))
+            ),
+            mouse::Interaction::default()
         );
     }
 }
