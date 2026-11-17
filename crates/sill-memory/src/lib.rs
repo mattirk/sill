@@ -106,6 +106,7 @@ pub fn write_snapshot(src: &Path, dir: &Path, kept: &[(String, PathBuf, String)]
         let snap = Connection::open(&tmp)?;
         snap.execute_batch(
             "PRAGMA journal_mode = DELETE;
+             PRAGMA temp_store = MEMORY;
              CREATE TABLE sessions (id TEXT PRIMARY KEY, agent TEXT NOT NULL, title TEXT NOT NULL, created_at INTEGER NOT NULL,
                  last_used INTEGER NOT NULL, ended_at INTEGER, summary TEXT NOT NULL, summary_kind TEXT NOT NULL);
              CREATE TABLE session_pins (session_id TEXT NOT NULL, path TEXT NOT NULL);
@@ -118,49 +119,49 @@ pub fn write_snapshot(src: &Path, dir: &Path, kept: &[(String, PathBuf, String)]
         snap.execute_batch(history::SCHEMA)?;
         snap.execute("ATTACH DATABASE ?1 AS src", params![format!("file:{}?mode=ro", src.display())]).or_else(|_| snap.execute("ATTACH DATABASE ?1 AS src", params![src.to_string_lossy()]))?;
         let tx = snap.unchecked_transaction()?;
-        tx.execute_batch(
-            "INSERT INTO sessions SELECT id, agent, title, created_at, last_used, ended_at, summary, summary_kind FROM src.sessions;
-             INSERT INTO session_pins SELECT session_id, path FROM src.session_pins;
-             INSERT INTO memories SELECT session_id, ts, kind, text FROM src.memories;
-             INSERT INTO entries SELECT session_id, seq, ts, kind, text FROM src.entries WHERE kind IN ('user', 'agent', 'tool');
-             INSERT INTO memory_text (session_id, kind, ref, text) SELECT session_id, kind, ref, text FROM src.memory_text;",
-        )?;
-        // the ledger across time (SPEC §3.6), when the store has one
-        let has_history: bool = tx.query_row("SELECT count(*) FROM src.sqlite_master WHERE name = 'history'", [], |r| r.get::<_, i64>(0))? > 0;
-        if has_history {
-            tx.execute_batch("INSERT INTO history SELECT * FROM src.history")?;
-        }
+        tx.execute_batch("CREATE TEMP TABLE excluded (id TEXT PRIMARY KEY);")?;
         // ghost sessions (docs/memory.md §3) are nobody's memory, not even while they run
         let has_ghost = tx.prepare("PRAGMA src.table_info(sessions)")?.query_map([], |r| r.get::<_, String>(1))?.filter_map(|r| r.ok()).any(|c| c == "ghost");
         if has_ghost {
-            tx.execute_batch(
-                "CREATE TEMP TABLE ghosts AS SELECT id FROM src.sessions WHERE ghost <> 0;
-                 DELETE FROM memory_text WHERE session_id IN (SELECT id FROM ghosts);
-                 DELETE FROM entries WHERE session_id IN (SELECT id FROM ghosts);
-                 DELETE FROM memories WHERE session_id IN (SELECT id FROM ghosts);
-                 DELETE FROM session_pins WHERE session_id IN (SELECT id FROM ghosts);
-                 DELETE FROM sessions WHERE id IN (SELECT id FROM ghosts);
-                 DROP TABLE ghosts;",
-            )?;
+            tx.execute_batch("INSERT OR IGNORE INTO excluded SELECT id FROM src.sessions WHERE ghost <> 0;")?;
         }
         // Crosscheck's reviewer sessions are a run's evidence, kept with its report: not memory
         let has_workers: bool = tx.query_row("SELECT count(*) FROM src.sqlite_master WHERE type = 'table' AND name = 'crosscheck_workers'", [], |r| r.get::<_, i64>(0))? > 0;
         if has_workers {
+            tx.execute_batch("INSERT OR IGNORE INTO excluded SELECT session_id FROM src.crosscheck_workers;")?;
+        }
+        tx.execute_batch(
+            "INSERT INTO sessions SELECT id, agent, title, created_at, last_used, ended_at, summary, summary_kind
+                 FROM src.sessions WHERE NOT EXISTS (SELECT 1 FROM excluded WHERE excluded.id = src.sessions.id);
+             INSERT INTO session_pins SELECT session_id, path
+                 FROM src.session_pins WHERE NOT EXISTS (SELECT 1 FROM excluded WHERE excluded.id = src.session_pins.session_id);
+             INSERT INTO memories SELECT session_id, ts, kind, text
+                 FROM src.memories WHERE NOT EXISTS (SELECT 1 FROM excluded WHERE excluded.id = src.memories.session_id);
+             INSERT INTO entries SELECT session_id, seq, ts, kind, text
+                 FROM src.entries WHERE kind IN ('user', 'agent', 'tool') AND NOT EXISTS (SELECT 1 FROM excluded WHERE excluded.id = src.entries.session_id);
+             INSERT INTO memory_text (session_id, kind, ref, text) SELECT session_id, kind, ref, text
+                 FROM src.memory_text WHERE NOT EXISTS (SELECT 1 FROM excluded WHERE excluded.id = src.memory_text.session_id);",
+        )?;
+        // the ledger across time (SPEC §3.6), when the store has one (NULL session_id for a ghost's keep stays)
+        let has_history: bool = tx.query_row("SELECT count(*) FROM src.sqlite_master WHERE name = 'history'", [], |r| r.get::<_, i64>(0))? > 0;
+        if has_history {
             tx.execute_batch(
-                "CREATE TEMP TABLE workers AS SELECT session_id AS id FROM src.crosscheck_workers;
-                 DELETE FROM memory_text WHERE session_id IN (SELECT id FROM workers);
-                 DELETE FROM entries WHERE session_id IN (SELECT id FROM workers);
-                 DELETE FROM memories WHERE session_id IN (SELECT id FROM workers);
-                 DELETE FROM session_pins WHERE session_id IN (SELECT id FROM workers);
-                 DELETE FROM history WHERE session_id IN (SELECT id FROM workers);
-                 DELETE FROM sessions WHERE id IN (SELECT id FROM workers);
-                 DROP TABLE workers;",
+                "INSERT INTO history SELECT * FROM src.history
+                 WHERE NOT EXISTS (SELECT 1 FROM excluded WHERE excluded.id = src.history.session_id);",
             )?;
         }
+        let excluded: std::collections::HashSet<String> = {
+            let mut st = tx.prepare("SELECT id FROM excluded")?;
+            let ids = st.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<std::collections::HashSet<String>>>()?;
+            ids
+        };
+        tx.execute_batch("DROP TABLE excluded;")?;
         {
             let mut st = tx.prepare("INSERT INTO kept VALUES (?1, ?2, ?3)")?;
             for (id, path, what) in kept {
-                st.execute(params![id, history::sql_path(path), what])?;
+                if !excluded.contains(id) {
+                    st.execute(params![id, history::sql_path(path), what])?;
+                }
             }
         }
         tx.commit()?;
@@ -964,27 +965,70 @@ mod tests {
         )
         .unwrap();
         install(&src).unwrap();
+        history::install(&src).unwrap();
         src.execute_batch(
             "INSERT INTO sessions (id, agent, title, created_at, last_used, ghost) VALUES ('norm0001', 'claude', 'normal one', 1, 1, 0);
              INSERT INTO sessions (id, agent, title, created_at, last_used, ghost) VALUES ('ghst0001', 'claude', 'ghost one', 2, 2, 1);
+             INSERT INTO session_pins VALUES ('norm0001', '/home/me/visible-pin');
+             INSERT INTO session_pins VALUES ('ghst0001', '/home/me/ghost-secret-pin');
+             INSERT INTO memories VALUES ('ghst0001', 2, 'note', 'phantom note');
              INSERT INTO entries VALUES ('norm0001', 1, 1, 'user', 'visible prompt', '');
              INSERT INTO entries VALUES ('ghst0001', 1, 2, 'user', 'phantom prompt', '');",
         )
         .unwrap();
+        // a ghost's keep has no session_id (SPEC §3.6 decision 1) and stays in history
+        let mut ghost_keep = history::Event::new(history::Kind::Kept, Path::new("/home/me/shared.txt"), 2);
+        ghost_keep.ghost = true;
+        ghost_keep.what = "updated".into();
+        history::record(&src, &ghost_keep).unwrap();
         // a Crosscheck reviewer session is not a ghost, and is left out the same way
         src.execute_batch(
             "CREATE TABLE crosscheck_workers (session_id TEXT PRIMARY KEY, run_id TEXT NOT NULL);
              INSERT INTO sessions (id, agent, title, created_at, last_used, ended_at, ghost) VALUES ('work0001', 'codex', 'ghost one reviewed', 3, 3, 3, 0);
+             INSERT INTO session_pins VALUES ('work0001', '/home/me/worker-secret-pin');
+             INSERT INTO memories VALUES ('work0001', 3, 'note', 'worker phantom note');
              INSERT INTO entries VALUES ('work0001', 1, 3, 'agent', 'phantom finding', '');
              INSERT INTO crosscheck_workers VALUES ('work0001', 'run');",
         )
         .unwrap();
+        let mut worker_hist = history::Event::new(history::Kind::Kept, Path::new("/home/me/worker-secret-kept"), 3);
+        worker_hist.session_id = Some("work0001".into());
+        worker_hist.session_title = "worker history title".into();
+        worker_hist.what = "added".into();
+        history::record(&src, &worker_hist).unwrap();
         assert_eq!(sessions(&src).unwrap().iter().filter(|s| s.id == "work0001").count(), 0);
         assert!(recall_candidates(&src, "norm0001", &[], Scope::Everywhere, 5, None).unwrap().iter().all(|s| s.id != "work0001"));
         let q = Query::parse("phantom", Path::new("/home/me"));
         assert!(search(&src, &q, 10, 10).unwrap().iter().all(|h| h.session.id != "work0001"));
         let snapdir = dir.join("memory");
-        write_snapshot(&db, &snapdir, &[]).unwrap();
+        let kept = vec![
+            ("norm0001".into(), PathBuf::from("/home/me/norm-kept"), "added".into()),
+            ("ghst0001".into(), PathBuf::from("/home/me/ghost-kept-secret"), "added".into()),
+            ("work0001".into(), PathBuf::from("/home/me/worker-kept-secret"), "added".into()),
+        ];
+        write_snapshot(&db, &snapdir, &kept).unwrap();
+        // None of the excluded strings or session IDs may appear anywhere in the snapshot file's raw bytes.
+        let raw = std::fs::read(snapdir.join(SNAPSHOT_FILE)).unwrap();
+        for forbidden in [
+            "ghst0001",
+            "ghost one",
+            "ghost-secret-pin",
+            "phantom note",
+            "phantom prompt",
+            "ghost-kept-secret",
+            "work0001",
+            "worker-secret-pin",
+            "worker phantom note",
+            "phantom finding",
+            "worker-secret-kept",
+            "worker history title",
+            "worker-kept-secret",
+        ] {
+            assert!(
+                !raw.windows(forbidden.len()).any(|w| w == forbidden.as_bytes()),
+                "excluded text {forbidden:?} leaked into snapshot bytes"
+            );
+        }
         let snap = open_snapshot(&snapdir).unwrap().unwrap();
         let ids: Vec<String> = snap.prepare("SELECT id FROM sessions").unwrap().query_map([], |r| r.get(0)).unwrap().flatten().collect();
         assert_eq!(ids, ["norm0001"]);
@@ -993,6 +1037,13 @@ mod tests {
         assert!(!texts.iter().any(|t| t.contains("phantom") || t.contains("ghost one")), "{texts:?}");
         let n: i64 = snap.query_row("SELECT COUNT(*) FROM entries WHERE session_id = 'ghst0001'", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0);
+        assert_eq!(snapshot_kept(&snap, "norm0001"), vec![(PathBuf::from("/home/me/norm-kept"), "added".to_string())]);
+        assert!(snapshot_kept(&snap, "ghst0001").is_empty());
+        assert!(snapshot_kept(&snap, "work0001").is_empty());
+        let hist = history::query(&snap, &history::Filter::default()).unwrap();
+        assert_eq!(hist.len(), 1);
+        assert!(hist[0].ghost && hist[0].session_id.is_none());
+        assert_eq!(hist[0].path, Path::new("/home/me/shared.txt"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
