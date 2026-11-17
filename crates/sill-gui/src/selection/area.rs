@@ -46,9 +46,8 @@ pub struct Position {
 pub struct FindQuery {
     pub needle: String,
     pub case_sensitive: bool,
-    /// `(Some(row_index), visible_occurrence_in_row)` for row-scoped conversation areas, or
-    /// `(None, global_occurrence)` for unindexed areas.
-    pub current: Option<(Option<usize>, usize)>,
+    /// The current match as `(row, occurrence among the row's laid-out leaves)`.
+    pub current: Option<(usize, usize)>,
 }
 
 /// A rendered leaf's layout and vertical position within the scrollable content, recorded during
@@ -500,7 +499,6 @@ impl<Message> Area<'_, Message> {
             current_row: None,
             last_row: None,
             row_seen: 0,
-            global_seen: 0,
             painted: false,
             scrollable_y: None,
             entered_scrollable_y: None,
@@ -1080,7 +1078,6 @@ struct PaintFind<'a> {
     current_row: Option<usize>,
     last_row: Option<usize>,
     row_seen: usize,
-    global_seen: usize,
     painted: bool,
     scrollable_y: Option<f32>,
     entered_scrollable_y: Option<f32>,
@@ -1144,22 +1141,16 @@ impl Operation for PaintFind<'_> {
             crate::find::match_ranges(selectable.text(), &query.needle, query.case_sensitive);
         let count = ranges.len();
         let current_in_leaf = match (query.current, self.current_row) {
-            (Some((Some(target_row), occ)), Some(row))
-                if row == target_row && occ >= self.row_seen && occ < self.row_seen + count =>
+            (Some((target_row, occ)), Some(row))
+                if row == target_row && (self.row_seen..self.row_seen + count).contains(&occ) =>
             {
                 Some(occ - self.row_seen)
-            }
-            (Some((None, occ)), _)
-                if occ >= self.global_seen && occ < self.global_seen + count =>
-            {
-                Some(occ - self.global_seen)
             }
             _ => None,
         };
         if self.current_row.is_some() {
             self.row_seen += count;
         }
-        self.global_seen += count;
         selectable.set_find(ranges, current_in_leaf);
         self.painted |= selectable.has_find();
     }

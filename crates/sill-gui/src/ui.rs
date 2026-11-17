@@ -1001,7 +1001,7 @@ impl App {
                 })
                 .collect()
         };
-        const SPACING: f32 = 12.0;
+        use rows::SPACING;
         // until the conversation has scrolled, the window's height stands in for the view's (a
         // screen of rows to spare on each side covers the difference)
         let viewport = if view.viewport > 0.0 {
@@ -1152,18 +1152,17 @@ impl App {
             );
         }
         // one selection across every message
-        let area: Element<'a, Message> = selection::area(layers)
+        let area = selection::area(layers)
             .on_copy(Message::Copy)
             .on_drag(Message::Selecting)
-            .find(self.find.area_query(view))
             .selection(&self.find.selected_text)
-            .visible_leaves(&self.find.visible_leaves)
-            .into();
-        let mut outer = stack![area];
-        if self.find.shown {
-            outer = outer.push(self.find.bar());
+            .visible_leaves(&self.find.visible_leaves);
+        // the area stays the stack's first layer with the bar open or closed, so it keeps its
+        // state (the selection, where the conversation is scrolled to)
+        if !self.find.shown {
+            return stack![area].into();
         }
-        outer.into()
+        stack![area.find(self.find.area_query(view)), self.find.bar()].into()
     }
 
     fn item<'a>(&'a self, view: &'a SessionView, item: &'a Item) -> Element<'a, Message> {
@@ -1502,50 +1501,29 @@ impl App {
                 } else {
                     one_line(&group.latest(), 140)
                 };
-                if single {
-                    cells
-                        .push(
-                            selection::text(name)
-                                .size(style::SMALL)
-                                .width(name_width)
-                                .wrapping(text::Wrapping::None)
-                                .find_only()
-                                .style(style::selectable(P.fg)),
-                        )
-                        .push(
-                            container(
-                                selection::text(latest)
-                                    .size(style::SMALL)
-                                    .wrapping(text::Wrapping::None)
-                                    .find_only()
-                                    .style(style::selectable(quiet)),
-                            )
-                            .width(Fill)
-                            .clip(true),
-                        )
-                        .push(status_mark(group.status()))
-                        .into()
-                } else {
-                    cells
-                        .push(
-                            text(name)
-                                .size(style::SMALL)
-                                .width(name_width)
-                                .wrapping(text::Wrapping::None),
-                        )
-                        .push(
-                            container(
-                                text(latest)
-                                    .size(style::SMALL)
-                                    .color(quiet)
-                                    .wrapping(text::Wrapping::None),
-                            )
-                            .width(Fill)
-                            .clip(true),
-                        )
-                        .push(status_mark(group.status()))
-                        .into()
-                }
+                // a single call's header is its only line, so Find searches it; a group's
+                // latest call is found among the calls inside it
+                let label = |content: String, color: Color| -> Element<'a, Message> {
+                    if single {
+                        selection::text(content)
+                            .size(style::SMALL)
+                            .wrapping(text::Wrapping::None)
+                            .find_only()
+                            .style(style::selectable(color))
+                            .into()
+                    } else {
+                        text(content)
+                            .size(style::SMALL)
+                            .color(color)
+                            .wrapping(text::Wrapping::None)
+                            .into()
+                    }
+                };
+                cells
+                    .push(container(label(name, P.fg)).width(name_width))
+                    .push(container(label(latest, quiet)).width(Fill).clip(true))
+                    .push(status_mark(group.status()))
+                    .into()
             };
             let toggle = if single {
                 session::message(&view.id, session::Event::ToggleTool(first.item_id.clone()))

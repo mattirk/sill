@@ -11,7 +11,6 @@
 use std::any::Any;
 use std::cell::RefCell;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
 
 use iced::advanced::widget::operation::scrollable::{self as scroll, AbsoluteOffset, Scrollable};
 use iced::advanced::widget::operation::{Operation, Outcome};
@@ -74,30 +73,17 @@ pub struct Match {
     pub open_keys: Vec<OpenKey>,
 }
 
+#[derive(Default)]
 pub struct State {
     pub shown: bool,
     pub query: String,
     pub case_sensitive: bool,
     pub matches: Vec<Match>,
     pub current: Option<usize>,
+    /// The conversation's selected text, mirrored by the selection area for Ctrl+F's query.
     pub selected_text: RefCell<Option<String>>,
+    /// The conversation's laid-out leaves, recorded by the selection area on each layout.
     pub visible_leaves: RefCell<Vec<VisibleLeaf>>,
-    pub recorded_scroll: Arc<Mutex<Option<f32>>>,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            shown: false,
-            query: String::new(),
-            case_sensitive: false,
-            matches: Vec::new(),
-            current: None,
-            selected_text: RefCell::new(None),
-            visible_leaves: RefCell::new(Vec::new()),
-            recorded_scroll: Arc::new(Mutex::new(None)),
-        }
-    }
 }
 
 impl State {
@@ -111,14 +97,12 @@ impl State {
 
     /// The row of the current match, so [`crate::rows::plan_with_pinned`] always builds it.
     pub fn pinned_row(&self) -> Option<usize> {
-        self.shown
-            .then(|| self.current.and_then(|idx| self.matches.get(idx)).map(|m| m.row))
-            .flatten()
+        self.current.and_then(|idx| self.matches.get(idx)).map(|m| m.row)
     }
 
     /// The query and current visible match to hand to [`crate::selection::Area::find`].
     pub fn area_query(&self, view: &SessionView) -> Option<FindQuery> {
-        if !self.shown || self.query.is_empty() {
+        if self.query.is_empty() {
             return None;
         }
         let current = self.current.and_then(|idx| {
@@ -129,7 +113,7 @@ impl State {
                     prev.row == m.row && prev.open_keys.iter().all(|k| k.is_open(view))
                 })
                 .count();
-            Some((Some(m.row), visible_occ))
+            Some((m.row, visible_occ))
         });
         Some(FindQuery {
             needle: self.query.clone(),
@@ -156,7 +140,6 @@ impl State {
             text_input("Find…", &self.query)
                 .id("find-query")
                 .on_input(|s| Message::Find(Event::Input(s)))
-                .on_submit(Message::Find(Event::Next))
                 .size(style::SMALL)
                 .padding([4, 8])
                 .width(180)
@@ -327,7 +310,7 @@ pub struct IndexedLeaf {
 
 /// Extracts all [`IndexedLeaf`] entries per row for `view`, in the exact order [`crate::ui`]
 /// builds rows and [`crate::selection::Area`] visits their [`Selectable`] leaves.
-pub fn index_rows(view: &SessionView) -> Vec<Vec<IndexedLeaf>> {
+fn index_rows(view: &SessionView) -> Vec<Vec<IndexedLeaf>> {
     let conversation = &view.conversation;
     let items = conversation.visible_items();
     let places = conversation.question_places();
@@ -656,15 +639,11 @@ fn index_question(question: &Question, keys: &[OpenKey], out: &mut Vec<IndexedLe
     }
 }
 
-/// Computes all matches across `view` for `(query, case_sensitive)`.
-pub fn collect_matches(view: &SessionView, query: &str, case_sensitive: bool) -> Vec<Match> {
-    if query.is_empty() {
-        return Vec::new();
-    }
-    let rows = index_rows(view);
+/// All matches of `(query, case_sensitive)` in the indexed `rows`.
+fn collect_matches(rows: &[Vec<IndexedLeaf>], query: &str, case_sensitive: bool) -> Vec<Match> {
     let mut matches = Vec::new();
-    for (row_idx, leaves) in rows.into_iter().enumerate() {
-        for (leaf_idx, leaf) in leaves.into_iter().enumerate() {
+    for (row_idx, leaves) in rows.iter().enumerate() {
+        for (leaf_idx, leaf) in leaves.iter().enumerate() {
             for range in match_ranges(&leaf.text, query, case_sensitive) {
                 matches.push(Match {
                     row: row_idx,
@@ -678,9 +657,9 @@ pub fn collect_matches(view: &SessionView, query: &str, case_sensitive: bool) ->
     matches
 }
 
-/// Estimates which row is at the top of the viewport, and returns the row offsets `(y, height)`.
-fn row_positions(view: &SessionView) -> (usize, f32, Vec<(f32, f32)>) {
-    const SPACING: f32 = 12.0;
+/// Estimates the conversation's scroll offset and each entry row's `(y, height)` from the
+/// measured heights, as [`crate::rows::plan`] lays them out in a view `viewport` high.
+fn row_positions(view: &SessionView, viewport: f32) -> (f32, Vec<(f32, f32)>) {
     let conversation = &view.conversation;
     let items = conversation.visible_items();
     let places = conversation.question_places();
@@ -689,292 +668,223 @@ fn row_positions(view: &SessionView) -> (usize, f32, Vec<(f32, f32)>) {
         |item| conversation.purpose(item),
         |item| places.contains_key(item.item_id.as_str()),
     );
-    let entries: Vec<Range<usize>> = folds.iter().map(|r| r.range().clone()).collect();
     let heights = view.heights.borrow();
-    let mut positions = Vec::with_capacity(entries.len());
+    let mut positions = Vec::with_capacity(folds.len());
     let mut y = 0.0_f32;
-    for entry in &entries {
+    for row in &folds {
         let h = heights
-            .get(&items[entry.start].item_id)
-            .map_or(44.0, |(_, h)| *h);
+            .get(&items[row.range().start].item_id)
+            .map_or(0.0, |(_, h)| *h);
         positions.push((y, h));
-        y += h + SPACING;
+        y += h + crate::rows::SPACING;
     }
-    let total = (y - SPACING).max(0.0);
-    let viewport = if view.viewport > 0.0 {
-        view.viewport
-    } else {
-        600.0
-    };
     let top_y = if view.follow_tail {
+        let total = (y - crate::rows::SPACING).max(0.0);
         (total - viewport).max(0.0)
     } else {
         view.scroll_offset
     };
+    (top_y, positions)
+}
+
+/// Picks the first match at or below the top of the viewport. Within the top row, uses the
+/// laid-out `visible_leaves` when there are any, so matches scrolled above the top of a long
+/// message are skipped in favour of the first visible one.
+fn first_match_at_or_below_top(
+    view: &SessionView,
+    viewport: f32,
+    rows: &[Vec<IndexedLeaf>],
+    matches: &[Match],
+    visible_leaves: &[VisibleLeaf],
+) -> usize {
+    let (top_y, positions) = row_positions(view, viewport);
     let top_row = positions
         .iter()
         .position(|&(ry, rh)| ry + rh > top_y + 1.0)
         .unwrap_or(0);
-    (top_row, top_y, positions)
-}
-
-/// Picks the first match at or below the top of the viewport. Within `top_row`, uses the laid-out
-/// `VisibleLeaf` geometry when available so matches scrolled above the top of a long message are
-/// skipped in favor of the first visible match.
-fn first_match_at_or_below_top(
-    view: &SessionView,
-    matches: &[Match],
-    visible_leaves: &[VisibleLeaf],
-) -> usize {
-    let (top_row, top_y, _) = row_positions(view);
     let top_row_leaves: Vec<&VisibleLeaf> = visible_leaves
         .iter()
         .filter(|l| l.row == Some(top_row))
         .collect();
-    let indexed_top_row_leaves = (!top_row_leaves.is_empty())
-        .then(|| index_rows(view).into_iter().nth(top_row))
-        .flatten();
+    let is_open = |keys: &[OpenKey]| keys.iter().all(|k| k.is_open(view));
     for (idx, m) in matches.iter().enumerate() {
         if m.row < top_row {
             continue;
         }
-        if m.row > top_row {
+        if m.row > top_row || !is_open(&m.open_keys) {
             return idx;
         }
-        let is_visible_leaf = m.open_keys.iter().all(|k| k.is_open(view));
-        if !is_visible_leaf {
-            return idx;
-        }
-        let Some(indexed_leaves) = &indexed_top_row_leaves else {
+        let shown_before = rows[top_row][..m.leaf_in_row]
+            .iter()
+            .filter(|leaf| is_open(&leaf.open_keys))
+            .count();
+        let Some(rect) = top_row_leaves
+            .get(shown_before)
+            .and_then(|leaf| Some((leaf, leaf.layout.highlight_rects(m.range).into_iter().next()?)))
+            .map(|(leaf, rect)| leaf.origin_y + rect.y + rect.height)
+        else {
             return idx;
         };
-        let visible_leaf_idx = indexed_leaves
-            .iter()
-            .take(m.leaf_in_row)
-            .filter(|leaf| leaf.open_keys.iter().all(|k| k.is_open(view)))
-            .count();
-        if let Some(vleaf) = top_row_leaves.get(visible_leaf_idx)
-            && let Some(rect) = vleaf.layout.highlight_rects(m.range).into_iter().next()
-        {
-            let match_bottom_in_content = vleaf.origin_y + rect.y + rect.height;
-            if match_bottom_in_content > top_y + 1.0 {
-                return idx;
-            }
-            continue;
+        if rect > top_y + 1.0 {
+            return idx;
         }
-        return idx;
     }
     0
+}
+
+/// The conversation's height: until it has scrolled, the window's stands in (as in
+/// [`crate::ui`]).
+fn viewport(view: &SessionView, window_height: f32) -> f32 {
+    if view.viewport > 0.0 {
+        view.viewport
+    } else {
+        window_height
+    }
 }
 
 impl App {
     /// Whether a running session terminal or host shell currently has keyboard focus.
     pub fn terminal_focused(&self) -> bool {
-        !self.backend_shown()
-            && self.details.is_none()
+        self.find_available()
             && self.menu.is_none()
             && self.current().is_some_and(|v| {
-                v.conversation_shown()
-                    && v.terminal_shown
+                v.terminal_shown
                     && v.terminal
                         .as_ref()
                         .is_some_and(|t| t.focused && t.status == crate::terminal::Status::Running)
             })
     }
 
-    /// Recomputes matches when streamed chunks arrive while the Find bar is open, preserving the
-    /// current match if it still exists and activating the first match when one newly appears.
-    pub fn refresh_find_on_stream(&mut self) -> Task<Message> {
-        if !self.find.shown || self.find.query.is_empty() {
-            return Task::none();
-        }
-        let Some(selected) = self.selected.clone() else {
-            return Task::none();
-        };
-        let Some(view) = self.views.get(&selected) else {
-            return Task::none();
-        };
-        if !view.conversation_shown() {
-            return Task::none();
-        }
-        let prev_match = self.find.current.and_then(|i| self.find.matches.get(i).cloned());
-        let matches = collect_matches(view, &self.find.query, self.find.case_sensitive);
-        if matches.is_empty() {
-            self.find.matches.clear();
-            self.find.current = None;
-            return Task::none();
-        }
-        if let Some(prev) = prev_match {
-            self.find.current = matches
-                .iter()
-                .position(|m| {
-                    m.row == prev.row
-                        && m.leaf_in_row == prev.leaf_in_row
-                        && m.range == prev.range
-                })
-                .or_else(|| self.find.current.map(|i| i.min(matches.len() - 1)));
-            self.find.matches = matches;
-            Task::none()
-        } else {
-            let initial = first_match_at_or_below_top(
-                view,
-                &matches,
-                &self.find.visible_leaves.borrow(),
-            );
-            self.find.matches = matches;
-            self.find.current = Some(initial);
-            self.activate_current_match(&selected)
-        }
+    /// Whether the conversation, the only surface Find searches so far, is what the window shows.
+    pub fn find_available(&self) -> bool {
+        !self.backend_shown()
+            && self.details.is_none()
+            && self
+                .current()
+                .is_some_and(|v| v.conversation_shown() && !v.desktop.shown)
     }
 
     pub fn find_event(&mut self, event: Event) -> Task<Message> {
-        self.sync_recorded_scroll();
+        if !self.find.shown && event != Event::Open {
+            return Task::none();
+        }
         match event {
             Event::Open => {
-                if self.terminal_focused() {
+                if !self.find_available() || self.terminal_focused() {
                     return Task::none();
                 }
-                let Some(selected) = self.selected.clone() else {
-                    return Task::none();
-                };
-                if self.backend_shown() || self.details.is_some() {
-                    return Task::none();
-                }
-                let Some(view) = self.views.get_mut(&selected) else {
-                    return Task::none();
-                };
-                if !view.conversation_shown() {
-                    return Task::none();
-                }
-                if let Some(pane) = &mut view.terminal {
+                if let Some(pane) = self.current_mut().and_then(|v| v.terminal.as_mut()) {
                     pane.focused = false;
                 }
+                let focus = keys::focus_and_select_all("find-query");
                 if self.find.shown {
-                    return keys::focus_and_select_all("find-query");
+                    return focus;
                 }
-                if let Some(sel) = self.find.selected_text.borrow().clone()
-                    && !sel.is_empty()
-                    && sel.chars().count() <= 120
-                    && !sel.contains('\n')
-                    && !sel.contains('\r')
+                if let Some(selected) = self.find.selected_text.borrow().as_ref()
+                    && selected.chars().count() <= 120
+                    && !selected.contains(['\n', '\r'])
                 {
-                    self.find.query = sel;
+                    self.find.query = selected.clone();
                 }
                 self.find.shown = true;
-                let scroll_task = self.recompute_find(&selected);
-                Task::batch([keys::focus_and_select_all("find-query"), scroll_task])
+                Task::batch([focus, self.recompute_find(false)])
             }
             Event::Close => {
                 self.find.close();
-                if self.current().is_some_and(|v| v.conversation_shown()) {
+                if self.find_available() {
                     iced::widget::operation::focus("prompt")
                 } else {
                     Task::none()
                 }
             }
             Event::Input(query) => {
-                if !self.find.shown {
-                    return Task::none();
-                }
                 self.find.query = query;
-                let Some(selected) = self.selected.clone() else {
-                    return Task::none();
-                };
-                self.recompute_find(&selected)
+                self.recompute_find(false)
             }
             Event::ToggleCase => {
-                if !self.find.shown {
-                    return Task::none();
-                }
                 self.find.case_sensitive = !self.find.case_sensitive;
-                let Some(selected) = self.selected.clone() else {
-                    return Task::none();
-                };
-                self.recompute_find(&selected)
+                self.recompute_find(false)
             }
-            Event::Next => {
-                if !self.find.shown || self.find.matches.is_empty() {
+            Event::Next | Event::Prev => {
+                let len = self.find.matches.len();
+                if len == 0 {
                     return Task::none();
                 }
-                let len = self.find.matches.len();
-                self.find.current = Some(match self.find.current {
-                    Some(i) => (i + 1) % len,
-                    None => 0,
+                self.find.current = Some(match (self.find.current, event == Event::Next) {
+                    (Some(i), true) => (i + 1) % len,
+                    (None, true) => 0,
+                    (Some(0) | None, false) => len - 1,
+                    (Some(i), false) => i - 1,
                 });
-                let Some(selected) = self.selected.clone() else {
-                    return Task::none();
-                };
-                self.activate_current_match(&selected)
-            }
-            Event::Prev => {
-                if !self.find.shown || self.find.matches.is_empty() {
-                    return Task::none();
-                }
-                let len = self.find.matches.len();
-                self.find.current = Some(match self.find.current {
-                    Some(0) | None => len - 1,
-                    Some(i) => i - 1,
-                });
-                let Some(selected) = self.selected.clone() else {
-                    return Task::none();
-                };
-                self.activate_current_match(&selected)
+                self.activate_current_match()
             }
         }
     }
 
-    pub fn sync_recorded_scroll(&mut self) {
-        if let Ok(mut guard) = self.find.recorded_scroll.lock()
-            && let Some(offset) = guard.take()
-            && let Some(selected) = self.selected.clone()
-            && let Some(view) = self.views.get_mut(&selected)
-        {
-            view.scroll_offset = offset;
+    /// Recomputes the matches for the query. With `keep_current` (text streamed in), the current
+    /// match stays where it is; otherwise the first match from the top of the view becomes current
+    /// and is revealed.
+    pub fn recompute_find(&mut self, keep_current: bool) -> Task<Message> {
+        if !self.find.shown || !self.find_available() {
+            return Task::none();
         }
-    }
-
-    fn recompute_find(&mut self, session: &str) -> Task<Message> {
-        let Some(view) = self.views.get(session) else {
+        let Some(view) = self.current() else {
             return Task::none();
         };
-        let matches = collect_matches(view, &self.find.query, self.find.case_sensitive);
+        let rows = if self.find.query.is_empty() {
+            Vec::new()
+        } else {
+            index_rows(view)
+        };
+        let matches = collect_matches(&rows, &self.find.query, self.find.case_sensitive);
         if matches.is_empty() {
             self.find.matches.clear();
             self.find.current = None;
             return Task::none();
         }
+        let kept = keep_current
+            .then(|| self.find.current.and_then(|i| self.find.matches.get(i)))
+            .flatten()
+            .map(|prev| {
+                matches
+                    .iter()
+                    .position(|m| {
+                        (m.row, m.leaf_in_row, m.range) == (prev.row, prev.leaf_in_row, prev.range)
+                    })
+                    .unwrap_or(self.find.current.unwrap_or(0).min(matches.len() - 1))
+            });
+        if let Some(current) = kept {
+            self.find.matches = matches;
+            self.find.current = Some(current);
+            return Task::none();
+        }
         let initial = first_match_at_or_below_top(
             view,
+            viewport(view, self.height),
+            &rows,
             &matches,
             &self.find.visible_leaves.borrow(),
         );
         self.find.matches = matches;
         self.find.current = Some(initial);
-        self.activate_current_match(session)
+        self.activate_current_match()
     }
 
-    fn activate_current_match(&mut self, session: &str) -> Task<Message> {
-        let Some(idx) = self.find.current else {
-            return Task::none();
-        };
-        let Some(m) = self.find.matches.get(idx).cloned() else {
+    /// Opens what hides the current match, scrolls its row into the built range and reveals the
+    /// match once it is laid out.
+    fn activate_current_match(&mut self) -> Task<Message> {
+        let Some(m) = self.find.current.and_then(|i| self.find.matches.get(i)).cloned() else {
             return Task::none();
         };
         let window_height = self.height;
-        let Some(view) = self.views.get_mut(session) else {
+        let Some(view) = self.current_mut() else {
             return Task::none();
         };
         for key in &m.open_keys {
             key.open(view);
         }
-        let (_, top_y, positions) = row_positions(view);
-        let viewport = if view.viewport > 0.0 {
-            view.viewport
-        } else if window_height > 0.0 {
-            window_height
-        } else {
-            600.0
-        };
+        let viewport = viewport(view, window_height);
+        let (top_y, positions) = row_positions(view, viewport);
         view.follow_tail = false;
         view.scroll_offset = top_y;
         if let Some(&(row_y, row_h)) = positions.get(m.row) {
@@ -983,7 +893,7 @@ impl App {
                 view.scroll_offset = (row_y - viewport / 3.0).max(0.0);
             }
         }
-        reveal_match("conversation", self.find.recorded_scroll.clone())
+        reveal_match("conversation")
     }
 }
 
@@ -1000,7 +910,6 @@ struct RevealMatch {
     entered: Option<ScrollFrame>,
     frames: Vec<ScrollFrame>,
     target: Option<(Id, f32)>,
-    recorded: Arc<Mutex<Option<f32>>>,
 }
 
 impl Operation for RevealMatch {
@@ -1063,9 +972,6 @@ impl Operation for RevealMatch {
         } else {
             current_scroll.clamp(0.0, max_scroll)
         };
-        if let Ok(mut guard) = self.recorded.lock() {
-            *guard = Some(target_y);
-        }
         self.target = Some((self.id.clone(), target_y));
     }
 
@@ -1083,13 +989,12 @@ impl Operation for RevealMatch {
     }
 }
 
-pub fn reveal_match(id: &'static str, recorded: Arc<Mutex<Option<f32>>>) -> Task<Message> {
+fn reveal_match(id: &'static str) -> Task<Message> {
     keys::effect(RevealMatch {
         id: Id::new(id),
         entered: None,
         frames: Vec::new(),
         target: None,
-        recorded,
     })
 }
 

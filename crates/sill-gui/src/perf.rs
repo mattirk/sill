@@ -264,6 +264,10 @@ fn find_in_a_long_conversation() {
         let mut screen = Screen::new();
         screen.frame(&app);
         let _ = app.update(Message::Find(FindEvent::Open));
+        // the first query extracts each message's Markdown leaf text, which is then cached
+        let first_ms = time(|| {
+            let _ = app.update(Message::Find(FindEvent::Input("inline cod".into())));
+        });
         let query_ms = time(|| {
             let _ = app.update(Message::Find(FindEvent::Input("inline code".into())));
         });
@@ -274,9 +278,9 @@ fn find_in_a_long_conversation() {
             }
         }) / 20;
         println!(
-            "{n:>5} items ({} matches): initial query {query_ms:>9.2?}, Next + frame {step_ms:>9.2?}",
+            "{n:>5} items ({} matches): first query {first_ms:>9.2?}, keystroke {query_ms:>9.2?}, \
+             Next + frame {step_ms:>9.2?}",
             app.find.matches.len()
         );
     }
 }
-

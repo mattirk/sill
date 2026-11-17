@@ -1045,4 +1045,3 @@ fn render_find() {
     let _ = app.update(Message::Find(FindEvent::Next));
     render(&app, "find-conversation");
 }
-
