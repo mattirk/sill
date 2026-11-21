@@ -3052,7 +3052,13 @@ fn the_hotkey_is_recorded_and_let_go_meanwhile() {
     let _ = app.update(Message::Settings(Event::ShortcutKey(Key::Character("`".into()), Physical::Code(Code::Backquote), Modifiers::LOGO)));
     assert_eq!(app.settings_page.as_ref().unwrap().recording, None);
     // the logo key by this system's name for it
-    let recorded = if cfg!(windows) { "Win+` @Backquote" } else { "Super+` @Backquote" };
+    let recorded = if cfg!(target_os = "macos") {
+        "Cmd+` @Backquote"
+    } else if cfg!(windows) {
+        "Win+` @Backquote"
+    } else {
+        "Super+` @Backquote"
+    };
     assert_eq!(app.settings.hotkey.as_deref(), Some(recorded));
     assert_eq!(app.hotkey_wanted(), recorded);
     // a window shortcut may share nothing with it: they are apart
