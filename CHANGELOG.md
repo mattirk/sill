@@ -3,6 +3,46 @@
 What changed in each release of silli. A release's notes on GitHub are its section here
 (`packaging/check-release.py --notes`); a version without a section is not released.
 
+## 0.0.7 — 2026-11-20
+
+### Changed
+
+- **Sill is now Silli.** Another Mac application is called Sill. The command is `silli`, the app
+  is Silli.app, the Debian package is `silli` and replaces `sill`, and the download page is
+  <https://mattirk.github.io/silli/>. Settings and state are under the new name
+  (`~/.config/silli`, `~/.local/state/silli`, `/var/lib/silli`), and nothing is carried over from
+  0.0.6: sessions, settings and agent sign-ins start fresh. Silli.app makes a new VM; the old
+  one stays in `~/Library/Application Support/Sill` until you delete it.
+- Window shortcuts and the global hotkey are recorded from a key press in Settings and matched
+  by the physical key, so they hold on any keyboard layout. The hotkey is the window's own
+  setting now: one set before is not carried over.
+- VM storage has one Scan and one Clean up, which reclaims every ended session with nothing to
+  review and clears the build output of the sessions that are not running.
+- The subagents listed above the prompt show only their name, status and time.
+
+### Added
+
+- The global hotkey works on the Mac (Option+Space unless changed).
+- A saved remote box can be pinned to the + menu, and a window opened from there comes up in
+  front.
+- **Apply and close**, under the caret beside Apply: the workspace's commits go into your
+  checkout and the session is then closed. Whatever stops the Apply leaves the session open.
+
+### Security
+
+- Git that the daemon runs on a workspace's clone can no longer be turned onto your checkout: a
+  clone whose `.git` points elsewhere is refused, and those commands may write only inside the
+  clone.
+- The folders of an installed 0.0.6 (`~/.config/sill`, `~/.local/state/sill`, `/var/lib/sill`)
+  stay hidden from jails under the default policy. Delete them when you need nothing from them.
+
+### Fixed
+
+- Hiding the window on the Mac hides the application too, so the application used before it is
+  active again.
+- Send now on a prompt the agent had already taken is no longer refused with an error under the
+  prompt.
+
 ## 0.0.6 — 2026-11-17
 
 ### Added

@@ -5,7 +5,7 @@ members = ["crates/silli-core", "crates/silli-memory", "crates/silli-proto", "cr
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.0.6"
+version = "0.0.7"
 edition = "2024"
 repository = "https://github.com/mattirk/silli"
 license = "Apache-2.0"

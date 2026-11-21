@@ -4159,7 +4159,7 @@ dependencies = [
 
 [[package]]
 name = "silli"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -4179,7 +4179,7 @@ dependencies = [
 
 [[package]]
 name = "silli-client"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "serde",
@@ -4190,7 +4190,7 @@ dependencies = [
 
 [[package]]
 name = "silli-core"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4217,7 +4217,7 @@ dependencies = [
 
 [[package]]
 name = "silli-gui"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -4250,7 +4250,7 @@ dependencies = [
 
 [[package]]
 name = "silli-memory"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -4259,7 +4259,7 @@ dependencies = [
 
 [[package]]
 name = "silli-proto"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4271,7 +4271,7 @@ dependencies = [
 
 [[package]]
 name = "silli-shim"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -4284,7 +4284,7 @@ dependencies = [
 
 [[package]]
 name = "silli-vm"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
