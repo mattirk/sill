@@ -207,7 +207,7 @@ pub(crate) fn switch_styled<'a>(on: bool, color: Color, size: f32, set: Option<i
         .into()
 }
 
-pub(crate) fn quiet_button<'a>(label: &'a str, message: Option<Message>) -> Element<'a, Message> {
+pub(crate) fn quiet_button<'a>(label: impl text::IntoFragment<'a>, message: Option<Message>) -> Element<'a, Message> {
     keys::press_maybe(
         button(text(label).size(style::TEXT)).padding([6, 14]).style(|_, status| {
             let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);

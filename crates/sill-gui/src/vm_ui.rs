@@ -81,14 +81,13 @@ pub enum Event {
     Space(Result<sill_proto::storage::Space, String>),
     ScanSessions,
     Sessions(Result<Vec<sill_proto::storage::SessionUsage>, String>),
-    Reclaim(String, i64),
-    Reclaimed(Result<(), String>),
-    CancelReclaim,
+    /// Clean up storage: reclaim every ended session's files and clear the build caches of the
+    /// other sessions not running. The first press asks, the second does it.
+    CleanUp,
+    CancelCleanUp,
+    CleanedUp(Result<String, String>),
     ScanCaches,
     Caches(Result<sill_proto::storage::Caches, String>),
-    ClearCaches,
-    CancelClear,
-    Cleared(Result<(), String>),
     OpenStorage,
     Info(Option<Box<Info>>),
     /// Once a second while the VM is on its way somewhere.
@@ -116,8 +115,9 @@ pub struct State {
     clearing: bool,
     sessions: Option<Result<Vec<sill_proto::storage::SessionUsage>, String>>,
     scanning_sessions: bool,
-    armed_session: crate::armed::Armed<(String, i64)>,
-    armed_clear: crate::armed::Armed<()>,
+    /// What the one Clean up button was armed for, as shown: the ended sessions (id, ended at)
+    /// and the sessions whose build caches go. A scan that shows otherwise arms again.
+    armed_cleanup: crate::armed::Armed<CleanupKey>,
     space_read_at: Option<std::time::Instant>,
     /// What is under way ("Restarting…"); the buttons wait for it.
     busy: Option<&'static str>,
@@ -271,45 +271,50 @@ impl App {
                 if self.vm.scanning_sessions || self.vm.clearing {
                     return Task::none();
                 }
-                self.vm.armed_session.clear();
+                self.vm.armed_cleanup.clear();
+                // one scan measures both: the sessions' files and their build caches
+                let caches = self.vm_event(Event::ScanCaches);
                 if self.demo {
-                    self.vm.sessions = Some(Ok(vec![sill_proto::storage::SessionUsage {
-                        session_id: "604fd5e1".into(),
-                        title: "Earlier build".into(),
-                        directories: vec![("private".into(), 7_500 << 20)],
-                        ended_at: Some(1),
-                        blocked: None,
-                    }]));
-                    return Task::none();
+                    let row = |id: &str, title: &str, mb: u64, ended_at: Option<i64>, blocked: Option<&str>| sill_proto::storage::SessionUsage {
+                        session_id: id.into(),
+                        title: title.into(),
+                        directories: vec![("private".into(), mb << 20)],
+                        ended_at,
+                        blocked: blocked.map(str::to_string),
+                    };
+                    self.vm.sessions = Some(Ok(vec![
+                        row("604fd5e1", "Earlier build", 7_500, Some(1), None),
+                        row("d4db6dd6", "Source reader scrollbars", 3_600, Some(2), None),
+                        row("6b7afaae", "Unreadable workspace", 994, Some(3), Some("Review 1 workspace(s) in Changes. Apply or discard their work first.")),
+                        row("2683ffe9", "Storage cleanup", 420, None, Some("End this session before reclaiming its files.")),
+                    ]));
+                    return caches;
                 }
                 let Some(connect) = self.connect.clone() else {
                     return Task::none();
                 };
                 self.vm.scanning_sessions = true;
-                return blocking(
+                self.vm.sessions = None;
+                let sessions = blocking(
                     move || {
                         let client = connect().map_err(|e| format!("{e:#}"))?;
                         client.call_within(method::STORAGE_SESSIONS, sill_proto::Empty {}, std::time::Duration::from_secs(300)).map_err(|e| format!("{e:#}"))
                     },
                     |r| msg(Event::Sessions(r)),
                 );
+                return Task::batch([sessions, caches]);
             }
             Event::Sessions(result) => {
                 self.vm.scanning_sessions = false;
                 self.vm.sessions = Some(result);
             }
-            Event::CancelReclaim => self.vm.armed_session.clear(),
-            Event::Reclaim(id, ended_at) => {
-                let eligible = self
-                    .vm
-                    .sessions
-                    .as_ref()
-                    .and_then(|result| result.as_ref().ok())
-                    .is_some_and(|rows| rows.iter().any(|row| row.session_id == id && row.ended_at == Some(ended_at) && row.blocked.is_none()));
-                if !eligible {
+            Event::CancelCleanUp => self.vm.armed_cleanup.clear(),
+            Event::CleanUp => {
+                let plan = cleanup_plan(&self.vm);
+                if plan.is_empty() || self.vm.clearing || self.vm.scanning_sessions || self.vm.scanning {
                     return Task::none();
                 }
-                if self.vm.clearing || self.vm.scanning_sessions || !self.vm.armed_session.press((id.clone(), ended_at)) {
+                if !self.vm.armed_cleanup.press(plan.key()) {
                     return Task::none();
                 }
                 if self.demo {
@@ -320,24 +325,37 @@ impl App {
                     return Task::none();
                 };
                 self.vm.clearing = true;
+                self.vm.said = None;
                 return blocking(
                     move || {
-                        connect()
-                            .map_err(|e| format!("{e:#}"))?
-                            .call_within::<serde_json::Value>(
-                                method::STORAGE_RECLAIM,
-                                sill_proto::storage::Reclaim { session_id: id, ended_at },
-                                std::time::Duration::from_secs(300),
-                            )
-                            .map(|_| ())
-                            .map_err(|e| format!("{e:#}"))
+                        let client = connect().map_err(|e| format!("{e:#}"))?;
+                        let (mut bytes, mut reclaimed, mut cleared, mut failures) = (0u64, 0usize, 0usize, Vec::new());
+                        // one at a time: the daemon checks each again (ended and nothing to review;
+                        // a cache's session not running)
+                        for (session_id, ended_at, size) in plan.sessions {
+                            let reclaim = sill_proto::storage::Reclaim { session_id: session_id.clone(), ended_at };
+                            match client.call_within::<serde_json::Value>(method::STORAGE_RECLAIM, reclaim, std::time::Duration::from_secs(300)) {
+                                Ok(_) => (reclaimed, bytes) = (reclaimed + 1, bytes + size),
+                                Err(e) => failures.push(format!("{session_id}: {e:#}")),
+                            }
+                        }
+                        for (session_id, size) in plan.caches {
+                            let clear = sill_proto::storage::ClearBuildCache { session_id: session_id.clone() };
+                            match client.call_within::<serde_json::Value>(method::STORAGE_CLEAR_BUILD_CACHE, clear, std::time::Duration::from_secs(120)) {
+                                Ok(_) => (cleared, bytes) = (cleared + 1, bytes + size),
+                                Err(e) => failures.push(format!("{session_id}: {e:#}")),
+                            }
+                        }
+                        let what = format!("Freed {}: {}.", readable_size(bytes), plan_words(reclaimed, cleared));
+                        if failures.is_empty() { Ok(what) } else { Err(format!("{what} Not cleaned up: {}", failures.join("; "))) }
                     },
-                    |r| msg(Event::Reclaimed(r)),
+                    |r| msg(Event::CleanedUp(r)),
                 );
             }
-            Event::Reclaimed(result) => {
+            Event::CleanedUp(result) => {
                 self.vm.clearing = false;
-                self.vm.said = Some(result.map(|()| "Session files reclaimed.".into()));
+                self.vm.said = Some(result);
+                // never retry a deletion: a fresh scan shows what remains
                 self.vm.sessions = None;
                 self.vm.caches = None;
                 return Task::batch([self.vm_event(Event::ReadSpace), self.vm_event(Event::ScanSessions)]);
@@ -346,19 +364,23 @@ impl App {
                 if self.vm.scanning || self.vm.clearing {
                     return Task::none();
                 }
-                self.vm.armed_clear.clear();
                 if self.demo {
+                    let cache = |id: &str, title: &str, mb: u64, active: bool| sill_proto::storage::BuildCache {
+                        session_id: id.into(),
+                        title: title.into(),
+                        bytes: mb << 20,
+                        active,
+                        path: sill_proto::sessions::HostPath::from_path(
+                            &std::path::Path::new("/var/lib/sill/1000/sessions").join(id).join("private/home%sill%.cache/sill-dev/target"),
+                        ),
+                        problem: None,
+                    };
                     self.vm.caches = Some(Ok(sill_proto::storage::Caches {
-                        caches: vec![sill_proto::storage::BuildCache {
-                            session_id: "604fd5e1".into(),
-                            title: "Earlier build".into(),
-                            bytes: 7_500 << 20,
-                            active: false,
-                            path: sill_proto::sessions::HostPath::from_path(std::path::Path::new(
-                                "/var/lib/sill/1000/sessions/604fd5e1/private/home%sill%.cache/sill-dev/target",
-                            )),
-                            problem: None,
-                        }],
+                        caches: vec![
+                            cache("604fd5e1", "Earlier build", 6_800, false),
+                            cache("6b7afaae", "Unreadable workspace", 900, false),
+                            cache("2683ffe9", "Storage cleanup", 300, true),
+                        ],
                     }));
                     return Task::none();
                 }
@@ -377,60 +399,6 @@ impl App {
             Event::Caches(result) => {
                 self.vm.scanning = false;
                 self.vm.caches = Some(result);
-            }
-            Event::CancelClear => self.vm.armed_clear.clear(),
-            Event::ClearCaches => {
-                if self.vm.scanning || self.vm.clearing {
-                    return Task::none();
-                }
-                let ids: Vec<String> = self
-                    .vm
-                    .caches
-                    .as_ref()
-                    .and_then(|r| r.as_ref().ok())
-                    .map(|r| r.caches.iter().filter(|c| !c.active && c.problem.is_none()).map(|c| c.session_id.clone()).collect())
-                    .unwrap_or_default();
-                if ids.is_empty() {
-                    return Task::none();
-                }
-                if !self.vm.armed_clear.press(()) {
-                    return Task::none();
-                }
-                if self.demo {
-                    self.vm.said = Some(Err(DEMO.into()));
-                    return Task::none();
-                }
-                let Some(connect) = self.connect.clone() else {
-                    return Task::none();
-                };
-                self.vm.clearing = true;
-                self.vm.said = None;
-                return blocking(
-                    move || {
-                        let client = connect().map_err(|e| format!("{e:#}"))?;
-                        let mut failures = Vec::new();
-                        for id in ids {
-                            if let Err(error) = client.call_within::<serde_json::Value>(
-                                method::STORAGE_CLEAR_BUILD_CACHE,
-                                sill_proto::storage::ClearBuildCache { session_id: id.clone() },
-                                std::time::Duration::from_secs(120),
-                            ) {
-                                failures.push(format!("{id}: {error:#}"));
-                            }
-                        }
-                        if failures.is_empty() { Ok(()) } else { Err(format!("Some build caches could not be cleared: {}", failures.join("; "))) }
-                    },
-                    |r| msg(Event::Cleared(r)),
-                );
-            }
-            Event::Cleared(result) => {
-                self.vm.clearing = false;
-                self.vm.sessions = None;
-                self.vm.armed_session.clear();
-                self.vm.said = Some(result.map(|()| "All eligible build caches cleared.".into()));
-                // Never retry a timed-out deletion. A fresh scan shows what remains.
-                self.vm.caches = None;
-                return Task::batch([self.vm_event(Event::ReadSpace), self.vm_event(Event::ScanCaches)]);
             }
             Event::Read => {
                 if self.demo {
@@ -563,9 +531,7 @@ impl App {
                     body = body.push(crate::daemon_ui::detail_row(label, space_label(disk)));
                     if low_space(disk) {
                         body = body.push(
-                            text(format!("{label} is low on space. Review session storage and reclaim space before starting more work."))
-                                .size(style::SMALL)
-                                .color(P.warning),
+                            text(format!("{label} is low on space. Scan storage and clean up before starting more work.")).size(style::SMALL).color(P.warning),
                         );
                     }
                 }
@@ -574,102 +540,78 @@ impl App {
             _ => body = body.push(text(if ready { "Reading free space…" } else { "Start the VM to read its free space." }).size(style::SMALL).color(P.fg_dim)),
         }
         let supported = vm.space.as_ref().is_some_and(|r| r.is_ok()) && ready;
-        body = body.push(quiet_button(
-            if vm.scanning_sessions { "Measuring sessions…" } else { "Scan session storage" },
-            (supported && !vm.scanning_sessions && !vm.clearing).then(|| msg(Event::ScanSessions)),
-        ));
-        match &vm.sessions {
-            Some(Ok(rows)) => {
-                if rows.is_empty() {
-                    body = body.push(text("No session files found."));
-                }
-                if rows.iter().any(|session| session.ended_at.is_some() && session.blocked.is_some()) {
-                    body = body.push(quiet_button("Open Changes", Some(Message::ShowPage(crate::Page::Changes))));
-                }
-                for session in rows {
-                    let total = session.directories.iter().map(|(_, n)| n).sum();
-                    body = body.push(text(format!("{} · {} · {}", session.title, session.session_id, readable_size(total))));
-                    for (path, size) in &session.directories {
-                        body = body.push(text(format!("{}   {path}", readable_size(*size))).size(style::TINY));
-                    }
-                    if let Some(reason) = &session.blocked {
-                        body = body.push(text(reason).size(style::SMALL));
-                    } else if let Some(end) = session.ended_at {
-                        let armed = vm.armed_session.is(&(session.session_id.clone(), end));
-                        if armed {
-                            body = body.push(text("Permanently remove this session’s jail files, including private tool data and Changes undo backups? Its Sill transcript and summary stay available.").size(style::SMALL));
-                        }
-                        body = body.push(quiet_button(
-                            if vm.clearing {
-                                "Clearing…"
-                            } else if armed {
-                                "Confirm reclaim"
-                            } else {
-                                "Reclaim session files"
-                            },
-                            (supported && !vm.scanning_sessions && !vm.clearing).then(|| msg(Event::Reclaim(session.session_id.clone(), end))),
-                        ));
-                        if armed {
-                            body = body.push(quiet_button("Cancel", Some(msg(Event::CancelReclaim))));
-                        }
-                    }
-                }
-            }
-            Some(Err(e)) => body = body.push(text(e).color(P.warning)),
-            None => (),
-        }
+        let scanning = vm.scanning_sessions || vm.scanning;
         body = body.push(
             row![
+                quiet_button(if scanning { "Measuring…" } else { "Scan storage" }, (supported && !scanning && !vm.clearing).then(|| msg(Event::ScanSessions))),
                 quiet_button(if vm.space_reading { "Refreshing…" } else { "Refresh space" }, (ready && !vm.space_reading).then(|| msg(Event::ReadSpace))),
-                quiet_button(
-                    if vm.scanning { "Scanning…" } else { "Scan build caches" },
-                    (supported && !vm.scanning && !vm.clearing).then(|| msg(Event::ScanCaches))
-                ),
             ]
             .spacing(8),
         );
-        body = body.push(text("Only private ~/.cache/sill-dev/target build outputs are cleared. Source files, unapplied changes and toolchains are kept. Running sessions are excluded. An interrupted cleanup is included in the next scan.")
-            .size(style::SMALL).color(P.fg_dim));
-        match &vm.caches {
-            Some(Ok(report)) => {
-                if report.caches.is_empty() {
-                    body = body.push(text("No build caches found.").size(style::SMALL).color(P.fg_dim));
+        for failed in [vm.sessions.as_ref().and_then(|r| r.as_ref().err()), vm.caches.as_ref().and_then(|r| r.as_ref().err())].into_iter().flatten() {
+            body = body.push(text(failed).size(style::SMALL).color(P.warning));
+        }
+        let (Some(Ok(rows)), Some(Ok(report))) = (&vm.sessions, &vm.caches) else {
+            return body.into();
+        };
+        let plan = cleanup_plan(vm);
+        if plan.is_empty() {
+            body = body.push(text("Nothing to clean up.").size(style::SMALL).color(P.fg_dim));
+        } else {
+            let armed = vm.armed_cleanup.is(&plan.key());
+            let label = if vm.clearing {
+                "Cleaning up…".to_string()
+            } else if armed {
+                format!("Confirm: free {}", readable_size(plan.bytes()))
+            } else {
+                format!("Clean up {} ({})", readable_size(plan.bytes()), plan_words(plan.sessions.len(), plan.caches.len()))
+            };
+            let mut actions = row![quiet_button(label, (supported && !scanning && !vm.clearing).then(|| msg(Event::CleanUp)))].spacing(8);
+            if armed {
+                actions = actions.push(quiet_button("Cancel", Some(msg(Event::CancelCleanUp))));
+            }
+            body = body.push(actions);
+            body = body.push(
+                text("Ended sessions lose their jail files, private tool data and Changes undo backups included; their Sill transcripts and summaries stay. Other sessions lose only their private ~/.cache/sill-dev/target build outputs. Running sessions are left alone.")
+                    .size(style::SMALL)
+                    .color(if armed { P.warning } else { P.fg_dim }),
+            );
+        }
+        if rows.iter().any(|session| session.ended_at.is_some() && session.blocked.is_some()) {
+            body = body.push(quiet_button("Open Changes", Some(Message::ShowPage(crate::Page::Changes))));
+        }
+        // one line each, largest first: what it is, how big, and what Clean up does with it
+        for session in rows {
+            let total: u64 = session.directories.iter().map(|(_, n)| n).sum();
+            let title = if session.title.is_empty() { session.session_id.clone() } else { session.title.clone() };
+            let cache = report.caches.iter().find(|c| c.session_id == session.session_id);
+            let reclaimed = plan.sessions.iter().any(|(id, ..)| *id == session.session_id);
+            let mut line =
+                column![row![text(title).size(style::SMALL), space().width(Fill), text(readable_size(total)).size(style::SMALL)].spacing(8)].spacing(2);
+            if reclaimed {
+                line = line.push(text("Ended · reclaimed by Clean up").size(style::TINY).color(P.fg_dim));
+            } else {
+                if let Some(reason) = &session.blocked {
+                    line = line.push(text(reason).size(style::TINY).color(P.warning));
                 }
-                let eligible = report.caches.iter().any(|c| !c.active && c.problem.is_none());
-                let mut actions = row![quiet_button(
-                    if vm.clearing {
-                        "Clearing…"
-                    } else if vm.armed_clear.is(&()) {
-                        "Confirm clear all build caches"
-                    } else {
-                        "Clear all build caches"
-                    },
-                    (supported && eligible && !vm.scanning && !vm.clearing).then(|| msg(Event::ClearCaches)),
-                )]
-                .spacing(8);
-                if vm.armed_clear.is(&()) {
-                    actions = actions.push(quiet_button("Cancel", Some(msg(Event::CancelClear))));
-                }
-                body = body.push(actions);
-                for cache in &report.caches {
-                    let id = &cache.session_id;
-                    let title = if cache.title.is_empty() { id.clone() } else { format!("{} · {id}", cache.title) };
-                    let mut line = column![
-                        row![text(title).size(style::SMALL), space().width(Fill), text(readable_size(cache.bytes)).size(style::SMALL)].spacing(8),
-                        text(cache.path.display.clone()).size(style::TINY).color(P.fg_dim),
-                    ]
-                    .spacing(4);
-                    if let Some(problem) = &cache.problem {
-                        line = line.push(text(problem).size(style::SMALL).color(P.warning));
+                match cache {
+                    Some(c) if c.problem.is_some() => line = line.push(text(c.problem.clone().unwrap_or_default()).size(style::TINY).color(P.warning)),
+                    Some(c) if c.active => {
+                        line = line.push(text(format!("Running · build cache {} kept", readable_size(c.bytes))).size(style::TINY).color(P.fg_dim))
                     }
-                    if cache.active {
-                        line = line.push(text("Running").size(style::SMALL).color(P.fg_dim));
-                    }
-                    body = body.push(line);
+                    Some(c) => line = line.push(text(format!("Build cache {} cleared by Clean up", readable_size(c.bytes))).size(style::TINY).color(P.fg_dim)),
+                    None => (),
                 }
             }
-            Some(Err(why)) => body = body.push(text(why).size(style::SMALL).color(P.warning)),
-            None => (),
+            body = body.push(line);
+        }
+        // a cache of a session the scan did not list (its files unmeasured): still shown
+        for cache in report.caches.iter().filter(|c| !rows.iter().any(|r| r.session_id == c.session_id)) {
+            let title = if cache.title.is_empty() { cache.session_id.clone() } else { cache.title.clone() };
+            body = body.push(
+                row![text(format!("{title} · build cache")).size(style::SMALL), space().width(Fill), text(readable_size(cache.bytes)).size(style::SMALL)]
+                    .spacing(8),
+            );
         }
         body.into()
     }
@@ -870,6 +812,59 @@ fn choose<'a>(options: Vec<Choice>, value: Option<u64>, on: impl Fn(Option<u64>)
 }
 
 /// 1.9 GB, 820 MB.
+/// What one Clean up does, from the last scan: the ended sessions it reclaims (id, ended at,
+/// bytes), and the sessions not running whose build caches it clears (id, bytes). A reclaimed
+/// session's cache goes with its files, so it is not counted twice.
+/// A plan as the person confirms it: the ended sessions (id, ended at), the caches' sessions.
+type CleanupKey = (Vec<(String, i64)>, Vec<String>);
+
+#[derive(Debug, Default)]
+struct CleanupPlan {
+    sessions: Vec<(String, i64, u64)>,
+    caches: Vec<(String, u64)>,
+}
+
+impl CleanupPlan {
+    fn is_empty(&self) -> bool {
+        self.sessions.is_empty() && self.caches.is_empty()
+    }
+    fn bytes(&self) -> u64 {
+        self.sessions.iter().map(|(_, _, n)| n).sum::<u64>() + self.caches.iter().map(|(_, n)| n).sum::<u64>()
+    }
+    fn key(&self) -> CleanupKey {
+        (self.sessions.iter().map(|(id, end, _)| (id.clone(), *end)).collect(), self.caches.iter().map(|(id, _)| id.clone()).collect())
+    }
+}
+
+fn cleanup_plan(vm: &State) -> CleanupPlan {
+    let (Some(Ok(rows)), Some(Ok(report))) = (&vm.sessions, &vm.caches) else { return CleanupPlan::default() };
+    let sessions: Vec<(String, i64, u64)> = rows
+        .iter()
+        .filter(|row| row.blocked.is_none())
+        .filter_map(|row| row.ended_at.map(|end| (row.session_id.clone(), end, row.directories.iter().map(|(_, n)| n).sum())))
+        .collect();
+    let caches = report
+        .caches
+        .iter()
+        .filter(|c| !c.active && c.problem.is_none() && !sessions.iter().any(|(id, ..)| *id == c.session_id))
+        .map(|c| (c.session_id.clone(), c.bytes))
+        .collect();
+    CleanupPlan { sessions, caches }
+}
+
+/// "2 ended sessions, 1 build cache".
+fn plan_words(sessions: usize, caches: usize) -> String {
+    let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let mut words = Vec::new();
+    if sessions > 0 {
+        words.push(plural(sessions, "ended session", "ended sessions"));
+    }
+    if caches > 0 {
+        words.push(plural(caches, "build cache", "build caches"));
+    }
+    if words.is_empty() { "nothing".into() } else { words.join(", ") }
+}
+
 pub fn readable_size(bytes: u64) -> String {
     const GB: f64 = (1u64 << 30) as f64;
     const MB: f64 = (1u64 << 20) as f64;
@@ -930,16 +925,24 @@ mod tests {
     }
 
     #[test]
-    fn reclaim_confirmation_belongs_to_the_scanned_ended_session() {
+    fn one_clean_up_confirms_what_it_showed() {
         let (mut app, _) = App::new(true, None);
         let _ = app.vm_event(Event::ScanSessions);
-        let key = ("604fd5e1".to_owned(), 1);
-        let _ = app.vm_event(Event::Reclaim(key.0.clone(), 2));
-        assert!(app.vm.armed_session.get().is_none());
-        let _ = app.vm_event(Event::Reclaim(key.0.clone(), key.1));
-        assert!(app.vm.armed_session.is(&key));
+        let plan = cleanup_plan(&app.vm);
+        // the two ended sessions; the blocked session's cache, not the running one's, and not a
+        // reclaimed session's cache a second time
+        assert_eq!(plan.key(), (vec![("604fd5e1".to_owned(), 1), ("d4db6dd6".to_owned(), 2)], vec!["6b7afaae".to_owned()]));
+        assert_eq!(plan.bytes(), (7_500 + 3_600 + 900) << 20);
+        let _ = app.vm_event(Event::CleanUp);
+        assert!(app.vm.armed_cleanup.is(&plan.key()));
+        assert!(!app.vm.clearing);
+        let _ = app.vm_event(Event::CancelCleanUp);
+        assert!(app.vm.armed_cleanup.get().is_none());
+        // a new scan disarms: what is confirmed is what was shown
+        let _ = app.vm_event(Event::CleanUp);
         let _ = app.vm_event(Event::ScanSessions);
-        assert!(app.vm.armed_session.get().is_none());
+        assert!(app.vm.armed_cleanup.get().is_none());
+        assert_eq!(plan_words(1, 2), "1 ended session, 2 build caches");
     }
 
     #[test]
@@ -948,17 +951,14 @@ mod tests {
         assert!(low_space(&DiskSpace { total: 64 << 30, used: 63 << 30, available: 0 }));
         assert!(low_space(&DiskSpace { total: 64 << 30, used: 60 << 30, available: 4 << 30 }));
         assert!(!low_space(&DiskSpace { total: 64 << 30, used: 40 << 30, available: 24 << 30 }));
+        // nothing to clean up: nothing to arm
         let (mut app, _) = App::new(true, None);
         let _ = app.vm_event(Event::Read);
-        let _ = app.vm_event(Event::ScanCaches);
-        let _ = app.vm_event(Event::ClearCaches);
-        assert!(app.vm.armed_clear.is(&()));
-        assert!(!app.vm.clearing);
-        let _ = app.vm_event(Event::CancelClear);
-        assert!(!app.vm.armed_clear.is(&()));
-        app.vm.caches.as_mut().unwrap().as_mut().unwrap().caches[0].active = true;
-        let _ = app.vm_event(Event::ClearCaches);
-        assert!(!app.vm.armed_clear.is(&()));
+        let _ = app.vm_event(Event::ScanSessions);
+        app.vm.sessions = Some(Ok(Vec::new()));
+        app.vm.caches.as_mut().unwrap().as_mut().unwrap().caches.iter_mut().for_each(|c| c.active = true);
+        let _ = app.vm_event(Event::CleanUp);
+        assert!(app.vm.armed_cleanup.get().is_none());
         assert!(!app.vm.clearing);
     }
 
@@ -968,11 +968,10 @@ mod tests {
         let (mut app, _) = App::new(true, None);
         let _ = app.vm_event(Event::Read);
         let _ = app.vm_event(Event::ScanSessions);
-        let _ = app.vm_event(Event::ScanCaches);
         let disk = &mut app.vm.space.as_mut().unwrap().as_mut().unwrap().state;
         disk.used = 62 << 30;
         disk.available = 1 << 30;
-        let _ = app.vm_event(Event::ClearCaches);
+        let _ = app.vm_event(Event::CleanUp);
         let content = container(app.vm_storage()).padding(20).width(Fill);
         let mut ui = iced_test::Simulator::with_size(crate::snapshots::settings(), (680.0, 600.0), content);
         let snapshot = ui.snapshot(&crate::style::theme()).unwrap();
