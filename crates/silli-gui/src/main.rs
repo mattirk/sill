@@ -1,3 +1,7 @@
+// A release build is a window's program on Windows: no console opens beside it. A debug build
+// keeps the console, for what it prints.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod agents_ui;
 mod annotation;
 mod annotation_state;
@@ -78,6 +82,8 @@ mod usage;
 mod viewer;
 mod vm_ui;
 mod window;
+#[cfg(windows)]
+mod windows;
 mod workspaces;
 mod workspaces_ui;
 
@@ -128,7 +134,7 @@ fn main() -> iced::Result {
         silli_proto::boxlink::askpass_main();
     }
     prefer_low_power_gpu();
-    prefer_vulkan();
+    prefer_backend();
     let options = Options::parse();
     // one silli-gui per account: a second start shows the running one and leaves
     if !options.demo {
@@ -172,9 +178,8 @@ fn main() -> iced::Result {
             // no title bar: the top bar's empty space moves the window
             // the Mac keeps the system's frame for its rounded corners, rim and shadow, the title
             // bar transparent and its buttons hidden (`macos.rs`)
-            // Windows: its own frame and title bar for now, so the system moves, resizes and
-            // snaps the window; which frame it keeps is the person's to choose on sight
-            // (docs/silli-windows.md, section 15)
+            // Windows keeps its frame too, for what the frame does (snapping, and out of it again);
+            // its title bar is taken away once the window exists (`windows.rs`)
             decorations: cfg!(any(target_os = "macos", windows)),
             visible: !options.hidden,
             // closing hides: the window stays, and with it the hotkey and `silli toggle`
@@ -210,16 +215,30 @@ fn prefer_low_power_gpu() {
     }
 }
 
-/// Draw through Vulkan, unless the person names backends (`WGPU_BACKEND`). Where no GPU can be
+/// Choose the graphics backend, unless the person names backends (`WGPU_BACKEND`).
+///
+/// Windows: Direct3D 12. Left to itself wgpu took Vulkan there, and through it the window stopped
+/// following the pointer while it was moved or resized: stalls of half a second with the program
+/// idle (the person's PC, 2026-11-20, AMD Radeon 880M; measured with the pointer dragging the
+/// window's edge: no stall through Direct3D 12 or the software renderer).
+///
+/// Linux: Vulkan. Where no GPU can be
 /// used — no `/dev/dri`, as in a jail or a VM without one — wgpu still offers its GL adapter
 /// through Mesa's EGL. iced accepts it, since a surface made only to check compatibility passes,
 /// and the window's own surface then fails to configure: wgpu panics, and iced's fallback to the
 /// software renderer never runs. With Vulkan only, the missing adapter is an error iced catches,
 /// and the window opens on the software renderer. A GPU without Vulkan draws in software too.
-fn prefer_vulkan() {
-    if cfg!(target_os = "linux") && std::env::var_os("WGPU_BACKEND").is_none() {
+fn prefer_backend() {
+    let backend = if cfg!(target_os = "linux") {
+        "vulkan"
+    } else if cfg!(windows) {
+        "dx12"
+    } else {
+        return;
+    };
+    if std::env::var_os("WGPU_BACKEND").is_none() {
         // SAFETY: as in prefer_low_power_gpu, before any thread exists.
-        unsafe { std::env::set_var("WGPU_BACKEND", "vulkan") };
+        unsafe { std::env::set_var("WGPU_BACKEND", backend) };
     }
 }
 
@@ -920,6 +939,11 @@ impl App {
             find: find::State::default(),
         };
         if demo {
+            // a plain window has one layout in the demo too: left in Shelf mode, a window without
+            // the system's frame could not be moved, nor resized but at its right edge
+            if app.layout.plain {
+                app.layout.mode = layout::Mode::Drawer;
+            }
             // the demo keeps its own state, but shows at the person's Interface scale (read
             // only, never written; not in tests, which start from the defaults)
             if !cfg!(test) {
@@ -1399,7 +1423,9 @@ impl App {
                 self.window_id = Some(id);
                 #[cfg(target_os = "macos")]
                 let dress = iced::window::run(id, macos::dress).discard();
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(windows)]
+                let dress = iced::window::run(id, windows::dress).discard();
+                #[cfg(not(any(target_os = "macos", windows)))]
                 let dress = Task::none();
                 return Task::batch([dress, iced::window::monitor_size(id).map(Message::Monitor), iced::window::run(id, x11_window).map(Message::XId)]);
             }

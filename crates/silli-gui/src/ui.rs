@@ -156,11 +156,13 @@ impl App {
         // locked to its edge at the full height: only its right edge, corners included, changes
         // its width. A free window has every edge, and its corners resize both ways.
         use iced::window::Direction;
-        // (the Mac's window is resized by the system at its own edges)
-        if !self.layout.plain {
+        // (the Mac's window is resized by the system at its own edges; on Windows the window has
+        // no frame of the system's, so its edges are silli's there too)
+        let own_edges = !self.layout.plain || cfg!(windows);
+        if own_edges {
             layers = layers.push(container(edge(Direction::East, false)).align_right(Fill));
         }
-        if !self.layout.plain && self.layout.mode != layout::Mode::Shelf {
+        if own_edges && self.layout.mode != layout::Mode::Shelf {
             layers = layers
                 .push(container(edge(Direction::West, false)).align_left(Fill))
                 .push(container(edge(Direction::North, true)).align_top(Fill))

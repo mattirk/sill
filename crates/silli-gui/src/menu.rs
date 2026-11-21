@@ -295,10 +295,24 @@ impl App {
                     style::with_hue(P.error, RED),
                     "close-window",
                     Message::Quit,
-                    "Hide: the window goes; the daemon and the sessions go on. The menu bar icon brings it back (Ctrl+Q)",
+                    if cfg!(windows) {
+                        "Hide: the window goes; the sessions go on. The tray icon brings it back (Ctrl+Q)"
+                    } else {
+                        "Hide: the window goes; the daemon and the sessions go on. The menu bar icon brings it back (Ctrl+Q)"
+                    },
                 ),
-                dot(style::with_hue(P.warning, YELLOW), "minimize-window", Message::Minimize, "Minimize: into the Dock"),
-                dot(P.success, "zoom-window", Message::Zoom, "Zoom: fill the screen, and back"),
+                dot(
+                    style::with_hue(P.warning, YELLOW),
+                    "minimize-window",
+                    Message::Minimize,
+                    if cfg!(windows) { "Minimize: to the taskbar" } else { "Minimize: into the Dock" }
+                ),
+                dot(
+                    P.success,
+                    "zoom-window",
+                    Message::Zoom,
+                    if cfg!(windows) { "Maximize: fill the screen, and back" } else { "Zoom: fill the screen, and back" }
+                ),
             ]
             .spacing(2),
         )

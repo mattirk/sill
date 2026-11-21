@@ -299,9 +299,9 @@ pub fn theme() -> Theme {
 
 /// A control's corners (buttons, hover and selection backgrounds, dropdowns): square on Linux,
 /// slightly round on the Mac, where the window's own corners are round (the person, 2026-11-12).
-pub const CONTROL: f32 = if cfg!(target_os = "macos") { 5.0 } else { 0.0 };
+pub const CONTROL: f32 = if cfg!(any(target_os = "macos", windows)) { 5.0 } else { 0.0 };
 /// A card's corners (code blocks, chips, menus, the person's message), as `CONTROL`.
-pub const CARD: f32 = if cfg!(target_os = "macos") { 6.0 } else { 0.0 };
+pub const CARD: f32 = if cfg!(any(target_os = "macos", windows)) { 6.0 } else { 0.0 };
 
 /// A control's border: `CONTROL`'s corners.
 fn control_border() -> Border {
