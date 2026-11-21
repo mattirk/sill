@@ -454,7 +454,7 @@ fn rebasing(clone: &Path) -> bool {
 
 /// Files the clone's index holds in conflict, read through the hardened view.
 fn conflicted(clone: &Path) -> Vec<String> {
-    let Ok(git) = crate::changes::Git::open(clone) else { return vec![] };
+    let Ok(git) = crate::changes::Git::open_clone(clone) else { return vec![] };
     let Ok(out) = git.cmd().args(["diff", "--name-only", "--diff-filter=U", "-z"]).output() else { return vec![] };
     String::from_utf8_lossy(&out.stdout).split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect()
 }
@@ -792,7 +792,7 @@ fn carry_steps<H: Host>(h: &H, r: &Row, upper: &Path, started: i64) -> Result<Op
             Ok(Some((done, format!("Work the agent did in {src} before it was pinned ({n} files) is in the workspace, uncommitted.{how}"))))
         }
         carry::Merge::Conflict(files) => {
-            let git = crate::changes::Git::open(&r.path)?;
+            let git = crate::changes::Git::open_clone(&r.path)?;
             let own = !flow::dirty(&git)?.is_empty() || flow::unapplied(&r.source, &r.path, &r.branch)?;
             drop(git);
             if own {

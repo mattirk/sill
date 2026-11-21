@@ -310,7 +310,7 @@ fn create_as(source: &Source, id: &str, name: &str, path: &Path, operation: &str
     std::fs::create_dir_all(path.join(".git/objects/info"))?;
     std::fs::write(path.join(".git/objects/info/alternates"), format!("{}\n", objects.display()))?;
     let branch = format!("sill/{}-{id}", slug(name));
-    let git = Git::open(path)?;
+    let git = Git::open_clone(path)?;
     let mut c = git.cmd_write();
     c.args(["update-ref", "-m", "sill workspace base"]).arg("refs/sill/base").arg(&source.head);
     ok(c, "base ref")?;
@@ -328,7 +328,7 @@ fn create_as(source: &Source, id: &str, name: &str, path: &Path, operation: &str
             .env("GIT_CONFIG_NOSYSTEM", "1");
         ok(c, "checkout")?;
     }
-    let git = Git::open(path)?;
+    let git = Git::open_clone(path)?;
     let mut c = git.cmd();
     c.arg("rev-parse").arg("--verify").arg(format!("{branch}^{{tree}}"));
     ok(c, "verify the clone")?;
@@ -492,7 +492,7 @@ pub fn summary(clone: &Path, branch: &str, base: &str) -> Result<Summary> {
 /// The branch's commits since `commits_from`, and the changes from tree-ish `from` to `to` (the
 /// working tree when None): against a full snapshot, untracked files count.
 fn summary_to(clone: &Path, branch: &str, commits_from: &str, from: &str, to: Option<&str>) -> Result<Summary> {
-    let git = Git::open(clone)?;
+    let git = Git::open_clone(clone)?;
     let mut c = git.cmd();
     c.args(["rev-list", "--count"]).arg(format!("{commits_from}..refs/heads/{branch}"));
     let commits = ok(c, "rev-list")?.parse().unwrap_or(0);
@@ -517,7 +517,7 @@ pub struct Revision {
 }
 
 pub fn revision(clone: &Path, branch: &str) -> Result<Revision> {
-    let git = Git::open(clone)?;
+    let git = Git::open_clone(clone)?;
     let mut c = git.cmd();
     c.arg("rev-parse").arg(format!("refs/heads/{branch}"));
     let tip = ok(c, "rev-parse")?;
@@ -563,7 +563,7 @@ pub fn set_destination(source: &Path, clone: &Path, id: &str, branch: &str, work
     c.arg("rev-parse").arg(format!("refs/heads/{branch}"));
     let tip = ok(c, "destination tip")?;
     anchor(source, id, "dest", &tip)?;
-    let git = Git::open(clone)?;
+    let git = Git::open_clone(clone)?;
     let mut c = git.cmd_write();
     c.args(["update-ref", "refs/sill/dest", &tip]);
     ok(c, "destination ref")?;
@@ -602,7 +602,7 @@ pub(crate) fn head_of(git: &Git) -> Result<(String, String)> {
 
 /// Whether `ancestor` is reachable from `tip` in the clone (borrowed objects included).
 pub fn descends(clone: &Path, ancestor: &str, tip: &str) -> Result<bool> {
-    descends_in(&Git::open(clone)?, ancestor, tip)
+    descends_in(&Git::open_clone(clone)?, ancestor, tip)
 }
 
 pub(crate) fn descends_in(git: &Git, ancestor: &str, tip: &str) -> Result<bool> {
@@ -620,7 +620,7 @@ pub fn diff(clone: &Path, commit: &str, limit: usize) -> Result<(String, bool)> 
 /// `only`: that path's diff alone (relative to the repository; a rename is then its two halves,
 /// as [`FileChange`] lists it).
 fn diff_to(clone: &Path, commit: &str, target: Option<&str>, only: Option<&Path>, limit: usize) -> Result<(String, bool)> {
-    let git = Git::open(clone)?;
+    let git = Git::open_clone(clone)?;
     let mut c = git.cmd();
     c.args(["diff"]).args(Git::DIFF_SAFE);
     if only.is_some() {

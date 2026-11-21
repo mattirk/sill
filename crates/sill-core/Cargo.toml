@@ -28,6 +28,7 @@ rusqlite.workspace = true
 sill-memory.workspace = true
 sill-proto.workspace = true
 rand = "0.10.3"
+libc = "0.2"
 similar = "3.2.1"
 
 [lints]

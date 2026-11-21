@@ -31,7 +31,7 @@ pub(super) fn rev(git: &Git, what: &str) -> Result<String> {
 
 /// A commit of the clone's whole state on top of its HEAD (see the module docs).
 pub fn snapshot(clone: &Path, message: &str) -> Result<String> {
-    let git = Git::open(clone)?;
+    let git = Git::open_clone(clone)?;
     let tree = worktree_tree(&git, clone)?;
     commit_tree(&git, &tree, message, &IDENT.map(|(k, v)| (k, v.to_string())))
 }
@@ -70,7 +70,7 @@ pub fn identity(source: &Path) -> Result<Option<(String, String)>> {
 /// Whether the clone holds work that is not committed: its state ([`state_tree`]) is not its
 /// HEAD's tree. What [`commit_all`] would commit, so the two never disagree.
 pub fn uncommitted(clone: &Path) -> Result<bool> {
-    let git = Git::open(clone)?;
+    let git = Git::open_clone(clone)?;
     Ok(worktree_tree(&git, clone)? != rev(&git, "HEAD^{tree}")?)
 }
 
@@ -79,7 +79,7 @@ pub fn uncommitted(clone: &Path) -> Result<bool> {
 /// whose session has ended, where no agent is left to commit it (2026-11-10: Apply brings commits
 /// only). False when there is nothing to commit.
 pub fn commit_all(clone: &Path, workspace_branch: &str, message: &str, name: &str, email: &str) -> Result<bool> {
-    let git = Git::open(clone)?;
+    let git = Git::open_clone(clone)?;
     let tree = worktree_tree(&git, clone)?;
     if tree == rev(&git, "HEAD^{tree}")? {
         return Ok(false);
@@ -102,14 +102,14 @@ pub fn commit_all(clone: &Path, workspace_branch: &str, message: &str, name: &st
 
 /// The tree of the clone's whole state now, no commit made: for a look.
 pub fn state_tree(clone: &Path) -> Result<String> {
-    worktree_tree(&Git::open(clone)?, clone)
+    worktree_tree(&Git::open_clone(clone)?, clone)
 }
 
 /// Drop the objects of the clone's own store that nothing reaches any more — the trees and blobs
 /// its looks left — keeping the last hour's. For when nothing else runs in the clone: the folder
 /// changing hands, a jail starting. The borrowed store is never touched.
 pub fn prune(clone: &Path) -> Result<()> {
-    let git = Git::open(clone)?;
+    let git = Git::open_clone(clone)?;
     let mut c = git.cmd_write();
     c.args(["prune", "--expire=1.hour.ago"]);
     ok(c, "prune").map(drop)
@@ -389,7 +389,7 @@ pub struct Mirror {
 }
 
 pub fn mirror(source: &Path, clone: &Path, workspace_branch: &str) -> Result<Mirror> {
-    let ws = Git::open(clone)?;
+    let ws = Git::open_clone(clone)?;
     let src = Git::open(source)?;
     let tip = rev(&ws, &format!("refs/heads/{workspace_branch}"))?;
     let (_, dest) = super::head_of(&src)?;
@@ -572,7 +572,7 @@ pub fn apply(
     if head.trim() != format!("ref: refs/heads/{branch}") || rev(&src, &format!("refs/heads/{branch}"))? != expected {
         return Ok(Err(Stop::SourceMoved));
     }
-    let ws = Git::open(clone)?;
+    let ws = Git::open_clone(clone)?;
     let tip = rev(&ws, &format!("refs/heads/{workspace_branch}"))?;
     if !super::descends(clone, expected, &tip)? {
         return Ok(Err(Stop::NeedsPrepare));
@@ -664,7 +664,7 @@ fn fast_forward(
 /// same branch already at these commits is done (a repeated click). The tip on success.
 pub fn branch(source: &Path, clone: &Path, id: &str, workspace_branch: &str, name: &str) -> Result<std::result::Result<String, Option<Stop>>> {
     let src = Git::open(source)?;
-    let ws = Git::open(clone)?;
+    let ws = Git::open_clone(clone)?;
     let tip = rev(&ws, &format!("refs/heads/{workspace_branch}"))?;
     if worktree_tree(&ws, clone)? != rev(&ws, &format!("{tip}^{{tree}}"))? {
         return Ok(Err(Some(Stop::Uncommitted)));
@@ -782,7 +782,7 @@ pub fn copy(source: &Path, clone: &Path, branch: &str, expected: &str, before: &
     if head.trim() != format!("ref: refs/heads/{branch}") || rev(&src, &format!("refs/heads/{branch}"))? != expected {
         return Ok(Err(Stop::SourceMoved));
     }
-    let ws = Git::open(clone)?;
+    let ws = Git::open_clone(clone)?;
     if !super::descends(clone, expected, &rev(&ws, "HEAD")?)? {
         return Ok(Err(Stop::NeedsPrepare));
     }
@@ -874,7 +874,7 @@ fn files_in_the_way(src: &Git, ws: &Git, source: &Path, expected: &str, tip: &st
 /// Put the clone into the state of snapshot `snap` (§12 Undo): its branch at the snapshot's
 /// parent, the files as in the snapshot ([`reset_to`]).
 pub fn reset_to_snapshot(clone: &Path, workspace_branch: &str, snap: &str) -> Result<()> {
-    let at = rev(&Git::open(clone)?, &format!("{snap}^"))?;
+    let at = rev(&Git::open_clone(clone)?, &format!("{snap}^"))?;
     reset_to(clone, workspace_branch, snap, &at)
 }
 
@@ -890,7 +890,7 @@ pub fn reset_to(clone: &Path, workspace_branch: &str, state: &str, at: &str) -> 
     }
     crate::safe_fs::write_file_beneath(clone, Path::new(".git/HEAD"), format!("ref: refs/heads/{workspace_branch}\n").as_bytes(), 0o644)
         .context("point the workspace at its branch")?;
-    let git = Git::open(clone)?;
+    let git = Git::open_clone(clone)?;
     let mut c = git.cmd_write();
     c.args(["update-ref", "-m", "sill: reset"]).arg(format!("refs/heads/{workspace_branch}")).arg(at);
     ok(c, "reset the branch")?;
@@ -927,7 +927,7 @@ pub(super) fn discard_retained(
         bail!("a rebase is stopped in the workspace");
     }
     let snap = snapshot(clone, "sill: discarded")?;
-    let ws = Git::open(clone)?;
+    let ws = Git::open_clone(clone)?;
     let mut c = ws.cmd_write();
     c.args(["update-ref", "refs/sill/discarding", &snap]);
     ok(c, "discarding ref")?;
@@ -941,7 +941,7 @@ pub(super) fn discard_retained(
     let at = discard_target(source, clone, workspace_branch)?;
     retain(&snap)?;
     reset_to(clone, workspace_branch, &at, &at)?;
-    let ws = Git::open(clone)?;
+    let ws = Git::open_clone(clone)?;
     let mut c = ws.cmd_write();
     c.args(["update-ref", "-d", "refs/sill/discarding"]);
     let _ = run(c);
@@ -953,7 +953,7 @@ pub(super) fn discard_retained(
 /// rebase), or their tip has moved on past the workspace's (their commits since come with it,
 /// 2026-11-10); only when the two have diverged, their common ancestor.
 fn discard_target(source: &Path, clone: &Path, workspace_branch: &str) -> Result<String> {
-    let ws = Git::open(clone)?;
+    let ws = Git::open_clone(clone)?;
     let tip = rev(&ws, &format!("refs/heads/{workspace_branch}"))?;
     let (_, dest) = super::head_of(&Git::open(source)?)?;
     if super::descends_in(&ws, &dest, &tip)? || super::descends_in(&ws, &tip, &dest)? {

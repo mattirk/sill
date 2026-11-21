@@ -4198,6 +4198,7 @@ dependencies = [
  "async-io",
  "futures",
  "glob",
+ "libc",
  "png 0.18.1",
  "rand 0.10.3",
  "rusqlite",

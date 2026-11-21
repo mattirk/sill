@@ -149,6 +149,12 @@ pub struct Git {
     common: PathBuf,
     /// Filter drivers of the person's own configuration, off in every command of this view.
     filters: Vec<String>,
+    /// A workspace's clone ([`Git::open_clone`]): no reflogs are written, its `logs` is not
+    /// linked into the view, and no link may sit below its `refs` or `objects` when it opens.
+    clone: bool,
+    /// For a clone: every command of the view may write only beneath the clone and the view
+    /// ([`crate::write_fence`]), so a link planted after the open is no way out either.
+    fence: Option<std::sync::Arc<std::os::fd::OwnedFd>>,
 }
 
 /// The names of the filter drivers `config` defines: `filter.<name>.clean`, `.smudge` or `.process`.
@@ -165,8 +171,35 @@ pub fn filter_drivers(config: &[(String, String)]) -> Vec<String> {
     names
 }
 
+/// Refuse a symbolic link anywhere below the directory `root` (itself checked by its parent):
+/// each directory is listed and each entry looked at without following it.
+fn no_links_below(root: &Path) -> Result<()> {
+    let Ok(entries) = std::fs::read_dir(root) else { return Ok(()) };
+    for e in entries {
+        let e = e?;
+        let ft = e.file_type()?;
+        anyhow::ensure!(!ft.is_symlink(), "{} is a link", e.path().display());
+        if ft.is_dir() {
+            no_links_below(&e.path())?;
+        }
+    }
+    Ok(())
+}
+
 impl Git {
     pub fn open(repo: &Path) -> Result<Git> {
+        Git::open_as(repo, false)
+    }
+
+    /// [`Git::open`] for a workspace's clone, a repository sill made and the agent writes: its
+    /// `.git` must be a real directory with no `commondir`, so a `gitdir:` file or a `commondir`
+    /// the agent wrote cannot turn sill's host-side writes (commit for Apply, prune, reset) onto
+    /// another repository, the person's checkout among them.
+    pub fn open_clone(repo: &Path) -> Result<Git> {
+        Git::open_as(repo, true)
+    }
+
+    fn open_as(repo: &Path, own_only: bool) -> Result<Git> {
         use crate::safe_fs::{open_dir_beneath, read_regular_at, stat_nofollow_at};
         use rustix::fs::FileType;
         let root = open_dir_beneath(repo, Path::new(""), false).with_context(|| format!("{}: no .git", repo.display()))?;
@@ -177,6 +210,7 @@ impl Git {
         // a linked worktree's `.git` (and a submodule checkout's) is a file naming its directory
         let gitdir = match stat_nofollow_at(&root, std::ffi::OsStr::new(".git"))? {
             Some(FileType::Directory) => repo.join(".git"),
+            Some(FileType::RegularFile) if own_only => bail!("{}: .git is a file naming another git directory", repo.display()),
             Some(FileType::RegularFile) => {
                 let text = read_regular_at(&root, Path::new(".git"), HEAD_MAX)?.with_context(|| format!("{}: no .git", repo.display()))?;
                 let text = String::from_utf8_lossy(&text);
@@ -189,6 +223,7 @@ impl Git {
         let gitdir_fd = open_dir_beneath(&gitdir, Path::new(""), false).with_context(|| format!("{}: no git directory", repo.display()))?;
         // a linked worktree keeps objects and refs in the main repository
         let commondir = read_regular_at(&gitdir_fd, Path::new("commondir"), HEAD_MAX).with_context(|| format!("{}: invalid commondir", repo.display()))?;
+        anyhow::ensure!(!own_only || commondir.is_none(), "{}: the git directory names a common directory elsewhere", repo.display());
         let common = commondir.map_or_else(|| gitdir.clone(), |text| from(&text, &gitdir));
         let common_fd = open_dir_beneath(&common, Path::new(""), false).with_context(|| format!("{}: no common git directory", repo.display()))?;
         let head = read_regular_at(&gitdir_fd, Path::new("HEAD"), HEAD_MAX)
@@ -204,7 +239,18 @@ impl Git {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
         std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-        let mut view = Git { work_tree: repo.to_path_buf(), dir, gitdir: gitdir.clone(), common: common.clone(), filters: Vec::new() };
+        if own_only {
+            // git creates ref locks, refs and loose objects below these by path: a link the agent
+            // planted inside would take the write wherever it points
+            for top in ["refs", "objects"] {
+                no_links_below(&common.join(top)).with_context(|| format!("{}: {top} in the git directory", repo.display()))?;
+            }
+        }
+        let mut view =
+            Git { work_tree: repo.to_path_buf(), dir, gitdir: gitdir.clone(), common: common.clone(), filters: Vec::new(), clone: own_only, fence: None };
+        if own_only {
+            view.fence = crate::write_fence::ruleset(&[repo, &view.dir])?;
+        }
         // linked by name: each must be what it claims at the name itself, not a link elsewhere
         for (name, kind) in [
             ("objects", FileType::Directory),
@@ -213,6 +259,10 @@ impl Git {
             ("logs", FileType::Directory),
             ("packed-refs", FileType::RegularFile),
         ] {
+            // a clone's reflogs are never read, and git appends to one through a planted link
+            if own_only && name == "logs" {
+                continue;
+            }
             if let Some(ft) = stat_nofollow_at(&common_fd, std::ffi::OsStr::new(name))? {
                 anyhow::ensure!(ft == kind, "{}: {name} in the git directory is a link or of the wrong kind", repo.display());
                 std::os::unix::fs::symlink(common.join(name), view.dir.join(name))?;
@@ -300,12 +350,21 @@ impl Git {
             .env_remove("GIT_COMMON_DIR")
             .current_dir(&self.work_tree);
         self.no_filters(&mut c);
+        self.fenced(&mut c);
         c
     }
 
-    /// A `git` on this view that may write: objects, loose refs and reflogs land in the
-    /// repository through the view's links, and the index is named directly so that git's lock
-    /// file is renamed onto the real index rather than over the view's link. Nothing runs from
+    fn fenced(&self, c: &mut std::process::Command) {
+        if let Some(fence) = &self.fence {
+            crate::write_fence::apply(c, fence);
+        }
+    }
+
+    /// A `git` on this view that may write: objects and loose refs land in the repository through
+    /// the view's links, and so do reflogs, but for a clone, which keeps none (its `logs` is not
+    /// linked and `core.logAllRefUpdates` is off). The index is named directly so that git's lock
+    /// file is renamed onto the real index rather than over the view's link. A clone's commands
+    /// write only beneath the clone and the view, whatever a path leads through. Nothing runs from
     /// the repository's config, as for [`Git::cmd`]; automatic gc and maintenance are off, and
     /// `file://` transport is allowed for an import from another view. A ref git would rewrite
     /// by replacing `packed-refs` would replace the view's link instead: callers update loose refs
@@ -331,10 +390,10 @@ impl Git {
             "gc.auto=0",
             "maintenance.auto=false",
             "fetch.writeCommitGraph=false",
-            "core.logAllRefUpdates=true",
         ] {
             c.arg("-c").arg(kv);
         }
+        c.arg("-c").arg(if self.clone { "core.logAllRefUpdates=false" } else { "core.logAllRefUpdates=true" });
         c.env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_INDEX_FILE", self.gitdir.join("index"))
@@ -343,6 +402,7 @@ impl Git {
             .env_remove("GIT_COMMON_DIR")
             .current_dir(work_tree);
         self.no_filters(&mut c);
+        self.fenced(&mut c);
         c
     }
 
@@ -1161,6 +1221,79 @@ mod tests {
         assert!(git_diff(&linked, Path::new("a.txt")).contains("+two"));
         // the main checkout is untouched by the worktree's edits
         assert!(git_status(&main).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A workspace's clone may not name another repository: an agent-written `gitdir:` file or
+    /// `commondir` would turn sill's host-side writes onto it (audit 2026-11-18 M1).
+    #[test]
+    fn a_clone_refuses_a_gitdir_file_and_a_commondir() {
+        let base = std::env::temp_dir().join(format!("sill-git-clone-redirect-{}", std::process::id()));
+        let person = base.join("person");
+        if !committed_repo(&person, "a.txt") {
+            return;
+        }
+        let clone = base.join("clone");
+        assert!(committed_repo(&clone, "a.txt"));
+        Git::open_clone(&clone).expect("a plain clone opens");
+        std::fs::write(clone.join(".git/commondir"), format!("{}\n", person.join(".git").display())).unwrap();
+        assert!(Git::open_clone(&clone).is_err(), "a commondir in a clone must be refused");
+        std::fs::remove_file(clone.join(".git/commondir")).unwrap();
+        std::fs::rename(clone.join(".git"), base.join("old-git")).unwrap();
+        std::fs::write(clone.join(".git"), format!("gitdir: {}\n", person.join(".git").display())).unwrap();
+        assert!(Git::open_clone(&clone).is_err(), "a gitdir file in a clone must be refused");
+        assert!(Git::open(&clone).is_ok(), "a pin's linked worktree still opens");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// No host-side write into a clone follows a link the agent planted (audit 2026-11-18 M2): a
+    /// link below `logs` is not read (no reflog is written), one below `refs` or `objects` when the
+    /// clone opens is refused, and one planted after the open meets the write fence.
+    #[test]
+    fn a_clone_write_follows_no_planted_link() {
+        let base = std::env::temp_dir().join(format!("sill-git-clone-links-{}", std::process::id()));
+        let clone = base.join("clone");
+        if !committed_repo(&clone, "a.txt") {
+            return;
+        }
+        let victim = base.join("victim");
+        std::fs::write(&victim, "precious\n").unwrap();
+        let _ = std::fs::remove_dir_all(clone.join(".git/logs"));
+        std::fs::create_dir_all(clone.join(".git/logs/refs/heads")).unwrap();
+        std::os::unix::fs::symlink(&victim, clone.join(".git/logs/HEAD")).unwrap();
+        std::os::unix::fs::symlink(&victim, clone.join(".git/logs/refs/heads/side")).unwrap();
+        let git = Git::open_clone(&clone).expect("links in logs are not read");
+        let head = String::from_utf8(git.cmd().args(["rev-parse", "HEAD"]).output().unwrap().stdout).unwrap();
+        let mut c = git.cmd_write();
+        c.args(["update-ref", "-m", "test", "refs/heads/side", head.trim()]);
+        assert!(c.status().unwrap().success());
+        let mut c = git.cmd_write();
+        c.args(["update-ref", "-m", "test", "HEAD", head.trim()]);
+        assert!(c.status().unwrap().success());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n", "no reflog line went through the link");
+        drop(git);
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, clone.join(".git/refs/heads/sill")).unwrap();
+        assert!(Git::open_clone(&clone).is_err(), "a link below refs must be refused");
+        std::fs::remove_file(clone.join(".git/refs/heads/sill")).unwrap();
+        std::os::unix::fs::symlink(&outside, clone.join(".git/objects/ab")).unwrap();
+        assert!(Git::open_clone(&clone).is_err(), "a link below objects must be refused");
+        std::fs::remove_file(clone.join(".git/objects/ab")).unwrap();
+        // planted after the open, between two commands of the same view (Crosscheck 2026-11-18)
+        let git = Git::open_clone(&clone).expect("a clean clone opens");
+        if git.fence.is_none() {
+            eprintln!("no Landlock here: the race is not fenced");
+            return;
+        }
+        std::os::unix::fs::symlink(&outside, clone.join(".git/refs/sill")).unwrap();
+        let mut c = git.cmd_write();
+        c.args(["update-ref", "refs/sill/dest", head.trim()]);
+        assert!(!c.status().unwrap().success(), "the fence refuses the write through the link");
+        assert!(!outside.join("dest").exists(), "nothing was written outside the clone");
+        let mut c = git.cmd_write();
+        c.args(["update-ref", "refs/heads/inside", head.trim()]);
+        assert!(c.status().unwrap().success(), "a write beneath the clone still works");
         let _ = std::fs::remove_dir_all(&base);
     }
 

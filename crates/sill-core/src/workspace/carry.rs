@@ -153,7 +153,7 @@ pub fn pending(source: &Path, clone: &Path, upper: &Path, started: i64) -> Resul
         return Ok(None);
     }
     let (mut paths, opaque, earliest) = walk(upper)?;
-    let git = Git::open(clone)?;
+    let git = Git::open_clone(clone)?;
     let skip: std::collections::HashSet<String> = ignored(&git, &paths)?.into_iter().collect();
     paths.retain(|p| !skip.contains(p));
     if paths.is_empty() && opaque.is_empty() {
@@ -199,7 +199,7 @@ pub fn is_empty(p: &Pending) -> bool {
 /// Merge the agent's work into the clone's state (its HEAD and uncommitted changes), no file
 /// touched.
 pub fn merge(clone: &Path, p: &Pending) -> Result<Merge> {
-    let git = Git::open(clone)?;
+    let git = Git::open_clone(clone)?;
     let ours = if flow::dirty(&git)?.is_empty() { flow::rev(&git, "HEAD")? } else { flow::snapshot(clone, "sill: before the carry")? };
     let mut c = git.cmd_write();
     c.args(["merge-tree", "--write-tree", "-z", "--name-only", "--no-messages", &format!("--merge-base={}", p.base), &ours, &p.commit]);
@@ -221,7 +221,7 @@ pub fn merge(clone: &Path, p: &Pending) -> Result<Merge> {
 /// A clean merge into the clone's files: what differs between its state `ours` and `tree` is
 /// written, uncommitted; the index and branch are untouched.
 pub fn write_clean(clone: &Path, ours: &str, tree: &str) -> Result<usize> {
-    let git = Git::open(clone)?;
+    let git = Git::open_clone(clone)?;
     let entries = flow::diff_tree(&git, ours, tree)?;
     for e in &entries {
         match &e.blob {
@@ -235,7 +235,7 @@ pub fn write_clean(clone: &Path, ours: &str, tree: &str) -> Result<usize> {
 /// Before the rebase that stops on the conflict: the workspace's branch at the agent's commit,
 /// its files as that commit has them. Returns the branch's tip before, to rebase onto.
 pub fn stage_rebase(clone: &Path, branch: &str, p: &Pending) -> Result<String> {
-    let git = Git::open(clone)?;
+    let git = Git::open_clone(clone)?;
     let tip = flow::rev(&git, "HEAD")?;
     let mut c = git.cmd_write();
     c.args(["update-ref", "-m", "sill: before the carry", "refs/sill/pre-carry", &tip]);
@@ -257,7 +257,7 @@ pub fn unstage(clone: &Path, branch: &str, tip: &str) -> Result<()> {
 /// After a rebase that went through: the branch back at `tip`, the rebased work left in the files,
 /// uncommitted.
 pub fn uncommit(clone: &Path, branch: &str, tip: &str) -> Result<()> {
-    let git = Git::open(clone)?;
+    let git = Git::open_clone(clone)?;
     let mut c = git.cmd_write();
     c.args(["update-ref", "-m", "sill: carried, uncommitted"]).arg(format!("refs/heads/{branch}")).arg(tip);
     ok(c, "carry: the branch")?;
