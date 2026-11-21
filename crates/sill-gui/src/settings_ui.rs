@@ -59,7 +59,11 @@ pub struct SettingsPage {
     pub load_token: String,
     pub policies: crate::policies::State,
     pub collapsed: std::collections::BTreeSet<&'static str>,
-    pub shortcuts: Option<crate::shortcuts::Bindings>,
+    /// The action (`shortcuts::ACTIONS`' id) whose shortcut is being recorded: the next key
+    /// press is its binding, and until then no window shortcut fires (`keys::window_shortcuts`).
+    pub recording: Option<&'static str>,
+    /// Why the last recorded press was not taken.
+    pub shortcut_refused: Option<String>,
     /// What the daemon said; `None` while it is read.
     pub snapshot: Option<Result<Snapshot, String>>,
     pub instructions: text_editor::Content,
@@ -87,7 +91,8 @@ impl Default for SettingsPage {
             load_token: String::new(),
             policies: crate::policies::State::default(),
             collapsed: std::collections::BTreeSet::from(["Keyboard shortcuts", "Policies", "Daemon technical details", RUNNING_TIME]),
-            shortcuts: None,
+            recording: None,
+            shortcut_refused: None,
             snapshot: None,
             instructions: text_editor::Content::new(),
             edited: false,
@@ -116,8 +121,10 @@ pub enum Event {
     ShelfShare(f32),
     /// Interface scale (sill-gui's own, `crate::settings::SCALES`).
     Scale(f32),
-    ShortcutInput(String, String),
-    ApplyShortcuts,
+    /// A shortcut's field was pressed: record it, or stop recording it.
+    RecordShortcut(&'static str),
+    /// A key press while a shortcut is recorded.
+    ShortcutKey(iced::keyboard::Key, iced::keyboard::key::Physical, iced::keyboard::Modifiers),
     ResetShortcuts,
     Instructions(text_editor::Action),
     InstructionsNewline,
@@ -428,34 +435,35 @@ impl App {
                 ],
             ));
 
-            let bindings = page.shortcuts.as_ref().unwrap_or(&self.settings.shortcuts);
+            let bindings = &self.settings.shortcuts;
             let mut rows = Vec::new();
             for (i, (id, label, _)) in crate::shortcuts::ACTIONS.iter().enumerate() {
-                rows.push(setting(
-                    label,
-                    None,
-                    text_input("Disabled", &crate::keys::label(crate::shortcuts::value(bindings, i)))
-                        .width(180)
-                        .padding(7)
-                        .size(style::SMALL)
-                        .on_input(move |value| event(Event::ShortcutInput((*id).into(), value))),
-                ));
+                let recording = page.recording == Some(*id);
+                let bound = crate::shortcuts::shown(crate::shortcuts::value(bindings, i));
+                let caption = if recording {
+                    "Press keys…".to_string()
+                } else if bound.is_empty() {
+                    "Disabled".to_string()
+                } else {
+                    bound
+                };
+                let field = button(text(caption).size(style::SMALL).width(Fill).center()).width(180).padding(7).style(move |_, status| {
+                    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                    button::Style {
+                        background: Some(alpha(P.fg, if recording || hovered { 0.12 } else { 0.07 }).into()),
+                        text_color: if recording { P.accent } else { P.fg },
+                        border: iced::Border { color: if recording { P.accent } else { iced::Color::TRANSPARENT }, width: 1.0, radius: style::CONTROL.into() },
+                        ..button::Style::default()
+                    }
+                });
+                rows.push(setting(label, None, keys::press(field, event(Event::RecordShortcut(id)))));
             }
-            let error = crate::shortcuts::validate(bindings).err();
-            let mut controls = column![
-                text(format!("Use {} or Alt with a key, optionally Shift. Blank disables a shortcut. Use Plus for +.", crate::keys::PRIMARY))
-                    .size(style::SMALL)
-            ];
-            if let Some(why) = &error {
+            let mut controls =
+                column![text("Press a shortcut's field, then the keys. Escape leaves it as it was; Backspace disables it.").size(style::SMALL)].spacing(8);
+            if let Some(why) = &page.shortcut_refused {
                 controls = controls.push(text(why.clone()).size(style::SMALL).color(P.error));
             }
-            controls = controls.push(
-                row![
-                    quiet_button("Apply", (page.shortcuts.is_some() && error.is_none()).then(|| event(Event::ApplyShortcuts))),
-                    quiet_button("Reset defaults", Some(event(Event::ResetShortcuts))),
-                ]
-                .spacing(8),
-            );
+            controls = controls.push(quiet_button("Reset defaults", Some(event(Event::ResetShortcuts))));
             rows.push(wide("Shortcut bindings", None, controls));
             page_column = page_column.push(section(page, "Keyboard shortcuts", rows));
 

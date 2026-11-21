@@ -176,8 +176,9 @@ impl App {
         {
             layers = layers.push(crate::media::expanded(view, key));
         }
+        let recording = self.settings_page.as_ref().is_some_and(|page| page.recording.is_some());
         let annotating = !self.backend_shown() && self.current().is_some_and(|view| view.annotation.is_some());
-        keys::annotation_shortcuts(keys::window_shortcuts(layers, &self.settings.shortcuts, self.find.shown, self.terminal_focused()), annotating)
+        keys::annotation_shortcuts(keys::window_shortcuts(layers, &self.settings.shortcuts, self.find.shown, self.terminal_focused(), recording), annotating)
     }
 
     /// The drawer `width` wide with its edge: the line is the drawer's own left side, flush with

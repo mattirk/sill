@@ -15,7 +15,7 @@ use iced::advanced::widget::operation::scrollable::{self as scroll, AbsoluteOffs
 use iced::advanced::widget::operation::{Operation, Outcome, TextInput};
 use iced::advanced::widget::{Id, Tree, Widget, tree};
 use iced::advanced::{Clipboard, Shell, mouse, overlay};
-use iced::keyboard::{self, Key, Modifiers, key::Named};
+use iced::keyboard::{self, Key, Modifiers, key::Named, key::Physical};
 use iced::widget::Button;
 use iced::{Border, Color, Element, Event, Length, Rectangle, Renderer, Size, Task, Theme, Vector};
 
@@ -24,6 +24,8 @@ use crate::style::P;
 
 /// What a focused control makes of a key besides Enter and Space.
 type OnKey<'a, M> = Rc<dyn Fn(&Key, Modifiers) -> Option<M> + 'a>;
+/// What a wrapper makes of a press before its content sees it; with the physical key.
+type Before<'a, M> = Rc<dyn Fn(&Key, Physical, Modifiers) -> Option<M> + 'a>;
 
 /// A control in the window's focus traversal: Enter or Space sends `on_activate`; other keys go
 /// to `on_key` while it has the keyboard.
@@ -31,7 +33,7 @@ pub struct Focus<'a, M> {
     content: Element<'a, M>,
     on_activate: Option<M>,
     on_key: Option<OnKey<'a, M>>,
-    before_children: Option<OnKey<'a, M>>,
+    before_children: Option<Before<'a, M>>,
 }
 
 #[derive(Default)]
@@ -72,23 +74,29 @@ impl<'a, M> Focus<'a, M> {
 #[cfg(test)]
 pub fn intercept_shortcuts<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     let mut wrapper = focus(content);
-    wrapper.before_children = Some(Rc::new(window_message));
+    wrapper.before_children = Some(Rc::new(|key, _, modifiers| window_message(key, modifiers)));
     wrapper.into()
 }
 
 #[cfg(test)]
 pub fn configured_shortcuts<'a>(content: impl Into<Element<'a, Message>>, bindings: &'a crate::shortcuts::Bindings) -> Element<'a, Message> {
-    window_shortcuts(content, bindings, false, false)
+    window_shortcuts(content, bindings, false, false, false)
 }
 
+/// The window's shortcuts, taken before any control. While Settings records a shortcut
+/// (`recording`) every press goes to the recorder instead: no shortcut fires, no field types.
 pub fn window_shortcuts<'a>(
     content: impl Into<Element<'a, Message>>,
     bindings: &'a crate::shortcuts::Bindings,
     find_shown: bool,
     terminal_focused: bool,
+    recording: bool,
 ) -> Element<'a, Message> {
     let mut wrapper = focus(content);
-    wrapper.before_children = Some(Rc::new(move |key, modifiers| {
+    wrapper.before_children = Some(Rc::new(move |key, physical, modifiers| {
+        if recording {
+            return Some(Message::Settings(crate::settings_ui::Event::ShortcutKey(key.clone(), physical, modifiers)));
+        }
         if find_shown {
             match key.as_ref() {
                 Key::Named(Named::F3) if !modifiers.command() && !modifiers.alt() => {
@@ -100,7 +108,7 @@ pub fn window_shortcuts<'a>(
                 _ => {}
             }
         }
-        let message = crate::shortcuts::message(bindings, key, modifiers)?;
+        let message = crate::shortcuts::message_at(bindings, key, physical, modifiers)?;
         if terminal_focused && matches!(message, Message::Find(crate::find::Event::Open)) {
             return None;
         }
@@ -222,7 +230,7 @@ impl Widget<Message, Theme, Renderer> for FindInput<'_> {
 pub fn annotation_shortcuts<'a>(content: impl Into<Element<'a, Message>>, active: bool) -> Element<'a, Message> {
     // Keep the same wrapper and widget tree when the editor opens and closes.
     let mut wrapper = focus(content);
-    wrapper.before_children = Some(Rc::new(move |key, modifiers| active.then(|| annotation_key(key, modifiers)).flatten()));
+    wrapper.before_children = Some(Rc::new(move |key, _, modifiers| active.then(|| annotation_key(key, modifiers)).flatten()));
     wrapper.into()
 }
 
@@ -311,8 +319,8 @@ impl<M: Clone> Widget<M, Theme, Renderer> for Focus<'_, M> {
         shell: &mut Shell<'_, M>,
         viewport: &Rectangle,
     ) {
-        if let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event
-            && let Some(message) = self.before_children.as_ref().and_then(|on| on(key, *modifiers))
+        if let Event::Keyboard(keyboard::Event::KeyPressed { key, physical_key, modifiers, .. }) = event
+            && let Some(message) = self.before_children.as_ref().and_then(|on| on(key, *physical_key, *modifiers))
         {
             shell.publish(message);
             shell.capture_event();

@@ -77,6 +77,15 @@ impl App {
         let Some(page) = &mut self.settings_page else {
             return Task::none();
         };
+        // anything else the page is asked to do ends the recording of a shortcut; answers that
+        // come in from the daemon meanwhile do not
+        let recording = page.recording;
+        if !matches!(event, Event::Loaded(..) | Event::Done(_) | Event::AutostartDone(_) | Event::InstructionsSaved(..) | Event::Scrolled(..)) {
+            page.recording = None;
+            if !matches!(event, Event::ShortcutKey(..)) {
+                page.shortcut_refused = None;
+            }
+        }
         match event {
             Event::Autostart(enabled) => {
                 if page.autostart_busy || self.demo || !matches!(sill_proto::transport::selected(), Ok(None)) {
@@ -152,23 +161,45 @@ impl App {
                 };
                 return self.settings_load();
             }
-            Event::ShortcutInput(id, value) => {
-                page.shortcuts.get_or_insert_with(|| self.settings.shortcuts.clone()).insert(id, value);
+            Event::RecordShortcut(id) => {
+                page.shortcut_refused = None;
+                page.recording = (recording != Some(id)).then_some(id);
             }
-            Event::ApplyShortcuts => {
-                if let Some(draft) = &page.shortcuts {
-                    match crate::shortcuts::validate(draft) {
-                        Ok(()) => {
-                            self.settings.shortcuts = draft.clone();
-                            page.shortcuts = None;
-                            self.save_settings();
-                        }
-                        Err(why) => page.said = Some(why),
+            Event::ShortcutKey(key, physical, modifiers) => {
+                use crate::shortcuts::Capture;
+                let Some(id) = recording else {
+                    return Task::none();
+                };
+                let binding = match crate::shortcuts::capture(&key, physical, modifiers) {
+                    // the chord is not complete, or was not one: go on recording
+                    Capture::Waiting => {
+                        page.recording = recording;
+                        return Task::none();
+                    }
+                    Capture::Refused(why) => {
+                        page.recording = recording;
+                        page.shortcut_refused = Some(why);
+                        return Task::none();
+                    }
+                    Capture::Cancel => return Task::none(),
+                    Capture::Clear => String::new(),
+                    Capture::Chord(binding) => binding,
+                };
+                let mut bindings = self.settings.shortcuts.clone();
+                bindings.insert(id.into(), binding);
+                match crate::shortcuts::validate(&bindings) {
+                    Ok(()) => {
+                        page.shortcut_refused = None;
+                        self.settings.shortcuts = bindings;
+                        self.save_settings();
+                    }
+                    Err(why) => {
+                        page.recording = recording;
+                        page.shortcut_refused = Some(why);
                     }
                 }
             }
             Event::ResetShortcuts => {
-                page.shortcuts = None;
                 self.settings.shortcuts.clear();
                 self.save_settings();
             }

@@ -2941,6 +2941,67 @@ fn configured_shortcuts_intercept_inputs_and_release_old_bindings() {
     assert!(crate::keys::from_text(&Key::Character("t".into()), Modifiers::COMMAND, true).is_none());
 }
 
+/// Settings records a shortcut from the keys pressed: while it does, the press reaches no
+/// window shortcut and no field, and what is stored is the physical key.
+#[test]
+fn a_shortcut_is_recorded_from_a_key_press() {
+    use crate::settings_ui::Event;
+    use iced::keyboard::key::{Code, Named, Physical};
+    use iced::keyboard::{Key, Modifiers};
+    let press = |key: Key, code: Code, modifiers: Modifiers| {
+        let mut events = hotkey(key, modifiers);
+        if let Some(iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { physical_key, .. })) = events.last_mut() {
+            *physical_key = Physical::Code(code);
+        }
+        events
+    };
+    let (mut app, _) = App::new(true, None);
+    let _ = app.update(Message::ShowPage(crate::Page::Settings));
+    let page = app.settings_page.as_mut().unwrap();
+    page.snapshot = Some(Ok(sill_client::settings::Snapshot::default()));
+    page.category = crate::settings_ui::Category::Interface;
+    page.collapsed.remove("Keyboard shortcuts");
+    let _ = app.update(Message::Settings(Event::RecordShortcut("new_session")));
+    assert_eq!(app.settings_page.as_ref().unwrap().recording, Some("new_session"));
+
+    // the window's own Ctrl+W is not acted on while recording: it goes to the recorder
+    let mut ui = iced_test::Simulator::with_size(crate::snapshots::settings(), (900.0, 5000.0), app.view());
+    ui.find("Press keys…").unwrap();
+    ui.send(press(Key::Character("w".into()), Code::KeyW, Modifiers::COMMAND));
+    let messages: Vec<_> = ui.into_messages().collect();
+    assert!(matches!(messages.as_slice(), [Message::Settings(Event::ShortcutKey(..))]), "{messages:?}");
+    for message in messages {
+        let _ = app.update(message);
+    }
+    let page = app.settings_page.as_ref().unwrap();
+    assert_eq!(page.recording, Some("new_session"), "a refused chord leaves the field recording");
+    assert!(page.shortcut_refused.as_ref().unwrap().contains("conflicts"));
+    assert!(app.settings.shortcuts.is_empty());
+
+    // a modifier alone is not a chord; the key with it is, by its place on the keyboard
+    let _ = app.update(Message::Settings(Event::ShortcutKey(Key::Named(Named::Alt), Physical::Code(Code::AltLeft), Modifiers::ALT)));
+    assert_eq!(app.settings_page.as_ref().unwrap().recording, Some("new_session"));
+    let _ = app.update(Message::Settings(Event::ShortcutKey(Key::Character("n".into()), Physical::Code(Code::KeyN), Modifiers::ALT)));
+    let page = app.settings_page.as_ref().unwrap();
+    assert_eq!((page.recording, page.shortcut_refused.as_deref()), (None, None));
+    assert_eq!(app.settings.shortcuts.get("new_session").map(String::as_str), Some("Alt+N @KeyN"));
+    let mut ui = iced_test::Simulator::with_size(crate::snapshots::settings(), (900.0, 700.0), app.view());
+    ui.send(press(Key::Character("˜".into()), Code::KeyN, Modifiers::ALT));
+    assert!(ui.into_messages().any(|m| matches!(m, Message::NewSession)));
+
+    // Escape leaves the binding, Backspace disables it, another request of the page stops recording
+    let _ = app.update(Message::Settings(Event::RecordShortcut("new_session")));
+    let _ = app.update(Message::Settings(Event::ShortcutKey(Key::Named(Named::Escape), Physical::Code(Code::Escape), Modifiers::empty())));
+    assert_eq!(app.settings_page.as_ref().unwrap().recording, None);
+    assert_eq!(app.settings.shortcuts.get("new_session").map(String::as_str), Some("Alt+N @KeyN"));
+    let _ = app.update(Message::Settings(Event::RecordShortcut("new_session")));
+    let _ = app.update(Message::Settings(Event::ShortcutKey(Key::Named(Named::Backspace), Physical::Code(Code::Backspace), Modifiers::empty())));
+    assert_eq!(app.settings.shortcuts.get("new_session").map(String::as_str), Some(""));
+    let _ = app.update(Message::Settings(Event::RecordShortcut("close_session")));
+    let _ = app.update(Message::Settings(Event::ToggleSection("Keyboard shortcuts")));
+    assert_eq!(app.settings_page.as_ref().unwrap().recording, None);
+}
+
 #[test]
 fn policy_errors_remain_visible_with_the_group_collapsed() {
     let (mut app, _) = App::new(true, None);
