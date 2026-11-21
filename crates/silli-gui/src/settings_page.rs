@@ -88,7 +88,7 @@ impl App {
         }
         match event {
             Event::Autostart(enabled) => {
-                if page.autostart_busy || self.demo || !matches!(silli_proto::transport::selected(), Ok(None)) {
+                if page.autostart_busy || self.demo || !silli_proto::transport::is_local() {
                     return Task::none();
                 }
                 page.autostart_busy = true;

@@ -81,6 +81,9 @@ pub struct Client {
 impl Client {
     /// Connect to the running daemon; an error when there is none.
     pub fn connect() -> Result<Client> {
+        if let Some(open) = crate::transport::pipe() {
+            return Self::piped(open);
+        }
         if let Some(target) = crate::transport::selected()? {
             return Self::ssh(&target.host, &target.binary);
         }
@@ -112,6 +115,9 @@ impl Client {
     /// with `Delegate=yes` where the user manager answers, so sessions get their cgroups, else
     /// spawned detached — and the socket waited for (direct mode, docs/daemon.md §3.1).
     pub fn connect_or_start() -> Result<Client> {
+        if let Some(open) = crate::transport::pipe() {
+            return Self::piped(open);
+        }
         if let Some(target) = crate::transport::selected()? {
             return Self::ssh(&target.host, &target.binary);
         }
@@ -120,6 +126,9 @@ impl Client {
 
     /// Explicit operator start/restart, independent of the automatic-start preference.
     pub fn connect_or_start_explicit() -> Result<Client> {
+        if let Some(open) = crate::transport::pipe() {
+            return Self::piped(open);
+        }
         if let Some(target) = crate::transport::selected()? {
             return Self::ssh(&target.host, &target.binary);
         }
@@ -306,6 +315,16 @@ impl Client {
                     matches!(io.kind(), BrokenPipe | ConnectionReset | ConnectionAborted | UnexpectedEof | NotConnected)
                 })
         })
+    }
+
+    /// A client on a pipe the process opens itself (`transport::choose_pipe`), initialized.
+    fn piped(open: &crate::transport::Opener) -> Result<Client> {
+        let stream = open().context("reaching the box")?;
+        let interrupt = stream.interrupt.clone();
+        let mut client = Self::over_io(stream.reader, stream.writer, move || interrupt())?;
+        client.remote = true;
+        client.initialize_within(SSH_INIT_TIMEOUT)?;
+        Ok(client)
     }
 
     /// Raw duplex transport; call `initialize` before sending control requests.

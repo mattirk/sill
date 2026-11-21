@@ -142,7 +142,7 @@ pub fn host_login(client: &Client, agent_id: &str, method_id: &str, mut progress
 /// page could never call back.
 pub(crate) fn relay_callback(client: &Client, relays: &mut Vec<crate::processes::Bridge>, port: Option<u16>, operation_id: &str) -> Result<()> {
     let Some(port) = port else { return Ok(()) };
-    let remote = silli_proto::transport::selected().ok().flatten().is_some();
+    let remote = !silli_proto::transport::is_local();
     if !remote || relays.iter().any(|r| r.url().ends_with(&format!(":{port}"))) {
         return Ok(());
     }

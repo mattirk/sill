@@ -21,6 +21,28 @@ pub struct BoxTarget {
 /// window's own VM), with the name it shows.
 static CHOSEN: std::sync::OnceLock<(String, BoxTarget)> = std::sync::OnceLock::new();
 
+/// How this process opens a byte pipe to its box's `silli daemon --stdio`, when the box is reached
+/// neither over SSH nor on a local socket: a Windows window's own VM, over the VM's host–guest
+/// socket (docs/silli-windows.md, section 6.2).
+pub type Opener = std::sync::Arc<dyn Fn() -> Result<RawStream> + Send + Sync>;
+
+static PIPE: std::sync::OnceLock<(String, Opener)> = std::sync::OnceLock::new();
+
+/// This process talks to the box named `name` through pipes `open` makes, from now on; once.
+pub fn choose_pipe(name: &str, open: Opener) {
+    let _ = PIPE.set((name.to_string(), open));
+}
+
+/// The chosen pipe, when the box is reached by one.
+pub(crate) fn pipe() -> Option<&'static Opener> {
+    PIPE.get().map(|(_, open)| open)
+}
+
+/// The daemon is this machine's own, on its local socket: no box was chosen in any way.
+pub fn is_local() -> bool {
+    PIPE.get().is_none() && matches!(selected(), Ok(None))
+}
+
 /// This process talks to `target` (named `name`) from now on; once.
 pub fn choose(name: &str, target: BoxTarget) {
     let _ = CHOSEN.set((name.to_string(), target));
@@ -28,6 +50,9 @@ pub fn choose(name: &str, target: BoxTarget) {
 
 /// The name of the box this process talks to, `None` for the local daemon.
 pub fn selected_name() -> Option<String> {
+    if let Some((name, _)) = PIPE.get() {
+        return Some(name.clone());
+    }
     if let Some((name, _)) = CHOSEN.get() {
         return Some(name.clone());
     }
@@ -242,7 +267,9 @@ pub fn open_stream(token: &str) -> Result<RawStream> {
         bail!("invalid stream token");
     }
     let handshake = serde_json::to_vec(&serde_json::json!({"_silli_stream":token}))?;
-    let mut stream = if let Some(target) = selected()? {
+    let mut stream = if let Some(open) = pipe() {
+        open()?
+    } else if let Some(target) = selected()? {
         crate::boxlink::ensure(&target.host)?;
         let mut child = ssh_command(&target.host, &target.binary)?
             .stdin(std::process::Stdio::piped())

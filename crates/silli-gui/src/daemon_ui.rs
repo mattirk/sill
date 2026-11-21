@@ -81,7 +81,7 @@ impl App {
                             client.call_within(silli_proto::method::DAEMON_STATUS, silli_proto::Empty {}, silli_proto::client::QUICK_TIMEOUT)
                         });
                         result.map_err(|e| {
-                            let local = matches!(silli_proto::transport::selected(), Ok(None));
+                            let local = silli_proto::transport::is_local();
                             let stopped = local
                                 && e.chain()
                                     .filter_map(|e| e.downcast_ref::<std::io::Error>())
@@ -178,7 +178,7 @@ impl App {
         {
             card = card.push(summary(s));
         }
-        let local = matches!(silli_proto::transport::selected(), Ok(None));
+        let local = silli_proto::transport::is_local();
         let autostart_control = crate::settings_ui::switch_styled(
             page.autostart.as_ref().copied().unwrap_or(false),
             P.accent,
