@@ -97,7 +97,11 @@ The implemented public conversation surface is `_sill/sessions.attach`,
 `_sill/uploads.create`, `_sill/uploads.get` and `_sill/session.event`, plus `_sill/daemon.schema`.
 `_sill/submissions.send_now` needs the capability `sill.send_now: 1` (the first one, 2026-11-05):
 the queued submission goes next, before older queued ones, resumed if it was held, and the active
-turn is cancelled so it goes as soon as the agent has stopped. A prompt's user item is created when
+turn is cancelled so it goes as soon as the agent has stopped. A submission the agent already has
+(`delivery` is no longer `queued`: it went by itself while the request was on its way) is returned
+as it is and nothing is cancelled, the active turn being its own (2026-11-20; before, it was
+refused with `invalid_state`, which the window showed as an error under a prompt the agent was
+answering). One that was cancelled while queued is still refused. A prompt's user item is created when
 it is dispatched, not when it is accepted: a queued prompt appears where the agent receives it.
 `_sill/policy.allow_host` approves a concrete hostname for the selected session only. It
 returns `agent_name: "this session"` and `live: true` when a running proxy can use the grant

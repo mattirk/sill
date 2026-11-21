@@ -115,7 +115,13 @@ fn serve(stream: UnixStream, script: Script, credential: PathBuf, observed: mpsc
     let mut key_accepted = false;
     let mut key_sent = false;
     while let Some(message) = read(&mut reader) {
-        let (Some(id), Some(method)) = (message.get("id").cloned(), message["method"].as_str()) else { continue };
+        let (Some(id), Some(method)) = (message.get("id").cloned(), message["method"].as_str()) else {
+            // a notification (`session/cancel`): nothing to answer, and a test may wait for it
+            if let Some(method) = message["method"].as_str() {
+                let _ = observed.send(method.to_string());
+            }
+            continue;
+        };
         let logged_in = credential.exists() || key_accepted;
         if method == "session/new" && script.asks == Ask::HangsAtOpen && !logged_in {
             let _ = observed.send("session/new unanswered".into());
@@ -169,6 +175,14 @@ fn serve(stream: UnixStream, script: Script, credential: PathBuf, observed: mpsc
                 let _ = observed.send(format!("prompt {marker}"));
                 if marker == "PROMPT-SLOW" && !logged_in {
                     std::thread::sleep(Duration::from_millis(200));
+                }
+                // a turn that lasts until the test ends it (`Fixture::end_turn`), so a test can act
+                // while it runs; what is sent meanwhile (a cancel) is read after it
+                if marker.starts_with("PROMPT-LONG") {
+                    let (ended, deadline) = (credential.with_file_name(format!("ended-{marker}")), Instant::now() + WAIT);
+                    while !ended.exists() && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
                 }
                 if logged_in {
                     send(
@@ -349,6 +363,11 @@ impl Fixture {
         std::fs::write(&self.credential, "token").unwrap();
     }
 
+    /// The agent's turn for a `PROMPT-LONG…` prompt ends now, with its answer.
+    fn end_turn(&self, marker: &str) {
+        std::fs::write(self.credential.with_file_name(format!("ended-{marker}")), "").unwrap();
+    }
+
     fn saved_key(&self, method: &str) -> PathBuf {
         self.dir.join("state/sill/keys/claude").join(method)
     }
@@ -473,6 +492,12 @@ impl Frontend {
 
     fn control(&self, control: Value) {
         let _: Value = self.client.call(method::SESSIONS_CONTROL, json!({"session_id": self.session, "control": control})).unwrap();
+    }
+
+    fn send_now(&self, marker: &str) -> Value {
+        self.client
+            .call(method::SUBMISSIONS_SEND_NOW, json!({"session_id": self.session, "submission_id": marker}))
+            .unwrap_or_else(|e| panic!("the send now for {marker} was refused: {e:#}"))
     }
 
     fn resume(&self, marker: &str) {
@@ -608,6 +633,39 @@ fn a_terminal_login_that_did_not_take_asks_again() {
     frontend.submit("PROMPT-THREE");
     frontend.control(json!({"type": "retry_session"}));
     frontend.answer(&fixture, "PROMPT-THREE");
+}
+
+/// Not a login: the scripted agent here is the one a test can time. A send-now that reaches the
+/// daemon after its prompt went by itself is answered with the prompt as it is and stops nothing,
+/// the turn at work being that prompt's own. The person's Enter on a queued line crossed the
+/// daemon's own dispatch, and the window showed "submission is not an unsent queued intent" under
+/// a prompt the agent was answering (2026-11-20). A prompt that still waits goes first as before,
+/// the turn before it stopped.
+#[test]
+fn a_send_now_for_a_prompt_that_already_went_is_answered_and_stops_nothing() {
+    let fixture = Fixture::new(script(Ask::AtPrompt, json!([terminal_method()])));
+    fixture.terminal_login();
+    let mut frontend = Frontend::attach(&fixture);
+    frontend.wait_for(&fixture, "the session opening", |e| matches!(e, Event::Ready { .. }));
+    frontend.submit("PROMPT-LONG-GONE");
+    fixture.expect("prompt PROMPT-LONG-GONE");
+    let gone = frontend.send_now("PROMPT-LONG-GONE");
+    assert_eq!(gone["delivery"], "direct", "answered as it is: {gone}");
+    // a cancel would be on its way to the agent by now, and is read as soon as the turn ends
+    std::thread::sleep(Duration::from_millis(200));
+    fixture.end_turn("PROMPT-LONG-GONE");
+    fixture.never("session/cancel", Duration::from_millis(300));
+    frontend.answer(&fixture, "PROMPT-LONG-GONE");
+
+    frontend.submit("PROMPT-LONG-AT-WORK");
+    fixture.expect("prompt PROMPT-LONG-AT-WORK");
+    let waiting = frontend.submit("PROMPT-NEXT");
+    assert_eq!(waiting["delivery"], "queued", "{waiting}");
+    frontend.send_now("PROMPT-NEXT");
+    fixture.end_turn("PROMPT-LONG-AT-WORK");
+    fixture.expect("session/cancel");
+    fixture.expect("prompt PROMPT-NEXT");
+    frontend.answer(&fixture, "PROMPT-NEXT");
 }
 
 /// Antigravity: with no login, `session/new` hangs while the agent waits for a browser login it

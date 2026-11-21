@@ -539,13 +539,21 @@ impl Runner {
         })
     }
     /// Send a queued prompt now (`sill.send_now`): resumed if held, first in the queue, and the
-    /// turn in progress stopped so it goes as soon as the agent has stopped.
+    /// turn in progress stopped so it goes as soon as the agent has stopped. A prompt the agent
+    /// already has is answered as it is, and nothing is stopped.
     pub(in crate::daemon) fn sfp_send_now(&self, hub: &Hub, key: &p::SubmissionKey) -> Result<p::Submission> {
         hub.with_store(|store| {
             let mut st = self.st.lock().unwrap();
             self.sfp_initialize_locked(store, hub, &st)?;
             let journal = Journal::new(store)?;
             let s = journal.submission(&key.session_id, &key.submission_id)?;
+            // It went by itself between the person's look at the queue and their request: the
+            // agent was ready a moment later, or its turn ended. That is what they asked for, and
+            // the turn at work may be this prompt's own, so nothing is stopped (the window showed
+            // "submission is not an unsent queued intent" under a prompt the agent was answering).
+            if sent_already(&s) {
+                return Ok(s);
+            }
             if s.delivery != "queued" || s.insertion != "pending" || s.outcome != "pending" {
                 return Err(Error::domain("invalid_state", "submission is not an unsent queued intent").into());
             }
@@ -691,6 +699,12 @@ fn attachments(store: &Store, session_id: &str, input: &[p::Attachment], images:
             p::Attachment::Uploaded { upload_id, .. } => super::super::uploads::resolve(store, session_id, upload_id, images),
         })
         .collect()
+}
+
+/// The agent has this submission: dispatch alone takes one out of the queue. One the person
+/// removed, or the session's end cancelled, stays `queued` and never went.
+fn sent_already(submission: &p::Submission) -> bool {
+    submission.delivery != "queued"
 }
 
 /// The queued submission to send next: the one the person asked to send now, else the oldest.
@@ -954,6 +968,24 @@ mod tests {
         assert_eq!(pick(Some("third")).as_deref(), Some("third"));
         assert_eq!(pick(Some("gone")).as_deref(), Some("first"), "a sent-now prompt removed meanwhile changes nothing");
         assert!(super::next_queued(vec![], Some("third".into())).is_none());
+    }
+
+    #[test]
+    fn send_now_takes_a_prompt_the_agent_already_has_as_sent() {
+        let f = Fixture::new();
+        let j = Journal::new(&f.store).unwrap();
+        let mut st = f.runner.st.lock().unwrap();
+        let (queued, _) = j.accept(&f.input(), "queued").unwrap();
+        assert!(!super::sent_already(&queued), "it waits: a send now has its work to do");
+        // it goes by itself, as when the agent is ready or its turn ends
+        f.runner.sfp_commit_submission(&f.store, &f.dir, &mut st, queued, &[]).unwrap();
+        let sent = j.submission(&f.runner.id, "submission").unwrap();
+        assert!(super::sent_already(&sent), "a send now that comes after is answered, not refused: {sent:?}");
+        let mut input = f.input();
+        input.submission_id = "removed".into();
+        j.accept(&input, "queued").unwrap();
+        let (removed, _) = j.cancel(&p::SubmissionKey { session_id: f.runner.id.clone(), submission_id: "removed".into() }).unwrap();
+        assert!(!super::sent_already(&removed), "a prompt the person removed never went: a send now for it is still refused");
     }
 
     #[test]
