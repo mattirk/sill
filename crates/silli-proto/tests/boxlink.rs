@@ -2,16 +2,31 @@
 //! passphrase-protected key and no agent: the case where only the person can sign in.
 //! Skipped where `sshd` or `ssh-keygen` is missing. This program is also its own askpass helper
 //! (`harness = false`): ssh starts it for every question, as it starts silli-gui.
+//! Unix only: off it the window cannot take SSH's questions yet, and there is nothing to try.
+
+#[cfg(not(unix))]
+fn main() {
+    println!("boxlink: skipped, not on Unix");
+}
+
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::sync::{Arc, Mutex};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 use silli_proto::boxlink::{self, Problem, Prompt, PromptKind, Prompter, Unavailable};
 
+#[cfg(unix)]
 const HOST: &str = "silli-test-box";
+#[cfg(unix)]
 const PASSPHRASE: &str = "open sesame";
 
+#[cfg(unix)]
 fn main() {
     if boxlink::is_askpass() {
         boxlink::askpass_main();
@@ -73,14 +88,17 @@ fn main() {
     println!("boxlink: ok");
 }
 
+#[cfg(unix)]
 fn problem(error: &anyhow::Error) -> Problem {
     error.downcast_ref::<Unavailable>().unwrap_or_else(|| panic!("not a box state: {error:#}")).problem
 }
 
+#[cfg(unix)]
 fn session(command: &str) -> std::process::Output {
     silli_proto::transport::ssh_base(HOST).unwrap().arg(command).stdin(Stdio::null()).output().unwrap()
 }
 
+#[cfg(unix)]
 fn scenario(start_server: &dyn Fn() -> bool, stop_server: &dyn Fn()) {
     let asked: Arc<Mutex<Vec<Prompt>>> = Arc::default();
     let answering = |answers: &'static [(&'static str, Option<&'static str>)]| -> Prompter {

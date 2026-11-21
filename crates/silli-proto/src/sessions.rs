@@ -3,10 +3,9 @@ use crate::method;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
 
 /// Exact bytes name a path on the daemon host. Display text is never operational.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
@@ -15,17 +14,95 @@ pub struct HostPath {
     pub display: String,
 }
 impl HostPath {
+    /// The path with these exact bytes, shown as text where they are not UTF-8.
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self { bytes_base64: STANDARD.encode(bytes), display: String::from_utf8_lossy(bytes).into_owned() }
+    }
+
+    /// The path's exact bytes: absolute, at most 4096 of them, without NUL.
+    pub fn bytes(&self) -> anyhow::Result<Vec<u8>> {
+        anyhow::ensure!(self.bytes_base64.len() <= 5464, "path exceeds 4096 bytes");
+        let bytes = STANDARD.decode(&self.bytes_base64)?;
+        anyhow::ensure!(!bytes.is_empty() && bytes.len() <= 4096 && !bytes.contains(&0) && bytes[0] == b'/', "expected an absolute host path without NUL");
+        Ok(bytes)
+    }
+
+    // A box's path is `/`-separated bytes whatever system the frontend runs on: on Windows the
+    // system's own path type joins with `` and does not call `/home/x` absolute. So a frontend
+    // takes paths apart and puts them together with these, never with `std::path`.
+
+    /// The path without its last component; `None` for `/` and for a path that is not valid.
+    pub fn parent(&self) -> Option<HostPath> {
+        let bytes = self.bytes().ok()?;
+        let trimmed = trim_slashes(&bytes);
+        let cut = trimmed.iter().rposition(|b| *b == b'/')?;
+        (trimmed.len() > 1).then(|| HostPath::from_bytes(if cut == 0 { b"/" } else { &trimmed[..cut] }))
+    }
+
+    /// The last component's bytes; empty for `/`.
+    pub fn file_name(&self) -> Vec<u8> {
+        let bytes = self.bytes().unwrap_or_default();
+        let trimmed = trim_slashes(&bytes);
+        trimmed.rsplit(|b| *b == b'/').next().unwrap_or_default().to_vec()
+    }
+
+    /// This path with `relative` below it (`relative` may itself hold `/`).
+    pub fn join(&self, relative: &[u8]) -> anyhow::Result<HostPath> {
+        let mut bytes = trim_slashes(&self.bytes()?).to_vec();
+        let relative = relative.strip_prefix(b"/").unwrap_or(relative);
+        if !relative.is_empty() {
+            if bytes != b"/" {
+                bytes.push(b'/');
+            }
+            bytes.extend_from_slice(relative);
+        }
+        Ok(HostPath::from_bytes(&bytes))
+    }
+
+    /// What is left of this path below `base`: empty when they are the same path, `None` when
+    /// this path is not `base` or below it.
+    pub fn strip_prefix(&self, base: &HostPath) -> Option<Vec<u8>> {
+        let (path, base) = (self.bytes().ok()?, base.bytes().ok()?);
+        let (path, base) = (trim_slashes(&path), trim_slashes(&base));
+        if base == b"/" {
+            return Some(path[1..].to_vec());
+        }
+        let rest = path.strip_prefix(base)?;
+        match rest.first() {
+            None => Some(Vec::new()),
+            Some(b'/') => Some(rest[1..].to_vec()),
+            Some(_) => None,
+        }
+    }
+
+    /// This path is `base` or below it.
+    pub fn starts_with(&self, base: &HostPath) -> bool {
+        self.strip_prefix(base).is_some()
+    }
+
+    /// How many components the path has; `/` has none.
+    pub fn depth(&self) -> usize {
+        self.bytes().map_or(0, |bytes| bytes.split(|b| *b == b'/').filter(|part| !part.is_empty()).count())
+    }
+
+    /// On the daemon's own system a host path is a path of that system.
+    #[cfg(unix)]
     pub fn from_path(path: &Path) -> Self {
         use std::os::unix::ffi::OsStrExt;
         Self { bytes_base64: STANDARD.encode(path.as_os_str().as_bytes()), display: path.to_string_lossy().into_owned() }
     }
+
+    #[cfg(unix)]
     pub fn to_path(&self) -> anyhow::Result<PathBuf> {
         use std::os::unix::ffi::OsStringExt;
-        anyhow::ensure!(self.bytes_base64.len() <= 5464, "path exceeds 4096 bytes");
-        let bytes = STANDARD.decode(&self.bytes_base64)?;
-        anyhow::ensure!(!bytes.is_empty() && bytes.len() <= 4096 && !bytes.contains(&0) && bytes[0] == b'/', "expected an absolute host path without NUL");
-        Ok(std::ffi::OsString::from_vec(bytes).into())
+        Ok(std::ffi::OsString::from_vec(self.bytes()?).into())
     }
+}
+
+/// Without slashes at the end, `/` itself kept.
+fn trim_slashes(bytes: &[u8]) -> &[u8] {
+    let end = bytes.iter().rposition(|b| *b != b'/').map_or(1, |last| last + 1);
+    &bytes[..end.min(bytes.len())]
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct Settings {
@@ -214,6 +291,33 @@ impl crate::Client {
 }
 
 #[cfg(test)]
+mod byte_path_tests {
+    use super::*;
+    #[test]
+    fn a_box_path_is_taken_apart_and_put_together_as_bytes() {
+        let p = |text: &str| HostPath::from_bytes(text.as_bytes());
+        assert_eq!(p("/home/x/a.rs").parent(), Some(p("/home/x")));
+        assert_eq!(p("/home/").parent(), Some(p("/")));
+        assert_eq!(p("/").parent(), None);
+        assert_eq!(p("/home/x/a.rs").file_name(), b"a.rs");
+        assert_eq!(p("/home/x/").file_name(), b"x");
+        assert_eq!(p("/").file_name(), b"");
+        assert_eq!(p("/home/x").join(b"src/main.rs").unwrap(), p("/home/x/src/main.rs"));
+        assert_eq!(p("/").join(b"etc").unwrap(), p("/etc"));
+        assert_eq!(p("/home/x").join(b"").unwrap(), p("/home/x"));
+        assert_eq!(p("/home/x/src/a.rs").strip_prefix(&p("/home/x")), Some(b"src/a.rs".to_vec()));
+        assert_eq!(p("/home/x").strip_prefix(&p("/home/x/")), Some(Vec::new()));
+        assert_eq!(p("/home/xy").strip_prefix(&p("/home/x")), None, "a name that only begins the same");
+        assert_eq!(p("/etc").strip_prefix(&p("/")), Some(b"etc".to_vec()));
+        assert!(p("/mnt/c/Users").starts_with(&p("/mnt/c")) && !p("/mnt/d").starts_with(&p("/mnt/c")));
+        assert_eq!((p("/").depth(), p("/a/b/").depth()), (0, 2));
+        // a backslash is a character of a name, never a separator
+        assert_eq!(p(r"/a/b\c").file_name(), br"b\c");
+        assert!(HostPath { bytes_base64: STANDARD.encode(b"relative"), display: String::new() }.parent().is_none());
+    }
+}
+
+#[cfg(all(test, unix))]
 mod path_tests {
     use super::*;
     #[test]

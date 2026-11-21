@@ -157,12 +157,15 @@ pub struct HistoryEvent {
     pub commits: Option<String>,
     pub files: Option<String>,
 }
+// Between the daemon's own paths and the wire's: the daemon's side only.
+#[cfg(unix)]
 impl From<crate::wire::Done> for Done {
     fn from(d: crate::wire::Done) -> Self {
         let convert = |v: Vec<(std::path::PathBuf, String)>| v.into_iter().map(|(p, message)| Outcome { path: HostPath::from_path(&p), message }).collect();
         Self { done: convert(d.done), failed: convert(d.failed) }
     }
 }
+#[cfg(unix)]
 impl TryFrom<Done> for crate::wire::Done {
     type Error = anyhow::Error;
     fn try_from(d: Done) -> anyhow::Result<Self> {

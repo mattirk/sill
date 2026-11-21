@@ -187,15 +187,17 @@ mod stored_path {
         Bytes { bytes_base64: String },
     }
     pub fn serialize<S: serde::Serializer>(path: &std::path::Path, serializer: S) -> Result<S::Ok, S::Error> {
-        use std::os::unix::ffi::OsStrExt;
         match path.to_str() {
             Some(text) => Encoding::Text(text.into()),
-            None => Encoding::Bytes { bytes_base64: STANDARD.encode(path.as_os_str().as_bytes()) },
+            #[cfg(unix)]
+            None => Encoding::Bytes { bytes_base64: STANDARD.encode(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str())) },
+            // only Unix has paths that are arbitrary bytes, and only the daemon stores any
+            #[cfg(not(unix))]
+            None => return Err(serde::ser::Error::custom("a stored path that is not Unicode")),
         }
         .serialize(serializer)
     }
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
-        use std::os::unix::ffi::OsStringExt;
         let bytes = match Encoding::deserialize(deserializer)? {
             Encoding::Text(text) => text.into_bytes(),
             Encoding::Bytes { bytes_base64 } => STANDARD.decode(bytes_base64).map_err(serde::de::Error::custom)?,
@@ -203,7 +205,10 @@ mod stored_path {
         if bytes.contains(&0) {
             return Err(serde::de::Error::custom("stored path contains NUL"));
         }
-        Ok(std::ffi::OsString::from_vec(bytes).into())
+        #[cfg(unix)]
+        return Ok(std::os::unix::ffi::OsStringExt::from_vec(bytes).into());
+        #[cfg(not(unix))]
+        String::from_utf8(bytes).map(PathBuf::from).map_err(|_| serde::de::Error::custom("a stored path that is not Unicode"))
     }
 }
 

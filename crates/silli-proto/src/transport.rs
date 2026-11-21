@@ -51,11 +51,7 @@ fn default_binary() -> String {
 }
 
 fn config_path() -> Result<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .context("HOME is not set")?;
-    Ok(base.join("silli/boxes.json"))
+    Ok(crate::config_dir()?.join("boxes.json"))
 }
 
 pub fn list() -> Result<BTreeMap<String, BoxTarget>> {
@@ -98,11 +94,15 @@ pub fn remove(name: &str) -> Result<()> {
 
 fn write(all: &BTreeMap<String, BoxTarget>) -> Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let path = config_path()?;
     std::fs::create_dir_all(path.parent().unwrap())?;
     let temp = path.with_extension(format!("json.{}", std::process::id()));
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    // the owner's alone; on Windows the account's settings folder already is
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(&temp)?;
     let result = (|| {
         file.write_all(&serde_json::to_vec_pretty(all)?)?;
         file.sync_all()?;
@@ -268,18 +268,23 @@ pub fn open_stream(token: &str) -> Result<RawStream> {
             }),
         }
     } else {
-        let socket = std::os::unix::net::UnixStream::connect(crate::socket_path()?).context("opening daemon byte stream")?;
-        let close = socket.try_clone()?;
-        let half = socket.try_clone()?;
-        RawStream {
-            reader: Box::new(socket.try_clone()?),
-            writer: Box::new(socket),
-            shutdown_write: Arc::new(move || {
-                let _ = half.shutdown(std::net::Shutdown::Write);
-            }),
-            interrupt: Arc::new(move || {
-                let _ = close.shutdown(std::net::Shutdown::Both);
-            }),
+        #[cfg(not(unix))]
+        bail!("no silli daemon runs on this system itself: a box must be chosen");
+        #[cfg(unix)]
+        {
+            let socket = std::os::unix::net::UnixStream::connect(crate::socket_path()?).context("opening daemon byte stream")?;
+            let close = socket.try_clone()?;
+            let half = socket.try_clone()?;
+            RawStream {
+                reader: Box::new(socket.try_clone()?),
+                writer: Box::new(socket),
+                shutdown_write: Arc::new(move || {
+                    let _ = half.shutdown(std::net::Shutdown::Write);
+                }),
+                interrupt: Arc::new(move || {
+                    let _ = close.shutdown(std::net::Shutdown::Both);
+                }),
+            }
         }
     };
     if let Err(error) = stream.writer.write_all(&handshake).and_then(|()| stream.writer.write_all(b"\n")).and_then(|()| stream.writer.flush()) {
@@ -320,6 +325,7 @@ mod tests {
         assert!(ssh_base("host\ncommand").is_err());
         assert!(validate_name("local").is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn closing_pipe_input_preserves_the_response_direction() {
         use std::io::{Read, Write};

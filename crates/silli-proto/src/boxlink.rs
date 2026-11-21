@@ -12,7 +12,9 @@
 //! network failures retry with a box-wide backoff, so open sessions do not each hammer the box.
 //! Nothing typed at a prompt is stored or logged: it goes to OpenSSH and nowhere else.
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
+use std::io::Write;
+use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -310,8 +312,7 @@ pub fn unattended(host: &str) -> Result<bool> {
 fn dir() -> Result<PathBuf> {
     let dir = crate::runtime_dir()?.join("ssh");
     std::fs::create_dir_all(&dir)?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    crate::private_dir(&dir)?;
     Ok(dir)
 }
 
@@ -503,6 +504,7 @@ struct Asking {
     stop: Arc<AtomicBool>,
 }
 
+#[cfg(unix)]
 #[derive(Serialize, Deserialize)]
 struct Answer {
     answer: Option<String>,
@@ -515,6 +517,14 @@ impl Asking {
         Self::listen_at(path, host, prompter, cancelled)
     }
 
+    /// Off Unix the window cannot take SSH's questions yet: a box there needs a key or an agent
+    /// that logs in without asking (docs/silli-windows.md, section 14).
+    #[cfg(not(unix))]
+    fn listen_at(_: PathBuf, _: &str, _: Prompter, _: Arc<AtomicBool>) -> Result<Asking> {
+        anyhow::bail!("signing in to a box from the window is not available on this system yet")
+    }
+
+    #[cfg(unix)]
     fn listen_at(path: PathBuf, host: &str, prompter: Prompter, cancelled: Arc<AtomicBool>) -> Result<Asking> {
         let _ = std::fs::remove_file(&path);
         let listener = std::os::unix::net::UnixListener::bind(&path).context("listening for SSH's questions")?;
@@ -555,6 +565,7 @@ impl Drop for Asking {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         // wake the accept loop so it sees the flag
+        #[cfg(unix)]
         let _ = std::os::unix::net::UnixStream::connect(&self.path);
         let _ = std::fs::remove_file(&self.path);
     }
@@ -568,6 +579,14 @@ pub fn is_askpass() -> bool {
 /// The helper: hand SSH's question to the window, print the answer for SSH. Exit 0 with an
 /// answer (or a yes), 1 without.
 pub fn askpass_main() -> ! {
+    #[cfg(not(unix))]
+    std::process::exit(1);
+    #[cfg(unix)]
+    askpass_unix()
+}
+
+#[cfg(unix)]
+fn askpass_unix() -> ! {
     let answer = (|| -> Result<Option<String>> {
         let text = std::env::args().nth(1).unwrap_or_default();
         let kind = match std::env::var("SSH_ASKPASS_PROMPT").as_deref() {
@@ -636,6 +655,7 @@ mod tests {
         assert_eq!(status(), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_window_answers_ssh_and_one_cancel_ends_the_sign_in() {
         let dir = std::env::temp_dir().join(format!("silli-ask-{}", std::process::id()));

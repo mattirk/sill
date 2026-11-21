@@ -36,6 +36,11 @@ pub fn socket_path() -> Result<PathBuf> {
 }
 
 pub fn runtime_dir() -> Result<PathBuf> {
+    // Windows has no runtime directory: the account's own local data, which no other account reads
+    #[cfg(windows)]
+    if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(local).join("Silli").join("run"));
+    }
     let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
     #[cfg(target_os = "macos")]
     let base = match base {
@@ -165,11 +170,33 @@ pub mod discovery;
 
 /// Per-account startup preference, independent of the daemon's settings/store.
 pub fn autostart_disabled_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("daemon-autostart-disabled"))
+}
+
+/// Where this account's silli settings are kept on the frontend's machine: `$XDG_CONFIG_HOME/silli`
+/// (usually `~/.config/silli`), on Windows `%APPDATA%Silli`.
+pub fn config_dir() -> Result<PathBuf> {
+    #[cfg(windows)]
+    if let Some(roaming) = std::env::var_os("APPDATA").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(roaming).join("Silli"));
+    }
     let config = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
         Some(path) => PathBuf::from(path),
         None => PathBuf::from(std::env::var_os("HOME").context("HOME not set")?).join(".config"),
     };
-    Ok(config.join("silli/daemon-autostart-disabled"))
+    Ok(config.join("silli"))
+}
+
+/// Make `dir` this account's alone. Windows keeps other accounts out of an account's own data by
+/// the folders it is in, so there is nothing to set there.
+pub fn private_dir(dir: &std::path::Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let _ = dir;
+    Ok(())
 }
 
 pub fn autostart_enabled() -> Result<bool> {

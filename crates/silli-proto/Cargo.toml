@@ -11,9 +11,12 @@ rust-version.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-rustix.workspace = true
 schemars = "1"
 base64 = "0.23"
+
+# the local daemon's socket and starting that daemon: Unix only (the daemon is Linux's)
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [[test]]
 name = "boxlink"

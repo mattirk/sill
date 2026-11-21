@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufReader, Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_channel};
@@ -45,6 +46,7 @@ pub const QUICK_TIMEOUT: Duration = Duration::from_secs(5);
 /// may be busy. The shared connection is already there, so no network or login time is in it.
 const SSH_INIT_TIMEOUT: Duration = Duration::from_secs(15);
 /// A bare daemon's `daemon.log` is rotated to `.1` past this when the next one starts.
+#[cfg(unix)]
 const LOG_KEEP: u64 = 8 * 1024 * 1024;
 
 /// Frontend-declared capabilities this program offers on connections it makes from now on.
@@ -85,6 +87,18 @@ impl Client {
         Self::connect_local()
     }
 
+    /// The daemon is Linux's: where the frontend's own system cannot run one, a box must be chosen.
+    #[cfg(not(unix))]
+    pub fn connect_local() -> Result<Client> {
+        bail!("no silli daemon runs on this system itself: a box must be chosen")
+    }
+
+    #[cfg(not(unix))]
+    fn connect_local_with_start(_explicit: bool) -> Result<Client> {
+        Self::connect_local()
+    }
+
+    #[cfg(unix)]
     pub fn connect_local() -> Result<Client> {
         let path = crate::socket_path()?;
         let stream = UnixStream::connect(&path).with_context(|| format!("silli daemon at {}", path.display()))?;
@@ -117,6 +131,7 @@ impl Client {
         Self::connect_local_with_start(false)
     }
 
+    #[cfg(unix)]
     fn connect_local_with_start(explicit: bool) -> Result<Client> {
         let path = crate::socket_path()?;
         match UnixStream::connect(&path) {
@@ -294,6 +309,7 @@ impl Client {
     }
 
     /// Raw duplex transport; call `initialize` before sending control requests.
+    #[cfg(unix)]
     pub fn over(stream: UnixStream) -> Result<Client> {
         let reader = stream.try_clone()?;
         let close = stream.try_clone()?;
@@ -482,6 +498,7 @@ impl Client {
 
 /// The first of `silli.socket`, `silli.service` in the failed state, if any (`is-failed` exits 0
 /// for exactly that; a unit that is not installed is "inactive").
+#[cfg(unix)]
 fn failed_unit() -> Option<&'static str> {
     ["silli.socket", "silli.service"].into_iter().find(|u| {
         std::process::Command::new("systemctl")
@@ -495,6 +512,7 @@ fn failed_unit() -> Option<&'static str> {
 }
 
 /// `systemd-run --user` works here: `$XDG_RUNTIME_DIR` set, systemd the init, the user manager answering.
+#[cfg(unix)]
 fn systemd_user_usable() -> bool {
     if std::env::var_os("XDG_RUNTIME_DIR").is_none() || !std::path::Path::new("/run/systemd/system").is_dir() {
         return false;
@@ -520,7 +538,7 @@ fn fail_pending(pending: &Pending, message: &str) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::rpc::Error;
