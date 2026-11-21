@@ -155,7 +155,7 @@ fn wait_for_network(dir: &Path) -> Result<(), String> {
 
 /// The VM's make: sized for this Mac, with what Settings chose in its place.
 fn config(dir: &Path) -> silli_vm::Config {
-    let mut config = silli_vm::Config::sized_for_this_mac(dir.to_path_buf());
+    let mut config = silli_vm::Config::sized_for_this_machine(dir.to_path_buf());
     let chosen = load_resources(dir);
     let (max_cpus, max_memory) = limits();
     if let Some(cpus) = chosen.cpus {
@@ -355,7 +355,7 @@ pub fn info() -> Option<Info> {
     let (dir, shared) = (DIR.get()?, SHARED.get()?);
     // the space a disk takes on the Mac: they are sparse, so less than their size
     let used = |name: &str| std::fs::metadata(dir.join(name)).ok().map(|m| m.blocks() * 512);
-    let automatic = silli_vm::Config::sized_for_this_mac(dir.clone());
+    let automatic = silli_vm::Config::sized_for_this_machine(dir.clone());
     let image = std::fs::read_to_string(dir.join("system.commit")).ok().map(|c| c.trim().chars().take(12).collect::<String>()).filter(|c| !c.is_empty());
     Some(Info {
         dir: dir.clone(),

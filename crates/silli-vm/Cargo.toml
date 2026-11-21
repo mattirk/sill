@@ -1,6 +1,6 @@
 [package]
 name = "silli-vm"
-description = "silli: the local Linux VM a desktop without the daemon runs its box in (macOS: Apple's Virtualization framework)"
+description = "silli: the local Linux VM a desktop without the daemon runs its box in (macOS: Apple's Virtualization framework; Windows: the Host Compute System)"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
@@ -9,7 +9,13 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# the documents the Host Compute System takes and gives (`hcs.rs`)
+serde_json.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # the app's image ships compressed (system.raw.gz) and is unpacked sparsely (`setup`)

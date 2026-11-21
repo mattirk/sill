@@ -6,9 +6,14 @@
 //! CPUs and memory: `SILLI_VM_CPUS`, `SILLI_VM_MEMORY_GB` (default: sized for this Mac). The binary
 //! needs the `com.apple.security.virtualization` entitlement
 //! (`packaging/mac/silli-vm.entitlements`).
-#[cfg(not(target_os = "macos"))]
+//!
+//! On Windows (the Host Compute System, for an account in "Hyper-V Administrators"):
+//! `silli-vm DIR` runs the VM in DIR until Ctrl-C, `SILLI_VM_HOLD` or the guest powering off;
+//! `SILLI_VM_SHARE=name=C:older,…` shares folders with it once it runs. `silli-vm vhd RAW
+//! OUT.vhd` makes a system disk of a raw image, `silli-vm disk FILE.vhdx GB` a data disk.
+#[cfg(not(any(target_os = "macos", windows)))]
 fn main() {
-    eprintln!("silli-vm: macOS only");
+    eprintln!("silli-vm: macOS and Windows only");
     std::process::exit(1);
 }
 
@@ -28,7 +33,7 @@ fn main() -> anyhow::Result<()> {
         eprintln!("{} {}", problem.what, problem.fix);
     }
     anyhow::ensure!(problems.is_empty(), "this Mac cannot run the VM");
-    let mut config = Config::sized_for_this_mac(dir.clone());
+    let mut config = Config::sized_for_this_machine(dir.clone());
     let number = |name: &str| std::env::var(name).ok().and_then(|v| v.parse().ok());
     if let Some(cpus) = number("SILLI_VM_CPUS") {
         config.cpus = cpus as usize;
@@ -89,5 +94,83 @@ fn main() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(300));
     }
     let _ = std::fs::remove_file(dir.join("ssh.sock"));
+    Ok(())
+}
+
+#[cfg(windows)]
+fn main() -> anyhow::Result<()> {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use anyhow::Context;
+    use silli_vm::{Config, State, Vm};
+
+    #[link(name = "kernel32", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn SetConsoleCtrlHandler(handler: extern "system" fn(u32) -> i32, add: i32) -> i32;
+    }
+    static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+    // Ctrl-C, the console closing, signing out, Windows shutting down
+    extern "system" fn interrupted(_: u32) -> i32 {
+        INTERRUPTED.store(true, Ordering::Relaxed);
+        1
+    }
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["vhd", raw, out] => return silli_vm::raw_to_vhd(Path::new(raw), Path::new(out)),
+        ["disk", file, gb] => return silli_vm::create_disk(Path::new(file), gb.parse::<u64>().context("disk FILE.vhdx GB")? << 30),
+        [_dir] => {}
+        _ => anyhow::bail!("usage: silli-vm DIR | silli-vm vhd RAW OUT.vhd | silli-vm disk FILE.vhdx GB"),
+    }
+    let dir = PathBuf::from(&args[0]);
+    let problems = silli_vm::check(&dir);
+    for problem in &problems {
+        eprintln!("{} {}", problem.what, problem.fix);
+    }
+    anyhow::ensure!(problems.is_empty(), "this PC cannot run the VM");
+    let mut config = Config::sized_for_this_machine(dir.clone());
+    let number = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok());
+    if let Some(cpus) = number("SILLI_VM_CPUS") {
+        config.cpus = cpus as usize;
+    }
+    if let Some(gb) = number("SILLI_VM_MEMORY_GB") {
+        config.memory_gb = gb;
+    }
+    let started = Instant::now();
+    let say = |what: &str| eprintln!("[{:>5.1}s] {what}", started.elapsed().as_secs_f32());
+
+    // SAFETY: a handler that only stores a flag
+    unsafe { SetConsoleCtrlHandler(interrupted, 1) };
+    let vm = Vm::start(&config, &[silli_vm::DAEMON_PORT, silli_vm::ROOT_PORT])?;
+    say(&format!("started {} ({} CPUs, {} GB)", vm.id(), config.cpus, config.memory_gb));
+    if let Ok(spec) = std::env::var("SILLI_VM_SHARE") {
+        // the guest's side of a share is there once the guest runs
+        std::thread::sleep(Duration::from_secs(5));
+        for (name, folder) in spec.split(',').filter_map(|share| share.split_once('=')) {
+            vm.share(name, Path::new(folder))?;
+            say(&format!("sharing {folder} as {name}"));
+        }
+    }
+    println!("ready");
+
+    let hold = std::env::var_os("SILLI_VM_HOLD").map(PathBuf::from);
+    loop {
+        if vm.state() == State::Stopped {
+            say("the guest powered off");
+            break;
+        }
+        if hold.as_ref().is_some_and(|path| path.exists()) || INTERRUPTED.load(Ordering::Relaxed) {
+            say("shutting down");
+            if let Err(why) = vm.request_stop() {
+                say(&format!("the guest could not be asked: {why:#}"));
+            }
+            vm.shut_down(Duration::from_secs(60))?;
+            say("stopped");
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
     Ok(())
 }

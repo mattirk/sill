@@ -41,7 +41,7 @@ impl Phase {
 }
 
 /// The VM's processors and memory as chosen in Settings (`resources.json` in the VM's directory);
-/// `None` is sized for this Mac (`silli_vm::Config::sized_for_this_mac`). They apply at a start.
+/// `None` is sized for this Mac (`silli_vm::Config::sized_for_this_machine`). They apply at a start.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Resources {
     #[serde(default, skip_serializing_if = "Option::is_none")]

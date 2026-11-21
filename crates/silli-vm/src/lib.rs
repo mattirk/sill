@@ -19,6 +19,16 @@ mod apple;
 #[cfg(target_os = "macos")]
 pub use apple::{Vm, serve_ssh};
 
+#[cfg(windows)]
+mod hcs;
+#[cfg(windows)]
+pub use hcs::{HvStream, SHARE_PORT, Vm, create_disk, raw_to_vhd};
+
+/// The guest's vsock ports a Windows window reaches its VM on (docs/silli-windows.md, section 6.2):
+/// the daemon's pipe, and the root helper.
+pub const DAEMON_PORT: u32 = 7600;
+pub const ROOT_PORT: u32 = 7601;
+
 /// How many folders of the Mac the guest can have at once: one virtiofs device each, made with
 /// the VM (`Vm::share_slot`). Each folder has a device of its own because replacing a device's
 /// share leaves everything mounted from it stale in the guest (seen 2026-11-12): giving one
@@ -33,7 +43,7 @@ pub fn share_tag(slot: usize) -> String {
 /// The guest's SSH on vsock (systemd's ssh generator binds it when the VM has a vsock device).
 pub const SSH_PORT: u32 = 22;
 
-/// The memory of this computer, in bytes (macOS), for choosing the VM's share of it.
+/// The memory of this computer, in bytes, for choosing the VM's share of it.
 pub fn host_memory_bytes() -> Option<u64> {
     requirements::memory_bytes()
 }
@@ -47,9 +57,9 @@ pub struct Config {
 }
 
 impl Config {
-    /// Half the Mac's processors and a quarter of its memory, within 2–8 CPUs and 2–8 GB
+    /// Half the machine's processors and a quarter of its memory, within 2–8 CPUs and 2–8 GB
     /// (docs/silli-stick.md: an 8 GB Mac gives the guest about 3–4 GB at most).
-    pub fn sized_for_this_mac(dir: PathBuf) -> Self {
+    pub fn sized_for_this_machine(dir: PathBuf) -> Self {
         let cpus = std::thread::available_parallelism().map_or(2, |n| n.get() / 2);
         let memory_gb = requirements::memory_bytes().map_or(2, |bytes| bytes / 4 / (1 << 30));
         Self { dir, cpus: cpus.clamp(2, 8), memory_gb: memory_gb.clamp(2, 8) }
