@@ -199,7 +199,7 @@ pub fn revert(session_id: &str, entries: &[&Entry]) -> Request {
 pub const BATCH: usize = 128;
 
 fn depth(entry: &Entry) -> usize {
-    path(entry).to_path().map_or(0, |p| p.components().count())
+    path(entry).depth()
 }
 
 /// Keep any number of entries: requests of at most `BATCH`, folders before what is in them (a
@@ -214,10 +214,10 @@ pub fn keep_all(session_id: &str, entries: &[&Entry]) -> Vec<Request> {
 /// folder the session created is left out when that folder is reverted too: reverting the folder
 /// removes it whole, and a cloned repository is then one path, not thousands.
 pub fn revert_all(session_id: &str, entries: &[&Entry]) -> Vec<Request> {
-    let created: Vec<std::path::PathBuf> = entries
+    let created: Vec<&HostPath> = entries
         .iter()
         .filter_map(|e| match e {
-            Entry::Overlay { path, kind, file_type, conflict: false, .. } if kind == "added" && file_type == "dir" => path.to_path().ok(),
+            Entry::Overlay { path, kind, file_type, conflict: false, .. } if kind == "added" && file_type == "dir" => Some(path),
             _ => None,
         })
         .collect();
@@ -225,10 +225,9 @@ pub fn revert_all(session_id: &str, entries: &[&Entry]) -> Vec<Request> {
         .iter()
         .copied()
         .filter(|e| {
-            let Ok(p) = path(e).to_path() else {
-                return true;
-            };
-            !created.iter().any(|dir| p != *dir && p.starts_with(dir))
+            let p = path(e);
+            // below a created folder, not that folder itself
+            !created.iter().any(|dir| p.strip_prefix(dir).is_some_and(|rest| !rest.is_empty()))
         })
         .collect();
     entries.sort_by_key(|e| std::cmp::Reverse(depth(e)));
@@ -394,7 +393,7 @@ mod tests {
     use super::*;
 
     fn path(p: &str) -> HostPath {
-        HostPath::from_path(std::path::Path::new(p))
+        HostPath::from_bytes(p.as_bytes())
     }
 
     fn overlay(session: &str, file: &str, ghost: bool, written: i64) -> Entry {
@@ -462,7 +461,7 @@ mod tests {
         let sent: Vec<HostPath> = reverts.iter().flat_map(paths).collect();
         assert_eq!(sent.len(), 301);
         assert!(reverts.iter().all(|r| paths(r).len() <= BATCH));
-        assert!(sent.iter().any(|p| p.to_path().unwrap() == std::path::Path::new("/home/x/db")));
+        assert!(sent.iter().any(|p| p.display == "/home/x/db"));
         // a folder that is only modified on the host keeps its entries
         if let Entry::Overlay { kind, .. } = &mut entries[0] {
             *kind = "modified".into();
@@ -474,7 +473,7 @@ mod tests {
         let items = |r: &Request| serde_json::from_value::<Keep>(r.1.clone()).unwrap().items;
         assert_eq!(keeps.iter().map(|r| items(r).len()).sum::<usize>(), 2301);
         assert!(keeps.iter().all(|r| items(r).len() <= BATCH));
-        assert!(items(&keeps[0]).iter().any(|i| i.path.to_path().unwrap() == std::path::Path::new("/home/x/db")));
+        assert!(items(&keeps[0]).iter().any(|i| i.path.display == "/home/x/db"));
     }
 
     #[test]

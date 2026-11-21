@@ -323,7 +323,7 @@ mod tests {
         Process {
             name: "web".into(),
             argv: vec!["npm".into(), "run".into(), "dev".into()],
-            cwd: silli_proto::sessions::HostPath::from_path(std::path::Path::new("/tmp")),
+            cwd: silli_proto::sessions::HostPath::from_bytes(b"/tmp"),
             port: Some(3000),
             pid: 7,
             location: "jail".into(),

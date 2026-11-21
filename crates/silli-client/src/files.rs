@@ -120,10 +120,10 @@ pub struct Files {
 pub struct Aliases(std::sync::Arc<std::sync::Mutex<BTreeMap<String, Vec<AliasPair>>>>);
 
 /// (a repository's path, its workspace folder).
-pub type AliasPair = (std::path::PathBuf, std::path::PathBuf);
+pub type AliasPair = (HostPath, HostPath);
 
 impl Aliases {
-    pub fn set(&self, session: &str, pairs: Vec<(std::path::PathBuf, std::path::PathBuf)>) -> bool {
+    pub fn set(&self, session: &str, pairs: Vec<AliasPair>) -> bool {
         let mut all = self.0.lock().unwrap();
         let changed = all.get(session).map_or(!pairs.is_empty(), |old| *old != pairs);
         if pairs.is_empty() {
@@ -134,18 +134,19 @@ impl Aliases {
         changed
     }
 
-    fn of(&self, session: &str) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
+    fn of(&self, session: &str) -> Vec<AliasPair> {
         self.0.lock().unwrap().get(session).cloned().unwrap_or_default()
     }
 }
 
 /// `path` under one pair's first path, moved under its second; `forward` false the other way.
-fn alias(path: &HostPath, pairs: &[(std::path::PathBuf, std::path::PathBuf)], forward: bool) -> HostPath {
-    let Ok(p) = path.to_path() else { return path.clone() };
+fn alias(path: &HostPath, pairs: &[AliasPair], forward: bool) -> HostPath {
     for (repository, workspace) in pairs {
         let (from, to) = if forward { (repository, workspace) } else { (workspace, repository) };
-        if let Ok(rel) = p.strip_prefix(from) {
-            return HostPath::from_path(&if rel.as_os_str().is_empty() { to.clone() } else { to.join(rel) });
+        if let Some(rest) = path.strip_prefix(from)
+            && let Ok(moved) = to.join(&rest)
+        {
+            return moved;
         }
     }
     path.clone()
@@ -153,7 +154,7 @@ fn alias(path: &HostPath, pairs: &[(std::path::PathBuf, std::path::PathBuf)], fo
 
 /// The request as the worker runs it: paths under an aliased repository in its workspace. A pin
 /// stays the repository's own.
-fn aliased(request: &Request, pairs: &[(std::path::PathBuf, std::path::PathBuf)]) -> Request {
+fn aliased(request: &Request, pairs: &[AliasPair]) -> Request {
     let to = |p: &HostPath| alias(p, pairs, true);
     match request {
         Request::Directory { path, after, pages } => Request::Directory { path: to(path), after: after.as_ref().map(to), pages: *pages },
@@ -165,7 +166,7 @@ fn aliased(request: &Request, pairs: &[(std::path::PathBuf, std::path::PathBuf)]
 }
 
 /// A reply's paths back under the repository.
-fn unaliased(data: Data, pairs: &[(std::path::PathBuf, std::path::PathBuf)]) -> Data {
+fn unaliased(data: Data, pairs: &[AliasPair]) -> Data {
     let back = |p: &HostPath| alias(p, pairs, false);
     match data {
         Data::Directory(page) => Data::Directory(admin::FilesPage {
@@ -217,7 +218,7 @@ impl Files {
     }
 
     /// A session's workspaces for the worker to read (see [`Aliases`]); true when they changed.
-    pub fn set_aliases(&self, session: &str, pairs: Vec<(std::path::PathBuf, std::path::PathBuf)>) -> bool {
+    pub fn set_aliases(&self, session: &str, pairs: Vec<AliasPair>) -> bool {
         self.aliases.set(session, pairs)
     }
 
@@ -257,7 +258,7 @@ pub struct Repo {
     /// Lines added and removed in the working tree.
     pub lines: Option<(String, String)>,
     /// What git says of each changed path, and of each folder with a change below it.
-    pub changes: BTreeMap<std::path::PathBuf, Change>,
+    pub changes: BTreeMap<Vec<u8>, Change>,
     /// Lines added and removed per changed file (by key), for the Diff view.
     /// Read with `lines` at every look, so a row and the totals agree.
     pub counts: BTreeMap<String, Option<(u64, u64)>>,
@@ -334,13 +335,13 @@ pub enum Change {
 
 /// A repository's status by path: each entry's own state, and `Below` for every folder between
 /// it and the repository's root.
-fn index(root: Option<&HostPath>, entries: &[discovery::StatusEntry]) -> BTreeMap<std::path::PathBuf, Change> {
+fn index(root: Option<&HostPath>, entries: &[discovery::StatusEntry]) -> BTreeMap<Vec<u8>, Change> {
     let mut changes = BTreeMap::new();
-    let Some(root) = root.and_then(|r| r.to_path().ok()) else {
+    let Some(root) = root.filter(|r| r.bytes().is_ok()) else {
         return changes;
     };
     for entry in entries {
-        let Ok(path) = entry.path.to_path() else {
+        let Ok(path) = entry.path.bytes() else {
             continue;
         };
         let change = if entry.status.contains('?') {
@@ -350,13 +351,15 @@ fn index(root: Option<&HostPath>, entries: &[discovery::StatusEntry]) -> BTreeMa
         } else {
             Change::Changed
         };
-        let mut folder = path.parent();
-        changes.insert(path.clone(), change);
+        let mut folder = entry.path.parent();
+        changes.insert(path, change);
         while let Some(dir) = folder {
-            if dir == root || !dir.starts_with(&root) || changes.contains_key(dir) {
+            let Ok(bytes) = dir.bytes() else { break };
+            // the root itself, anything not below it, or a folder already marked
+            if dir.strip_prefix(root).is_none_or(|rest| rest.is_empty()) || changes.contains_key(&bytes) {
                 break;
             }
-            changes.insert(dir.to_path_buf(), Change::Below);
+            changes.insert(bytes, Change::Below);
             folder = dir.parent();
         }
     }
@@ -366,7 +369,7 @@ fn index(root: Option<&HostPath>, entries: &[discovery::StatusEntry]) -> BTreeMa
 impl FilesState {
     /// The path's git state, from the status of the pinned repository it is in.
     pub fn change(&self, path: &HostPath) -> Option<Change> {
-        let path = path.to_path().ok()?;
+        let path = path.bytes().ok()?;
         self.repos.values().find_map(|r| r.changes.get(&path).copied())
     }
 
@@ -475,8 +478,8 @@ impl FilesState {
 
     /// Browse, or pin, the absolute path typed below the drawer.
     pub fn typed_path(&mut self, pin: bool) -> Option<Request> {
-        let path = HostPath::from_path(std::path::Path::new(self.path_input.trim()));
-        if path.to_path().is_err() {
+        let path = HostPath::from_bytes(self.path_input.trim().as_bytes());
+        if path.bytes().is_err() {
             self.error = Some("Enter an absolute path on the daemon host (for example /home/me/project).".into());
             return None;
         }

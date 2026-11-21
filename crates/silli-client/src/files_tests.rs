@@ -225,7 +225,7 @@ fn folders_list_as_the_frontend_lists_them() {
 /// repository (docs/parallel-coding.md §12): what the tree, reader and chips use.
 #[test]
 fn aliased_paths_read_the_workspace_and_answer_under_the_repository() {
-    let pairs = vec![(std::path::PathBuf::from("/home/me/repo"), std::path::PathBuf::from("/ws/repo-1"))];
+    let pairs = vec![(path_of("/home/me/repo"), path_of("/ws/repo-1"))];
     let run = aliased(&Request::Directory { path: path_of("/home/me/repo/src"), after: Some(path_of("/home/me/repo/src/a")), pages: 1 }, &pairs);
     let Request::Directory { path, after, .. } = &run else { panic!() };
     assert_eq!(path.to_path().unwrap(), std::path::Path::new("/ws/repo-1/src"));
@@ -271,7 +271,7 @@ fn a_saved_file_goes_to_the_workspace_it_was_read_from() {
     let files = Files::start(std::sync::Arc::new(|| anyhow::bail!("no daemon")), |_| true);
     let file = path_of("/home/me/repo/README.md");
     assert_eq!(files.workspace_path("s", &file).to_path().unwrap(), std::path::Path::new("/home/me/repo/README.md"));
-    files.set_aliases("s", vec![(std::path::PathBuf::from("/home/me/repo"), std::path::PathBuf::from("/ws/repo-1"))]);
+    files.set_aliases("s", vec![(path_of("/home/me/repo"), path_of("/ws/repo-1"))]);
     assert_eq!(files.workspace_path("s", &file).to_path().unwrap(), std::path::Path::new("/ws/repo-1/README.md"));
     assert_eq!(files.workspace_path("other", &file).to_path().unwrap(), std::path::Path::new("/home/me/repo/README.md"), "another session's files are its own");
     assert_eq!(files.workspace_path("s", &path_of("/home/me/notes.md")).to_path().unwrap(), std::path::Path::new("/home/me/notes.md"));

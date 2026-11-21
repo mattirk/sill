@@ -16,8 +16,8 @@ pub struct Loaded {
 
 impl Loaded {
     /// The (repository path, workspace folder) pairs the file worker reads through.
-    pub fn aliases(&self) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
-        self.view.workspaces.iter().filter_map(|w| Some((w.source.to_path().ok()?, w.path.to_path().ok()?))).collect()
+    pub fn aliases(&self) -> Vec<crate::files::AliasPair> {
+        self.view.workspaces.iter().filter(|w| w.source.bytes().is_ok() && w.path.bytes().is_ok()).map(|w| (w.source.clone(), w.path.clone())).collect()
     }
 
     pub fn detail(&self, workspace_id: &str) -> Option<&api::Detail> {
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn a_moved_checkout_alone_is_nothing_to_apply() {
-        let path = |p: &str| serde_json::json!(silli_proto::sessions::HostPath::from_path(std::path::Path::new(p)));
+        let path = |p: &str| serde_json::json!(silli_proto::sessions::HostPath::from_bytes(p.as_bytes()));
         let detail = |files: u32, operation: serde_json::Value| -> api::Detail {
             serde_json::from_value(serde_json::json!({
                 "workspace": {"workspace_id": "ws-1", "name": "repo", "session_id": "s", "source": path("/home/me/repo"),
@@ -276,7 +276,7 @@ mod tests {
     }
 
     fn run_apply_as(needs_rebase: bool, conflicts: &[&str], how: How) -> (anyhow::Result<ApplyOutcome>, Vec<(String, serde_json::Value)>) {
-        let path = |p: &str| serde_json::json!(silli_proto::sessions::HostPath::from_path(std::path::Path::new(p)));
+        let path = |p: &str| serde_json::json!(silli_proto::sessions::HostPath::from_bytes(p.as_bytes()));
         let workspace = serde_json::json!({"workspace_id": "ws-1", "name": "repo", "session_id": "s", "source": path("/home/me/repo"),
             "source_branch": "main", "base": "b0", "branch": "silli/repo-ws-1", "path": path("/ws/repo-ws-1"),
             "state": "open", "operation": null, "limitations": [], "created_at": "t", "updated_at": "t"});
@@ -352,7 +352,7 @@ mod tests {
         let said = out.unwrap_err().to_string();
         assert!(said.starts_with("Your checkout switched branch"), "{said}");
         assert!(calls.iter().all(|(m, _)| m != method::WORKSPACES_APPLY && m != method::WORKSPACES_PREPARE));
-        let path = |p: &str| serde_json::json!(silli_proto::sessions::HostPath::from_path(std::path::Path::new(p)));
+        let path = |p: &str| serde_json::json!(silli_proto::sessions::HostPath::from_bytes(p.as_bytes()));
         let detail = |now: &str| -> api::Detail {
             serde_json::from_value(serde_json::json!({
                 "workspace": {"workspace_id": "ws-1", "name": "repo", "session_id": "s", "source": path("/home/me/repo"),
@@ -372,7 +372,7 @@ mod tests {
     fn run_apply_switched() -> (anyhow::Result<ApplyOutcome>, Vec<(String, serde_json::Value)>) {
         let mut calls = Vec::new();
         let seen: api::Revision = serde_json::from_value(revision("t1", "b0")).unwrap();
-        let path = |p: &str| serde_json::json!(silli_proto::sessions::HostPath::from_path(std::path::Path::new(p)));
+        let path = |p: &str| serde_json::json!(silli_proto::sessions::HostPath::from_bytes(p.as_bytes()));
         let workspace = serde_json::json!({"workspace_id": "ws-1", "name": "repo", "session_id": "s", "source": path("/home/me/repo"),
             "source_branch": "main", "base": "b0", "branch": "silli/repo-ws-1", "path": path("/ws/repo-ws-1"),
             "state": "open", "operation": null, "limitations": [], "created_at": "t", "updated_at": "t"});
