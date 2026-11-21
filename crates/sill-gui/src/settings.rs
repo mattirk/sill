@@ -33,6 +33,10 @@ pub struct Settings {
     /// Interface scale, a multiplier on the desktop's own scaling: 1.0 is the desktop's normal
     /// size. Unset, unreadable or out of bounds = 1.0.
     pub interface_scale: Option<f32>,
+    /// Remote boxes pinned to the `+` menu, by their saved name (`boxes.json`), in pinning
+    /// order. Shared by every window; a name no longer saved is not shown.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pinned_boxes: Vec<String>,
 }
 
 /// One display's window: the Shelf's width and the free window's (Drawer and Full) size and place,

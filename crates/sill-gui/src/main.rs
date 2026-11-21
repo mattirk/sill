@@ -117,6 +117,9 @@ struct Options {
 static CONTROL: std::sync::Mutex<Option<async_channel::Receiver<control::Command>>> = std::sync::Mutex::new(None);
 /// The window started hidden.
 static HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The window was started by a press in another sill window (Open on a box, `boxes_ui.rs`): it
+/// comes up in front and focused, not where a new window of a background process lands.
+static RAISE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn main() -> iced::Result {
     // ssh started this executable to ask the person something during a sign-in (`box_ui`)
@@ -141,6 +144,9 @@ fn main() -> iced::Result {
         }
     }
     HIDDEN.store(options.hidden, std::sync::atomic::Ordering::Relaxed);
+    RAISE.store(std::env::var_os(boxes_ui::RAISE_ENV).is_some(), std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: still one thread here (before iced and the daemon's workers start)
+    unsafe { std::env::remove_var(boxes_ui::RAISE_ENV) };
     // this window shows session permission state (its Permissions panel), so it may change
     // choices and operate sessions using Desktop development capabilities (docs/protocol.md)
     sill_proto::client::declare_capability(permissions::CAPABILITY);
@@ -1363,6 +1369,10 @@ impl App {
             Message::XId(xid) => {
                 self.xid = xid;
                 self.no_x11 = xid.is_none();
+                // opened from another sill window: up in front, as a shown window comes
+                if self.visible && RAISE.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    return self.show(0);
+                }
                 if self.visible {
                     return self.place();
                 }

@@ -7,6 +7,10 @@
 //! with a control socket of its own beside this machine's window (`control::box_socket_path`),
 //! so this window — and on the Mac its VM — stays as it is. A window already open on that box is
 //! shown instead.
+//!
+//! A saved box can be pinned: it then has a row of its own in the `+` menu, which opens its
+//! window as Open here does. Pins are sill-gui's settings (`pinned_boxes`), shared by every
+//! window.
 use std::collections::{BTreeMap, BTreeSet};
 
 use iced::widget::{Column, column, container, row, text, text_input};
@@ -20,12 +24,14 @@ use crate::{App, Message, Page, blocking};
 
 /// The card's title (and its key among the Settings page's folded cards).
 pub const TITLE: &str = "Remote boxes";
+/// Set on a window Open starts: it comes up in front and focused (`main.rs`, `RAISE`).
+pub const RAISE_ENV: &str = "SILL_GUI_RAISE";
 /// Where `packaging/deploy-server.sh` installs Sill on a box (docs/server.md).
 pub const DEFAULT_BINARY: &str = "/usr/local/bin/sill";
 
 pub struct State {
     /// The saved boxes, as last read.
-    saved: Result<BTreeMap<String, BoxTarget>, String>,
+    pub(crate) saved: Result<BTreeMap<String, BoxTarget>, String>,
     address: String,
     name: String,
     binary: String,
@@ -81,10 +87,17 @@ pub enum Event {
     Disconnect(String),
     Disconnected(String, Result<(), String>),
     Remove(String),
+    /// Pin a saved box to the `+` menu, or unpin it.
+    Pin(String),
 }
 
 fn event(event: Event) -> Message {
     Message::Boxes(event)
+}
+
+/// The machine's own box, as the `+` menu names it.
+pub(crate) fn this_machine_name() -> &'static str {
+    this_machine()
 }
 
 /// The saved box this window serves; None for this machine's own daemon (on the Mac, its VM).
@@ -102,13 +115,18 @@ fn open_window(name: Option<&str>) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().map_err(|e| format!("cannot find this program: {e}"))?;
     let mut command = std::process::Command::new(&exe);
-    command.env_remove("SILL_BOX").env_remove("SILL_GUI_SOCKET");
+    command.env_remove("SILL_BOX").env_remove("SILL_GUI_SOCKET").env(RAISE_ENV, "1");
     if let Some(name) = name {
         command.env("SILL_BOX", name).env("SILL_GUI_SOCKET", crate::control::box_socket_path(name));
     }
     // its own process group: a signal to this window's group leaves the other window
     command.stdin(std::process::Stdio::null()).process_group(0);
+    #[cfg(target_os = "macos")]
+    crate::macos::yield_activation();
     let mut child = command.spawn().map_err(|e| format!("cannot start {}: {e}", exe.display()))?;
+    // the Mac: the new window to the front once it runs (X11: it asks the window manager itself)
+    #[cfg(target_os = "macos")]
+    crate::macos::activate_when_running(child.id());
     std::thread::Builder::new()
         .name("sill-gui-window".into())
         .spawn(move || {
@@ -261,9 +279,54 @@ impl App {
                 state.said =
                     Some(transport::remove(&name).map(|()| format!("Removed {name}. Its sessions go on running on the box.")).map_err(|e| format!("{e:#}")));
                 state.saved = transport::list().map_err(|e| format!("{e:#}"));
+                let gone = state.saved.as_ref().is_ok_and(|saved| !saved.contains_key(&name));
+                if gone && self.settings.pinned_boxes.contains(&name) {
+                    self.pinned_boxes_reload();
+                    self.settings.pinned_boxes.retain(|pinned| *pinned != name);
+                    self.save_settings();
+                }
+            }
+            Event::Pin(name) => {
+                // another window may have pinned since this one read its settings
+                self.pinned_boxes_reload();
+                let pins = &mut self.settings.pinned_boxes;
+                if pins.contains(&name) {
+                    pins.retain(|pinned| *pinned != name);
+                } else {
+                    pins.push(name);
+                }
+                self.save_settings();
             }
         }
         Task::none()
+    }
+
+    /// The pins as the settings file has them now: every window writes the same file.
+    pub(crate) fn pinned_boxes_reload(&mut self) {
+        if self.persist {
+            self.settings.pinned_boxes = crate::settings::load().pinned_boxes;
+        }
+    }
+
+    /// The pinned boxes the `+` menu offers, in pinning order: saved ones, and not the box this
+    /// window serves. In a window on a box, this machine's own comes first, the way back.
+    pub(crate) fn menu_boxes(&self) -> Vec<(Option<String>, String)> {
+        let current = current();
+        let mut boxes = Vec::new();
+        if current.is_some() {
+            boxes.push((None, if cfg!(target_os = "macos") { "Sill's own virtual machine" } else { "The daemon on this computer" }.to_string()));
+        }
+        if let Ok(saved) = &self.boxes.saved {
+            for name in &self.settings.pinned_boxes {
+                if current.as_deref() == Some(name.as_str()) {
+                    continue;
+                }
+                if let Some(target) = saved.get(name) {
+                    boxes.push((Some(name.clone()), target.host.clone()));
+                }
+            }
+        }
+        boxes
     }
 
     /// The card's rows: this machine, each saved box, then Add a box.
@@ -281,12 +344,23 @@ impl App {
                     let here = current.as_deref() == Some(name.as_str());
                     let busy = state.disconnecting.contains(name);
                     let armed = state.armed_remove.as_deref() == Some(name.as_str());
+                    let pinned = self.settings.pinned_boxes.contains(name);
                     let mut sub = target.host.clone();
                     if target.binary != "sill" && target.binary != DEFAULT_BINARY {
                         sub.push_str(&format!(" · {}", target.binary));
                     }
                     let controls = row![
                         opener(here, live.then(|| event(Event::Open(Some(name.clone()))))),
+                        iced::widget::tooltip(
+                            quiet_button(if pinned { "Unpin" } else { "Pin" }, live.then(|| event(Event::Pin(name.clone())))),
+                            container(
+                                text(if pinned { "Take it out of the + menu" } else { "Show it in the + menu, to open its window from there" })
+                                    .size(style::TINY)
+                            )
+                            .padding([3, 8])
+                            .style(style::card(P.surface)),
+                            iced::widget::tooltip::Position::Bottom,
+                        ),
                         // this window's own connection: closing it would only make it again
                         quiet_button(
                             if busy { "Disconnecting…" } else { "Disconnect" },
@@ -419,5 +493,20 @@ mod tests {
         assert_eq!(app.boxes.armed_remove.as_deref(), Some("server"));
         let _ = app.boxes_event(Event::Remove("other".into()));
         assert_eq!(app.boxes.armed_remove.as_deref(), Some("other"), "a press on another box arms that one");
+    }
+
+    #[test]
+    fn a_pinned_box_is_offered_by_the_menu_until_unpinned() {
+        let (mut app, _) = App::new(true, None);
+        let target = |host: &str| BoxTarget { host: host.into(), binary: DEFAULT_BINARY.into(), ssh_config: None };
+        app.boxes.saved = Ok(BTreeMap::from([("lab".to_string(), target("me@lab")), ("server".to_string(), target("me@server"))]));
+        assert!(app.menu_boxes().is_empty(), "nothing pinned, nothing offered");
+        let _ = app.boxes_event(Event::Pin("server".into()));
+        let _ = app.boxes_event(Event::Pin("lab".into()));
+        // in pinning order; a pin whose box is no longer saved is not offered
+        app.settings.pinned_boxes.push("gone".into());
+        assert_eq!(app.menu_boxes(), vec![(Some("server".to_string()), "me@server".to_string()), (Some("lab".to_string()), "me@lab".to_string())]);
+        let _ = app.boxes_event(Event::Pin("server".into()));
+        assert_eq!(app.menu_boxes(), vec![(Some("lab".to_string()), "me@lab".to_string())]);
     }
 }

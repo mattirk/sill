@@ -70,3 +70,56 @@ fn dock_icon() {
         let () = msg_send![image, release];
     }
 }
+
+/// Before this window starts another sill window (Open on a box): let it take the front. Since
+/// macOS 14 activation is cooperative — an app comes forward only when the active one yields — so
+/// this window, active from the press, yields to every process of its own bundle: the new window,
+/// or one already open on that box that is asked to show itself. Without a bundle (a development
+/// build) or before macOS 14 there is nothing to yield; the new window then activates itself.
+pub fn yield_activation() {
+    // SAFETY: on the main thread (the window's update); NSApplication, NSBundle and NSString are
+    // used with their declared argument and return types, and the selector is checked first.
+    unsafe {
+        let app: *mut AnyObject = msg_send![objc2::class!(NSApplication), sharedApplication];
+        let bundle: *mut AnyObject = msg_send![objc2::class!(NSBundle), mainBundle];
+        if app.is_null() || bundle.is_null() {
+            return;
+        }
+        let id: *mut AnyObject = msg_send![bundle, bundleIdentifier];
+        let yields: bool = msg_send![app, respondsToSelector: objc2::sel!(yieldActivationToApplicationWithBundleIdentifier:)];
+        if !id.is_null() && yields {
+            let () = msg_send![app, yieldActivationToApplicationWithBundleIdentifier: id];
+        }
+    }
+}
+
+/// Bring the sill window of process `pid` to the front once it runs, from this (active) one: on
+/// a thread of its own, looking for it for up to five seconds. A process that never becomes an
+/// application (a second start that hands over to a window already open, and leaves) is not
+/// found, and nothing happens.
+pub fn activate_when_running(pid: u32) {
+    let Ok(pid) = i32::try_from(pid) else { return };
+    let _ = std::thread::Builder::new().name("sill-gui-raise".into()).spawn(move || {
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            // SAFETY: NSRunningApplication may be used from any thread; the messages are its own,
+            // with their declared argument and return types, inside an autorelease pool.
+            let done = objc2::rc::autoreleasepool(|_| unsafe {
+                let app: *mut AnyObject = msg_send![objc2::class!(NSRunningApplication), runningApplicationWithProcessIdentifier: pid];
+                if app.is_null() {
+                    return false;
+                }
+                let launched: bool = msg_send![app, isFinishedLaunching];
+                if !launched {
+                    return false;
+                }
+                // NSApplicationActivateAllWindows
+                let _: bool = msg_send![app, activateWithOptions: 1usize];
+                msg_send![app, isActive]
+            });
+            if done {
+                return;
+            }
+        }
+    });
+}

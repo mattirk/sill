@@ -73,6 +73,8 @@ impl App {
             },
             Message::Placed,
         ))
+        // the Mac: the app made active and the window key and in front (X11 is asked above)
+        .chain(if cfg!(target_os = "macos") { iced::window::gain_focus(id) } else { Task::none() })
         // and the keyboard in the session's prompt
         .chain(self.focus_prompt())
     }

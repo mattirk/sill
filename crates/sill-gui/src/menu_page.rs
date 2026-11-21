@@ -25,6 +25,9 @@ impl App {
                     return Task::none();
                 }
                 self.menu = Some(menu::Menu::default());
+                // the pinned boxes as saved now: another window may have pinned or removed one
+                let _ = self.boxes_event(crate::boxes_ui::Event::Reload);
+                self.pinned_boxes_reload();
                 let Some(actions) = self.actions.clone() else {
                     // the demo has two agents and nothing to reopen
                     self.menu.as_mut().unwrap().agents = Some(Ok(demo_agents()));
@@ -103,6 +106,10 @@ impl App {
                 };
                 let (method, params) = sill_client::sessions::new_here(from);
                 return self.act("", Act::Create, method, params);
+            }
+            Event::OpenBox(name) => {
+                self.menu = None;
+                return self.boxes_event(crate::boxes_ui::Event::Open(name));
             }
             Event::Delete(id) => {
                 let Some(menu) = &mut self.menu else {

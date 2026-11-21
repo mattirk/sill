@@ -2045,6 +2045,24 @@ fn the_menu_lists_agents_and_sessions_to_reopen() {
     assert!(ui.find("Ended session 1").is_err(), "filtered out");
 }
 
+/// A box pinned in Settings has a row in the menu, which opens a window on it.
+#[test]
+fn the_menu_offers_pinned_boxes() {
+    use crate::menu::Event;
+    use sill_proto::transport::BoxTarget;
+    let (mut app, _) = App::new(true, None);
+    let _ = app.update(Message::Menu(Event::Toggle));
+    let target = |host: &str| BoxTarget { host: host.into(), binary: "sill".into(), ssh_config: None };
+    app.boxes.saved = Ok([("lab".to_string(), target("me@lab")), ("server".to_string(), target("me@server"))].into());
+    app.settings.pinned_boxes = vec!["lab".into()];
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.find("me@lab").unwrap();
+    assert!(ui.find("me@server").is_err(), "not pinned");
+    ui.click("lab").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(matches!(&messages[..], [Message::Menu(Event::OpenBox(Some(name)))] if name == "lab"), "{messages:?}");
+}
+
 /// Starting from the menu creates the session with a fresh identity and opens it once the list
 /// shows it; deleting asks for a second press.
 #[test]

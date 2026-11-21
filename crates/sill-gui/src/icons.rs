@@ -48,6 +48,11 @@ const LINES: &[(&str, &str)] = &[
     ("pen", "m16 3 5 5M3 21l5-1L21 7a2.12 2.12 0 0 0-5-3L3 17z"),
     // a session's test desktop, shown in the conversation's place (lucide monitor)
     ("monitor", "M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM8 21h8M12 17v4"),
+    // a remote box, pinned to the + menu
+    (
+        "server",
+        "M4 2h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zM4 14h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2zM6 6h.01M6 18h.01",
+    ),
     // a session's Permissions (lucide shield)
     (
         "shield",

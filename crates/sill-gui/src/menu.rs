@@ -1,7 +1,8 @@
 //! The `+` menu (reference `09`): one row per agent that can start here, with a
 //! ghost button at its right; then *Reopen* — a filter, and the sessions not open as tabs, newest
 //! first, the first few and "N more…". A row reopens its session; *New here* starts a new one
-//! that follows an ended session; the bin deletes, on a second press.
+//! that follows an ended session; the bin deletes, on a second press. Between them, the remote
+//! boxes pinned in Settings › Remote boxes: a row opens a window on that box (`boxes_ui.rs`).
 use iced::widget::{Column, button, column, container, mouse_area, row, rule, scrollable, space, svg, text, text_input, tooltip};
 use iced::{Alignment, Element, Fill, Padding};
 use sill_client::sessions;
@@ -50,6 +51,8 @@ pub enum Event {
     NewHere(String),
     Delete(String),
     View(View),
+    /// Open a window on a pinned box (None: this machine's own).
+    OpenBox(Option<String>),
 }
 
 fn event(event: Event) -> Message {
@@ -123,6 +126,38 @@ impl App {
                     );
                     panel = panel.push(row![start, other, ghost].align_y(Alignment::Center));
                 }
+            }
+        }
+        let boxes = self.menu_boxes();
+        if !boxes.is_empty() {
+            panel = panel.push(rule::horizontal(1).style(style::rule_style(P.border)));
+            for (name, sub) in boxes {
+                let (glyph, title) = match &name {
+                    Some(name) => ("server", name.clone()),
+                    None => ("monitor", crate::boxes_ui::this_machine_name().to_string()),
+                };
+                let what = match &name {
+                    Some(name) => format!("Open a window on the box {name}: its own agents and sessions; this window stays"),
+                    None => "Open a window on this machine's own sessions; this window stays".to_string(),
+                };
+                panel = panel.push(tooltip(
+                    keys::press(
+                        button(
+                            row![
+                                icons::glyph(glyph, 15.0, P.fg),
+                                column![text(title).size(style::TEXT), text(sub).size(style::TINY).color(P.fg_dim)].spacing(1).width(Fill),
+                            ]
+                            .spacing(10)
+                            .align_y(Alignment::Center),
+                        )
+                        .padding([4, 8])
+                        .width(Fill)
+                        .style(style::row_button),
+                        event(Event::OpenBox(name)),
+                    ),
+                    tip(what),
+                    tooltip::Position::Left,
+                ));
             }
         }
         let open: Vec<String> = self.tabs.iter().map(|t| t.id.clone()).collect();
