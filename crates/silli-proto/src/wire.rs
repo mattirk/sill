@@ -206,7 +206,7 @@ mod stored_path {
             return Err(serde::de::Error::custom("stored path contains NUL"));
         }
         #[cfg(unix)]
-        return Ok(std::os::unix::ffi::OsStringExt::from_vec(bytes).into());
+        return Ok(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(bytes).into());
         #[cfg(not(unix))]
         String::from_utf8(bytes).map(PathBuf::from).map_err(|_| serde::de::Error::custom("a stored path that is not Unicode"))
     }
