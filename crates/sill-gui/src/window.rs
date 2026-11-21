@@ -107,6 +107,11 @@ impl App {
         if !self.visible {
             return self.show(time);
         }
+        // the Mac: a shown window behind another application's comes up, as on X11
+        #[cfg(target_os = "macos")]
+        if !crate::macos::is_active() {
+            return self.show(time);
+        }
         let Some(xid) = self.xid else {
             return self.hide();
         };

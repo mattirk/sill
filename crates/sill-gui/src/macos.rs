@@ -71,6 +71,15 @@ fn dock_icon() {
     }
 }
 
+/// Whether sill is the active application: the one the keyboard goes to.
+pub fn is_active() -> bool {
+    // SAFETY: on the main thread (the window's update); `isActive` returns a BOOL.
+    unsafe {
+        let app: *mut AnyObject = msg_send![objc2::class!(NSApplication), sharedApplication];
+        !app.is_null() && msg_send![app, isActive]
+    }
+}
+
 /// Before this window starts another sill window (Open on a box): let it take the front. Since
 /// macOS 14 activation is cooperative — an app comes forward only when the active one yields — so
 /// this window, active from the press, yields to every process of its own bundle: the new window,
