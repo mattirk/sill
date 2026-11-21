@@ -29,7 +29,11 @@ step cargo clippy --locked "$@" --all-targets -- -D warnings
 if [ "$(uname -s)" = Linux ] && [ "$*" = --workspace ] && rustup target list --installed 2>/dev/null | grep -qx aarch64-apple-darwin; then
     step cargo clippy --locked --target aarch64-apple-darwin -p silli-gui -p silli-vm -p silli-client -p silli-proto --all-targets -- -D warnings
 fi
-step python3 packaging/test_release.py
+# The release scripts' tests try the Linux and Mac packaging and installer: not on Windows.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) echo "== skipped on Windows: python3 packaging/test_release.py" ;;
+    *) step python3 packaging/test_release.py ;;
+esac
 # Tests run in parallel, as many at once as the machine has cores. SILLI_TEST_THREADS=1 runs them
 # one at a time: for telling a test that fails from one that fails only beside others.
 if [ -n "${SILLI_TEST_THREADS:-}" ]; then
