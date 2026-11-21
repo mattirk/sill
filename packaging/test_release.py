@@ -266,6 +266,17 @@ cp "$RELEASE/${{url##*/}}" "$out" """)
         self.assertNotEqual(status, 0)
         self.assertIn("Apple Silicon", out)
 
+    def test_mac_removes_its_own_old_app_and_no_other_sill(self):
+        self.system("Darwin", "arm64")
+        self.command("defaults", "echo com.github.mattirk.sill")
+        status, out = self.install("1\n", SILLI_DRY_RUN="1")
+        self.assertEqual(status, 0, out)
+        self.assertIn("would run: rm -rf /Applications/Sill.app\r", out)
+        self.command("defaults", "echo com.example.sill")
+        status, out = self.install("1\n", SILLI_DRY_RUN="1")
+        self.assertEqual(status, 0, out)
+        self.assertNotIn("/Applications/Sill.app", out)
+
     def test_systems_without_a_package_and_a_missing_release_are_named(self):
         self.system("Linux", "aarch64")
         status, out = self.install("1\n")

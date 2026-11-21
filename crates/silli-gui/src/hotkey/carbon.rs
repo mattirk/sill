@@ -129,7 +129,8 @@ impl Hotkey {
                 self.installed.set(true);
             }
             let mut held = std::ptr::null_mut();
-            let id = EventHotKeyId { signature: u32::from_be_bytes(*b"silli"), id: 1 };
+            // a four-character code: the name itself is one too long
+            let id = EventHotKeyId { signature: u32::from_be_bytes(*b"slli"), id: 1 };
             let status = RegisterEventHotKey(u32::from(chord.mac), modifiers, id, target, 0, &mut held);
             if status != 0 {
                 anyhow::bail!("macOS refused it (error {status}); another program may hold it");

@@ -39,6 +39,7 @@ SIZE=$(du -sk "$PKG" --exclude=DEBIAN | cut -f1)
 # so the list is by hand from `strings target/release/silli-gui | grep -o 'lib.*\.so\.[0-9]*'`:
 # Wayland + xkbcommon and the X11 client libraries (either session), the Vulkan loader and a driver
 # for the GPU renderer (iced draws in software without them), EGL for wgpu's GL fallback.
+# Conflicts/Replaces: the package was `sill` until 0.0.6; installing this one removes that one.
 cat > "$PKG/DEBIAN/control" <<CTL
 Package: silli
 Version: $VER
@@ -50,6 +51,8 @@ Installed-Size: $SIZE
 Depends: bubblewrap, e2fsprogs, curl, unzip, libwayland-client0, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6
 Recommends: systemd, libvulkan1, mesa-vulkan-drivers, libegl1, libwayland-egl1
 Suggests: weston, xwayland, dbus
+Conflicts: sill
+Replaces: sill
 Homepage: https://github.com/mattirk/silli
 Description: AI agents in a jail the host controls
  AI agents on your own Linux machine: an ACP client, a bubblewrap jail

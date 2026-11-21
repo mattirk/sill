@@ -48,14 +48,17 @@ mask = [
   "~/.docker", "~/.kube", "~/.vault-token",
   "~/.config/Nextcloud",           # sync account tokens
   "~/.mozilla", "~/.config/chromium", "~/.config/google-chrome",
+  # silli's own folders under the name it had until 0.0.6, for a machine where they are left
+  "~/.config/sill", "~/.local/state/sill", "~/.local/state/sill.bak-*",
 ]
 # Group-shared trees (setgid dirs, group-writable files) must be direct or ro: overlayfs can't copy up
 # files owned by another uid/gid inside the user namespace (SPEC §4.10 #16). Add yours here, e.g.
 #   direct = [..., "/srv/shared-project"]
 # Visible, never writable:
 ro = []
-# Host mount points left out of the jail (shown as empty directories):
-hidden_mounts = ["/boot", "/boot/efi"]
+# Host mount points left out of the jail (shown as empty directories). The last is the state
+# filesystem under the name silli had until 0.0.6, where one is still mounted:
+hidden_mounts = ["/boot", "/boot/efi", "/var/lib/sill"]
 # Folders pinned to a session are bound live (host = jail): edits and commits made in the jail are host
 # edits and commits at once; review = git for repositories. Everything else is overlaid and reviewed in
 # Changes; nothing is kept without a click.

@@ -47,6 +47,10 @@ main() {
                run cp -R "$tmp/mnt/Silli.app" /Applications/Silli.app.new
                run rm -rf /Applications/Silli.app
                run mv /Applications/Silli.app.new /Applications/Silli.app
+               # this app under its name until 0.0.6, and never another program called Sill
+               if [ "$(defaults read /Applications/Sill.app/Contents/Info CFBundleIdentifier 2>/dev/null)" = com.github.mattirk.sill ]; then
+                   run rm -rf /Applications/Sill.app
+               fi
                run hdiutil detach -quiet "$tmp/mnt"
                mounted=
                say "Installed: open Silli from Applications."

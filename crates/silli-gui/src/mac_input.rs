@@ -76,8 +76,8 @@ const FUNCTION: u64 = 0x800000;
 /// Event fields: the poster's own 64 bits, and the posting process.
 const SOURCE_USER_DATA: u32 = 42;
 const SOURCE_PID: u32 = 41;
-/// What Silli puts in the user data of every event it posts.
-const MARK: i64 = i64::from_be_bytes(*b"silli-mac");
+/// What Silli puts in the user data of every event it posts: eight bytes.
+const MARK: i64 = i64::from_be_bytes(*b"sillimac");
 const SESSION_TAP: u32 = 1;
 const HEAD_INSERT: u32 = 0;
 const LISTEN_ONLY: u32 = 1;
