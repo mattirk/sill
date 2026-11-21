@@ -28,7 +28,7 @@ impl App {
             let id = d.workspace.workspace_id.clone();
             let running = state.running.is_some();
             let ev = |e: Event| (!running).then_some(Message::Workspaces(e));
-            let name = d.workspace.source.display.rsplit('/').next().unwrap_or(&d.workspace.source.display).to_string();
+            let name = crate::workspaces::repository_name(d).to_string();
             let said = ws::describe(&d.summary);
             let summary = if said.is_empty() { "changes".to_string() } else { said };
             let mut line = row![
@@ -46,6 +46,11 @@ impl App {
                 line = line.push(text("Working…").size(style::TINY).color(P.fg_dim));
             }
             let rebase_stopped = d.workspace.operation.as_ref().is_some_and(|o| o.state == "conflict");
+            // an Apply onto another branch than the workspace started from, asked about once
+            let onto = ws::other_branch(d).map(|(_, now)| now).filter(|now| {
+                state.apply_armed.get().is_some_and(|(w, seen)| *w == id && *seen == d.revision)
+                    || state.apply_onto.as_ref().is_some_and(|(w, b)| *w == id && b == now)
+            });
             if rebase_stopped {
                 line = line.push(tooltip(
                     keys::press_maybe(
@@ -61,10 +66,6 @@ impl App {
                 if let Some(crosscheck) = self.crosscheck_button(d) {
                     line = line.push(crosscheck);
                 }
-                let onto = ws::other_branch(d).map(|(_, now)| now).filter(|now| {
-                    state.apply_armed.get().is_some_and(|(w, seen)| *w == id && *seen == d.revision)
-                        || state.apply_onto.as_ref().is_some_and(|(w, b)| *w == id && b == now)
-                });
                 let label = onto.map_or("Apply".to_string(), |now| format!("Apply onto {now}?"));
                 let apply = keys::press_maybe(
                     button(text(label).size(style::SMALL)).padding([3, 10]).style(style::solid(P.accent)),
@@ -114,10 +115,23 @@ impl App {
                 shelf = shelf.push(row);
             }
             if state.menu.as_deref() == Some(id.as_str()) && !rebase_stopped {
-                // the other ways to apply, side by side at the right (the person, 2026-11-16)
+                // the other ways to apply, side by side at the right (the person, 2026-11-16);
+                // Apply and close at their left, where it moves neither (2026-11-20)
+                let close = onto.map_or("Apply and close".to_string(), |now| format!("Apply onto {now} and close?"));
+                let waits = !d.summary.uncommitted.is_empty() && d.workspace.state == sill_proto::workspaces::WorkspaceState::Open;
+                let closes = if waits {
+                    "Apply once the agent has committed, then close this session as its tab's × does"
+                } else {
+                    "Apply, then close this session as its tab's × does"
+                };
                 shelf = shelf.push(
                     row![
                         space::horizontal(),
+                        tooltip(
+                            quiet_button(close, ev(Event::ApplyClose(session.clone(), id.clone()))),
+                            container(text(closes).size(style::TINY)).padding(6).style(style::fill(P.surface)),
+                            tooltip::Position::Top,
+                        ),
                         quiet_button("Apply without commit", ev(Event::Copy(session.clone(), id.clone()))),
                         quiet_button("Apply as branch", ev(Event::Branch(session.clone(), id.clone()))),
                     ]

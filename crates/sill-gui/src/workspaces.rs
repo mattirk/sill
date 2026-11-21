@@ -43,6 +43,9 @@ pub struct State {
     /// The commit turn being waited for ([`State::committing`]) was asked for by Apply as
     /// branch: the branch, not an Apply, follows it.
     pub branch_after_commit: bool,
+    /// The commit turn being waited for was asked for by Apply and close: the Apply that
+    /// follows it closes the session too.
+    pub close_after_commit: bool,
 }
 
 impl State {
@@ -72,6 +75,12 @@ impl State {
     }
 }
 
+/// A workspace's repository as the shelf names it: its folder's name.
+pub(crate) fn repository_name(d: &api::Detail) -> &str {
+    let display = &d.workspace.source.display;
+    display.rsplit('/').next().unwrap_or(display)
+}
+
 /// Every session's workspaces with their state, and the discarded work still undoable.
 pub type All = (api::Listed, Vec<api::Detail>);
 
@@ -87,6 +96,11 @@ pub enum Event {
     PageDone(String, bool),
     Loaded(String, Result<Loaded, String>),
     Apply(String, String),
+    /// Apply and close: an Apply, and once the work is in the checkout the session is closed as
+    /// its tab's × closes it.
+    ApplyClose(String, String),
+    /// Apply and close has applied: said as any Apply, and the session closes.
+    AppliedClose(String, String),
     /// The caret beside Apply: show or hide the other ways to apply.
     Menu(String, String),
     /// Apply without commit: the workspace's state into the checkout, uncommitted, to try.
@@ -98,6 +112,8 @@ pub enum Event {
     Commit(String, String),
     /// Apply as branch found uncommitted changes: [`Event::Commit`], then the branch.
     CommitForBranch(String, String),
+    /// Apply and close found uncommitted changes: [`Event::Commit`], then the Apply that closes.
+    CommitForClose(String, String),
     /// The turn after that prompt ended: the session's workspaces read afresh.
     Committed(String, Result<Loaded, String>),
     /// The Changes page's Apply found uncommitted changes in this workspace.
@@ -367,34 +383,28 @@ impl App {
                 }
                 Task::none()
             }
-            Event::Apply(session, workspace) => {
-                // one commit turn for an Apply: the one that follows it never asks for another
-                let after_commit = self.views.get_mut(&session).and_then(|v| v.workspaces.committed.take()).is_some_and(|w| w == workspace);
-                if self.ask_other_branch(&session, &workspace) {
-                    return Task::none();
+            Event::Apply(session, workspace) => self.shelf_apply(session, workspace, false),
+            Event::ApplyClose(session, workspace) => self.shelf_apply(session, workspace, true),
+            Event::AppliedClose(session, workspace) => {
+                // another of the session's repositories still has work to apply: the session
+                // stays for it, where closing would leave that work to the Changes page unsaid.
+                // Its line says so: the applied one's line goes with its work.
+                let stays = self.views.get(&session).and_then(|v| {
+                    let offered = v.workspaces.offered();
+                    let other = offered.iter().find(|d| d.workspace.workspace_id != workspace)?;
+                    let applied = offered.iter().find(|d| d.workspace.workspace_id == workspace).map_or("The other repository", |d| repository_name(d));
+                    Some((other.workspace.workspace_id.clone(), format!("{applied} is applied. The session stays open: this still has work to apply.")))
+                });
+                let done = self.workspaces_event(Event::Done(session.clone(), workspace, "Applied to your checkout.".to_string(), false));
+                match stays {
+                    Some((other, said)) => {
+                        if let Some(view) = self.views.get_mut(&session) {
+                            view.workspaces.notices.insert(other, (said, false));
+                        }
+                        done
+                    }
+                    None => Task::batch([done, Task::done(Message::CloseTab(session))]),
                 }
-                let Some((actions, seen)) = self.workspace_action(&session, &workspace) else { return Task::none() };
-                blocking(
-                    move || match ws::apply(&actions, &workspace, &seen, How::Commits) {
-                        Ok(ApplyOutcome::Applied) => Event::Done(session, workspace, "Applied to your checkout.".to_string(), false),
-                        Ok(ApplyOutcome::Conflicts(paths)) => Event::Done(
-                            session,
-                            workspace,
-                            format!("The rebase onto your checkout stopped on {}: Resolve asks the agent, or Abort.", paths.join(", ")),
-                            true,
-                        ),
-                        Ok(ApplyOutcome::Uncommitted) if after_commit => Event::Done(
-                            session,
-                            workspace,
-                            "Sill still finds uncommitted changes after the agent's commit, so nothing was applied: look at the workspace, then apply."
-                                .to_string(),
-                            true,
-                        ),
-                        Ok(ApplyOutcome::Uncommitted) => Event::Commit(session, workspace),
-                        Err(e) => Event::Done(session, workspace, ws::message(&e), true),
-                    },
-                    Message::Workspaces,
-                )
             }
             Event::Menu(session, workspace) => {
                 if let Some(view) = self.views.get_mut(&session) {
@@ -463,11 +473,23 @@ impl App {
                 }
                 task
             }
+            Event::CommitForClose(session, workspace) => {
+                let task = self.workspaces_event(Event::Commit(session.clone(), workspace.clone()));
+                // the session closes only after the commit turn asked for here, if one was
+                if let Some(view) = self.views.get_mut(&session)
+                    && view.workspaces.committing.as_ref().is_some_and(|(w, _)| *w == workspace)
+                {
+                    view.workspaces.close_after_commit = true;
+                }
+                task
+            }
             Event::Commit(session, workspace) => {
                 let Some(view) = self.views.get_mut(&session) else { return Task::none() };
                 view.workspaces.running = None;
-                // an Apply follows unless Apply as branch asked ([`Event::CommitForBranch`])
+                // a plain Apply follows unless Apply as branch or Apply and close asked
+                // ([`Event::CommitForBranch`], [`Event::CommitForClose`])
                 view.workspaces.branch_after_commit = false;
+                view.workspaces.close_after_commit = false;
                 let Some(d) = view.workspaces.loaded.as_ref().and_then(|l| l.detail(&workspace)) else { return Task::none() };
                 if view.conversation.busy() {
                     view.workspaces.notices.insert(workspace, ("The agent is working; apply after its turn.".into(), true));
@@ -483,6 +505,7 @@ impl App {
                 let Some((workspace, seen)) = view.workspaces.committing.take() else { return Task::none() };
                 // what follows this turn, decided once: a failed or changed turn leaves nothing behind
                 let then_branch = std::mem::take(&mut view.workspaces.branch_after_commit);
+                let then_close = std::mem::take(&mut view.workspaces.close_after_commit);
                 let Ok(loaded) = loaded else {
                     view.workspaces.notices.insert(workspace, ("The workspace could not be read after the agent's turn: look again, then apply.".into(), true));
                     return Task::none();
@@ -494,6 +517,11 @@ impl App {
                         view.workspaces.committed = Some(workspace.clone());
                         if then_branch {
                             return Task::done(Message::Workspaces(Event::Branch(session, workspace)));
+                        }
+                        // the person went on writing here while the agent committed: the work is
+                        // applied and the session stays, with what they wrote
+                        if then_close && view.draft.text().trim().is_empty() && view.attachments.is_empty() {
+                            return Task::done(Message::Workspaces(Event::ApplyClose(session, workspace)));
                         }
                         return Task::done(Message::Workspaces(Event::Apply(session, workspace)));
                     }
@@ -587,6 +615,44 @@ impl App {
                 Task::none()
             }
         }
+    }
+
+    /// Apply from the shelf. With `close` it is Apply and close: once the work is in the
+    /// checkout the session is closed ([`Event::AppliedClose`]); whatever stops the Apply leaves
+    /// the session as it is.
+    fn shelf_apply(&mut self, session: String, workspace: String, close: bool) -> Task<Message> {
+        // one commit turn for an Apply: the one that follows it never asks for another
+        let after_commit = self.views.get_mut(&session).and_then(|v| v.workspaces.committed.take()).is_some_and(|w| w == workspace);
+        if self.ask_other_branch(&session, &workspace) {
+            // the menu stays open over the question, for the second click on Apply and close
+            return Task::none();
+        }
+        if close && let Some(view) = self.views.get_mut(&session) {
+            view.workspaces.menu = None;
+        }
+        let Some((actions, seen)) = self.workspace_action(&session, &workspace) else { return Task::none() };
+        blocking(
+            move || match ws::apply(&actions, &workspace, &seen, How::Commits) {
+                Ok(ApplyOutcome::Applied) if close => Event::AppliedClose(session, workspace),
+                Ok(ApplyOutcome::Applied) => Event::Done(session, workspace, "Applied to your checkout.".to_string(), false),
+                Ok(ApplyOutcome::Conflicts(paths)) => Event::Done(
+                    session,
+                    workspace,
+                    format!("The rebase onto your checkout stopped on {}: Resolve asks the agent, or Abort.", paths.join(", ")),
+                    true,
+                ),
+                Ok(ApplyOutcome::Uncommitted) if after_commit => Event::Done(
+                    session,
+                    workspace,
+                    "Sill still finds uncommitted changes after the agent's commit, so nothing was applied: look at the workspace, then apply.".to_string(),
+                    true,
+                ),
+                Ok(ApplyOutcome::Uncommitted) if close => Event::CommitForClose(session, workspace),
+                Ok(ApplyOutcome::Uncommitted) => Event::Commit(session, workspace),
+                Err(e) => Event::Done(session, workspace, ws::message(&e), true),
+            },
+            Message::Workspaces,
+        )
     }
 
     /// Whether an Apply of `workspace` must first ask: the checkout is on another branch than the

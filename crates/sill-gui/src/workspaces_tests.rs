@@ -447,3 +447,197 @@ fn a_failed_commit_for_a_branch_leaves_no_branch_for_a_later_apply() {
     server.join().unwrap();
     assert_eq!(app.views["idle"].workspaces.notices.get("ws-1"), Some(&("Applied to your checkout.".to_string(), false)), "an Apply, not a branch");
 }
+
+/// The daemon's side of a session closing as its tab's × closes it.
+fn expect_close(daemon: &mut crate::tests::Daemon, session: &str) {
+    let end = daemon.expect(method::SESSIONS_END);
+    assert_eq!(end["params"], json!({"session_id": session, "reason": "close"}));
+    daemon.reply(&end, json!({"pending": false, "deleted": false}));
+    let list = daemon.expect(method::SESSIONS_LIST);
+    daemon.reply(&list, json!({"sessions": [], "next": null}));
+}
+
+/// Apply and close (the caret's menu, 2026-11-20): the Apply of what the person saw, and once
+/// the work is in the checkout the session closes as its tab's × closes it.
+#[test]
+fn apply_and_close_applies_then_closes_the_session() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    app.views.get_mut("demo").unwrap().workspaces.loaded = Some(loaded(3));
+    let _ = app.update(Message::Workspaces(Event::Menu("demo".into(), "ws-1".into())));
+    let server = std::thread::spawn(move || {
+        let get = daemon.expect(method::WORKSPACES_GET);
+        daemon.reply(&get, detail(3));
+        let apply = daemon.expect(method::WORKSPACES_APPLY);
+        assert_eq!(apply["params"]["revision"], revision());
+        daemon.reply(&apply, json!({"workspace": workspace(), "operation": null, "discarded": null}));
+        expect_close(&mut daemon, "demo");
+    });
+    let task = app.update(Message::Workspaces(Event::ApplyClose("demo".into(), "ws-1".into())));
+    settle_task(&mut app, task);
+    server.join().unwrap();
+    assert!(app.tabs.is_empty() && app.selected.is_none(), "the session's tab went with it");
+}
+
+/// With uncommitted work the agent is asked to commit first, as for Apply; the Apply after its
+/// turn closes the session, as the person asked at the click.
+#[test]
+fn apply_and_close_waits_for_the_agents_commit() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let mut idle = crate::SessionView::new("idle");
+    idle.workspaces.loaded = Some(uncommitted());
+    app.views.insert("idle".into(), idle);
+    let server = std::thread::spawn(move || {
+        let get = daemon.expect(method::WORKSPACES_GET);
+        daemon.reply(&get, serde_json::to_value(&uncommitted().details[0]).unwrap());
+        let apply = daemon.expect(method::WORKSPACES_APPLY);
+        daemon.refuse_for(&apply, "uncommitted", "The workspace has uncommitted changes.");
+        let submit = daemon.expect(method::SESSIONS_SUBMIT);
+        assert_eq!(submit["params"]["purpose"], "commit");
+        daemon.reply(&submit, json!({}));
+        let get = daemon.expect(method::WORKSPACES_GET);
+        daemon.reply(&get, serde_json::to_value(&committed("tree-1").details[0]).unwrap());
+        let apply = daemon.expect(method::WORKSPACES_APPLY);
+        assert_eq!(apply["params"]["revision"]["tip"], "t2", "the committed work");
+        daemon.reply(&apply, json!({"workspace": workspace(), "operation": null, "discarded": null}));
+        expect_close(&mut daemon, "idle");
+    });
+    let task = app.update(Message::Workspaces(Event::ApplyClose("idle".into(), "ws-1".into())));
+    settle_task(&mut app, task);
+    let state = &app.views["idle"].workspaces;
+    assert!(state.close_after_commit && state.committing.as_ref().is_some_and(|(w, _)| w == "ws-1"), "waiting for the agent's commit");
+    let task = app.update(Message::Workspaces(Event::Committed("idle".into(), Ok(committed("tree-1")))));
+    settle_task(&mut app, task);
+    server.join().unwrap();
+    assert!(app.views.get("idle").is_none_or(|v| !v.workspaces.close_after_commit && v.failed.is_none()));
+}
+
+/// What stops the Apply leaves the session open, and nothing closes it later: a commit turn that
+/// left work uncommitted takes the close with it, so the plain Apply that follows the next commit
+/// turn only applies. So does a turn during which the person went on writing in the session.
+#[test]
+fn apply_and_close_closes_nothing_when_the_apply_did_not_go_as_asked() {
+    for writing in [false, true] {
+        let (client, mut daemon) = daemon();
+        let mut app = live_app(vec![client]);
+        let mut idle = crate::SessionView::new("idle");
+        idle.workspaces.loaded = Some(uncommitted());
+        app.views.insert("idle".into(), idle);
+        let server = std::thread::spawn(move || {
+            let get = daemon.expect(method::WORKSPACES_GET);
+            daemon.reply(&get, serde_json::to_value(&uncommitted().details[0]).unwrap());
+            let apply = daemon.expect(method::WORKSPACES_APPLY);
+            daemon.refuse_for(&apply, "uncommitted", "The workspace has uncommitted changes.");
+            let submit = daemon.expect(method::SESSIONS_SUBMIT);
+            daemon.reply(&submit, json!({}));
+            if !writing {
+                // the Changes page's Apply asks for a commit of its own
+                let submit = daemon.expect(method::SESSIONS_SUBMIT);
+                daemon.reply(&submit, json!({}));
+            }
+            let get = daemon.expect(method::WORKSPACES_GET);
+            daemon.reply(&get, serde_json::to_value(&committed("tree-1").details[0]).unwrap());
+            let apply = daemon.expect(method::WORKSPACES_APPLY);
+            daemon.reply(&apply, json!({"workspace": workspace(), "operation": null, "discarded": null}));
+        });
+        let task = app.update(Message::Workspaces(Event::ApplyClose("idle".into(), "ws-1".into())));
+        settle_task(&mut app, task);
+        assert!(app.views["idle"].workspaces.close_after_commit);
+        if writing {
+            app.views.get_mut("idle").unwrap().draft = crate::editor::Editor::with_text("one more thing");
+        } else {
+            // the agent's turn ends with the work still uncommitted
+            let task = app.update(Message::Workspaces(Event::Committed("idle".into(), Ok(uncommitted()))));
+            settle_task(&mut app, task);
+            let state = &app.views["idle"].workspaces;
+            assert!(!state.close_after_commit, "nothing waits on a turn that is over");
+            assert_eq!(state.notices.get("ws-1"), Some(&("The agent left changes uncommitted, so nothing was applied.".to_string(), true)));
+            let task = app.update(Message::Workspaces(Event::Commit("idle".into(), "ws-1".into())));
+            settle_task(&mut app, task);
+            assert!(!app.views["idle"].workspaces.close_after_commit);
+        }
+        let tree = app.views["idle"].workspaces.committing.as_ref().unwrap().1.clone();
+        let task = app.update(Message::Workspaces(Event::Committed("idle".into(), Ok(committed(&tree)))));
+        settle_task(&mut app, task);
+        server.join().unwrap();
+        let view = &app.views["idle"];
+        assert_eq!(view.workspaces.notices.get("ws-1"), Some(&("Applied to your checkout.".to_string(), false)), "applied");
+        assert!(view.failed.is_none() && app.list_error.is_none(), "and no close was asked for: {:?} {:?}", view.failed, app.list_error);
+        if writing {
+            assert_eq!(view.draft.text().trim_end(), "one more thing", "what the person wrote is still there");
+        }
+    }
+}
+
+/// A session with two repositories: Apply and close on one applies it and leaves the session
+/// open while the other still has work to apply, and the other's line says so.
+#[test]
+fn apply_and_close_keeps_the_session_while_another_repository_has_work() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let mut two = loaded(3);
+    let mut other = detail(2);
+    other["workspace"]["workspace_id"] = json!("ws-2");
+    other["workspace"]["source"] = path("/home/me/tools");
+    two.details.push(serde_json::from_value(other).unwrap());
+    app.views.get_mut("demo").unwrap().workspaces.loaded = Some(two);
+    let server = std::thread::spawn(move || {
+        let get = daemon.expect(method::WORKSPACES_GET);
+        daemon.reply(&get, detail(3));
+        let apply = daemon.expect(method::WORKSPACES_APPLY);
+        daemon.reply(&apply, json!({"workspace": workspace(), "operation": null, "discarded": null}));
+    });
+    let task = app.update(Message::Workspaces(Event::ApplyClose("demo".into(), "ws-1".into())));
+    settle_task(&mut app, task);
+    server.join().unwrap();
+    let view = &app.views["demo"];
+    assert!(view.failed.is_none() && app.list_error.is_none() && !app.tabs.is_empty(), "the session is still open");
+    let (said, bad) = view.workspaces.notices["ws-2"].clone();
+    assert!(!bad && said == "repo is applied. The session stays open: this still has work to apply.", "{said}");
+}
+
+/// A checkout on another branch than the workspace started from is asked about once, as for
+/// Apply: the first click on Apply and close sends nothing and leaves its menu open with the
+/// question on its label; the second applies onto that branch and closes.
+#[test]
+fn apply_and_close_onto_another_branch_asks_first() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let mut on_feature = loaded(3);
+    on_feature.details[0].revision.destination_branch = "feature".into();
+    app.views.get_mut("demo").unwrap().workspaces.loaded = Some(on_feature);
+    // the turn has ended: the shelf is there to click
+    let conversation = &mut app.views.get_mut("demo").unwrap().conversation;
+    if let Some(session) = &mut conversation.session {
+        session.activity = "idle".into();
+        session.turn_id = None;
+    }
+    let _ = app.update(Message::Workspaces(Event::Menu("demo".into(), "ws-1".into())));
+    {
+        let mut ui = crate::tests::simulator(&app, (720.0, 860.0));
+        ui.click("Apply and close").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(matches!(&messages[..], [Message::Workspaces(Event::ApplyClose(s, w))] if s == "demo" && w == "ws-1"), "{messages:?}");
+    }
+    let task = app.update(Message::Workspaces(Event::ApplyClose("demo".into(), "ws-1".into())));
+    settle_task(&mut app, task);
+    let state = &app.views["demo"].workspaces;
+    assert!(state.notices["ws-1"].0.contains("started from main, but your checkout is on feature"));
+    assert!(state.running.is_none() && state.menu.as_deref() == Some("ws-1"), "asked, with the menu still open");
+    crate::tests::simulator(&app, (720.0, 860.0)).find("Apply onto feature and close?").unwrap();
+    let server = std::thread::spawn(move || {
+        let get = daemon.expect(method::WORKSPACES_GET);
+        let mut d = detail(3);
+        d["revision"]["destination_branch"] = json!("feature");
+        daemon.reply(&get, d);
+        let apply = daemon.expect(method::WORKSPACES_APPLY);
+        assert_eq!(apply["params"]["revision"]["destination_branch"], "feature");
+        daemon.reply(&apply, json!({"workspace": workspace(), "operation": null, "discarded": null}));
+        expect_close(&mut daemon, "demo");
+    });
+    let task = app.update(Message::Workspaces(Event::ApplyClose("demo".into(), "ws-1".into())));
+    settle_task(&mut app, task);
+    server.join().unwrap();
+    assert!(app.tabs.is_empty(), "applied onto feature, and closed");
+}

@@ -504,7 +504,7 @@ fn render_workspaces() {
     let dir = sill_proto::admin::FileMetadata { file: false, directory: true, symlink: false, target: None, length: "0".into(), readonly: false };
     view.files.roots.push(sill_client::files::Root { path: host("/home/demo/vendored"), global: false, metadata: Some(dir), error: None });
     render(&app, "workspaces-1-shelf");
-    // the caret beside Apply: Apply without commit
+    // the caret beside Apply: Apply and close, Apply without commit, Apply as branch
     app.views.get_mut("demo").unwrap().workspaces.menu = Some("ws-1".into());
     render(&app, "workspaces-4-apply-menu");
     let view = app.views.get_mut("demo").unwrap();
