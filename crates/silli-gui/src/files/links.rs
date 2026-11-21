@@ -22,7 +22,7 @@ impl App {
         };
         // Conversation file links are absolute host paths, read through the session's
         // file worker (including workspace aliases), never the GUI's local filesystem.
-        let source = HostPath::from_path(std::path::Path::new("/"));
+        let source = HostPath::from_bytes("/".as_bytes());
         if let Ok(LinkTarget::File(path, fragment)) = resolve_link(&source, &target) {
             return self.update(Message::Files(Action::Navigate { session, path, fragment, history: true }));
         }
@@ -160,31 +160,34 @@ pub(super) fn resolve_link(source: &HostPath, target: &str) -> Result<LinkTarget
     }
     let (path, fragment) = target.split_once('#').unwrap_or((target, ""));
     let path = path.split_once('?').map_or(path, |(path, _)| path);
-    use std::os::unix::ffi::OsStringExt;
     let decoded = percent_encoding::percent_decode_str(path).collect::<Vec<_>>();
     if decoded.contains(&0) {
         return Err("Link contains a NUL byte".into());
     }
-    let source = source.to_path().map_err(|e| e.to_string())?;
+    // A link is a path of the box: taken apart at `/` as bytes, never as this system's paths.
     let path = if path.is_empty() {
-        source.clone()
+        source.bytes().map_err(|e| e.to_string())?
+    } else if decoded.first() == Some(&b'/') {
+        decoded
     } else {
-        let decoded = std::path::PathBuf::from(std::ffi::OsString::from_vec(decoded));
-        if decoded.is_absolute() { decoded } else { source.parent().ok_or("Document has no parent directory")?.join(decoded) }
+        let folder = source.parent().ok_or("Document has no parent directory")?;
+        folder.join(&decoded).and_then(|joined| joined.bytes()).map_err(|e| e.to_string())?
     };
     // Normalize lexically: the daemon resolves and reads host paths, never this GUI process.
-    let mut normalized = std::path::PathBuf::new();
-    for part in path.components() {
+    let mut parts: Vec<&[u8]> = Vec::new();
+    for part in path.split(|b| *b == b'/') {
         match part {
-            std::path::Component::ParentDir => {
-                normalized.pop();
+            b".." => {
+                parts.pop();
             }
-            std::path::Component::CurDir => {}
-            part => normalized.push(part.as_os_str()),
+            b"" | b"." => {}
+            part => parts.push(part),
         }
     }
+    let mut normalized = vec![b'/'];
+    normalized.extend(parts.join(&b'/'));
     let fragment = percent_encoding::percent_decode_str(fragment).decode_utf8().map_err(|_| "Heading link is not UTF-8")?.into_owned();
-    Ok(LinkTarget::File(HostPath::from_path(&normalized), fragment))
+    Ok(LinkTarget::File(HostPath::from_bytes(&normalized), fragment))
 }
 
 pub(super) fn heading_index(items: &[markdown::Item], fragment: &str) -> Option<usize> {

@@ -1,6 +1,5 @@
 use silli_proto::method;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,8 +21,8 @@ pub fn in_session(app: &App, event: session::Event) -> Message {
 
 /// The daemon's end of a socket pair: read the app's requests, answer or refuse them.
 pub struct Daemon {
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
+    reader: BufReader<Socket>,
+    writer: Socket,
 }
 
 impl Daemon {
@@ -81,11 +80,38 @@ impl Daemon {
     }
 }
 
+/// The two ends of a connection inside this process: a Unix socket pair where there is one, a
+/// loopback connection on Windows.
+#[cfg(unix)]
+type Socket = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+type Socket = std::net::TcpStream;
+
+fn socket_pair() -> (Socket, Socket) {
+    #[cfg(unix)]
+    return Socket::pair().unwrap();
+    #[cfg(windows)]
+    {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let ours = Socket::connect(listener.local_addr().unwrap()).unwrap();
+        (ours, listener.accept().unwrap().0)
+    }
+}
+
+/// A client of the protocol over one end.
+fn client_over(socket: Socket) -> Client {
+    let (reader, close) = (socket.try_clone().unwrap(), socket.try_clone().unwrap());
+    Client::over_io(reader, socket, move || {
+        let _ = close.shutdown(std::net::Shutdown::Both);
+    })
+    .unwrap()
+}
+
 pub fn daemon() -> (Client, Daemon) {
-    let (socket, peer) = UnixStream::pair().unwrap();
+    let (socket, peer) = socket_pair();
     peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let reader = BufReader::new(peer.try_clone().unwrap());
-    (Client::over(socket).unwrap(), Daemon { reader, writer: peer })
+    (client_over(socket), Daemon { reader, writer: peer })
 }
 
 /// A connector handing out these clients one connection at a time, then refusing.
@@ -248,7 +274,7 @@ fn queued_prompt_becomes_visible_on_dispatch_and_question_resolves() {
     assert!(view.open_questions().next().is_none());
 }
 
-fn read_request(reader: &mut BufReader<UnixStream>, method: &str) -> Value {
+fn read_request(reader: &mut BufReader<Socket>, method: &str) -> Value {
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
     let request: Value = serde_json::from_str(&line).unwrap();
@@ -256,13 +282,13 @@ fn read_request(reader: &mut BufReader<UnixStream>, method: &str) -> Value {
     request
 }
 
-fn reply(writer: &mut UnixStream, request: &Value, result: impl serde::Serialize) {
+fn reply(writer: &mut Socket, request: &Value, result: impl serde::Serialize) {
     writeln!(writer, "{}", json!({"jsonrpc":"2.0","id":request["id"],"result":result})).unwrap();
 }
 
 #[test]
 fn fragmented_snapshot_and_live_handoff_over_real_protocol_transport() {
-    let (socket, mut peer) = UnixStream::pair().unwrap();
+    let (socket, mut peer) = socket_pair();
     peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let source = demo::conversation();
     let server = std::thread::spawn(move || {
@@ -314,7 +340,7 @@ fn fragmented_snapshot_and_live_handoff_over_real_protocol_transport() {
             );
         }
     });
-    let client = Client::over(socket).unwrap();
+    let client = client_over(socket);
     let mut view = silli_client::Conversation::attach(&client, "demo").unwrap();
     assert_eq!(view.seq, 3);
     for expected in [false, true] {
@@ -584,10 +610,8 @@ fn other_sessions_waiting_on_the_person_are_marked() {
     let mut ui = simulator(&app, (1000.0, 860.0));
     ui.find("?").unwrap();
     drop(ui);
-    let _ = app.update(Message::Files(Action::Open {
-        path: silli_proto::sessions::HostPath::from_path(std::path::Path::new("/home/demo/project/README.md")),
-        repo: None,
-    }));
+    let _ =
+        app.update(Message::Files(Action::Open { path: silli_proto::sessions::HostPath::from_bytes("/home/demo/project/README.md".as_bytes()), repo: None }));
     let mut ui = simulator(&app, (1000.0, 860.0));
     ui.click("other-title").unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
@@ -745,7 +769,7 @@ pub fn settle(pane: &crate::terminal::Pane, text: &str) {
 }
 
 /// A connection over `socket`, its controls recorded in `seen`.
-fn connection(socket: UnixStream, seen: Arc<Mutex<Vec<String>>>) -> silli_client::terminal::Connection {
+fn connection(socket: Socket, seen: Arc<Mutex<Vec<String>>>) -> silli_client::terminal::Connection {
     use silli_client::terminal::{Connection, Control};
     let close = socket.try_clone().unwrap();
     Connection {
@@ -776,7 +800,7 @@ fn connection(socket: UnixStream, seen: Arc<Mutex<Vec<String>>>) -> silli_client
 fn a_terminal_shows_its_stream_and_sends_keys_back() {
     use crate::terminal::{Event, Pane, Status};
     use std::io::Read;
-    let (ours, mut remote) = UnixStream::pair().unwrap();
+    let (ours, mut remote) = socket_pair();
     remote.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let controls = Arc::new(Mutex::new(Vec::new()));
     let seen = controls.clone();
@@ -833,7 +857,7 @@ fn a_terminal_shows_its_stream_and_sends_keys_back() {
 fn dropping_a_pane_detaches_its_stream_even_after_the_emulator_answered() {
     use crate::terminal::{Pane, Status};
     use std::io::Read;
-    let (ours, mut remote) = UnixStream::pair().unwrap();
+    let (ours, mut remote) = socket_pair();
     remote.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let (mut pane, events) = Pane::open(40, 10, move |_, _| Ok(connection(ours, Arc::default())));
     pane.accept(events.recv_blocking().unwrap());
@@ -1714,7 +1738,7 @@ fn a_button_keeps_its_press_and_a_click_clears_the_selection() {
 fn the_reader_selects_across_markdown_blocks_and_diff_lines() {
     use crate::files::Action;
     use silli_proto::sessions::HostPath;
-    let path = |s: &str| HostPath::from_path(std::path::Path::new(s));
+    let path = |s: &str| HostPath::from_bytes(s.as_bytes());
     let (mut app, _) = App::new(true, None);
     let _ = app.update(Message::Files(Action::Open { path: path("/home/demo/project/README.md"), repo: None }));
     let mut ui = simulator(&app, (1000.0, 860.0));
@@ -1921,10 +1945,8 @@ fn escape_toggles_session_and_backend() {
     let (mut app, _) = App::new(true, None);
     let _ = app.update(Message::Layout(crate::layout::Action::Mode(Mode::Full)));
     let _ = app.update(Message::Files(Action::ToggleDrawer));
-    let _ = app.update(Message::Files(Action::Open {
-        path: silli_proto::sessions::HostPath::from_path(std::path::Path::new("/home/demo/project/README.md")),
-        repo: None,
-    }));
+    let _ =
+        app.update(Message::Files(Action::Open { path: silli_proto::sessions::HostPath::from_bytes("/home/demo/project/README.md".as_bytes()), repo: None }));
     let _ = app.update(Message::Escape);
     assert!(demo_view(&app).files.reader.is_none(), "an open file closes first");
     assert!(app.changes.is_none());
@@ -2284,7 +2306,7 @@ fn the_changes_page_groups_what_sessions_wrote() {
 }
 
 fn page_workspace(id: &str, session: &str, files: &[&str]) -> silli_proto::workspaces::Detail {
-    let host = |p: &str| silli_proto::sessions::HostPath::from_path(std::path::Path::new(p));
+    let host = |p: &str| silli_proto::sessions::HostPath::from_bytes(p.as_bytes());
     let listed: Vec<serde_json::Value> =
         files.iter().map(|f| json!({"path": host(&format!("/home/demo/project/{f}")), "status": "M", "added": "2", "removed": "1"})).collect();
     serde_json::from_value(json!({
@@ -2328,7 +2350,7 @@ fn the_changes_page_is_by_session_with_each_workspaces_files() {
         let task = app.update(message);
         settle_task(&mut app, task);
     }
-    let host = silli_proto::sessions::HostPath::from_path(std::path::Path::new("/home/demo/project/src/a.rs"));
+    let host = silli_proto::sessions::HostPath::from_bytes("/home/demo/project/src/a.rs".as_bytes());
     let key = workspace_key("w1", &host);
     assert!(matches!(app.changes.as_ref().unwrap().open.get(&key), Some(Some(Ok(_)))), "the file's diff is open");
     // the entries read again: a workspace's open diff is not one of theirs to close
@@ -2346,7 +2368,7 @@ fn discarded_workspaces_are_collapsed_by_default() {
     let (mut app, _) = App::new(true, None);
     let task = app.update(Message::ToggleChanges);
     settle_task(&mut app, task);
-    let host = silli_proto::sessions::HostPath::from_path(std::path::Path::new("/home/demo/project"));
+    let host = silli_proto::sessions::HostPath::from_bytes("/home/demo/project".as_bytes());
     let listed = serde_json::from_value(json!({
         "workspaces": [],
         "discarded": [{"discard_id": "d1", "workspace_id": "ws-old", "name": "project", "source": host, "until": "2026-11-22T10:00:00Z", "created_at": "t"}],
@@ -2727,7 +2749,7 @@ fn folder_chips_show_tracked_lines_and_untracked_files_independently() {
     use silli_client::files::{Repo, Root, key};
     use silli_proto::sessions::HostPath;
     let (mut app, _) = App::new(true, None);
-    let path = HostPath::from_path(std::path::Path::new("/project"));
+    let path = HostPath::from_bytes("/project".as_bytes());
     let view = app.views.get_mut("demo").unwrap();
     view.files.roots = vec![Root { path: path.clone(), global: false, metadata: None, error: None }];
     view.files
@@ -3029,15 +3051,17 @@ fn the_hotkey_is_recorded_and_let_go_meanwhile() {
 
     let _ = app.update(Message::Settings(Event::ShortcutKey(Key::Character("`".into()), Physical::Code(Code::Backquote), Modifiers::LOGO)));
     assert_eq!(app.settings_page.as_ref().unwrap().recording, None);
-    assert_eq!(app.settings.hotkey.as_deref(), Some("Super+` @Backquote"));
-    assert_eq!(app.hotkey_wanted(), "Super+` @Backquote");
+    // the logo key by this system's name for it
+    let recorded = if cfg!(windows) { "Win+` @Backquote" } else { "Super+` @Backquote" };
+    assert_eq!(app.settings.hotkey.as_deref(), Some(recorded));
+    assert_eq!(app.hotkey_wanted(), recorded);
     // a window shortcut may share nothing with it: they are apart
     assert!(app.settings.shortcuts.is_empty());
 
     // Escape leaves it, Backspace sets none, Reset brings the default back
     let _ = app.update(Message::Settings(Event::RecordShortcut(HOTKEY)));
     let _ = app.update(Message::Settings(Event::ShortcutKey(Key::Named(Named::Escape), Physical::Code(Code::Escape), Modifiers::empty())));
-    assert_eq!(app.hotkey_wanted(), "Super+` @Backquote");
+    assert_eq!(app.hotkey_wanted(), recorded);
     let _ = app.update(Message::Settings(Event::RecordShortcut(HOTKEY)));
     let _ = app.update(Message::Settings(Event::ShortcutKey(Key::Named(Named::Backspace), Physical::Code(Code::Backspace), Modifiers::empty())));
     assert_eq!(app.settings.hotkey.as_deref(), Some(""));
@@ -3171,7 +3195,7 @@ fn markdown_image_is_read_from_session_host_and_decoded() {
     let request = daemon.expect(method::FILES_IMAGE);
     let params: silli_proto::admin::SessionImage = serde_json::from_value(request["params"].clone()).unwrap();
     assert_eq!(params.session_id, "demo");
-    assert_eq!(params.path.to_path().unwrap(), std::path::PathBuf::from("/tmp/image one.png"));
+    assert_eq!(params.path.display, "/tmp/image one.png");
     let mut png = std::io::Cursor::new(Vec::new());
     image::DynamicImage::new_rgba8(2, 2).write_to(&mut png, image::ImageFormat::Png).unwrap();
     daemon.reply(
@@ -3561,7 +3585,7 @@ fn mode_changes_in_flight_are_serialized() {
 #[test]
 fn markdown_link_click_navigates_and_secondary_click_copies() {
     let (mut app, _) = App::new(true, None);
-    let source = silli_proto::sessions::HostPath::from_path(std::path::Path::new("/home/demo/project/README.md"));
+    let source = silli_proto::sessions::HostPath::from_bytes("/home/demo/project/README.md".as_bytes());
     let _ = app.update(Message::Files(crate::files::Action::Open { path: source.clone(), repo: None }));
     let view = app.views.get_mut("demo").unwrap();
     let file = view.files.reader.as_mut().unwrap();
@@ -4334,7 +4358,7 @@ fn find_escape_terminal_focus_and_navigation_close() {
     // Opening a file in the reader closes Find.
     let _ = app.update(Message::Find(FindEvent::Open));
     assert!(app.find.shown);
-    let _ = app.update(Message::Files(Action::Open { path: HostPath::from_path(std::path::Path::new("/home/demo/project/README.md")), repo: None }));
+    let _ = app.update(Message::Files(Action::Open { path: HostPath::from_bytes("/home/demo/project/README.md".as_bytes()), repo: None }));
     assert!(!app.find.shown);
     let _ = app.update(Message::Files(Action::CloseViewer));
 
@@ -4356,7 +4380,7 @@ fn find_searches_the_reader_preview_source_and_diff() {
     use crate::files::Action;
     use crate::find::{Event as FindEvent, ReaderMode, Surface};
     use silli_proto::sessions::HostPath;
-    let path = |p: &str| HostPath::from_path(std::path::Path::new(p));
+    let path = |p: &str| HostPath::from_bytes(p.as_bytes());
     let mode = |app: &App| match &app.find.surface {
         Some(Surface::Reader { mode, .. }) => Some(*mode),
         _ => None,

@@ -1,5 +1,7 @@
-//! The tray on the Mac: an item in the menu bar, by `tray-icon`. The picture is a template (the
-//! herring and its silli without the plate), so the menu bar tints it for its own light or dark.
+//! The tray on the Mac and on Windows, by `tray-icon`: an item in the menu bar, an icon in the
+//! notification area. On the Mac the picture is a template (the herring and its silli without the
+//! plate), so the menu bar tints it for its own light or dark; on Windows it is the tray's own
+//! picture, plate and all.
 //! Everything here happens on the main thread, where the window's messages are handled; the
 //! moving icon is stepped by the window's own clock (`Tray::tick`).
 use std::cell::{Cell, RefCell};
@@ -9,8 +11,9 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 
 use super::{Asked, FRAMES, TRAY_ICON, frame_svg, rgba};
 
-/// The picture's side in pixels: the menu bar's 22 points on a Retina display.
-const SIZE: u32 = 44;
+/// The picture's side in pixels: the menu bar's 22 points on a Retina display; on Windows the
+/// notification area's 16 at twice the size, which it scales to the display.
+const SIZE: u32 = if cfg!(target_os = "macos") { 44 } else { 32 };
 
 /// The running item; dropping it removes the icon.
 pub struct Tray {
@@ -53,13 +56,17 @@ impl Tray {
         }
         let frames = self.frames.borrow();
         if let Some(icon) = frames.get(frame).or_else(|| frames.first()) {
+            #[cfg(target_os = "macos")]
             let _ = self.icon.set_icon_templated(Some(icon.clone()));
+            #[cfg(not(target_os = "macos"))]
+            let _ = self.icon.set_icon(Some(icon.clone()));
         }
     }
 }
 
 /// The tray's SVG as the menu bar's template: the plate gone, the herring and the silli left for
 /// the menu bar to tint.
+#[cfg(target_os = "macos")]
 fn picture(svg: &str) -> Option<Icon> {
     let plate = svg.find(r#"<rect x="4" y="4""#)?;
     let end = plate + svg[plate..].find("/>")? + 2;
@@ -67,15 +74,26 @@ fn picture(svg: &str) -> Option<Icon> {
     Icon::from_rgba(rgba(&bare, SIZE)?, SIZE, SIZE).ok()
 }
 
+/// The tray's picture as it is.
+#[cfg(not(target_os = "macos"))]
+fn picture(svg: &str) -> Option<Icon> {
+    Icon::from_rgba(rgba(svg, SIZE)?, SIZE, SIZE).ok()
+}
+
 /// Put the icon in the menu bar; `None` (said on stderr) when it cannot be made.
 pub fn start(asked: async_channel::Sender<Asked>) -> Option<Tray> {
+    #[cfg(target_os = "macos")]
     if objc2::MainThreadMarker::new().is_none() {
         eprintln!("silli-gui: no menu bar icon: not on the main thread");
         return None;
     }
     let toggle = MenuItem::new("Show / hide silli", true, None);
     // with the window's own VM, quitting ends it, and the sessions in it
-    let quit = MenuItem::new(if crate::local_vm::phase().is_some() { "Quit Silli" } else { "Quit the window (sessions go on)" }, true, None);
+    #[cfg(target_os = "macos")]
+    let own_vm = crate::local_vm::phase().is_some();
+    #[cfg(not(target_os = "macos"))]
+    let own_vm = false;
+    let quit = MenuItem::new(if own_vm { "Quit Silli" } else { "Quit the window (sessions go on)" }, true, None);
     let menu = Menu::new();
     if let Err(e) = menu.append_items(&[&toggle, &PredefinedMenuItem::separator(), &quit]) {
         eprintln!("silli-gui: no menu bar icon: {e}");
@@ -98,11 +116,15 @@ pub fn start(asked: async_channel::Sender<Asked>) -> Option<Tray> {
     }));
     let rest = picture(TRAY_ICON)?;
     let built = TrayIconBuilder::new()
-        .with_icon_templated(rest.clone())
+        .with_icon(rest.clone())
         .with_tooltip("Silli: click to show or hide")
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
         .build();
+    #[cfg(target_os = "macos")]
+    if let Ok(icon) = &built {
+        let _ = icon.set_icon_templated(Some(rest.clone()));
+    }
     match built {
         Ok(icon) => Some(Tray { icon, frames: RefCell::new(vec![rest]), frame: Cell::new(0), busy: Cell::new(false) }),
         Err(e) => {
@@ -112,7 +134,7 @@ pub fn start(asked: async_channel::Sender<Asked>) -> Option<Tray> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     #[test]
     fn the_template_is_the_herring_without_its_plate() {

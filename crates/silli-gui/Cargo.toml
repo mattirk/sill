@@ -38,7 +38,6 @@ unicode-width = "0.2"
 # the desktop on X11: the global hotkey, placing the window on the screen edge, asking the window
 # manager to activate it (the daemon's x11rb, same version)
 x11rb = { version = "0.14", features = ["randr"] }
-rustix.workspace = true
 # the local day of a time (localtime_r), for the running-time chart
 libc = "0.2"
 resvg = { version = "0.45", default-features = false }
@@ -48,10 +47,16 @@ resvg = { version = "0.45", default-features = false }
 objc2 = "0.6"
 # its own Linux VM, the box its daemon runs in (`local_vm.rs`)
 silli-vm = { path = "../silli-vm" }
-# the menu bar's icon (`tray/menu_bar.rs`)
+
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+# the menu bar's icon on the Mac, the notification area's on Windows (`tray/menu_bar.rs`)
 tray-icon = { version = "0.26", default-features = false }
 
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+[target.'cfg(unix)'.dependencies]
+# file descriptors and the account's id: the X11 hotkey's wake-up pipe, the control socket's place
+rustix.workspace = true
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 # the panel's tray icon (`tray/sni.rs`)
 ksni = { version = "0.3.7", default-features = false, features = ["tokio", "blocking"] }
 

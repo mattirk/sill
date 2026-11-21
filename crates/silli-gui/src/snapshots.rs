@@ -91,7 +91,7 @@ fn calibrate() {
 fn render_files() {
     use crate::{Message, files::Action};
     use silli_proto::sessions::HostPath;
-    let path = |s: &str| HostPath::from_path(std::path::Path::new(s));
+    let path = |s: &str| HostPath::from_bytes(s.as_bytes());
     let (mut app, _) = App::new(true, None);
     let _ = app.update(Message::Layout(crate::layout::Action::Mode(crate::layout::Mode::Drawer)));
     let _ = app.update(Message::Files(Action::Toggle(path("/home/demo/project/src"))));
@@ -220,7 +220,7 @@ fn render_thoughts() {
 fn render_syntax_views() {
     use crate::{Message, files::Action};
     use silli_proto::sessions::HostPath;
-    let path = |s: &str| HostPath::from_path(std::path::Path::new(s));
+    let path = |s: &str| HostPath::from_bytes(s.as_bytes());
     let (mut app, _) = App::new(true, None);
     let _ = app.update(Message::Files(Action::Open { path: path("/home/demo/project/src/main.rs"), repo: None }));
     render(&app, "syntax-source");
@@ -245,7 +245,7 @@ fn render_source_editing() {
     use iced::widget::text_editor;
     use silli_proto::sessions::HostPath;
     let (mut app, _) = App::new(true, None);
-    let _ = app.update(Message::Files(Action::Open { path: HostPath::from_path(std::path::Path::new("/home/demo/project/src/main.rs")), repo: None }));
+    let _ = app.update(Message::Files(Action::Open { path: HostPath::from_bytes("/home/demo/project/src/main.rs".as_bytes()), repo: None }));
     let _ = app.update(Message::Files(Action::Text(text_editor::Action::Edit(text_editor::Edit::Insert('X')))));
     render(&app, "edit-source");
     let _ = app.update(Message::Files(Action::CloseViewer));
@@ -441,7 +441,7 @@ fn render_source_gutter() {
     use iced::widget::text_editor;
     use silli_proto::sessions::HostPath;
     let (mut app, _) = App::new(true, None);
-    let _ = app.update(Message::Files(Action::Open { path: HostPath::from_path(std::path::Path::new("/home/demo/project/README.md")), repo: None }));
+    let _ = app.update(Message::Files(Action::Open { path: HostPath::from_bytes("/home/demo/project/README.md".as_bytes()), repo: None }));
     let _ = app.update(Message::Files(Action::Source));
     let content = (1..=130)
         .map(|line| {
@@ -487,7 +487,7 @@ fn render_workspaces() {
         let _ = app.update(Message::DemoTick);
     }
     let _ = app.update(crate::tests::in_session(&app, crate::session::Event::Answer { question_id: "demo-question".into(), option_id: "allow".into() }));
-    let host = |p: &str| silli_proto::sessions::HostPath::from_path(std::path::Path::new(p));
+    let host = |p: &str| silli_proto::sessions::HostPath::from_bytes(p.as_bytes());
     let ws = serde_json::json!({"workspace_id": "ws-1", "name": "project", "session_id": "demo", "source": host("/home/demo/project"),
         "source_branch": "main", "base": "b0", "branch": "silli/project-ws-1", "path": host("/ws/project-ws-1"),
         "state": "open", "operation": null, "limitations": [], "created_at": "t", "updated_at": "t"});
@@ -542,7 +542,7 @@ fn render_crosscheck() {
         let _ = app.update(Message::DemoTick);
     }
     let _ = app.update(crate::tests::in_session(&app, crate::session::Event::Answer { question_id: "demo-question".into(), option_id: "allow".into() }));
-    let host = |p: &str| silli_proto::sessions::HostPath::from_path(std::path::Path::new(p));
+    let host = |p: &str| silli_proto::sessions::HostPath::from_bytes(p.as_bytes());
     let ws = serde_json::json!({"workspace_id": "ws-1", "name": "silli", "session_id": "demo", "source": host("/home/demo/silli"),
         "source_branch": "main", "base": "b0", "branch": "silli/silli-ws-1", "path": host("/ws/silli-ws-1"),
         "state": "open", "operation": null, "limitations": [], "created_at": "t", "updated_at": "t"});
@@ -751,7 +751,7 @@ fn render_tab_hover() {
 fn render_changes_workspaces() {
     use crate::Message;
     let (mut app, _) = App::new(true, None);
-    let host = |p: &str| silli_proto::sessions::HostPath::from_path(std::path::Path::new(p));
+    let host = |p: &str| silli_proto::sessions::HostPath::from_bytes(p.as_bytes());
     for (id, title, ended) in [("s1", "Changes view grouping", false), ("s2", "Restore previous active tab", true), ("s3", "Session tab layout fix", false)] {
         let mut s = crate::tests::session_record(id, "claude", ended, false);
         s.title = title.into();

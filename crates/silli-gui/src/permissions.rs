@@ -1133,12 +1133,12 @@ mod tests {
     fn filesystem_changes_require_restart_but_unused_inventory_does_not() {
         let launch: PolicyView = serde_json::from_value(view("launch", false, json!([]))).unwrap();
         let mut preview = launch.clone();
-        preview.filesystem.as_mut().unwrap().unused.push(silli_proto::sessions::HostPath::from_path(std::path::Path::new("/stored/.cargo")));
+        preview.filesystem.as_mut().unwrap().unused.push(silli_proto::sessions::HostPath::from_bytes("/stored/.cargo".as_bytes()));
         let mut perms = Perms { views: Some(Views { launch: Some(launch), preview, agent_name: None, warnings: vec![] }), ..Default::default() };
         assert!(!perms.filesystem_open);
         assert!(!perms.restart_pending(true));
         perms.views.as_mut().unwrap().preview.filesystem.as_mut().unwrap().rules.push(silli_proto::admin::PathRule {
-            target: silli_proto::sessions::HostPath::from_path(std::path::Path::new("/home/me/.codex")),
+            target: silli_proto::sessions::HostPath::from_bytes("/home/me/.codex".as_bytes()),
             backing: None,
             behavior: "agent".into(),
             source: "home_paths".into(),
@@ -1156,7 +1156,7 @@ mod tests {
         app.all_sessions = vec![session_record("demo", "demo", false, false)];
         let mut preview: PolicyView = serde_json::from_value(view("preview", false, json!([]))).unwrap();
         let rule = |behavior: &str, target: &str| silli_proto::admin::PathRule {
-            target: silli_proto::sessions::HostPath::from_path(std::path::Path::new(target)),
+            target: silli_proto::sessions::HostPath::from_bytes(target.as_bytes()),
             backing: None,
             behavior: behavior.into(),
             source: "test".into(),

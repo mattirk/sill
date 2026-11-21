@@ -22,6 +22,7 @@ pub struct Day {
 }
 
 /// Seconds east of UTC at `seconds`, by the machine's time zone (0 when it cannot be told).
+#[cfg(unix)]
 fn local_offset(seconds: i64) -> i64 {
     let time: libc::time_t = seconds as libc::time_t;
     // SAFETY: localtime_r writes only the tm it is given and reads the time it is given.
@@ -29,6 +30,29 @@ fn local_offset(seconds: i64) -> i64 {
         let mut tm: libc::tm = std::mem::zeroed();
         if libc::localtime_r(&time, &mut tm).is_null() { 0 } else { tm.tm_gmtoff as i64 }
     }
+}
+
+/// Windows' C library gives the local date and time of a moment, not its offset: the offset is
+/// that date and time read as if it were UTC, less the moment.
+#[cfg(windows)]
+fn local_offset(seconds: i64) -> i64 {
+    let time: libc::time_t = seconds as libc::time_t;
+    // SAFETY: localtime_s writes only the tm it is given and reads the time it is given.
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_s(&mut tm, &time) != 0 {
+            return 0;
+        }
+        tm
+    };
+    // days from 1970-01-01 to the civil date (Howard Hinnant's days_from_civil)
+    let (year, month, day) = (tm.tm_year as i64 + 1900, tm.tm_mon as i64 + 1, tm.tm_mday as i64);
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let of_era = year.rem_euclid(400);
+    let of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let days = era * 146_097 + of_era * 365 + of_era / 4 - of_era / 100 + of_year - 719_468;
+    days * 86_400 + tm.tm_hour as i64 * 3600 + tm.tm_min as i64 * 60 + tm.tm_sec as i64 - seconds
 }
 
 fn now_seconds() -> i64 {

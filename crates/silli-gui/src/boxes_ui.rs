@@ -107,12 +107,17 @@ pub fn current() -> Option<String> {
 
 /// What this machine's own box is called here.
 fn this_machine() -> &'static str {
-    if cfg!(target_os = "macos") { "This Mac" } else { "This computer" }
+    if cfg!(target_os = "macos") {
+        "This Mac"
+    } else if cfg!(windows) {
+        "This PC"
+    } else {
+        "This computer"
+    }
 }
 
 /// Start a window on `name` (None: this machine's own), beside this one.
 fn open_window(name: Option<&str>) -> Result<(), String> {
-    use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().map_err(|e| format!("cannot find this program: {e}"))?;
     let mut command = std::process::Command::new(&exe);
     command.env_remove("SILLI_BOX").env_remove("SILLI_GUI_SOCKET").env(RAISE_ENV, "1");
@@ -120,7 +125,12 @@ fn open_window(name: Option<&str>) -> Result<(), String> {
         command.env("SILLI_BOX", name).env("SILLI_GUI_SOCKET", crate::control::box_socket_path(name));
     }
     // its own process group: a signal to this window's group leaves the other window
-    command.stdin(std::process::Stdio::null()).process_group(0);
+    command.stdin(std::process::Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    // CREATE_NEW_PROCESS_GROUP
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0000_0200);
     #[cfg(target_os = "macos")]
     crate::macos::yield_activation();
     let mut child = command.spawn().map_err(|e| format!("cannot start {}: {e}", exe.display()))?;

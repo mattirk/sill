@@ -16,19 +16,37 @@ use crate::shortcuts::Capture;
 
 #[cfg(target_os = "macos")]
 mod carbon;
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+mod windows;
+#[cfg(all(unix, not(target_os = "macos")))]
 mod x11;
 #[cfg(target_os = "macos")]
 pub use carbon::{Hotkey, start};
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+pub use windows::{Hotkey, start};
+#[cfg(all(unix, not(target_os = "macos")))]
 pub use x11::{Hotkey, start};
 
 /// The modifiers as this system's keyboards name them, in the order a spec lists them:
 /// Control, the logo key, Alt, Shift.
-const NAMES: [&str; 4] = if cfg!(target_os = "macos") { ["Control", "Cmd", "Option", "Shift"] } else { ["Ctrl", "Super", "Alt", "Shift"] };
+const NAMES: [&str; 4] = if cfg!(target_os = "macos") {
+    ["Control", "Cmd", "Option", "Shift"]
+} else if cfg!(windows) {
+    ["Ctrl", "Win", "Alt", "Shift"]
+} else {
+    ["Ctrl", "Super", "Alt", "Shift"]
+};
 
 /// The default, when the setting is unset.
-pub const DEFAULT: &str = if cfg!(target_os = "macos") { "Option+Space @Space" } else { "Alt+Space @Space" };
+/// On Windows `Alt+Space` is the system's own window menu, and other programs take it
+/// (docs/silli-windows.md, section 15).
+pub const DEFAULT: &str = if cfg!(target_os = "macos") {
+    "Option+Space @Space"
+} else if cfg!(windows) {
+    "Ctrl+Alt+Space @Space"
+} else {
+    "Alt+Space @Space"
+};
 
 /// What the hotkey thread tells the window.
 #[derive(Debug, Clone)]
@@ -138,7 +156,7 @@ pub fn validate(spec: &str) -> Result<()> {
     if !(chord.ctrl || chord.alt || chord.logo || bare_ok(chord.code)) {
         bail!("without {}, {} or {} this key would be swallowed everywhere you type it; hold one, or use a function key", NAMES[0], NAMES[2], NAMES[1]);
     }
-    if cfg!(not(target_os = "macos")) && chord.ctrl && chord.alt && is_function(chord.code) {
+    if cfg!(target_os = "linux") && chord.ctrl && chord.alt && is_function(chord.code) {
         bail!("Ctrl+Alt with a function key switches the virtual console");
     }
     Ok(())
@@ -188,7 +206,7 @@ mod tests {
         assert!(validate("Ctrl+Alt+KeyT").is_ok(), "by hand, the physical key alone");
         assert!(validate("A @KeyA").is_err(), "a bare letter would be swallowed");
         assert!(validate("Shift+A @KeyA").is_err());
-        assert_eq!(validate("Ctrl+Alt+F2 @F2").is_err(), cfg!(not(target_os = "macos")), "the virtual console's");
+        assert_eq!(validate("Ctrl+Alt+F2 @F2").is_err(), cfg!(target_os = "linux"), "the virtual console's");
         assert!(validate("Option+Space @Space").is_ok() && validate("Cmd+Control+KeyK").is_ok(), "as a Mac names them");
         assert!(validate("Alt+X @NoSuchKey").is_err());
         assert!(validate("Hyper+Space @Space").is_err());
@@ -206,7 +224,10 @@ mod tests {
     fn a_press_is_recorded_as_the_physical_key() {
         use iced::keyboard::key::Named;
         let space = Key::Named(Named::Space);
-        assert_eq!(capture(&space, Physical::Code(Code::Space), Modifiers::ALT), Capture::Chord(DEFAULT.into()));
+        assert_eq!(capture(&space, Physical::Code(Code::Space), Modifiers::ALT), Capture::Chord(format!("{}+Space @Space", NAMES[2])));
+        // the default is a chord the recorder would itself write
+        let held = if cfg!(windows) { Modifiers::CTRL | Modifiers::ALT } else { Modifiers::ALT };
+        assert_eq!(capture(&space, Physical::Code(Code::Space), held), Capture::Chord(DEFAULT.into()));
         assert_eq!(
             capture(&Key::Character("`".into()), Physical::Code(Code::Backquote), Modifiers::LOGO),
             Capture::Chord(format!("{}+` @Backquote", NAMES[1]))

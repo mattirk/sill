@@ -13,7 +13,7 @@ mod links;
 mod tree;
 
 fn path(p: &str) -> HostPath {
-    HostPath::from_path(std::path::Path::new(p))
+    HostPath::from_bytes(p.as_bytes())
 }
 
 fn metadata(directory: bool) -> admin::FileMetadata {

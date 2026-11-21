@@ -476,7 +476,7 @@ impl App {
         if view.media.len() >= 64 {
             return Task::none();
         }
-        let home = view.files.home.as_ref().and_then(|p| p.to_path().ok());
+        let home = view.files.home.clone();
         let mut keys: Vec<String> = view.conversation.items().values().flat_map(item_keys).collect();
         for submission in view.conversation.submissions.values() {
             for a in &submission.attachments {
@@ -519,8 +519,12 @@ impl App {
                             return Err("Remote image URLs are not fetched automatically.".into());
                         }
                         let decoded = percent_encoding::percent_decode_str(path).decode_utf8().map_err(|e| e.to_string())?;
-                        let path = std::path::PathBuf::from(decoded.as_ref());
-                        let path = if path.is_absolute() { path } else { home.ok_or("Session home is not known; retry after opening Files.")?.join(path) };
+                        // a path of the box: absolute as it is, else below the session's home
+                        let path = if decoded.starts_with('/') {
+                            silli_proto::sessions::HostPath::from_bytes(decoded.as_bytes())
+                        } else {
+                            home.ok_or("Session home is not known; retry after opening Files.")?.join(decoded.as_bytes()).map_err(|e| e.to_string())?
+                        };
                         let mut bytes = Vec::new();
                         let mut offset = "0".to_string();
                         let mut revision = None;
@@ -530,7 +534,7 @@ impl App {
                                     method::FILES_IMAGE,
                                     serde_json::to_value(admin::SessionImage {
                                         session_id: session.clone(),
-                                        path: silli_proto::sessions::HostPath::from_path(&path),
+                                        path: path.clone(),
                                         offset: offset.clone(),
                                         length: Some(256 * 1024),
                                         revision,

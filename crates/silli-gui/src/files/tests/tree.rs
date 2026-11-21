@@ -261,7 +261,9 @@ fn folder_picker_pins_only_the_originating_session() {
     app.selected = Some("b".into());
     act(&mut app, Action::PickFolder);
     assert_eq!(app.drawer.folder_picker, Some((session.clone(), token.clone())));
-    act(&mut app, Action::FolderPicked { session, token, path: Some("/home/demo/project".into()) });
+    // a folder of this machine, as its picker gives one
+    let picked = if cfg!(windows) { "C:/demo/project" } else { "/home/demo/project" };
+    act(&mut app, Action::FolderPicked { session, token, path: Some(picked.into()) });
     assert!(app.drawer.folder_picker.is_none());
     // The demo refuses pin requests: its error proves the request reached the original tab.
     assert!(app.views["demo"].files.error.as_deref().unwrap().contains("Demo pins"));

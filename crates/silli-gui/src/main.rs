@@ -4,6 +4,7 @@ mod annotation_state;
 #[cfg(test)]
 mod annotation_tests;
 mod armed;
+mod box_paths;
 mod box_ui;
 mod boxes_ui;
 mod changes_page;
@@ -171,7 +172,10 @@ fn main() -> iced::Result {
             // no title bar: the top bar's empty space moves the window
             // the Mac keeps the system's frame for its rounded corners, rim and shadow, the title
             // bar transparent and its buttons hidden (`macos.rs`)
-            decorations: cfg!(target_os = "macos"),
+            // Windows: its own frame and title bar for now, so the system moves, resizes and
+            // snaps the window; which frame it keeps is the person's to choose on sight
+            // (docs/silli-windows.md, section 15)
+            decorations: cfg!(any(target_os = "macos", windows)),
             visible: !options.hidden,
             // closing hides: the window stays, and with it the hotkey and `silli toggle`
             exit_on_close_request: options.demo,
@@ -368,8 +372,8 @@ pub enum Message {
     CloseRequested,
     /// From the tray icon.
     Tray(tray::Asked),
-    /// The Mac's menu bar icon: the next frame while an agent works.
-    #[cfg(target_os = "macos")]
+    /// The Mac's menu bar icon and Windows' tray icon: the next frame while an agent works.
+    #[cfg(any(target_os = "macos", windows))]
     TrayTick,
     /// Work done off the window's thread that needs no answer.
     Nothing,
@@ -807,6 +811,7 @@ fn x11_window(window: &dyn iced::window::Window) -> Option<u64> {
     use iced::window::raw_window_handle::RawWindowHandle;
     match window.window_handle().ok()?.as_raw() {
         // X ids are 32 bits, whatever Xlib's long is
+        #[cfg(unix)]
         RawWindowHandle::Xlib(handle) => Some(u64::from(handle.window as u32)),
         RawWindowHandle::Xcb(handle) => Some(u64::from(handle.window.get())),
         _ => None,
@@ -891,7 +896,7 @@ impl App {
             height: START_SIZE.height,
             layout: layout::Layout {
                 // the Mac's window is the system's: resized and placed by it, without modes
-                plain: cfg!(target_os = "macos") && !cfg!(test),
+                plain: cfg!(any(target_os = "macos", windows)) && !cfg!(test),
                 ..layout::Layout::default()
             },
             settings: settings::Settings::default(),
@@ -990,6 +995,11 @@ impl App {
         let mut subscriptions = vec![];
         if self.demo && self.demo_step <= demo::CHUNKS.len() {
             subscriptions.push(iced::time::every(Duration::from_millis(600)).map(|_| Message::DemoTick));
+        }
+        // Windows' tray icon is stepped the same way
+        #[cfg(windows)]
+        if self.tray_busy && self.tray.is_some() {
+            subscriptions.push(iced::time::every(Duration::from_millis(tray::FRAME_MS)).map(|_| Message::TrayTick));
         }
         // the menu bar's icon moves while an agent works; the Mac steps it on the main thread
         // (Linux's tray has a thread of its own)
@@ -1424,7 +1434,7 @@ impl App {
                 return if active { self.hide() } else { self.show(time) };
             }
             Message::CloseRequested => return self.hide(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             Message::TrayTick => {
                 if let Some(tray) = &self.tray {
                     tray.tick();

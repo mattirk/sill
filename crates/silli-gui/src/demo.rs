@@ -155,7 +155,7 @@ pub fn prompt(seq: u64, text: &str) -> Vec<SessionEvent> {
 }
 
 fn path(path: &str) -> HostPath {
-    HostPath::from_path(std::path::Path::new(path))
+    HostPath::from_bytes(path.as_bytes())
 }
 
 fn metadata(directory: bool) -> admin::FileMetadata {

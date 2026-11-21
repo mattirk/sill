@@ -370,8 +370,8 @@ impl App {
                         title: title.into(),
                         bytes: mb << 20,
                         active,
-                        path: silli_proto::sessions::HostPath::from_path(
-                            &std::path::Path::new("/var/lib/silli/1000/sessions").join(id).join("private/home%silli%.cache/silli-dev/target"),
+                        path: silli_proto::sessions::HostPath::from_bytes(
+                            format!("/var/lib/silli/1000/sessions/{id}/private/home%silli%.cache/silli-dev/target").as_bytes(),
                         ),
                         problem: None,
                     };

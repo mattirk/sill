@@ -122,7 +122,7 @@ pub struct Drawer {
 impl Drawer {
     /// A workspace session's repositories for the file worker to read in their workspaces
     /// (docs/parallel-coding.md §12); true when that changed, so the drawer reads again.
-    pub(crate) fn set_aliases(&self, session: &str, pairs: Vec<(std::path::PathBuf, std::path::PathBuf)>) -> bool {
+    pub(crate) fn set_aliases(&self, session: &str, pairs: Vec<silli_client::files::AliasPair>) -> bool {
         self.files.as_ref().is_some_and(|f| f.set_aliases(session, pairs))
     }
 

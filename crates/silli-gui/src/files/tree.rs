@@ -2,7 +2,6 @@
 //! diff mode and the native folder picker.
 use iced::Task;
 use silli_client::files::{self, Request};
-use silli_proto::sessions::HostPath;
 
 use super::Action;
 use super::edits::edit_source;
@@ -45,7 +44,7 @@ impl App {
         let Some(view) = self.views.get_mut(&session).filter(|v| v.media_token == token) else {
             return Task::none();
         };
-        let requests = path.and_then(|path| view.files.pin(HostPath::from_path(&path), true)).into_iter().collect();
+        let requests = path.and_then(|path| crate::box_paths::from_local(&path)).and_then(|path| view.files.pin(path, true)).into_iter().collect();
         self.files_send(&session, requests);
         Task::none()
     }
@@ -60,7 +59,7 @@ impl App {
             return Task::none();
         };
         let requests = match result {
-            Ok(path) => view.files.pin(HostPath::from_path(&path), true).into_iter().collect(),
+            Ok(path) => crate::box_paths::from_local(&path).and_then(|path| view.files.pin(path, true)).into_iter().collect(),
             Err(said) => {
                 view.files.error = Some(said);
                 Vec::new()

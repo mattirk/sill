@@ -4,17 +4,17 @@
 //! the silli ripples, the fish rides it — a frame every 125 ms; still when every session is idle.
 //!
 //! On Linux it is a StatusNotifierItem (`tray/sni.rs`), on the Mac an item in the menu bar
-//! (`tray/menu_bar.rs`): the same clicks, menu and motion.
+//! (`tray/menu_bar.rs`), on Windows an icon in the notification area by the same code: the same clicks, menu and motion.
 use std::f64::consts::PI;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod menu_bar;
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 mod sni;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub use menu_bar::{Tray, start};
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub use sni::{Tray, start};
 
 /// What the tray asks of the window.

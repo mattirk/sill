@@ -294,7 +294,7 @@ impl App {
                     return Task::none();
                 }
                 page.pin_path.clear();
-                let path = silli_proto::sessions::HostPath::from_path(std::path::Path::new(&path));
+                let path = silli_proto::sessions::HostPath::from_bytes(path.as_bytes());
                 return self.settings_call(settings::add_global_pin(path), |_| "Pinned for every new session".into());
             }
             Event::RemovePin(path) => {

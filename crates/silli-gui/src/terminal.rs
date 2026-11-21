@@ -252,13 +252,19 @@ impl Pane {
     }
 }
 
-/// `--demo`: a pretend shell on the other end of a socket pair; it echoes, knows `ls` and `exit`.
-#[cfg(unix)]
+/// `--demo`: a pretend shell on the other end of a connection inside this process (a Unix socket
+/// pair; on Windows, which has none, a loopback connection); it echoes, knows `ls` and `exit`.
 pub fn demo_shell(cols: u16, rows: u16) -> anyhow::Result<Connection> {
     use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
     const PROMPT: &str = "\x1b[32mdemo@jail\x1b[0m:\x1b[34m~/project\x1b[0m$ ";
-    let (ours, mut theirs) = UnixStream::pair()?;
+    #[cfg(unix)]
+    let (ours, mut theirs) = std::os::unix::net::UnixStream::pair()?;
+    #[cfg(windows)]
+    let (ours, mut theirs) = {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        let ours = std::net::TcpStream::connect(listener.local_addr()?)?;
+        (ours, listener.accept()?.0)
+    };
     std::thread::Builder::new().name("silli-gui-demo-shell".into()).spawn(move || {
         let mut line = String::new();
         let mut bytes = [0u8; 1024];
@@ -323,12 +329,6 @@ pub fn demo_shell(cols: u16, rows: u16) -> anyhow::Result<Connection> {
         },
         control: Box::new(|_| Ok(())),
     })
-}
-
-/// Off Unix the demo has no pretend shell.
-#[cfg(not(unix))]
-pub fn demo_shell(_: u16, _: u16) -> anyhow::Result<Connection> {
-    anyhow::bail!("the demo's pretend shell needs a Unix socket pair")
 }
 
 // --- drawing and input ----------------------------------------------------------------------

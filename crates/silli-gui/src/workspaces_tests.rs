@@ -8,7 +8,7 @@ use super::*;
 use crate::tests::{daemon, live_app, settle_task};
 
 fn path(p: &str) -> Value {
-    json!(silli_proto::sessions::HostPath::from_path(std::path::Path::new(p)))
+    json!(silli_proto::sessions::HostPath::from_bytes(p.as_bytes()))
 }
 
 fn workspace() -> Value {

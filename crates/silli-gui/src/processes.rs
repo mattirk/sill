@@ -669,7 +669,7 @@ mod tests {
         Process {
             name: name.into(),
             argv: vec!["serve".into()],
-            cwd: silli_proto::sessions::HostPath::from_path(std::path::Path::new("/tmp")),
+            cwd: silli_proto::sessions::HostPath::from_bytes("/tmp".as_bytes()),
             port,
             pid: 1,
             started: "0".into(),

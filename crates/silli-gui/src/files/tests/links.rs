@@ -12,7 +12,7 @@ fn document_links_resolve_against_the_document_not_the_process_directory() {
         ("/elsewhere/file.md", "/elsewhere/file.md", ""),
     ] {
         let LinkTarget::File(actual, fragment) = resolve_link(&source, target).unwrap() else { panic!("expected file") };
-        assert_eq!(actual.to_path().unwrap(), std::path::Path::new(expected));
+        assert_eq!(actual.display, expected);
         assert_eq!(fragment, anchor);
     }
     assert!(matches!(resolve_link(&source, "https://example.org/a#b").unwrap(), LinkTarget::Web(_)));
