@@ -1,8 +1,7 @@
 //! The subagents at work, listed above the prompt: one row each, a small spinner, what the agent
-//! calls it and the last thing it did. Read from the conversation alone: a subagent is its
-//! delegation card (a tool item of kind `Delegate`, SPEC §4.1), at work while the card's status
-//! says so, and what it does are the tool items under that card. A card of an earlier agent
-//! process is not listed: nothing will ever finish it.
+//! calls it and its status. Read from the conversation alone: a subagent is its delegation card
+//! (a tool item of kind `Delegate`, SPEC §4.1), at work while the card's status says so. A card of
+//! an earlier agent process is not listed: nothing will ever finish it.
 use iced::widget::{Column, column, container, row, rule, scrollable, space, text};
 use iced::{Alignment, Element, Fill};
 use sill_client::conversation::Conversation;
@@ -22,8 +21,6 @@ pub struct Subagent<'a> {
     pub title: &'a str,
     pub id: &'a str,
     pub status: Status,
-    /// The title of its latest call.
-    pub activity: Option<&'a str>,
     /// How many subagents it is under.
     pub depth: usize,
 }
@@ -104,17 +101,9 @@ pub fn at_work(conversation: &Conversation) -> Vec<Subagent<'_>> {
     for item in conversation.visible_items() {
         let Some(tool) = &item.tool else { continue };
         let parent = tool.parent_item_id.as_deref().and_then(|id| places.get(id).copied());
-        if let Some(parent) = parent
-            && !tool.title.trim().is_empty()
-            // its own subagent has a row of its own
-            && !tool.kind.eq_ignore_ascii_case("delegate")
-        {
-            let under: &mut Subagent<'_> = &mut listed[parent];
-            under.activity = Some(name(&tool.title));
-        }
         let Some(status) = Status::of(item, conversation) else { continue };
         places.insert(item.item_id.as_str(), listed.len());
-        listed.push(Subagent { id: &item.item_id, title: name(&tool.title), status, activity: None, depth: parent.map_or(0, |p| listed[p].depth + 1) });
+        listed.push(Subagent { id: &item.item_id, title: name(&tool.title), status, depth: parent.map_or(0, |p| listed[p].depth + 1) });
     }
     listed
 }
@@ -133,15 +122,12 @@ pub fn panel(view: &SessionView) -> Option<Element<'_, Message>> {
             Status::NeedsInput => container(text("!").size(style::SMALL).color(P.warning)).center_x(11).into(),
             Status::Unknown => container(text("·").size(style::SMALL).color(P.fg_dim)).center_x(11).into(),
         };
-        let mut description = row![
+        let description = row![
             text(crate::ui::one_line(subagent.title, 48)).size(style::SMALL).wrapping(text::Wrapping::None),
             text(subagent.status.label()).size(style::TINY).color(P.fg_dim).wrapping(text::Wrapping::None)
         ]
         .spacing(8)
         .align_y(Alignment::Center);
-        if let Some(activity) = subagent.activity {
-            description = description.push(text(crate::ui::one_line(activity, 120)).size(style::TINY).color(P.fg_dim).wrapping(text::Wrapping::None));
-        }
         let elapsed = view.subagent_clocks.0.get(subagent.id).map_or(0, |(_, since)| since.elapsed().as_millis() as u64);
         let line = row![
             space().width(14.0 * subagent.depth as f32),
@@ -223,7 +209,7 @@ mod tests {
     }
 
     /// The rows are the delegation cards still at work in the agent process that runs now, each
-    /// with its latest call, a subagent's own subagent under it; finished cards, other tools and
+    /// a subagent's own subagent under it; finished cards, other tools and
     /// an earlier process's cards are not listed, and an ended session lists nothing.
     #[test]
     fn the_subagents_at_work_are_the_open_delegation_cards() {
@@ -245,8 +231,8 @@ mod tests {
         assert_eq!(
             at_work(&conversation),
             [
-                Subagent { id: "a", title: "Count words", status: Status::Running, activity: Some("Read a.txt"), depth: 0 },
-                Subagent { id: "c", title: "Nested", status: Status::Unknown, activity: None, depth: 1 },
+                Subagent { id: "a", title: "Count words", status: Status::Running, depth: 0 },
+                Subagent { id: "c", title: "Nested", status: Status::Unknown, depth: 1 },
             ]
         );
         conversation.session.as_mut().unwrap().lifecycle = "ended".into();
