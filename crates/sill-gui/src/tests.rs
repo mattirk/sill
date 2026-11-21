@@ -3002,6 +3002,54 @@ fn a_shortcut_is_recorded_from_a_key_press() {
     assert_eq!(app.settings_page.as_ref().unwrap().recording, None);
 }
 
+/// The global hotkey is recorded as the shortcuts are, into sill-gui's own settings; while it
+/// is recorded in a shown window no key is held, so that the press reaches the recorder.
+#[test]
+fn the_hotkey_is_recorded_and_let_go_meanwhile() {
+    use crate::settings_ui::{Event, HOTKEY};
+    use iced::keyboard::key::{Code, Named, Physical};
+    use iced::keyboard::{Key, Modifiers};
+    let (mut app, _) = App::new(true, None);
+    app.visible = true;
+    let _ = app.update(Message::ShowPage(crate::Page::Settings));
+    assert_eq!(app.hotkey_wanted(), crate::hotkey::DEFAULT);
+    let _ = app.update(Message::Settings(Event::RecordShortcut(HOTKEY)));
+    assert_eq!(app.hotkey_wanted(), "");
+    // a hidden window records nothing: the key is held again
+    app.visible = false;
+    assert_eq!(app.hotkey_wanted(), crate::hotkey::DEFAULT);
+    app.visible = true;
+
+    // a key that would be swallowed everywhere is refused, and the field goes on recording
+    let _ = app.update(Message::Settings(Event::ShortcutKey(Key::Character("a".into()), Physical::Code(Code::KeyA), Modifiers::empty())));
+    let page = app.settings_page.as_ref().unwrap();
+    assert_eq!(page.recording, Some(HOTKEY));
+    assert!(page.shortcut_refused.is_some());
+    assert_eq!(app.settings.hotkey, None);
+
+    let _ = app.update(Message::Settings(Event::ShortcutKey(Key::Character("`".into()), Physical::Code(Code::Backquote), Modifiers::LOGO)));
+    assert_eq!(app.settings_page.as_ref().unwrap().recording, None);
+    assert_eq!(app.settings.hotkey.as_deref(), Some("Super+` @Backquote"));
+    assert_eq!(app.hotkey_wanted(), "Super+` @Backquote");
+    // a window shortcut may share nothing with it: they are apart
+    assert!(app.settings.shortcuts.is_empty());
+
+    // Escape leaves it, Backspace sets none, Reset brings the default back
+    let _ = app.update(Message::Settings(Event::RecordShortcut(HOTKEY)));
+    let _ = app.update(Message::Settings(Event::ShortcutKey(Key::Named(Named::Escape), Physical::Code(Code::Escape), Modifiers::empty())));
+    assert_eq!(app.hotkey_wanted(), "Super+` @Backquote");
+    let _ = app.update(Message::Settings(Event::RecordShortcut(HOTKEY)));
+    let _ = app.update(Message::Settings(Event::ShortcutKey(Key::Named(Named::Backspace), Physical::Code(Code::Backspace), Modifiers::empty())));
+    assert_eq!(app.settings.hotkey.as_deref(), Some(""));
+    assert_eq!(app.hotkey_wanted(), "");
+    let _ = app.update(Message::Settings(Event::ResetHotkey));
+    assert_eq!(app.hotkey_wanted(), crate::hotkey::DEFAULT);
+    // leaving the page while it records ends the recording
+    let _ = app.update(Message::Settings(Event::RecordShortcut(HOTKEY)));
+    let _ = app.update(Message::ShowPage(crate::Page::Changes));
+    assert_eq!(app.hotkey_wanted(), crate::hotkey::DEFAULT);
+}
+
 #[test]
 fn policy_errors_remain_visible_with_the_group_collapsed() {
     let (mut app, _) = App::new(true, None);

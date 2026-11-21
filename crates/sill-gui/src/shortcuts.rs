@@ -166,11 +166,11 @@ pub enum Capture {
     Refused(String),
 }
 
-/// Read a press for the recorder. `key` is the key without its modifiers (iced's `key`).
-pub fn capture(key: &Key, physical: Physical, modifiers: Modifiers) -> Capture {
-    match key {
-        Key::Named(Named::Escape) if modifiers.is_empty() => return Capture::Cancel,
-        Key::Named(Named::Backspace | Named::Delete) if modifiers.is_empty() => return Capture::Clear,
+/// What the recorder makes of a press whatever is recorded: its own keys, and modifiers.
+pub fn recorder_key(key: &Key, modifiers: Modifiers) -> Option<Capture> {
+    Some(match key {
+        Key::Named(Named::Escape) if modifiers.is_empty() => Capture::Cancel,
+        Key::Named(Named::Backspace | Named::Delete) if modifiers.is_empty() => Capture::Clear,
         Key::Named(
             Named::Shift
             | Named::Control
@@ -181,11 +181,26 @@ pub fn capture(key: &Key, physical: Physical, modifiers: Modifiers) -> Capture {
             | Named::Hyper
             | Named::CapsLock
             | Named::NumLock
-            | Named::ScrollLock
             | Named::Fn
             | Named::FnLock,
-        ) => return Capture::Waiting,
-        _ => {}
+        ) => Capture::Waiting,
+        _ => return None,
+    })
+}
+
+/// What a key types on this layout, where that can be written in a binding; else its name.
+pub fn key_label(key: &Key, code: Code) -> String {
+    match key {
+        Key::Character(c) if c == "+" => "Plus".into(),
+        Key::Character(c) if c.chars().count() == 1 && !c.contains(|c: char| c.is_whitespace() || c.is_control() || c == '@') => c.to_uppercase(),
+        _ => format!("{code:?}"),
+    }
+}
+
+/// Read a press for the recorder. `key` is the key without its modifiers (iced's `key`).
+pub fn capture(key: &Key, physical: Physical, modifiers: Modifiers) -> Capture {
+    if let Some(early) = recorder_key(key, modifiers) {
+        return early;
     }
     let Physical::Code(code) = physical else {
         return Capture::Refused("This key is not known to the system by its place on the keyboard.".into());
@@ -201,14 +216,7 @@ pub fn capture(key: &Key, physical: Physical, modifiers: Modifiers) -> Capture {
             chord.push('+');
         }
     }
-    // what the key types on this layout, where that can be written; else the key's name
-    match key {
-        Key::Character(c) if c == "+" => chord.push_str("Plus"),
-        Key::Character(c) if c.chars().count() == 1 && !c.contains(|c: char| c.is_whitespace() || c.is_control() || c == '@') => {
-            chord.push_str(&c.to_uppercase())
-        }
-        _ => chord.push_str(&format!("{code:?}")),
-    }
+    chord.push_str(&key_label(key, code));
     Capture::Chord(format!("{chord} @{code:?}"))
 }
 

@@ -170,6 +170,21 @@ impl App {
                 let Some(id) = recording else {
                     return Task::none();
                 };
+                if id == settings_ui::HOTKEY {
+                    match crate::hotkey::capture(&key, physical, modifiers) {
+                        Capture::Waiting => page.recording = recording,
+                        Capture::Refused(why) => {
+                            page.recording = recording;
+                            page.shortcut_refused = Some(why);
+                        }
+                        Capture::Cancel => {}
+                        // the grab follows from `sync_hotkey`, as it does when recording ends
+                        Capture::Clear => self.settings.hotkey = Some(String::new()),
+                        Capture::Chord(spec) => self.settings.hotkey = Some(spec),
+                    }
+                    self.save_settings();
+                    return Task::none();
+                }
                 let binding = match crate::shortcuts::capture(&key, physical, modifiers) {
                     // the chord is not complete, or was not one: go on recording
                     Capture::Waiting => {
@@ -307,21 +322,9 @@ impl App {
             }
             Event::ToggleWhere => page.where_open = !page.where_open,
             Event::AlwaysOnTop(on) => return self.set_always_on_top(on),
-            Event::HotkeyInput(value) => page.hotkey = Some(value),
-            Event::ApplyHotkey => {
-                let Some(spec) = page.hotkey.clone() else {
-                    return Task::none();
-                };
-                if crate::hotkey::validate(&spec).is_err() {
-                    return Task::none();
-                }
-                page.hotkey = None;
-                // the grab follows at once; the setting is the daemon's
-                if let Some(hotkey) = &self.hotkey {
-                    hotkey.set(spec.trim());
-                }
-                return self
-                    .settings_call(settings::patch(sill_proto::admin::SettingChange::Hotkey { value: Some(spec.trim().to_string()) }), |_| String::new());
+            Event::ResetHotkey => {
+                self.settings.hotkey = None;
+                self.save_settings();
             }
         }
         Task::none()

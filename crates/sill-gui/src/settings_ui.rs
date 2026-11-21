@@ -61,6 +61,7 @@ pub struct SettingsPage {
     pub collapsed: std::collections::BTreeSet<&'static str>,
     /// The action (`shortcuts::ACTIONS`' id) whose shortcut is being recorded: the next key
     /// press is its binding, and until then no window shortcut fires (`keys::window_shortcuts`).
+    /// [`HOTKEY`] is the global show/hide key's field.
     pub recording: Option<&'static str>,
     /// Why the last recorded press was not taken.
     pub shortcut_refused: Option<String>,
@@ -76,8 +77,6 @@ pub struct SettingsPage {
     /// Delete all ended sessions was pressed once.
     pub armed_delete: crate::armed::Armed<()>,
     pub where_open: bool,
-    /// The hotkey as typed, before it is applied.
-    pub hotkey: Option<String>,
 }
 
 impl Default for SettingsPage {
@@ -101,10 +100,12 @@ impl Default for SettingsPage {
             said: None,
             armed_delete: Default::default(),
             where_open: false,
-            hotkey: None,
         }
     }
 }
+
+/// The global hotkey's field, as `SettingsPage::recording` names it.
+pub const HOTKEY: &str = "hotkey";
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -140,8 +141,31 @@ pub enum Event {
     ToggleWhere,
     AlwaysOnTop(bool),
     AlwaysApply(bool),
-    HotkeyInput(String),
-    ApplyHotkey,
+    /// The hotkey back to its default.
+    ResetHotkey,
+}
+
+/// A field that records a key: pressed, it takes the next key press as its binding
+/// (`SettingsPage::recording`); `bound` is what it holds now.
+fn recorder<'a>(page: &SettingsPage, id: &'static str, bound: String) -> Element<'a, Message> {
+    let recording = page.recording == Some(id);
+    let caption = if recording {
+        "Press keys…".to_string()
+    } else if bound.is_empty() {
+        "Disabled".to_string()
+    } else {
+        bound
+    };
+    let field = button(text(caption).size(style::SMALL).width(Fill).center()).width(180).padding(7).style(move |_, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: Some(alpha(P.fg, if recording || hovered { 0.12 } else { 0.07 }).into()),
+            text_color: if recording { P.accent } else { P.fg },
+            border: iced::Border { color: if recording { P.accent } else { iced::Color::TRANSPARENT }, width: 1.0, radius: style::CONTROL.into() },
+            ..button::Style::default()
+        }
+    });
+    keys::press(field, event(Event::RecordShortcut(id)))
 }
 
 fn event(event: Event) -> Message {
@@ -438,29 +462,12 @@ impl App {
             let bindings = &self.settings.shortcuts;
             let mut rows = Vec::new();
             for (i, (id, label, _)) in crate::shortcuts::ACTIONS.iter().enumerate() {
-                let recording = page.recording == Some(*id);
                 let bound = crate::shortcuts::shown(crate::shortcuts::value(bindings, i));
-                let caption = if recording {
-                    "Press keys…".to_string()
-                } else if bound.is_empty() {
-                    "Disabled".to_string()
-                } else {
-                    bound
-                };
-                let field = button(text(caption).size(style::SMALL).width(Fill).center()).width(180).padding(7).style(move |_, status| {
-                    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-                    button::Style {
-                        background: Some(alpha(P.fg, if recording || hovered { 0.12 } else { 0.07 }).into()),
-                        text_color: if recording { P.accent } else { P.fg },
-                        border: iced::Border { color: if recording { P.accent } else { iced::Color::TRANSPARENT }, width: 1.0, radius: style::CONTROL.into() },
-                        ..button::Style::default()
-                    }
-                });
-                rows.push(setting(label, None, keys::press(field, event(Event::RecordShortcut(id)))));
+                rows.push(setting(label, None, recorder(page, id, bound)));
             }
             let mut controls =
                 column![text("Press a shortcut's field, then the keys. Escape leaves it as it was; Backspace disables it.").size(style::SMALL)].spacing(8);
-            if let Some(why) = &page.shortcut_refused {
+            if let Some(why) = page.shortcut_refused.as_ref().filter(|_| page.recording != Some(HOTKEY)) {
                 controls = controls.push(text(why.clone()).size(style::SMALL).color(P.error));
             }
             controls = controls.push(quiet_button("Reset defaults", Some(event(Event::ResetShortcuts))));
@@ -468,27 +475,22 @@ impl App {
             page_column = page_column.push(section(page, "Keyboard shortcuts", rows));
 
             // ---- Window
-            let spec = page.hotkey.clone().unwrap_or_else(|| s.hotkey.clone().unwrap_or_else(|| crate::hotkey::DEFAULT.into()));
-            let typed_ok = crate::hotkey::validate(&spec).err();
-            let saved = s.hotkey.as_deref().unwrap_or(crate::hotkey::DEFAULT);
+            let spec = self.settings.hotkey.as_deref().unwrap_or(crate::hotkey::DEFAULT);
+            let recording = page.recording == Some(HOTKEY);
             let mut hotkey = column![
                 row![
-                    text_input("<Control>Tab", &spec)
-                        .size(style::SMALL)
-                        .padding(7)
-                        .width(180)
-                        .on_input(|v| event(Event::HotkeyInput(v)))
-                        .on_submit(event(Event::ApplyHotkey)),
-                    quiet_button("Apply", (typed_ok.is_none() && spec.trim() != saved).then(|| event(Event::ApplyHotkey)),),
+                    recorder(page, HOTKEY, crate::hotkey::pretty(spec)),
+                    quiet_button("Reset", self.settings.hotkey.is_some().then(|| event(Event::ResetHotkey))),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
             ]
             .spacing(6);
-            if let Some(why) = typed_ok {
-                hotkey = hotkey.push(text(format!("{why:#}")).size(style::SMALL).color(P.error));
+            if let Some(why) = page.shortcut_refused.as_ref().filter(|_| recording) {
+                hotkey = hotkey.push(text(why.clone()).size(style::SMALL).color(P.error));
             }
-            if let Some(status) = &self.hotkey_status {
+            // while it is recorded the key is let go, and the thread says so: not worth showing
+            if let Some(status) = self.hotkey_status.as_ref().filter(|_| !recording) {
                 hotkey = hotkey.push(text(status).size(style::SMALL).color(P.fg_dim));
             }
             page_column = page_column.push(section(
@@ -505,7 +507,11 @@ impl App {
                         Some("Click to show or hide; its menu quits the window (a daemon setting)"),
                         switch(s.tray.unwrap_or(true), move |v| change(SettingChange::Tray { value: Some(v) })),
                     ),
-                    wide("Hotkey", Some("Shows, raises or hides the window — for example <Control>Tab, <Alt>space, <Super>grave, F12"), hotkey),
+                    wide(
+                        "Hotkey",
+                        Some("Shows, raises or hides the window from anywhere. Press the field, then the keys; Backspace sets none (sill-gui)"),
+                        hotkey,
+                    ),
                 ],
             ));
         }

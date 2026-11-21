@@ -774,6 +774,8 @@ pub struct App {
     pub switching: Option<layout::Mode>,
     /// The global hotkey's thread (none in the demo and the tests), and how its grab stands.
     hotkey: Option<hotkey::Hotkey>,
+    /// The spec the thread was last given (`sync_hotkey`).
+    hotkey_held: Option<String>,
     pub hotkey_status: Option<String>,
     /// The tray icon while the shared `tray` setting has it, and where its clicks go.
     tray: Option<tray::Tray>,
@@ -902,6 +904,7 @@ impl App {
             visible: !HIDDEN.load(std::sync::atomic::Ordering::Relaxed),
             switching: None,
             hotkey: None,
+            hotkey_held: None,
             hotkey_status: None,
             tray: None,
             tray_asked: None,
@@ -1129,6 +1132,29 @@ impl App {
 
     /// Every message: its update, and the herring's stroke when the view went between the
     /// session and the backend (by the herring, Escape or anything else).
+    /// The key the hotkey's thread should hold: the setting's, or none while Settings records it
+    /// in a shown window (a grabbed key would never reach the recorder).
+    fn hotkey_wanted(&self) -> String {
+        if self.visible && self.settings_page.as_ref().is_some_and(|page| page.recording == Some(settings_ui::HOTKEY)) {
+            return String::new();
+        }
+        // `SILL_GUI_HOTKEY` overrides the setting: a second sill-gui beside the running one, for
+        // trying a build
+        std::env::var("SILL_GUI_HOTKEY").ok().or_else(|| self.settings.hotkey.clone()).unwrap_or_else(|| hotkey::DEFAULT.into())
+    }
+
+    /// Give the hotkey's thread its key, when that changed.
+    fn sync_hotkey(&mut self) {
+        let Some(hotkey) = &self.hotkey else {
+            return;
+        };
+        let spec = self.hotkey_wanted();
+        if self.hotkey_held.as_ref() != Some(&spec) {
+            hotkey.set(&spec);
+            self.hotkey_held = Some(spec);
+        }
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         if self.guard_file_edits(&message) {
             return Task::none();
@@ -1137,6 +1163,7 @@ impl App {
         let prior_session = self.selected.clone();
         let prior_image_mode = self.current().and_then(|v| v.image_viewer_mode);
         let mut task = self.apply(message);
+        self.sync_hotkey();
         // Find belongs to the surface it was opened on (docs/find.md, decision 3)
         let find_task = self.find_follow(&prior_session);
         task = Task::batch([task, find_task]);
@@ -1526,12 +1553,6 @@ impl App {
                     return Task::none();
                 }
                 style::set_theme(&settings.theme);
-                if let Some(hotkey) = &self.hotkey {
-                    // `SILL_GUI_HOTKEY` overrides the shared setting: a second sill-gui beside the
-                    // running one, for trying a build
-                    let spec = std::env::var("SILL_GUI_HOTKEY").ok();
-                    hotkey.set(spec.as_deref().or(settings.hotkey.as_deref()).unwrap_or(hotkey::DEFAULT));
-                }
                 // the tray icon as the shared setting says (unset: shown)
                 let want = settings.tray.unwrap_or(true);
                 if want && self.tray.is_none() {

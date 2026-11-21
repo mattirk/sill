@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     pub settings_category: crate::settings_ui::Category,
     pub shortcuts: crate::shortcuts::Bindings,
+    /// The global show/hide key (`hotkey.rs`): unset = its default, empty = none.
+    pub hotkey: Option<String>,
     /// Stage edits for review in sessions started by choosing an agent.
     pub always_apply: bool,
     /// Shelf mode's width as a share of the main display's usable width (0.15–0.4), on displays
@@ -112,6 +114,9 @@ pub fn load() -> Settings {
     let mut settings: Settings = path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|text| toml::from_str(&text).ok()).unwrap_or_default();
     if crate::shortcuts::validate(&settings.shortcuts).is_err() {
         settings.shortcuts.clear();
+    }
+    if settings.hotkey.as_deref().is_some_and(|spec| crate::hotkey::validate(spec).is_err()) {
+        settings.hotkey = None;
     }
     settings
 }
