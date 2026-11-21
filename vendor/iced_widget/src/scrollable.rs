@@ -117,7 +117,7 @@ where
         .enclose()
     }
 
-    /// Shows a grab cursor over the active scrollbar (sill patch).
+    /// Shows a grab cursor over the active scrollbar (silli patch).
     pub fn scrollbar_grab_cursor(mut self) -> Self {
         self.scrollbar_grab_cursor = true;
         self
@@ -791,7 +791,7 @@ where
                 return;
             }
 
-            // sill patch: after it scrolled, upstream keeps every wheel event from the
+            // silli patch: after it scrolled, upstream keeps every wheel event from the
             // content for a while, so a nested scrollable does not take over mid-gesture.
             // A wheel event along an axis this one does not scroll is not its gesture: a
             // sideways-only scrollable around an editor held the editor's vertical scroll
@@ -880,7 +880,7 @@ where
 
             match event {
                 Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
-                    // sill patch: not this scrollable's axis; a parent may scroll it
+                    // silli patch: not this scrollable's axis; a parent may scroll it
                     if cursor_over_scrollable.is_none() || is_other_axis {
                         return;
                     }

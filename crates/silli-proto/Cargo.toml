@@ -1,0 +1,23 @@
+[package]
+name = "silli-proto"
+description = "silli: the daemon protocol — wire types, method names, the socket, a blocking client (docs/daemon.md §3.3)"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rustix.workspace = true
+schemars = "1"
+base64 = "0.23"
+
+[[test]]
+name = "boxlink"
+harness = false
+
+[lints]
+workspace = true

@@ -1,0 +1,14 @@
+# After the mount: make /var/lib/silli sticky + world-writable (1777, like /tmp) so every user can create
+# their own 0700 directory without root. Separate from the mount unit because the permission lives on
+# the mounted filesystem's root inode, not on the mount point.
+[Unit]
+Description=Permissions on the silli state filesystem
+Requires=var-lib-silli.mount
+After=var-lib-silli.mount
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/chmod 1777 /var/lib/silli
+
+[Install]
+WantedBy=var-lib-silli.mount

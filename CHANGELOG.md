@@ -1,6 +1,6 @@
 # Changelog
 
-What changed in each release of sill. A release's notes on GitHub are its section here
+What changed in each release of silli. A release's notes on GitHub are its section here
 (`packaging/check-release.py --notes`); a version without a section is not released.
 
 ## 0.0.6 — 2026-11-17
@@ -57,7 +57,7 @@ What changed in each release of sill. A release's notes on GitHub are its sectio
 - **Apply as branch**: a workspace's commits become a new branch in your checkout, which stays
   on its own branch with its files untouched. It sits beside Apply without commit under the
   caret next to Apply.
-- Sill.app sets its VM's clock from the Mac at start and after the Mac wakes, so session timers
+- Silli.app sets its VM's clock from the Mac at start and after the Mac wakes, so session timers
   and agent sign-ins no longer lag by the length of a sleep.
 - A session's launch warnings (a host socket in a pinned folder, missing resource limits) are
   shown in the window: the shield turns yellow and the Permissions panel lists them.
@@ -72,8 +72,8 @@ What changed in each release of sill. A release's notes on GitHub are its sectio
 
 ### Security
 
-- The seccomp filter also applies on arm64, so jails in Sill.app's VM start with it.
-- Git filter drivers from your own git configuration are switched off in the git commands sill
+- The seccomp filter also applies on arm64, so jails in Silli.app's VM start with it.
+- Git filter drivers from your own git configuration are switched off in the git commands silli
   runs for workspaces, so files are applied and committed byte for byte.
 - Host sockets and FIFOs are no longer bound into a jail's layout; one inside a pinned folder is
   named in a launch warning.
@@ -96,7 +96,7 @@ What changed in each release of sill. A release's notes on GitHub are its sectio
 
 - The agents marked as tested come from the daemon, so Kimi Code, Mistral Vibe and OpenCode
   show as tested.
-- The herring on its sill is the Linux application icon too.
+- The herring on its silli is the Linux application icon too.
 
 ### Security
 
@@ -123,7 +123,7 @@ The first public release.
 
 - **Jailed by default.** Every session runs Claude Code, OpenCode, Kimi Code or any ACP agent in
   its own bubblewrap sandbox, with no capabilities and its own network namespace. Secrets such
-  as `~/.ssh` are hidden, and the network is an allow-list behind sill's proxy.
+  as `~/.ssh` are hidden, and the network is an allow-list behind silli's proxy.
 - **Pins and Changes.** Pinned folders are live; everything else the agent writes waits in an
   overlay for Keep or Revert, with diffs. Workspaces give a session its own copy of a
   repository, applied to your checkout when you choose.
@@ -131,6 +131,6 @@ The first public release.
   granted per session and revoked when it ends.
 - **Memory.** Each session leaves a summary, so the next agent in the same folder starts
   informed.
-- **VM and remote.** The daemon runs on a Linux desktop, in a local Linux VM (Sill.app on Apple
+- **VM and remote.** The daemon runs on a Linux desktop, in a local Linux VM (Silli.app on Apple
   Silicon Macs) or on another Linux box over SSH.
 - Linux packages (tar.gz, deb), a Mac DMG, and an installer script on the download page.

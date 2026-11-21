@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=silli
+Comment=AI agents in a jail the host controls, every change in a ledger
+Exec=@PREFIX@/bin/silli gui
+Icon=silli
+Terminal=false
+Categories=Development;Utility;
+Keywords=agent;acp;claude;codex;gemini;sandbox;
+StartupNotify=false
+X-GNOME-UsesNotifications=false

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Runs site/install.sh for SILL_VERSION on this machine, answering its questions on a pseudo-terminal
+"""Runs site/install.sh for SILLI_VERSION on this machine, answering its questions on a pseudo-terminal
 (the script asks on /dev/tty), then checks that what it installed is there. For CI runners."""
 import os
 from pathlib import Path
@@ -35,6 +35,6 @@ status = os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
 if status != 0:
     raise SystemExit(f"install.sh exited with {status}")
 if mac:
-    subprocess.run(["codesign", "--verify", "--deep", "/Applications/Sill.app"], check=True)
+    subprocess.run(["codesign", "--verify", "--deep", "/Applications/Silli.app"], check=True)
 else:
-    subprocess.run(["sill", "--version"], check=True)
+    subprocess.run(["silli", "--version"], check=True)

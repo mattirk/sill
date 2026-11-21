@@ -1,66 +1,66 @@
 # Security
 
-Sill runs AI coding agents in a jail and lets you decide what they may change, reach and keep.
+Silli runs AI coding agents in a jail and lets you decide what they may change, reach and keep.
 It reduces what an agent can do to your machine; it does not guarantee security. This page says
-how to report a problem, what sill is built to hold against, and where it is known not to.
+how to report a problem, what silli is built to hold against, and where it is known not to.
 
 ## Reporting a vulnerability
 
-Open a public [issue](https://github.com/mattirk/sill/issues), or a pull request with a fix.
+Open a public [issue](https://github.com/mattirk/silli/issues), or a pull request with a fix.
 
 If you would rather report privately, use GitHub's
-**[Report a vulnerability](https://github.com/mattirk/sill/security/advisories/new)** (the
+**[Report a vulnerability](https://github.com/mattirk/silli/security/advisories/new)** (the
 repository's Security tab → Advisories). A private report is visible only to the author.
 
-Useful in a report: the sill version or commit, the system (Linux distribution and kernel, or
+Useful in a report: the silli version or commit, the system (Linux distribution and kernel, or
 macOS version), the policy in use if it is not the default, and the steps or a proof of concept.
 
-Sill is a side project of one author. A report may or may not get an answer or a fix. Reports
+Silli is a side project of one author. A report may or may not get an answer or a fix. Reports
 about agents themselves (Claude Code, Codex and others) belong to their vendors, unless the
-problem is how sill runs them.
+problem is how silli runs them.
 
 ## Supported versions
 
-Sill is pre-1.0 and comes without support. If a problem is fixed, the fix goes to the `main`
+Silli is pre-1.0 and comes without support. If a problem is fixed, the fix goes to the `main`
 branch and into a later release; earlier releases are not updated.
 
 ## Isolation at a glance
 
-![Sill isolation: sandboxed agents use workspace copies and filesystem overlays; Apply and Keep transfer changes, live pins permit direct writes, a proxy filters network access, and host operations require explicit grants.](docs/isolation.svg)
+![Silli isolation: sandboxed agents use workspace copies and filesystem overlays; Apply and Keep transfer changes, live pins permit direct writes, a proxy filters network access, and host operations require explicit grants.](docs/isolation.svg)
 
 Workspace repositories are separate copies: **Apply** transfers their commits to your checkout.
 Ordinary filesystem changes stay in the overlay until **Keep**. Live pins are direct access.
 The diagram simplifies the default model; the limits below still apply.
 
-## What sill is built to hold against
+## What silli is built to hold against
 
 The agent inside a session is assumed to be fully hostile, for example through a prompt injection:
 it controls every file it writes, every command it runs, the text of its tool calls and the
-network requests it makes. Against that agent, sill aims to keep:
+network requests it makes. Against that agent, silli aims to keep:
 
 - **The host's files.** The agent writes to an overlay; changes reach the host only when you keep
   them. Folders you pin are the exception: they are written directly.
 - **Your secrets.** The paths the policy masks (`~/.ssh`, `~/.gnupg`, `~/.config`, cloud
   credentials and others) are empty inside the jail.
-- **The network.** The jail has no network of its own. Requests go through sill's proxy, which
+- **The network.** The jail has no network of its own. Requests go through silli's proxy, which
   allows only the hosts on the policy's list and refuses local and private addresses.
-- **Other sessions and sill itself.** No capabilities, no nested user namespaces, no host D-Bus or
-  display, and sill's own configuration and state are hidden.
+- **Other sessions and silli itself.** No capabilities, no nested user namespaces, no host D-Bus or
+  display, and silli's own configuration and state are hidden.
 
-Sill also considers a second unprivileged account on the same machine, a hostile remote box, and
-installing sill from a checkout an agent has modified.
+Silli also considers a second unprivileged account on the same machine, a hostile remote box, and
+installing silli from a checkout an agent has modified.
 
 ## Known limits
 
 - **The jail shares the host's kernel.** A kernel vulnerability reachable from the jail is a way
   out. A syscall filter narrows that surface on x86_64 and on arm64 (the Linux VM inside
-  Sill.app); it is a deny-list, and on any other architecture there is none.
+  Silli.app); it is a deny-list, and on any other architecture there is none.
 - **The Mac VM is not a second wall of equal strength.** It keeps the agent off macOS itself, but
   the folders you share with it are writable from the whole VM, and sessions inside one VM are
   separated less strictly than on a Linux desktop.
 - **Pinned folders are live.** An agent can write anything in a pin, including files that run
   later on the host: build scripts, git hooks, editor tasks. Pin what you would let the agent edit.
-- **Keep is your review.** Sill shows what changed and refuses some dangerous paths, but what you
+- **Keep is your review.** Silli shows what changed and refuses some dangerous paths, but what you
   keep is on the host. Read what "Keep all" covers before using it.
 - **The default mask list is not complete.** Credentials stored outside the masked paths (for
   example `~/.pgpass`, `~/.terraform.d`, or Snap and Flatpak browser profiles) are readable unless
@@ -69,14 +69,14 @@ installing sill from a checkout an agent has modified.
   token can send data there. The allow-list limits where data can go, not what is sent.
 - **Grants are wide.** Host control (`launch`, `commands`), "Control Mac" and "Run Mac commands"
   each amount to acting as you on that machine. Treat any of them as full access for as long as
-  it is on; revoking stops what sill still tracks, not what was installed or detached meanwhile.
-- **Installing an agent means trusting its publisher.** Sill pins and checks the packages in its
+  it is on; revoking stops what silli still tracks, not what was installed or detached meanwhile.
+- **Installing an agent means trusting its publisher.** Silli pins and checks the packages in its
   own registry snapshot and probes a new agent inside a jail, but logging an agent in and running
   it gives its code your account at that provider, and some login flows run on the host.
 - **Releases are not signed.** Packages come with a `SHA256SUMS` file from the same release, which
   detects a damaged download but not a replaced one. The Mac app is ad-hoc signed and not
   notarized.
-- **No independent audit.** Sill is developed with AI coding agents and reviewed by its author.
+- **No independent audit.** Silli is developed with AI coding agents and reviewed by its author.
   The audits below were done the same way.
 
 ## Audits

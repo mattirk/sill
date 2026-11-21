@@ -1,13 +1,13 @@
 #!/bin/sh
-# Weston for the Mac app's VM, built from source (docs/sill-stick.md section 9): Debian 13 has
-# Weston 14, and sill's test desktop needs `--debug-scopes` (Weston 15) so the debug extension
+# Weston for the Mac app's VM, built from source (docs/silli-stick.md section 9): Debian 13 has
+# Weston 14, and silli's test desktop needs `--debug-scopes` (Weston 15) so the debug extension
 # its live view and screenshots use offers no scope that would show one client another's
 # traffic. Only what the test desktop uses: the headless backend, software rendering, Xwayland,
 # the desktop shell and weston-screenshooter.
 #
 # Run as root in the image's build guest: `sh weston-build.sh OUT`. Leaves OUT/weston.tar.gz (to
 # extract at /) and OUT/runtime-packages (the Debian packages it needs at run time), and takes
-# its build tools away again (pkg-config stays: the image has it for building sill). packaging/mac-image.sh keys its cache of the result by this file's
+# its build tools away again (pkg-config stays: the image has it for building silli). packaging/mac-image.sh keys its cache of the result by this file's
 # hash: change anything here (versions, checksums, options) and it is built again.
 set -eu
 out=$1

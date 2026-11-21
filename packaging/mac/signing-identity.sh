@@ -1,14 +1,14 @@
 #!/bin/sh
-# One code-signing identity for Sill's local builds (docs/sill-stick.md section 9). macOS keeps
+# One code-signing identity for Silli's local builds (docs/silli-stick.md section 9). macOS keeps
 # Screen Recording and Accessibility consent for an app by its signature; an app signed ad hoc is
 # a new app each build, so the consent was lost at every rebuild. Signed with this certificate,
-# Sill is the same app to macOS from build to build. Run once per Mac; macOS asks for your
+# Silli is the same app to macOS from build to build. Run once per Mac; macOS asks for your
 # password to trust the certificate for code signing. Nothing leaves this Mac.
 #
-# After running it, remove any "Sill" rows in System Settings → Privacy & Security once (they
+# After running it, remove any "Silli" rows in System Settings → Privacy & Security once (they
 # belong to the builds signed ad hoc); from then on rebuilds keep the consent.
 set -eu
-name="Sill local development"
+name="Silli local development"
 keychain="$HOME/Library/Keychains/login.keychain-db"
 if security find-identity -v -p codesigning | grep -q "\"$name\""; then
     echo "\"$name\" is already in your login keychain."

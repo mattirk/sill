@@ -1,0 +1,19 @@
+# silli-gui as a systemd user service: starts hidden with the graphical session, the hotkey shows it.
+#   systemctl --user restart silli-gui     # after an update (`silli restart` does this and the daemon)
+#   journalctl --user -u silli-gui -f      # its log
+# Installed to /etc/systemd/user/ by the package / `silli init`; enabled per user by `silli init --user`
+#   (systemctl --user enable --now silli-gui)
+# Cinnamon does not activate graphical-session.target, so the service hangs off default.target; the
+# user instance already carries DISPLAY/XAUTHORITY/DBUS_SESSION_BUS_ADDRESS on this desktop.
+[Unit]
+Description=silli desktop window
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/silli gui --hidden
+Restart=on-failure
+RestartSec=2
+Slice=app.slice
+
+[Install]
+WantedBy=default.target

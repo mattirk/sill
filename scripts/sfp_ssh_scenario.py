@@ -15,15 +15,15 @@ from sfp_client import Client
 
 binary = str(Path(sys.argv[1]).resolve())
 processes = []
-with tempfile.TemporaryDirectory(prefix="sill-sfp-ssh-") as directory:
+with tempfile.TemporaryDirectory(prefix="silli-sfp-ssh-") as directory:
     root = Path(directory)
     env = os.environ.copy()
-    for name in ("SILL_SESSION", "SILL_BOX", "INVOCATION_ID", "NOTIFY_SOCKET", "LISTEN_PID", "LISTEN_FDS"):
+    for name in ("SILLI_SESSION", "SILLI_BOX", "INVOCATION_ID", "NOTIFY_SOCKET", "LISTEN_PID", "LISTEN_FDS"):
         env.pop(name, None)
     for name, child in (("HOME", "home"), ("XDG_CONFIG_HOME", "config"), ("XDG_STATE_HOME", "state"), ("XDG_RUNTIME_DIR", "run")):
         (root / child).mkdir()
         env[name] = str(root / child)
-    env["SILL_LAUNCHER"] = "direct"
+    env["SILLI_LAUNCHER"] = "direct"
     def start(argv, **kwargs):
         process = subprocess.Popen(argv, **kwargs)
         processes.append(process)
@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix="sill-sfp-ssh-") as directory:
     try:
         with (root / "daemon.log").open("w") as log:
             daemon = start([binary, "daemon"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log)
-        remote_socket = root / "run/sill/daemon.sock"
+        remote_socket = root / "run/silli/daemon.sock"
         wait_path(remote_socket)
         for name in ("host", "client"):
             subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(root / name)], check=True)
@@ -66,11 +66,11 @@ with tempfile.TemporaryDirectory(prefix="sill-sfp-ssh-") as directory:
             start(["ssh", "-F", str(ssh_config), "-o", "ExitOnForwardFailure=yes", "-N", "-L", f"{forwarded}:{remote_socket}", "sfp-fixture"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log)
         wait_path(forwarded)
         client = Client(forwarded)
-        status = client.call("_sill/daemon.status", {})
+        status = client.call("_silli/daemon.status", {})
         assert status["pid"] == daemon.pid
-        opened = client.call("_sill/terminals.open", {"label": "ssh-fixture", "argv": ["/bin/sh", "-c", "printf READY; read reply; printf 'DONE:%s\\n' \"$reply\""], "cols": 80, "rows": 24})
+        opened = client.call("_silli/terminals.open", {"label": "ssh-fixture", "argv": ["/bin/sh", "-c", "printf READY; read reply; printf 'DONE:%s\\n' \"$reply\""], "cols": 80, "rows": 24})
         key = {"terminal_id": opened["terminal_id"]}
-        token = client.call("_sill/terminals.attach", key)["token"]
+        token = client.call("_silli/terminals.attach", key)["token"]
         with client.open_stream(token) as stream:
             data = b""
             while b"READY" not in data:
@@ -78,9 +78,9 @@ with tempfile.TemporaryDirectory(prefix="sill-sfp-ssh-") as directory:
         client.close()
         # A new SSH channel/control connection adopts the same shell and replays its bytes.
         client = Client(forwarded)
-        assert client.call("_sill/terminals.get", key)["pid"] == opened["pid"]
-        client.call("_sill/terminals.resize", dict(key, cols=100, rows=30))
-        token = client.call("_sill/terminals.attach", key)["token"]
+        assert client.call("_silli/terminals.get", key)["pid"] == opened["pid"]
+        client.call("_silli/terminals.resize", dict(key, cols=100, rows=30))
+        token = client.call("_silli/terminals.attach", key)["token"]
         with client.open_stream(token) as stream:
             stream.sendall(b"through-ssh\n")
             data = b""
@@ -91,24 +91,24 @@ with tempfile.TemporaryDirectory(prefix="sill-sfp-ssh-") as directory:
             assert b"READY" in data
         client.close()
         assert daemon.poll() is None
-        # Also exercise Sill's actual selected-box SSH command, not just port forwarding.
-        wrapper = root / "remote-sill"
-        exports = " ".join(f"{name}={shlex.quote(env[name])}" for name in ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "SILL_LAUNCHER"))
-        wrapper.write_text(f"#!/bin/sh\nunset SILL_SESSION SILL_BOX\nexport {exports}\nexec {shlex.quote(binary)} \"$@\"\n")
+        # Also exercise Silli's actual selected-box SSH command, not just port forwarding.
+        wrapper = root / "remote-silli"
+        exports = " ".join(f"{name}={shlex.quote(env[name])}" for name in ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "SILLI_LAUNCHER"))
+        wrapper.write_text(f"#!/bin/sh\nunset SILLI_SESSION SILLI_BOX\nexport {exports}\nexec {shlex.quote(binary)} \"$@\"\n")
         wrapper.chmod(0o700)
         tools = root / "bin"
         tools.mkdir()
         ssh = tools / "ssh"
         ssh.write_text(f"#!/bin/sh\nexec {shlex.quote(shutil.which('ssh'))} -F {shlex.quote(str(ssh_config))} \"$@\"\n")
         ssh.chmod(0o700)
-        (root / "config/sill").mkdir(exist_ok=True)
-        (root / "config/sill/boxes.json").write_text(json.dumps({"test": {"host": "sfp-fixture", "binary": str(wrapper)}}))
+        (root / "config/silli").mkdir(exist_ok=True)
+        (root / "config/silli/boxes.json").write_text(json.dumps({"test": {"host": "sfp-fixture", "binary": str(wrapper)}}))
         frontend_env = dict(env, PATH=str(tools) + os.pathsep + env.get("PATH", ""))
         result = subprocess.run([binary, "--box", "test", "daemon", "status"], env=frontend_env, capture_output=True, text=True, timeout=15)
         assert result.returncode == 0, result.stderr
         assert f"pid {daemon.pid}" in result.stdout
         # the command left the box's shared connection behind; a second one rides it
-        sockets = [p for p in (Path(env["XDG_RUNTIME_DIR"]) / "sill/ssh").iterdir() if p.is_socket()]
+        sockets = [p for p in (Path(env["XDG_RUNTIME_DIR"]) / "silli/ssh").iterdir() if p.is_socket()]
         assert len(sockets) == 1, sockets
         result = subprocess.run([binary, "--box", "test", "daemon", "status"], env=frontend_env, capture_output=True, text=True, timeout=15)
         assert result.returncode == 0, result.stderr
@@ -122,7 +122,7 @@ with tempfile.TemporaryDirectory(prefix="sill-sfp-ssh-") as directory:
         raise
     finally:
         # a shared connection left behind would outlive this script by its ControlPersist time
-        for master in (root / "run/sill/ssh").glob("*"):
+        for master in (root / "run/silli/ssh").glob("*"):
             if master.is_socket():
                 subprocess.run(["ssh", "-o", f"ControlPath={master}", "-O", "exit", "sfp-fixture"], capture_output=True, timeout=5)
         for process in reversed(processes):

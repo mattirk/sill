@@ -1,11 +1,11 @@
 #!/bin/sh
-# Build the Mac app's Linux system image: Debian 13 arm64 with sill's daemon, shim and jail
-# runtime. On Apple Silicon, boot with Apple's Virtualization framework (crates/sill-vm).
+# Build the Mac app's Linux system image: Debian 13 arm64 with silli's daemon, shim and jail
+# runtime. On Apple Silicon, boot with Apple's Virtualization framework (crates/silli-vm).
 # On ARM64 Linux, boot with QEMU (no nested virtualization required); CI supplies native-built
-# binaries via SILL_IMAGE_BINARIES. Both paths install committed HEAD with the server deployment
+# binaries via SILLI_IMAGE_BINARIES. Both paths install committed HEAD with the server deployment
 # (packaging/deploy-server.sh). Output: dist/mac-image/system.raw, a sparse raw disk.
 #
-# Only the system is in the image. The account's home and sill's state go on data disks of their
+# Only the system is in the image. The account's home and silli's state go on data disks of their
 # own (home.raw, state.raw), which the app makes and keeps across new images; the guest formats
 # them on first use (packaging/mac/guest). The image leaves no key or identity behind: its first
 # boot in the app runs cloud-init afresh with the app's own seed (account key, host keys,
@@ -26,7 +26,7 @@ SYSTEM_SIZE=16g
 # the build's own data disks, thrown away after it
 DATA_SIZE=32g
 # downloads and built pieces kept between builds; CI points this at its own cache
-cache="${SILL_IMAGE_CACHE:-$HOME/Library/Caches/sill/image}"
+cache="${SILLI_IMAGE_CACHE:-$HOME/Library/Caches/silli/image}"
 work="target/mac-image"
 out="dist/mac-image"
 mkdir -p "$cache" "$work" "$out"
@@ -52,13 +52,13 @@ truncate -s "$DATA_SIZE" "$work/home.raw" "$work/state.raw"
 # a key for this build only, and the packages the box needs (docs/server.md, plus Node for
 # registry installs)
 rm -f "$work/key" "$work/key.pub"
-ssh-keygen -q -t ed25519 -N '' -f "$work/key" -C sill-image-build
+ssh-keygen -q -t ed25519 -N '' -f "$work/key" -C silli-image-build
 mkdir "$work/seed"
 cat > "$work/seed/user-data" <<EOF
 #cloud-config
-hostname: sill-box
+hostname: silli-box
 users:
-  - name: sill
+  - name: silli
     shell: /bin/bash
     # for this build only: removed at its end
     sudo: ALL=(ALL) NOPASSWD:ALL
@@ -67,10 +67,10 @@ users:
 # lean from the first package on: no recommended extras, no docs or translations
 # (packaging/mac/guest/apt-lean.conf, dpkg-lean.cfg)
 write_files:
-  - path: /etc/apt/apt.conf.d/90sill-lean
+  - path: /etc/apt/apt.conf.d/90silli-lean
     encoding: b64
     content: $(base64 < packaging/mac/guest/apt-lean.conf | tr -d '\n')
-  - path: /etc/dpkg/dpkg.cfg.d/90sill-lean
+  - path: /etc/dpkg/dpkg.cfg.d/90silli-lean
     encoding: b64
     content: $(base64 < packaging/mac/guest/dpkg-lean.cfg | tr -d '\n')
 package_update: true
@@ -88,13 +88,13 @@ packages: [git, ripgrep, ca-certificates, build-essential, pkg-config, bubblewra
 # when the account is ready, so it never tries a login too early
 output: {all: '| tee -a /var/log/cloud-init-output.log /dev/hvc0'}
 runcmd:
-  - [sh, -c, 'echo sill-image-ready > /dev/hvc0']
+  - [sh, -c, 'echo silli-image-ready > /dev/hvc0']
 EOF
-printf 'instance-id: sill-image-build-%s\nlocal-hostname: sill-box\n' "$(date +%s)" > "$work/seed/meta-data"
+printf 'instance-id: silli-image-build-%s\nlocal-hostname: silli-box\n' "$(date +%s)" > "$work/seed/meta-data"
 if [ "$image_backend" = apple ]; then
     hdiutil makehybrid -quiet -iso -joliet -default-volume-name cidata -o "$work/seed.iso" "$work/seed"
-    cargo build --locked -q -p sill-vm
-    codesign --force --sign - --entitlements packaging/mac/sill-vm.entitlements target/debug/sill-vm 2>/dev/null
+    cargo build --locked -q -p silli-vm
+    codesign --force --sign - --entitlements packaging/mac/silli-vm.entitlements target/debug/silli-vm 2>/dev/null
 else
     cloud-localds "$work/seed.iso" "$work/seed/user-data" "$work/seed/meta-data"
 fi
@@ -103,7 +103,7 @@ fi
 vm=
 boot() {
     rm -f "$work/go" "$work/ready"
-    SILL_VM_HOLD="$PWD/$work/go" target/debug/sill-vm "$work" > "$work/ready" 2>> "$work/vm.log" &
+    SILLI_VM_HOLD="$PWD/$work/go" target/debug/silli-vm "$work" > "$work/ready" 2>> "$work/vm.log" &
     vm=$!
     while [ ! -s "$work/ready" ]; do
         kill -0 $vm 2>/dev/null || { cat "$work/vm.log" >&2; exit 1; }
@@ -122,10 +122,10 @@ trap 'touch "$work/go"; [ -z "$vm" ] || wait $vm 2>/dev/null || true' EXIT
 : > "$work/vm.log"
 guest() {
     # never a password prompt: until cloud-init has put the key in place, a login just fails
-    # over the VM's host–guest socket (sill-vm's ssh.sock), never the guest's network
+    # over the VM's host–guest socket (silli-vm's ssh.sock), never the guest's network
     ssh -q -i "$work/key" -o BatchMode=yes -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
-        -o ProxyCommand="nc -U $PWD/$work/ssh.sock" sill@sill-box "$@"
+        -o ProxyCommand="nc -U $PWD/$work/ssh.sock" silli@silli-box "$@"
 }
 
 # Override only transport/lifecycle on Linux; all image provisioning below is shared.
@@ -151,7 +151,7 @@ echo 'Waiting for the first boot (packages; console: target/mac-image/console.lo
 # cloud-init's last step marks the console; logins before it would only fail, and OpenSSH holds
 # failed logins against the source
 tries=0
-until grep -q sill-image-ready "$work/console.log" 2>/dev/null; do
+until grep -q silli-image-ready "$work/console.log" 2>/dev/null; do
     tries=$((tries + 1))
     kill -0 "$vm" 2>/dev/null || { cat "$work/vm.log" >&2; exit 1; }
     [ $tries -lt 180 ] || { echo 'The first boot did not finish in 30 minutes.' >&2; exit 1; }
@@ -165,23 +165,23 @@ boot
 let_in
 echo 'Setting up the data disks'
 git archive --format=tar HEAD packaging/mac/guest | guest 'rm -rf guest && mkdir guest && tar -x -C guest'
-guest 'sudo install -D -m755 guest/packaging/mac/guest/sill-disks /usr/local/lib/sill/sill-disks &&
-    sudo install -D -m755 -o root -g root guest/packaging/mac/guest/sill-mac-folders /usr/local/lib/sill/sill-mac-folders &&
-    sudo install -m644 guest/packaging/mac/guest/sill-disks.service /etc/systemd/system/ &&
+guest 'sudo install -D -m755 guest/packaging/mac/guest/silli-disks /usr/local/lib/silli/silli-disks &&
+    sudo install -D -m755 -o root -g root guest/packaging/mac/guest/silli-mac-folders /usr/local/lib/silli/silli-mac-folders &&
+    sudo install -m644 guest/packaging/mac/guest/silli-disks.service /etc/systemd/system/ &&
     sudo sh -c "cat guest/packaging/mac/guest/fstab >> /etc/fstab" &&
-    sudo install -m644 guest/packaging/mac/guest/grub.cfg /etc/default/grub.d/sill.cfg &&
+    sudo install -m644 guest/packaging/mac/guest/grub.cfg /etc/default/grub.d/silli.cfg &&
     sudo install -m644 guest/packaging/mac/guest/gitconfig /etc/gitconfig &&
-    sudo install -m644 guest/packaging/mac/guest/sysctl.conf /etc/sysctl.d/90-sill.conf &&
-    sudo install -m644 guest/packaging/mac/guest/sshd.conf /etc/ssh/sshd_config.d/90-sill.conf &&
+    sudo install -m644 guest/packaging/mac/guest/sysctl.conf /etc/sysctl.d/90-silli.conf &&
+    sudo install -m644 guest/packaging/mac/guest/sshd.conf /etc/ssh/sshd_config.d/90-silli.conf &&
     sudo sshd -t &&
-    sudo install -D -m644 guest/packaging/mac/guest/resolved.conf /etc/systemd/resolved.conf.d/90-sill.conf &&
-    sudo install -m600 guest/packaging/mac/guest/network.yaml /etc/netplan/90-sill.yaml &&
-    sudo install -m644 guest/packaging/mac/guest/cloud-network.cfg /etc/cloud/cloud.cfg.d/99-sill-network.cfg &&
+    sudo install -D -m644 guest/packaging/mac/guest/resolved.conf /etc/systemd/resolved.conf.d/90-silli.conf &&
+    sudo install -m600 guest/packaging/mac/guest/network.yaml /etc/netplan/90-silli.yaml &&
+    sudo install -m644 guest/packaging/mac/guest/cloud-network.cfg /etc/cloud/cloud.cfg.d/99-silli-network.cfg &&
     sudo rm -f /etc/netplan/50-cloud-init.yaml &&
     sudo update-grub 2>/dev/null &&
-    sudo mkdir -p /mnt/sill-state && rm -rf guest &&
-    sudo systemctl daemon-reload && sudo systemctl enable sill-disks.service &&
-    sudo /usr/local/lib/sill/sill-disks && sudo mount -a && findmnt -n -o SOURCE,TARGET /home && findmnt -n -o SOURCE,TARGET /mnt/sill-state'
+    sudo mkdir -p /mnt/silli-state && rm -rf guest &&
+    sudo systemctl daemon-reload && sudo systemctl enable silli-disks.service &&
+    sudo /usr/local/lib/silli/silli-disks && sudo mount -a && findmnt -n -o SOURCE,TARGET /home && findmnt -n -o SOURCE,TARGET /mnt/silli-state'
 # Node for the registry's agents, newer than Debian's 20 (Kimi Code needs 22.19 or later; the
 # person chose the LTS line, 2026-11-13): nodejs.org's build, pinned by version and checksum,
 # downloaded once into the cache, in /usr/local with its npm and npx
@@ -218,22 +218,22 @@ guest 'cat > /tmp/weston-in/runtime-packages' < "$weston_cache/runtime-packages"
 guest 'sudo apt-get install -y -qq $(cat /tmp/weston-in/runtime-packages) >/dev/null &&
     sudo tar -xzf /tmp/weston-in/weston.tar.gz -C / && sudo ldconfig && rm -rf /tmp/weston-in &&
     weston --version'
-echo 'Building and installing sill in the guest'
+echo 'Building and installing silli in the guest'
 git archive --format=tar HEAD | guest 'rm -rf src && mkdir src && tar -x -C src'
 # Rust is only used for the image build and removed below. Leave shell profiles untouched;
 # deployment sources cargo/env explicitly, so fresh installs need no Rust initialization.
-if [ -n "${SILL_IMAGE_BINARIES:-}" ]; then
-    [ "$(cat "$SILL_IMAGE_BINARIES/commit")" = "$(git rev-parse HEAD)" ] || {
+if [ -n "${SILLI_IMAGE_BINARIES:-}" ]; then
+    [ "$(cat "$SILLI_IMAGE_BINARIES/commit")" = "$(git rev-parse HEAD)" ] || {
         echo 'Prebuilt binaries do not match this commit.' >&2; exit 1;
     }
-    for binary in sill sill-shim; do
-        guest "mkdir -p src/target/release && cat > src/target/release/$binary && chmod 755 src/target/release/$binary" < "$SILL_IMAGE_BINARIES/$binary"
+    for binary in silli silli-shim; do
+        guest "mkdir -p src/target/release && cat > src/target/release/$binary && chmod 755 src/target/release/$binary" < "$SILLI_IMAGE_BINARIES/$binary"
     done
-    guest 'cd src && SILL_STATE_DIR=/mnt/sill-state ./packaging/deploy-server.sh --no-build'
+    guest 'cd src && SILLI_STATE_DIR=/mnt/silli-state ./packaging/deploy-server.sh --no-build'
 else
     guest 'curl -fsSL https://sh.rustup.rs | sh -s -- -y -q --profile minimal --no-modify-path >/dev/null'
     # A fresh SSH login gives deployment its user manager; the state is the data disk's.
-    guest '. ~/.cargo/env && cd src && SILL_STATE_DIR=/mnt/sill-state ./packaging/deploy-server.sh'
+    guest '. ~/.cargo/env && cd src && SILLI_STATE_DIR=/mnt/silli-state ./packaging/deploy-server.sh'
 fi
 
 # a disk that failed under the guest loses writes quietly: refuse such an image
@@ -259,26 +259,26 @@ guest 'weston --version && command -v Xwayland xdotool >/dev/null'
 # for the logins still to come and is thrown away
 guest 'sudo cloud-init clean --logs --machine-id && rm -f ~/.bash_history &&
     sudo mkdir -p /mnt/root && sudo mount --bind / /mnt/root &&
-    sudo rm -rf /mnt/root/home/sill && sudo cp -a /home/sill /mnt/root/home/ &&
-    sudo rm -f /mnt/root/home/sill/.ssh/authorized_keys &&
+    sudo rm -rf /mnt/root/home/silli && sudo cp -a /home/silli /mnt/root/home/ &&
+    sudo rm -f /mnt/root/home/silli/.ssh/authorized_keys &&
     sudo umount /mnt/root && sudo rmdir /mnt/root'
 # last, as root in one go: the account's sudo was the build's alone. The app's seed gives none,
-# and what Sill.app does as root there goes through root's SSH and the folder mounter
-# (docs/sill-mac.md, finding 15). An image whose account can still become root is not kept.
+# and what Silli.app does as root there goes through root's SSH and the folder mounter
+# (docs/silli-mac.md, finding 15). An image whose account can still become root is not kept.
 left=$(guest 'sudo sh -c "fstrim -a >/dev/null 2>&1
     rm -f /etc/sudoers.d/90-cloud-init-users
-    if runuser -u sill -- sudo -n true 2>/dev/null; then echo sill-still-root; fi
-    test -x /usr/local/lib/sill/sill-mac-folders || echo sill-no-mounter
-    echo sill-image-clean
+    if runuser -u silli -- sudo -n true 2>/dev/null; then echo silli-still-root; fi
+    test -x /usr/local/lib/silli/silli-mac-folders || echo silli-no-mounter
+    echo silli-image-clean
     systemctl poweroff"' 2>&1) || true
 touch "$work/go"
 if [ "$image_backend" = qemu ]; then wait_off; else wait $vm || true; vm=; fi
 case "$left" in
-    *sill-still-root*) echo 'The account still has sudo; not keeping this image.' >&2; exit 1 ;;
-    *sill-no-mounter*) echo 'The folder mounter is not in the image; not keeping it.' >&2; exit 1 ;;
+    *silli-still-root*) echo 'The account still has sudo; not keeping this image.' >&2; exit 1 ;;
+    *silli-no-mounter*) echo 'The folder mounter is not in the image; not keeping it.' >&2; exit 1 ;;
 esac
 case "$left" in
-    *sill-image-clean*) ;;
+    *silli-image-clean*) ;;
     *) echo 'Guest did not confirm final cleanup; not keeping this image.' >&2; exit 1 ;;
 esac
 trap - EXIT

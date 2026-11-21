@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Linux regression: python3 scripts/test_shim_isolation.py target/debug/sill-shim.
+"""Linux regression: python3 scripts/test_shim_isolation.py target/debug/silli-shim.
 
 Uses disposable processes and sockets only. The positive control must succeed so an
 ambient seccomp/Yama restriction cannot masquerade as a successful protection test.
@@ -28,7 +28,7 @@ def duplicate(pid, fd):
         os.close(handle)
 
 
-with tempfile.TemporaryDirectory(prefix="sill-shim-isolation-") as directory:
+with tempfile.TemporaryDirectory(prefix="silli-shim-isolation-") as directory:
     with socket.socket(socket.AF_UNIX) as listener:
         listener.bind(directory + "/control")
         listener.listen()
@@ -42,7 +42,7 @@ with tempfile.TemporaryDirectory(prefix="sill-shim-isolation-") as directory:
             control.wait()
         shim = subprocess.Popen(
             [sys.argv[1], "--control-fd", str(fd)], pass_fds=(fd,),
-            env={**os.environ, "SILL_PROC_DIR": directory}, stderr=subprocess.PIPE,
+            env={**os.environ, "SILLI_PROC_DIR": directory}, stderr=subprocess.PIPE,
         )
         try:
             ready = shim.stderr.readline()

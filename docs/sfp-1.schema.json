@@ -59,7 +59,7 @@
     },
     "ActiveTimeQuery": {
       "additionalProperties": false,
-      "description": "`_sill/usage.active_time`: how far back to look.",
+      "description": "`_silli/usage.active_time`: how far back to look.",
       "properties": {
         "days": {
           "description": "Whole days before now, 1 to 366.",
@@ -128,7 +128,7 @@
     },
     "AgentDiscover": {
       "additionalProperties": false,
-      "description": "Find an installed agent's directories (`_sill/agents.discovered`), as proposals for its\n`home_paths`. Without `method_id`: one first start in a throwaway jail with an empty home.\nWith it: that login method run on the daemon host with an empty home, as host logins are;\nwhat it wrote is proposed and copied into the agent's sill-owned home. Declares nothing.",
+      "description": "Find an installed agent's directories (`_silli/agents.discovered`), as proposals for its\n`home_paths`. Without `method_id`: one first start in a throwaway jail with an empty home.\nWith it: that login method run on the daemon host with an empty home, as host logins are;\nwhat it wrote is proposed and copied into the agent's silli-owned home. Declares nothing.",
       "properties": {
         "agent_id": {
           "type": "string"
@@ -200,7 +200,7 @@
       "type": "object"
     },
     "AgentResetDone": {
-      "description": "A reset: the agent's running sessions stopped first (a running agent holds its login and writes\nto its home), then its sill-owned home, its ghost sessions' copies and its saved API keys\nremoved. The install and its definition stay: it starts as a fresh install does.",
+      "description": "A reset: the agent's running sessions stopped first (a running agent holds its login and writes\nto its home), then its silli-owned home, its ghost sessions' copies and its saved API keys\nremoved. The install and its definition stay: it starts as a fresh install does.",
       "properties": {
         "removed": {
           "description": "Files removed.",
@@ -223,7 +223,7 @@
       "type": "object"
     },
     "AgentSettings": {
-      "description": "An agent's adjustable settings as sill stores them (SPEC §3.2): per session (what that session\nruns with) and per agent type (the default a new session starts from).",
+      "description": "An agent's adjustable settings as silli stores them (SPEC §3.2): per session (what that session\nruns with) and per agent type (the default a new session starts from).",
       "properties": {
         "config": {
           "additionalProperties": {
@@ -592,7 +592,7 @@
       "type": "object"
     },
     "Branched": {
-      "description": "What `_sill/workspaces.branch` made: the branch's name in the person's checkout.",
+      "description": "What `_silli/workspaces.branch` made: the branch's name in the person's checkout.",
       "properties": {
         "branch": {
           "type": "string"
@@ -1246,7 +1246,7 @@
         },
         "workspaces": {
           "default": null,
-          "description": "Work in workspaces for the session's pinned repositories (docs/parallel-coding.md §12);\nabsent follows Settings → Automatic workspaces. Needs `sill.workspaces`.",
+          "description": "Work in workspaces for the session's pinned repositories (docs/parallel-coding.md §12);\nabsent follows Settings → Automatic workspaces. Needs `silli.workspaces`.",
           "type": [
             "boolean",
             "null"
@@ -1609,10 +1609,10 @@
       "type": "object"
     },
     "DaemonStatus": {
-      "description": "`_sill/daemon.status`.",
+      "description": "`_silli/daemon.status`.",
       "properties": {
         "journal": {
-          "description": "Session logs are journald streams (`journalctl --user -t sill-<id>`), else files.",
+          "description": "Session logs are journald streams (`journalctl --user -t silli-<id>`), else files.",
           "type": "boolean"
         },
         "launcher": {
@@ -1841,7 +1841,7 @@
       "type": "object"
     },
     "DesktopFrame": {
-      "description": "A frame of a session's test desktop, taken by the daemon (`_sill/desktop.capture`). The PNG\nitself is read with `_sill/desktop.read` while it is the latest.",
+      "description": "A frame of a session's test desktop, taken by the daemon (`_silli/desktop.capture`). The PNG\nitself is read with `_silli/desktop.read` while it is the latest.",
       "properties": {
         "changed": {
           "description": "False when `since` named this picture: there is nothing new to read.",
@@ -2129,7 +2129,7 @@
           "type": "array"
         },
         "login_method": {
-          "description": "Set when the proposals come from a login with this method (`_sill/agents.discover` with\n`method_id`): the login's files are already in the agent's sill-owned home.",
+          "description": "Set when the proposals come from a login with this method (`_silli/agents.discover` with\n`method_id`): the login's files are already in the agent's silli-owned home.",
           "type": [
             "string",
             "null"
@@ -3469,7 +3469,7 @@
       "type": "object"
     },
     "InvalidStateDetails": {
-      "description": "`invalid_state` (with `sill.workspaces`): why a workspace operation cannot run, as a stable\nreason (`stale_revision`, `source_overlap`, `submodules`…), and the files involved.",
+      "description": "`invalid_state` (with `silli.workspaces`): why a workspace operation cannot run, as a stable\nreason (`stale_revision`, `source_overlap`, `submodules`…), and the files involved.",
       "properties": {
         "paths": {
           "default": [],
@@ -3570,7 +3570,7 @@
           "type": "integer"
         },
         "name": {
-          "description": "The managed process's name, for a service started with `sill-proc`.",
+          "description": "The managed process's name, for a service started with `silli-proc`.",
           "type": [
             "string",
             "null"
@@ -3608,7 +3608,7 @@
       "type": "object"
     },
     "JailProcesses": {
-      "description": "What runs in a session's jail now (docs/jail-processes.md), as sill sees it from outside the\nagent. Empty when the session's jail is not running.",
+      "description": "What runs in a session's jail now (docs/jail-processes.md), as silli sees it from outside the\nagent. Empty when the session's jail is not running.",
       "properties": {
         "commands": {
           "default": [],
@@ -3620,7 +3620,7 @@
         },
         "services": {
           "default": [],
-          "description": "Long-running programs: managed processes (`sill-proc`) and anything listening on a port.",
+          "description": "Long-running programs: managed processes (`silli-proc`) and anything listening on a port.",
           "items": {
             "$ref": "#/$defs/JailProcess"
           },
@@ -4277,7 +4277,7 @@
       "type": "object"
     },
     "Notice": {
-      "description": "`_sill/workspaces.changed`: refresh the workspace (invalidation only).",
+      "description": "`_silli/workspaces.changed`: refresh the workspace (invalidation only).",
       "properties": {
         "workspace_id": {
           "type": "string"
@@ -4447,7 +4447,7 @@
           ]
         },
         "unreadable": {
-          "description": "Sessions whose writes could not be listed, with why (a launch recorded by an older Sill,\nsay); on the first page only. The rest of the listing is whole.",
+          "description": "Sessions whose writes could not be listed, with why (a launch recorded by an older Silli,\nsay); on the first page only. The rest of the listing is whole.",
           "items": {
             "$ref": "#/$defs/Unreadable"
           },
@@ -5179,7 +5179,7 @@
           "type": "object"
         },
         {
-          "description": "A login page for the frontend to open in the person's browser (capability\n`sill.login_browser`); the daemon opens none. `callback_port`: the daemon host's loopback\nport the page redirects to, which a frontend on another machine relays with\n`_sill/streams.login_callback`.",
+          "description": "A login page for the frontend to open in the person's browser (capability\n`silli.login_browser`); the daemon opens none. `callback_port`: the daemon host's loopback\nport the page redirects to, which a frontend on another machine relays with\n`_silli/streams.login_callback`.",
           "properties": {
             "callback_port": {
               "format": "uint16",
@@ -5207,7 +5207,7 @@
       ]
     },
     "Proposal": {
-      "description": "A path an agent created under a fresh home on its first start: a proposal for its `home_paths`\n(`_sill/agents.discovered`; docs/agent-directories.md \"Directory setup by probe\").",
+      "description": "A path an agent created under a fresh home on its first start: a proposal for its `home_paths`\n(`_silli/agents.discovered`; docs/agent-directories.md \"Directory setup by probe\").",
       "properties": {
         "initial_content": {
           "description": "A file: what the agent wrote, when small text; the file's initial content if declared.",
@@ -5809,7 +5809,7 @@
         },
         "tested": {
           "default": false,
-          "description": "Known to work inside sill's jail end to end (install, login, a prompt). The daemon's list\nis the only one; a frontend shows the other entries on request.",
+          "description": "Known to work inside silli's jail end to end (install, login, a prompt). The daemon's list\nis the only one; a frontend shows the other entries on request.",
           "type": "boolean"
         },
         "version": {
@@ -6453,7 +6453,7 @@
         },
         "agent_title": {
           "default": null,
-          "description": "The name the agent gave the session, if any (sill's own title is `title`).",
+          "description": "The name the agent gave the session, if any (silli's own title is `title`).",
           "type": [
             "string",
             "null"
@@ -6526,7 +6526,7 @@
         },
         "summarizing": {
           "default": null,
-          "description": "The turn running is sill's own summary turn: `checkpoint` (Summarize now) or `end` (the\nsession's closing summary); None for the agent's ordinary work and when nothing runs.",
+          "description": "The turn running is silli's own summary turn: `checkpoint` (Summarize now) or `end` (the\nsession's closing summary); None for the agent's ordinary work and when nothing runs.",
           "type": [
             "string",
             "null"
@@ -7542,7 +7542,7 @@
           "type": "string"
         },
         "uncommitted": {
-          "description": "Uncommitted paths, untracked included. Apply brings commits only: while there are any,\nthey are committed first — by the session's agent, asked by the frontend, or by sill for\na workspace no agent will write again. `workspaces.copy` brings them as they are.",
+          "description": "Uncommitted paths, untracked included. Apply brings commits only: while there are any,\nthey are committed first — by the session's agent, asked by the frontend, or by silli for\na workspace no agent will write again. `workspaces.copy` brings them as they are.",
           "items": {
             "type": "string"
           },
@@ -7911,7 +7911,7 @@
           "type": "string"
         },
         "purpose": {
-          "description": "Why sill started the turn when the person did not: `summary` (a summary sill asked the\nagent for), or a submission's `purpose` (`commit`, `crosscheck`); null for the person's own\nturns and the agent's. Frontends fold a `summary` or `commit` turn to one line, and of a\n`crosscheck` turn only its prompt.",
+          "description": "Why silli started the turn when the person did not: `summary` (a summary silli asked the\nagent for), or a submission's `purpose` (`commit`, `crosscheck`); null for the person's own\nturns and the agent's. Frontends fold a `summary` or `commit` turn to one line, and of a\n`crosscheck` turn only its prompt.",
           "type": [
             "string",
             "null"
@@ -8234,72 +8234,72 @@
     "offered": [
       {
         "doc": "Daemon-host free space, build-cache cleanup and ended-session storage reclaim.",
-        "name": "sill.storage",
+        "name": "silli.storage",
         "version": 1
       },
       {
-        "doc": "_sill/crosscheck.*: a second opinion on a workspace's work from one Reviewer, a saved agent with its options; a submission may carry the purpose `crosscheck`.",
-        "name": "sill.crosscheck",
+        "doc": "_silli/crosscheck.*: a second opinion on a workspace's work from one Reviewer, a saved agent with its options; a submission may carry the purpose `crosscheck`.",
+        "name": "silli.crosscheck",
         "version": 1
       },
       {
-        "doc": "_sill/submissions.send_now: a queued submission goes next, the active turn stopped.",
-        "name": "sill.send_now",
+        "doc": "_silli/submissions.send_now: a queued submission goes next, the active turn stopped.",
+        "name": "silli.send_now",
         "version": 1
       },
       {
-        "doc": "The frontend shows session permission state: it may change session capability choices (_sill/permissions.set, apply_development, restore_defaults) and operate sessions using Desktop development or Host control capabilities.",
-        "name": "sill.permission_modes",
+        "doc": "The frontend shows session permission state: it may change session capability choices (_silli/permissions.set, apply_development, restore_defaults) and operate sessions using Desktop development or Host control capabilities.",
+        "name": "silli.permission_modes",
         "version": 1
       },
       {
-        "doc": "_sill/desktop.capture and _sill/desktop.read: pictures of a session's test desktop, for a live view.",
-        "name": "sill.desktop_view",
+        "doc": "_silli/desktop.capture and _silli/desktop.read: pictures of a session's test desktop, for a live view.",
+        "name": "silli.desktop_view",
         "version": 1
       },
       {
-        "doc": "_sill/agents.discover and _sill/agents.discovered: a first start in a throwaway jail proposes an installed agent's home_paths; the person approves them on the Agents page (saved with _sill/agents.save).",
-        "name": "sill.agent_setup",
+        "doc": "_silli/agents.discover and _silli/agents.discovered: a first start in a throwaway jail proposes an installed agent's home_paths; the person approves them on the Agents page (saved with _silli/agents.save).",
+        "name": "silli.agent_setup",
         "version": 1
       },
       {
-        "doc": "_sill/workspaces.*: a session's own clone and branch of a repository; the person merges (fast-forward) or discards the result. _sill/workspaces.changed goes only to connections answered this capability.",
-        "name": "sill.workspaces",
+        "doc": "_silli/workspaces.*: a session's own clone and branch of a repository; the person merges (fast-forward) or discards the result. _silli/workspaces.changed goes only to connections answered this capability.",
+        "name": "silli.workspaces",
         "version": 1
       },
       {
-        "doc": "_sill/policy.quiet_host: stop showing a host's refusal banner in every session, without granting access.",
-        "name": "sill.network_quiet",
+        "doc": "_silli/policy.quiet_host: stop showing a host's refusal banner in every session, without granting access.",
+        "name": "silli.network_quiet",
         "version": 1
       },
       {
-        "doc": "_sill/usage.active_time: the time agents worked per hour, over all sessions, for a running-time chart.",
-        "name": "sill.usage",
+        "doc": "_silli/usage.active_time: the time agents worked per hour, over all sessions, for a running-time chart.",
+        "name": "silli.usage",
         "version": 1
       },
       {
-        "doc": "Host logins hand their pages to the frontend (`open_url` login progress) instead of opening a browser on the daemon host; _sill/streams.login_callback relays the page's loopback callback from a frontend on another machine; _sill/operations.cancel stops a running login.",
-        "name": "sill.login_browser",
+        "doc": "Host logins hand their pages to the frontend (`open_url` login progress) instead of opening a browser on the daemon host; _silli/streams.login_callback relays the page's loopback callback from a frontend on another machine; _silli/operations.cancel stops a running login.",
+        "name": "silli.login_browser",
         "version": 1
       },
       {
-        "doc": "_sill/procs.running: what runs in a session's jail now, commands apart from services, seen from outside the agent (docs/jail-processes.md); _sill/procs.stop_command stops one command with its tree.",
-        "name": "sill.jail_processes",
+        "doc": "_silli/procs.running: what runs in a session's jail now, commands apart from services, seen from outside the agent (docs/jail-processes.md); _silli/procs.stop_command stops one command with its tree.",
+        "name": "silli.jail_processes",
         "version": 1
       },
       {
-        "doc": "_sill/providers.*: model providers, records on the daemon host for OpenAI-compatible endpoints. The daemon derives the configuration, the key and the network grant of agents it has a translation for (docs/model-providers.md).",
-        "name": "sill.providers",
+        "doc": "_silli/providers.*: model providers, records on the daemon host for OpenAI-compatible endpoints. The daemon derives the configuration, the key and the network grant of agents it has a translation for (docs/model-providers.md).",
+        "name": "silli.providers",
         "version": 1
       },
       {
         "doc": "Per-model provider token limits and Ollama active-context detection.",
-        "name": "sill.provider_limits",
+        "name": "silli.provider_limits",
         "version": 1
       },
       {
-        "doc": "The frontend displays Host control: the session's caption (a line in the control's colour for as long as it is active, with its words when it starts or its scope changes) and the window-level line naming every session with active control. It may activate and revoke (_sill/host_control.activate, revoke); attached to a session, it counts as displaying that session's control, which ends when the last such connection goes.",
-        "name": "sill.host_control",
+        "doc": "The frontend displays Host control: the session's caption (a line in the control's colour for as long as it is active, with its words when it starts or its scope changes) and the window-level line naming every session with active control. It may activate and revoke (_silli/host_control.activate, revoke); attached to a session, it counts as displaying that session's control, which ends when the last such connection goes.",
+        "name": "silli.host_control",
         "version": 1
       }
     ],
@@ -8379,11 +8379,11 @@
   "methods": [
     {
       "capabilities": {
-        "sill.storage": 1
+        "silli.storage": 1
       },
       "doc": "Measure session-owned directories and report reclaim eligibility.",
       "kind": "request",
-      "name": "_sill/storage.sessions",
+      "name": "_silli/storage.sessions",
       "params": {
         "$ref": "#/$defs/Empty"
       },
@@ -8396,11 +8396,11 @@
     },
     {
       "capabilities": {
-        "sill.storage": 1
+        "silli.storage": 1
       },
       "doc": "Reclaim an ended session's jail after its work has been settled.",
       "kind": "request",
-      "name": "_sill/storage.reclaim",
+      "name": "_silli/storage.reclaim",
       "params": {
         "$ref": "#/$defs/Reclaim"
       },
@@ -8410,11 +8410,11 @@
     },
     {
       "capabilities": {
-        "sill.storage": 1
+        "silli.storage": 1
       },
       "doc": "Read used, total and available bytes on the daemon host home and state filesystems.",
       "kind": "request",
-      "name": "_sill/storage.space",
+      "name": "_silli/storage.space",
       "params": {
         "$ref": "#/$defs/Empty"
       },
@@ -8424,11 +8424,11 @@
     },
     {
       "capabilities": {
-        "sill.storage": 1
+        "silli.storage": 1
       },
       "doc": "Scan known session build caches; active sessions cannot be cleared.",
       "kind": "request",
-      "name": "_sill/storage.caches",
+      "name": "_silli/storage.caches",
       "params": {
         "$ref": "#/$defs/Empty"
       },
@@ -8438,11 +8438,11 @@
     },
     {
       "capabilities": {
-        "sill.storage": 1
+        "silli.storage": 1
       },
       "doc": "Detach and remove only the known build cache of an inactive session; read caches again after uncertainty before repeating.",
       "kind": "request",
-      "name": "_sill/storage.clear_build_cache",
+      "name": "_silli/storage.clear_build_cache",
       "params": {
         "$ref": "#/$defs/ClearBuildCache"
       },
@@ -8452,11 +8452,11 @@
     },
     {
       "capabilities": {
-        "sill.crosscheck": 1
+        "silli.crosscheck": 1
       },
       "doc": "Read the saved Reviewers and, for every agent that can review, the options its latest session reported.",
       "kind": "request",
-      "name": "_sill/crosscheck.reviewers",
+      "name": "_silli/crosscheck.reviewers",
       "params": {
         "$ref": "#/$defs/CrosscheckEmpty"
       },
@@ -8466,11 +8466,11 @@
     },
     {
       "capabilities": {
-        "sill.crosscheck": 1
+        "silli.crosscheck": 1
       },
       "doc": "Save the Reviewers. Read them after uncertainty before repeating.",
       "kind": "request",
-      "name": "_sill/crosscheck.set_reviewers",
+      "name": "_silli/crosscheck.set_reviewers",
       "params": {
         "$ref": "#/$defs/CrosscheckSetReviewers"
       },
@@ -8480,11 +8480,11 @@
     },
     {
       "capabilities": {
-        "sill.crosscheck": 1
+        "silli.crosscheck": 1
       },
       "doc": "Read a workspace's review, when it has one, and whether its files are still the ones reviewed.",
       "kind": "request",
-      "name": "_sill/crosscheck.get",
+      "name": "_silli/crosscheck.get",
       "params": {
         "$ref": "#/$defs/CrosscheckWorkspaceKey"
       },
@@ -8494,11 +8494,11 @@
     },
     {
       "capabilities": {
-        "sill.crosscheck": 1
+        "silli.crosscheck": 1
       },
       "doc": "Capture the workspace's work and start a Reviewer on it, replacing the workspace's earlier review. The same operation_id answers with the review it started; never replay uncertain work under a new one.",
       "kind": "request",
-      "name": "_sill/crosscheck.start",
+      "name": "_silli/crosscheck.start",
       "params": {
         "$ref": "#/$defs/CrosscheckStart"
       },
@@ -8508,11 +8508,11 @@
     },
     {
       "capabilities": {
-        "sill.crosscheck": 1
+        "silli.crosscheck": 1
       },
       "doc": "Remove a review: one under way is cancelled and its Reviewer stopped. A review already gone is not an error.",
       "kind": "request",
-      "name": "_sill/crosscheck.remove",
+      "name": "_silli/crosscheck.remove",
       "params": {
         "$ref": "#/$defs/CrosscheckRunKey"
       },
@@ -8522,11 +8522,11 @@
     },
     {
       "capabilities": {
-        "sill.crosscheck": 1
+        "silli.crosscheck": 1
       },
-      "doc": "A workspace's review changed or was removed; read it again. Sent only to connections answered sill.crosscheck.",
+      "doc": "A workspace's review changed or was removed; read it again. Sent only to connections answered silli.crosscheck.",
       "kind": "notification",
-      "name": "_sill/crosscheck.changed",
+      "name": "_silli/crosscheck.changed",
       "params": {
         "$ref": "#/$defs/CrosscheckNotice"
       },
@@ -8538,7 +8538,7 @@
       "capabilities": {},
       "doc": "Release this connection's immutable memory text snapshot early.",
       "kind": "request",
-      "name": "_sill/memory.text.close",
+      "name": "_silli/memory.text.close",
       "params": {
         "$ref": "#/$defs/TextClose"
       },
@@ -8550,7 +8550,7 @@
       "capabilities": {},
       "doc": "Delete one exact session. Inspect existence after uncertainty; never replay against a replacement identity.",
       "kind": "request",
-      "name": "_sill/sessions.delete",
+      "name": "_silli/sessions.delete",
       "params": {
         "$ref": "#/$defs/SessionKey"
       },
@@ -8562,7 +8562,7 @@
       "capabilities": {},
       "doc": "Explicitly replace a conversation generation. Never blindly retry after uncertainty.",
       "kind": "request",
-      "name": "_sill/sessions.reset",
+      "name": "_silli/sessions.reset",
       "params": {
         "$ref": "#/$defs/SessionKey"
       },
@@ -8574,7 +8574,7 @@
       "capabilities": {},
       "doc": "Read a bounded daemon-host session log tail.",
       "kind": "request",
-      "name": "_sill/sessions.log",
+      "name": "_silli/sessions.log",
       "params": {
         "$ref": "#/$defs/Log"
       },
@@ -8586,7 +8586,7 @@
       "capabilities": {},
       "doc": "Read daemon-host file/repository information with exact path bytes and bounded results.",
       "kind": "request",
-      "name": "_sill/files.find",
+      "name": "_silli/files.find",
       "params": {
         "$ref": "#/$defs/Find"
       },
@@ -8598,7 +8598,7 @@
       "capabilities": {},
       "doc": "The repository containing the path: the nearest directory with `.git`, the path itself when it is a directory; null outside any repository.",
       "kind": "request",
-      "name": "_sill/repos.root",
+      "name": "_silli/repos.root",
       "params": {
         "$ref": "#/$defs/PathKey"
       },
@@ -8610,7 +8610,7 @@
       "capabilities": {},
       "doc": "Read daemon-host file/repository information with exact path bytes and bounded results.",
       "kind": "request",
-      "name": "_sill/repos.head",
+      "name": "_silli/repos.head",
       "params": {
         "$ref": "#/$defs/PathKey"
       },
@@ -8622,7 +8622,7 @@
       "capabilities": {},
       "doc": "Read daemon-host file/repository information with exact path bytes and bounded results.",
       "kind": "request",
-      "name": "_sill/repos.summary",
+      "name": "_silli/repos.summary",
       "params": {
         "$ref": "#/$defs/SummaryKey"
       },
@@ -8634,7 +8634,7 @@
       "capabilities": {},
       "doc": "Read daemon-host file/repository information with exact path bytes and bounded results.",
       "kind": "request",
-      "name": "_sill/repos.changed_lines",
+      "name": "_silli/repos.changed_lines",
       "params": {
         "$ref": "#/$defs/ChangedLines"
       },
@@ -8646,7 +8646,7 @@
       "capabilities": {},
       "doc": "Read daemon-host file/repository information with exact path bytes and bounded results.",
       "kind": "request",
-      "name": "_sill/repos.status",
+      "name": "_silli/repos.status",
       "params": {
         "$ref": "#/$defs/Status"
       },
@@ -8658,7 +8658,7 @@
       "capabilities": {},
       "doc": "Apply configured compaction and retention; inspect memory after uncertainty before retrying.",
       "kind": "request",
-      "name": "_sill/memory.compact",
+      "name": "_silli/memory.compact",
       "params": {
         "$ref": "#/$defs/Empty"
       },
@@ -8670,7 +8670,7 @@
       "capabilities": {},
       "doc": "Delete ended sessions; do not blindly retry because newly ended sessions may appear.",
       "kind": "request",
-      "name": "_sill/memory.forget",
+      "name": "_silli/memory.forget",
       "params": {
         "$ref": "#/$defs/Empty"
       },
@@ -8682,7 +8682,7 @@
       "capabilities": {},
       "doc": "Read an image visible through the session filesystem view in bounded chunks; revision detects concurrent edits.",
       "kind": "request",
-      "name": "_sill/files.image",
+      "name": "_silli/files.image",
       "params": {
         "$ref": "#/$defs/SessionImage"
       },
@@ -8694,7 +8694,7 @@
       "capabilities": {},
       "doc": "Read network denials and their acknowledgement state (4 MiB response bound).",
       "kind": "request",
-      "name": "_sill/policy.denied",
+      "name": "_silli/policy.denied",
       "params": {
         "$ref": "#/$defs/DeniedList"
       },
@@ -8704,11 +8704,11 @@
     },
     {
       "capabilities": {
-        "sill.network_quiet": 1
+        "silli.network_quiet": 1
       },
       "doc": "Hide refusal banners for an exact hostname across sessions; network access is unchanged.",
       "kind": "request",
-      "name": "_sill/policy.quiet_host",
+      "name": "_silli/policy.quiet_host",
       "params": {
         "$ref": "#/$defs/NetworkHost"
       },
@@ -8720,7 +8720,7 @@
       "capabilities": {},
       "doc": "Acknowledge a denial; inspect denied state after uncertainty before retrying.",
       "kind": "request",
-      "name": "_sill/policy.remember_denied",
+      "name": "_silli/policy.remember_denied",
       "params": {
         "$ref": "#/$defs/NetworkHost"
       },
@@ -8732,7 +8732,7 @@
       "capabilities": {},
       "doc": "Approve a concrete host for this session only; policy limits apply. Inspect policy after uncertainty.",
       "kind": "request",
-      "name": "_sill/policy.allow_host",
+      "name": "_silli/policy.allow_host",
       "params": {
         "$ref": "#/$defs/NetworkHost"
       },
@@ -8742,11 +8742,11 @@
     },
     {
       "capabilities": {
-        "sill.desktop_view": 1
+        "silli.desktop_view": 1
       },
-      "doc": "Take a picture of the session's test desktop (Desktop development), on the host, outside the jail. A new one is kept for `_sill/desktop.read`; when it is still the `since` revision nothing is encoded and `changed` is false. `not_found` when the session has no test desktop running.",
+      "doc": "Take a picture of the session's test desktop (Desktop development), on the host, outside the jail. A new one is kept for `_silli/desktop.read`; when it is still the `since` revision nothing is encoded and `changed` is false. `not_found` when the session has no test desktop running.",
       "kind": "request",
-      "name": "_sill/desktop.capture",
+      "name": "_silli/desktop.capture",
       "params": {
         "$ref": "#/$defs/DesktopCapture"
       },
@@ -8756,11 +8756,11 @@
     },
     {
       "capabilities": {
-        "sill.desktop_view": 1
+        "silli.desktop_view": 1
       },
       "doc": "Read the latest test desktop picture (PNG) in chunks of at most 1 MiB; `conflict` when a newer capture replaced that revision.",
       "kind": "request",
-      "name": "_sill/desktop.read",
+      "name": "_silli/desktop.read",
       "params": {
         "$ref": "#/$defs/DesktopRead"
       },
@@ -8770,11 +8770,11 @@
     },
     {
       "capabilities": {
-        "sill.permission_modes": 1
+        "silli.permission_modes": 1
       },
       "doc": "Save for future sessions: add a host pattern to the session agent's network defaults. Existing sessions and their grants are unchanged.",
       "kind": "request",
-      "name": "_sill/policy.save_host",
+      "name": "_silli/policy.save_host",
       "params": {
         "$ref": "#/$defs/NetworkHost"
       },
@@ -8784,11 +8784,11 @@
     },
     {
       "capabilities": {
-        "sill.permission_modes": 1
+        "silli.permission_modes": 1
       },
       "doc": "Remember a contained capability choice for this session within policy limits; blocked widening is refused. Inspect the preview after uncertainty.",
       "kind": "request",
-      "name": "_sill/permissions.set",
+      "name": "_silli/permissions.set",
       "params": {
         "$ref": "#/$defs/PermissionChoice"
       },
@@ -8798,11 +8798,11 @@
     },
     {
       "capabilities": {
-        "sill.permission_modes": 1
+        "silli.permission_modes": 1
       },
       "doc": "Apply development permissions: remember the test desktop and the private bus as session choices together; refused as a whole, recording nothing, when a limit or a missing backend blocks either.",
       "kind": "request",
-      "name": "_sill/permissions.apply_development",
+      "name": "_silli/permissions.apply_development",
       "params": {
         "$ref": "#/$defs/SessionKey"
       },
@@ -8812,11 +8812,11 @@
     },
     {
       "capabilities": {
-        "sill.host_control": 1
+        "silli.host_control": 1
       },
       "doc": "Activate Host control for a running session with exactly these operations, or change an active one's scope: a new generation each time. Refused for ghosts, a policy that forbids it and a stopped session; never a saved choice.",
       "kind": "request",
-      "name": "_sill/host_control.activate",
+      "name": "_silli/host_control.activate",
       "params": {
         "$ref": "#/$defs/Activate"
       },
@@ -8826,11 +8826,11 @@
     },
     {
       "capabilities": {
-        "sill.host_control": 1
+        "silli.host_control": 1
       },
       "doc": "End the session's Host control activation; a no-op without one. Host processes it launched are stopped, except those marked to keep.",
       "kind": "request",
-      "name": "_sill/host_control.revoke",
+      "name": "_silli/host_control.revoke",
       "params": {
         "$ref": "#/$defs/SessionKey"
       },
@@ -8840,11 +8840,11 @@
     },
     {
       "capabilities": {
-        "sill.host_control": 1
+        "silli.host_control": 1
       },
       "doc": "Mark a bridge-launched host process (by its process-list name, host:<id>) to keep running after Host control ends, or not.",
       "kind": "request",
-      "name": "_sill/host_control.keep",
+      "name": "_silli/host_control.keep",
       "params": {
         "$ref": "#/$defs/Keep"
       },
@@ -8854,11 +8854,11 @@
     },
     {
       "capabilities": {
-        "sill.permission_modes": 1
+        "silli.permission_modes": 1
       },
       "doc": "A session's Host control state: active, generation, operations, displaying frontends, the last end and the policy's ban. Session records carry the active brief for every client.",
       "kind": "request",
-      "name": "_sill/host_control.state",
+      "name": "_silli/host_control.state",
       "params": {
         "$ref": "#/$defs/SessionKey"
       },
@@ -8868,11 +8868,11 @@
     },
     {
       "capabilities": {
-        "sill.permission_modes": 1
+        "silli.permission_modes": 1
       },
       "doc": "Restore defaults: remove this session's added capability and host grants, keeping its policy and pins. A running jail keeps its launch state until restarted.",
       "kind": "request",
-      "name": "_sill/permissions.restore_defaults",
+      "name": "_silli/permissions.restore_defaults",
       "params": {
         "$ref": "#/$defs/SessionKey"
       },
@@ -8884,7 +8884,7 @@
       "capabilities": {},
       "doc": "Filesystem changes changed; refresh bounded public pages.",
       "kind": "notification",
-      "name": "_sill/changes.changed",
+      "name": "_silli/changes.changed",
       "params": {
         "$ref": "#/$defs/Empty"
       },
@@ -8894,11 +8894,11 @@
     },
     {
       "capabilities": {
-        "sill.workspaces": 1
+        "silli.workspaces": 1
       },
       "doc": "Workspaces, newest first, in live keyset pages (1–128), optionally one session's; the first page also lists discarded work still undoable. Reading settles: a workspace whose session ended is a result, or is freed when nothing is left to apply.",
       "kind": "request",
-      "name": "_sill/workspaces.list",
+      "name": "_silli/workspaces.list",
       "params": {
         "$ref": "#/$defs/List"
       },
@@ -8908,11 +8908,11 @@
     },
     {
       "capabilities": {
-        "sill.workspaces": 1
+        "silli.workspaces": 1
       },
       "doc": "A session's pinned repositories as its jail has them: whether it works in workspaces, each workspace (its clone stands at the repository's path in the jail), and repositories kept live with why.",
       "kind": "request",
-      "name": "_sill/workspaces.session",
+      "name": "_silli/workspaces.session",
       "params": {
         "$ref": "#/$defs/SessionKey2"
       },
@@ -8922,11 +8922,11 @@
     },
     {
       "capabilities": {
-        "sill.workspaces": 1
+        "silli.workspaces": 1
       },
       "doc": "A workspace with its current revision and what an Apply would bring (since the last Apply), through the hardened Git view.",
       "kind": "request",
-      "name": "_sill/workspaces.get",
+      "name": "_silli/workspaces.get",
       "params": {
         "$ref": "#/$defs/Key"
       },
@@ -8936,11 +8936,11 @@
     },
     {
       "capabilities": {
-        "sill.workspaces": 1
+        "silli.workspaces": 1
       },
       "doc": "The workspace's working tree against what the person already has, or against where it started; at most 4 MiB.",
       "kind": "request",
-      "name": "_sill/workspaces.diff",
+      "name": "_silli/workspaces.diff",
       "params": {
         "$ref": "#/$defs/DiffRequest"
       },
@@ -8950,11 +8950,11 @@
     },
     {
       "capabilities": {
-        "sill.workspaces": 1
+        "silli.workspaces": 1
       },
       "doc": "When the person's checkout moved, rebase the workspace onto it in a helper jail with the session's restrictions — its uncommitted work committed first, as for an Apply (refused as uncommitted while the session's agent can commit it) — and return the revision an Apply would bring. A rebase that stops leaves conflicts (resolve in the workspace, or abort).",
       "kind": "request",
-      "name": "_sill/workspaces.prepare",
+      "name": "_silli/workspaces.prepare",
       "params": {
         "$ref": "#/$defs/Operate"
       },
@@ -8964,11 +8964,11 @@
     },
     {
       "capabilities": {
-        "sill.workspaces": 1
+        "silli.workspaces": 1
       },
-      "doc": "Bring the workspace's commits into the person's checkout by fast-forward, exactly this revision; repeatable, the workspace goes on. Commits only: uncommitted work is refused as uncommitted while the session's agent can commit it, and committed by sill as the person otherwise. Refusals: invalid_state with reason stale_revision, source_moved, source_overlap, untracked_collision, uncommitted, no_identity, workspace_detached, writer_active, rebase_in_progress.",
+      "doc": "Bring the workspace's commits into the person's checkout by fast-forward, exactly this revision; repeatable, the workspace goes on. Commits only: uncommitted work is refused as uncommitted while the session's agent can commit it, and committed by silli as the person otherwise. Refusals: invalid_state with reason stale_revision, source_moved, source_overlap, untracked_collision, uncommitted, no_identity, workspace_detached, writer_active, rebase_in_progress.",
       "kind": "request",
-      "name": "_sill/workspaces.apply",
+      "name": "_silli/workspaces.apply",
       "params": {
         "$ref": "#/$defs/Apply"
       },
@@ -8978,11 +8978,11 @@
     },
     {
       "capabilities": {
-        "sill.workspaces": 1
+        "silli.workspaces": 1
       },
       "doc": "Apply without commit: write the workspace's whole state, committed or not, into the person's checkout as uncommitted changes for them to try, exactly this revision. No commit is made on either side and the workspace keeps its work for a later apply; repeatable. Refusals: invalid_state with reason stale_revision, source_moved, source_overlap, untracked_collision, workspace_detached, writer_active, rebase_in_progress.",
       "kind": "request",
-      "name": "_sill/workspaces.copy",
+      "name": "_silli/workspaces.copy",
       "params": {
         "$ref": "#/$defs/Apply"
       },
@@ -8992,11 +8992,11 @@
     },
     {
       "capabilities": {
-        "sill.workspaces": 1
+        "silli.workspaces": 1
       },
-      "doc": "Apply as branch: make a new branch in the person's checkout at the workspace's commits, exactly this revision's work, without switching to it: the checkout's branch, index and files are untouched. The name is the branch the agent works on, or the session's title in snake_case when the workspace is on sill's own branch. Commits only, as for apply. Repeating it with the branch already there at those commits does nothing. Refusals: invalid_state with reason branch_exists (the name holds other commits; never moved), stale_revision, uncommitted, no_identity, workspace_detached, writer_active, rebase_in_progress.",
+      "doc": "Apply as branch: make a new branch in the person's checkout at the workspace's commits, exactly this revision's work, without switching to it: the checkout's branch, index and files are untouched. The name is the branch the agent works on, or the session's title in snake_case when the workspace is on silli's own branch. Commits only, as for apply. Repeating it with the branch already there at those commits does nothing. Refusals: invalid_state with reason branch_exists (the name holds other commits; never moved), stale_revision, uncommitted, no_identity, workspace_detached, writer_active, rebase_in_progress.",
       "kind": "request",
-      "name": "_sill/workspaces.branch",
+      "name": "_silli/workspaces.branch",
       "params": {
         "$ref": "#/$defs/Apply"
       },
@@ -9006,11 +9006,11 @@
     },
     {
       "capabilities": {
-        "sill.workspaces": 1
+        "silli.workspaces": 1
       },
       "doc": "Throw away what the workspace has beyond the last Apply, exactly this revision; the work is kept 7 days for Undo.",
       "kind": "request",
-      "name": "_sill/workspaces.discard",
+      "name": "_silli/workspaces.discard",
       "params": {
         "$ref": "#/$defs/Apply"
       },
@@ -9020,11 +9020,11 @@
     },
     {
       "capabilities": {
-        "sill.workspaces": 1
+        "silli.workspaces": 1
       },
       "doc": "Put discarded work back: into its workspace when nothing happened there since (changed_since otherwise), or into a workspace of its own when that is gone.",
       "kind": "request",
-      "name": "_sill/workspaces.undo",
+      "name": "_silli/workspaces.undo",
       "params": {
         "$ref": "#/$defs/Undo"
       },
@@ -9034,11 +9034,11 @@
     },
     {
       "capabilities": {
-        "sill.workspaces": 1
+        "silli.workspaces": 1
       },
       "doc": "Remove a workspace that cannot be read (its operation is of kind read) or whose folder or repository is gone: its folder and record go with whatever work the folder holds, and there is no Undo. Refusals: invalid_state with reason session_active (its session has not ended), readable (apply or discard it instead).",
       "kind": "request",
-      "name": "_sill/workspaces.remove",
+      "name": "_silli/workspaces.remove",
       "params": {
         "$ref": "#/$defs/Operate"
       },
@@ -9048,11 +9048,11 @@
     },
     {
       "capabilities": {
-        "sill.workspaces": 1
+        "silli.workspaces": 1
       },
       "doc": "Abort a rebase that prepare left stopped, in the same helper jail.",
       "kind": "request",
-      "name": "_sill/workspaces.abort",
+      "name": "_silli/workspaces.abort",
       "params": {
         "$ref": "#/$defs/Operate"
       },
@@ -9062,11 +9062,11 @@
     },
     {
       "capabilities": {
-        "sill.workspaces": 1
+        "silli.workspaces": 1
       },
-      "doc": "A workspace changed; refresh it. Sent only to connections answered sill.workspaces.",
+      "doc": "A workspace changed; refresh it. Sent only to connections answered silli.workspaces.",
       "kind": "notification",
-      "name": "_sill/workspaces.changed",
+      "name": "_silli/workspaces.changed",
       "params": {
         "$ref": "#/$defs/Notice"
       },
@@ -9078,7 +9078,7 @@
       "capabilities": {},
       "doc": "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry.",
       "kind": "request",
-      "name": "_sill/changes.list",
+      "name": "_silli/changes.list",
       "params": {
         "$ref": "#/$defs/List2"
       },
@@ -9090,7 +9090,7 @@
       "capabilities": {},
       "doc": "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry.",
       "kind": "request",
-      "name": "_sill/changes.diff",
+      "name": "_silli/changes.diff",
       "params": {
         "$ref": "#/$defs/Diff"
       },
@@ -9102,7 +9102,7 @@
       "capabilities": {},
       "doc": "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry.",
       "kind": "request",
-      "name": "_sill/changes.keep",
+      "name": "_silli/changes.keep",
       "params": {
         "$ref": "#/$defs/Keep2"
       },
@@ -9114,7 +9114,7 @@
       "capabilities": {},
       "doc": "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry.",
       "kind": "request",
-      "name": "_sill/changes.revert",
+      "name": "_silli/changes.revert",
       "params": {
         "$ref": "#/$defs/Revert"
       },
@@ -9126,7 +9126,7 @@
       "capabilities": {},
       "doc": "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry.",
       "kind": "request",
-      "name": "_sill/changes.undo",
+      "name": "_silli/changes.undo",
       "params": {
         "$ref": "#/$defs/Undo2"
       },
@@ -9138,7 +9138,7 @@
       "capabilities": {},
       "doc": "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry.",
       "kind": "request",
-      "name": "_sill/changes.git-revert",
+      "name": "_silli/changes.git-revert",
       "params": {
         "$ref": "#/$defs/GitRevert"
       },
@@ -9150,7 +9150,7 @@
       "capabilities": {},
       "doc": "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry.",
       "kind": "request",
-      "name": "_sill/changes.history",
+      "name": "_silli/changes.history",
       "params": {
         "$ref": "#/$defs/History"
       },
@@ -9162,7 +9162,7 @@
       "capabilities": {},
       "doc": "Read live bounded memory pages; after uncertain mutations inspect current state before retrying.",
       "kind": "request",
-      "name": "_sill/memory.list",
+      "name": "_silli/memory.list",
       "params": {
         "$ref": "#/$defs/List3"
       },
@@ -9174,7 +9174,7 @@
       "capabilities": {},
       "doc": "Read live bounded memory pages; after uncertain mutations inspect current state before retrying.",
       "kind": "request",
-      "name": "_sill/memory.text",
+      "name": "_silli/memory.text",
       "params": {
         "$ref": "#/$defs/TextRead"
       },
@@ -9186,7 +9186,7 @@
       "capabilities": {},
       "doc": "Read live bounded memory pages; after uncertain mutations inspect current state before retrying.",
       "kind": "request",
-      "name": "_sill/memory.search",
+      "name": "_silli/memory.search",
       "params": {
         "$ref": "#/$defs/Search"
       },
@@ -9198,7 +9198,7 @@
       "capabilities": {},
       "doc": "Read live bounded memory pages; after uncertain mutations inspect current state before retrying.",
       "kind": "request",
-      "name": "_sill/memory.notes.list",
+      "name": "_silli/memory.notes.list",
       "params": {
         "$ref": "#/$defs/NotesList"
       },
@@ -9210,7 +9210,7 @@
       "capabilities": {},
       "doc": "Read live bounded memory pages; after uncertain mutations inspect current state before retrying.",
       "kind": "request",
-      "name": "_sill/memory.notes.add",
+      "name": "_silli/memory.notes.add",
       "params": {
         "$ref": "#/$defs/AddNote"
       },
@@ -9222,7 +9222,7 @@
       "capabilities": {},
       "doc": "Read live bounded memory pages; after uncertain mutations inspect current state before retrying.",
       "kind": "request",
-      "name": "_sill/memory.notes.remove",
+      "name": "_silli/memory.notes.remove",
       "params": {
         "$ref": "#/$defs/RemoveNote"
       },
@@ -9234,7 +9234,7 @@
       "capabilities": {},
       "doc": "Read live bounded memory pages; after uncertain mutations inspect current state before retrying.",
       "kind": "request",
-      "name": "_sill/memory.refresh",
+      "name": "_silli/memory.refresh",
       "params": {
         "$ref": "#/$defs/Empty"
       },
@@ -9246,7 +9246,7 @@
       "capabilities": {},
       "doc": "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
       "kind": "request",
-      "name": "_sill/agents.list",
+      "name": "_silli/agents.list",
       "params": {
         "$ref": "#/$defs/List4"
       },
@@ -9258,7 +9258,7 @@
       "capabilities": {},
       "doc": "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
       "kind": "request",
-      "name": "_sill/agents.get",
+      "name": "_silli/agents.get",
       "params": {
         "$ref": "#/$defs/AgentKey"
       },
@@ -9270,7 +9270,7 @@
       "capabilities": {},
       "doc": "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
       "kind": "request",
-      "name": "_sill/agents.save",
+      "name": "_silli/agents.save",
       "params": {
         "$ref": "#/$defs/Definition"
       },
@@ -9282,7 +9282,7 @@
       "capabilities": {},
       "doc": "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
       "kind": "request",
-      "name": "_sill/agents.remove",
+      "name": "_silli/agents.remove",
       "params": {
         "$ref": "#/$defs/AgentKey"
       },
@@ -9294,7 +9294,7 @@
       "capabilities": {},
       "doc": "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
       "kind": "request",
-      "name": "_sill/agents.available",
+      "name": "_silli/agents.available",
       "params": {
         "$ref": "#/$defs/AgentKey"
       },
@@ -9306,7 +9306,7 @@
       "capabilities": {},
       "doc": "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
       "kind": "request",
-      "name": "_sill/agents.defaults.get",
+      "name": "_silli/agents.defaults.get",
       "params": {
         "$ref": "#/$defs/AgentKey"
       },
@@ -9318,7 +9318,7 @@
       "capabilities": {},
       "doc": "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
       "kind": "request",
-      "name": "_sill/agents.defaults.set",
+      "name": "_silli/agents.defaults.set",
       "params": {
         "$ref": "#/$defs/Defaults"
       },
@@ -9328,11 +9328,11 @@
     },
     {
       "capabilities": {
-        "sill.agent_setup": 1
+        "silli.agent_setup": 1
       },
       "doc": "What the agent's last first-start probe created under an empty home: proposals for its home_paths, or none when no probe has run.",
       "kind": "request",
-      "name": "_sill/agents.discovered",
+      "name": "_silli/agents.discovered",
       "params": {
         "$ref": "#/$defs/AgentKey"
       },
@@ -9344,7 +9344,7 @@
       "capabilities": {},
       "doc": "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
       "kind": "request",
-      "name": "_sill/registry.refresh",
+      "name": "_silli/registry.refresh",
       "params": {
         "$ref": "#/$defs/Empty"
       },
@@ -9354,11 +9354,11 @@
     },
     {
       "capabilities": {
-        "sill.providers": 1
+        "silli.providers": 1
       },
       "doc": "Model providers on the daemon host, each with whether a key is saved (never the key) and the host:port sessions may reach, and the agents the daemon hands providers to.",
       "kind": "request",
-      "name": "_sill/providers.list",
+      "name": "_silli/providers.list",
       "params": {
         "$ref": "#/$defs/Empty"
       },
@@ -9368,11 +9368,11 @@
     },
     {
       "capabilities": {
-        "sill.providers": 1
+        "silli.providers": 1
       },
       "doc": "Write a provider record; a key, when given, replaces the saved one. Running sessions of agents that use providers become outdated. Inspect the list after uncertainty before retrying.",
       "kind": "request",
-      "name": "_sill/providers.save",
+      "name": "_silli/providers.save",
       "params": {
         "$ref": "#/$defs/ProviderSave"
       },
@@ -9382,11 +9382,11 @@
     },
     {
       "capabilities": {
-        "sill.providers": 1
+        "silli.providers": 1
       },
       "doc": "Remove a provider record and its key. A provider already gone is not an error.",
       "kind": "request",
-      "name": "_sill/providers.remove",
+      "name": "_silli/providers.remove",
       "params": {
         "$ref": "#/$defs/ProviderKey"
       },
@@ -9396,11 +9396,11 @@
     },
     {
       "capabilities": {
-        "sill.providers": 1
+        "silli.providers": 1
       },
       "doc": "Ask an endpoint for its models from the daemon host, with the given key or the one saved for provider_id. Changes nothing; fails with the endpoint's own error.",
       "kind": "request",
-      "name": "_sill/providers.test",
+      "name": "_silli/providers.test",
       "params": {
         "$ref": "#/$defs/ProviderTest"
       },
@@ -9410,11 +9410,11 @@
     },
     {
       "capabilities": {
-        "sill.provider_limits": 1
+        "silli.provider_limits": 1
       },
       "doc": "Read Ollama's active context allocation for one model, from the same host and path prefix as the provider; does not load or modify models.",
       "kind": "request",
-      "name": "_sill/providers.detect_limits",
+      "name": "_silli/providers.detect_limits",
       "params": {
         "$ref": "#/$defs/ProviderDetectLimits"
       },
@@ -9426,7 +9426,7 @@
       "capabilities": {},
       "doc": "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
       "kind": "request",
-      "name": "_sill/registry.installed",
+      "name": "_silli/registry.installed",
       "params": {
         "$ref": "#/$defs/AgentKey"
       },
@@ -9438,7 +9438,7 @@
       "capabilities": {},
       "doc": "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
       "kind": "request",
-      "name": "_sill/registry.uninstall",
+      "name": "_silli/registry.uninstall",
       "params": {
         "$ref": "#/$defs/EntryKey"
       },
@@ -9450,7 +9450,7 @@
       "capabilities": {},
       "doc": "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
       "kind": "request",
-      "name": "_sill/registry.icon",
+      "name": "_silli/registry.icon",
       "params": {
         "$ref": "#/$defs/EntryKey"
       },
@@ -9462,7 +9462,7 @@
       "capabilities": {},
       "doc": "List global or session pins in bounded live byte-ordered pages.",
       "kind": "request",
-      "name": "_sill/pins.list",
+      "name": "_silli/pins.list",
       "params": {
         "$ref": "#/$defs/List5"
       },
@@ -9474,7 +9474,7 @@
       "capabilities": {},
       "doc": "Ensure global pin membership; returns the canonical daemon-host path.",
       "kind": "request",
-      "name": "_sill/pins.add",
+      "name": "_silli/pins.add",
       "params": {
         "$ref": "#/$defs/GlobalPin"
       },
@@ -9486,7 +9486,7 @@
       "capabilities": {},
       "doc": "Ensure a path is not globally pinned; inspect membership after uncertainty.",
       "kind": "request",
-      "name": "_sill/pins.remove",
+      "name": "_silli/pins.remove",
       "params": {
         "$ref": "#/$defs/GlobalPin"
       },
@@ -9498,7 +9498,7 @@
       "capabilities": {},
       "doc": "Ensure session pin membership; inspect membership after uncertainty.",
       "kind": "request",
-      "name": "_sill/sessions.pin",
+      "name": "_silli/sessions.pin",
       "params": {
         "$ref": "#/$defs/SessionPin"
       },
@@ -9510,7 +9510,7 @@
       "capabilities": {},
       "doc": "Ensure a path is not pinned in a session; inspect membership after uncertainty.",
       "kind": "request",
-      "name": "_sill/sessions.unpin",
+      "name": "_silli/sessions.unpin",
       "params": {
         "$ref": "#/$defs/SessionPin"
       },
@@ -9522,7 +9522,7 @@
       "capabilities": {},
       "doc": "Recover durable login/install status after disconnect or restart. Unknown outcomes must not be replayed.",
       "kind": "request",
-      "name": "_sill/operations.get",
+      "name": "_silli/operations.get",
       "params": {
         "$ref": "#/$defs/OperationKey"
       },
@@ -9534,7 +9534,7 @@
       "capabilities": {},
       "doc": "Read the daemon host home directory.",
       "kind": "request",
-      "name": "_sill/files.home",
+      "name": "_silli/files.home",
       "params": {
         "$ref": "#/$defs/Empty"
       },
@@ -9546,7 +9546,7 @@
       "capabilities": {},
       "doc": "Read metadata of an exact daemon-host path.",
       "kind": "request",
-      "name": "_sill/files.metadata",
+      "name": "_silli/files.metadata",
       "params": {
         "$ref": "#/$defs/FileKey"
       },
@@ -9558,7 +9558,7 @@
       "capabilities": {},
       "doc": "List directory children in bounded live byte-ordered pages.",
       "kind": "request",
-      "name": "_sill/files.list",
+      "name": "_silli/files.list",
       "params": {
         "$ref": "#/$defs/FilesList"
       },
@@ -9570,7 +9570,7 @@
       "capabilities": {},
       "doc": "Read at most 1 MiB from a regular daemon-host file; chunks are not an immutable snapshot.",
       "kind": "request",
-      "name": "_sill/files.read",
+      "name": "_silli/files.read",
       "params": {
         "$ref": "#/$defs/FileRead"
       },
@@ -9582,7 +9582,7 @@
       "capabilities": {},
       "doc": "Atomically replace a daemon-host file with at most 1 MiB. Do not blindly retry; read the file after uncertainty.",
       "kind": "request",
-      "name": "_sill/files.write",
+      "name": "_silli/files.write",
       "params": {
         "$ref": "#/$defs/FileWrite"
       },
@@ -9594,7 +9594,7 @@
       "capabilities": {},
       "doc": "Read daemon settings.",
       "kind": "request",
-      "name": "_sill/settings.get",
+      "name": "_silli/settings.get",
       "params": {
         "$ref": "#/$defs/Empty"
       },
@@ -9604,11 +9604,11 @@
     },
     {
       "capabilities": {
-        "sill.usage": 1
+        "silli.usage": 1
       },
       "doc": "Read the time agents worked per UTC hour over the last days, summed over all sessions including deleted ones.",
       "kind": "request",
-      "name": "_sill/usage.active_time",
+      "name": "_silli/usage.active_time",
       "params": {
         "$ref": "#/$defs/ActiveTimeQuery"
       },
@@ -9620,7 +9620,7 @@
       "capabilities": {},
       "doc": "Apply named settings changes. Read settings after an uncertain outcome before retrying.",
       "kind": "request",
-      "name": "_sill/settings.patch",
+      "name": "_silli/settings.patch",
       "params": {
         "$ref": "#/$defs/SettingsPatch"
       },
@@ -9632,7 +9632,7 @@
       "capabilities": {},
       "doc": "Read global instructions.",
       "kind": "request",
-      "name": "_sill/settings.instructions.get",
+      "name": "_silli/settings.instructions.get",
       "params": {
         "$ref": "#/$defs/Empty"
       },
@@ -9644,7 +9644,7 @@
       "capabilities": {},
       "doc": "Replace global instructions (at most 1 MiB). Read back after uncertainty before retrying.",
       "kind": "request",
-      "name": "_sill/settings.instructions.set",
+      "name": "_silli/settings.instructions.set",
       "params": {
         "$ref": "#/$defs/Text2"
       },
@@ -9656,7 +9656,7 @@
       "capabilities": {},
       "doc": "List available daemon policy names (4 MiB result bound).",
       "kind": "request",
-      "name": "_sill/policy.list",
+      "name": "_silli/policy.list",
       "params": {
         "$ref": "#/$defs/NamesList"
       },
@@ -9668,7 +9668,7 @@
       "capabilities": {},
       "doc": "Read a named daemon policy.",
       "kind": "request",
-      "name": "_sill/policy.get",
+      "name": "_silli/policy.get",
       "params": {
         "$ref": "#/$defs/PolicyKey"
       },
@@ -9680,7 +9680,7 @@
       "capabilities": {},
       "doc": "Preview next-build session rules and diagnostics; this view is not enforced by a running jail.",
       "kind": "request",
-      "name": "_sill/policy.preview",
+      "name": "_silli/policy.preview",
       "params": {
         "$ref": "#/$defs/SessionKey"
       },
@@ -9692,7 +9692,7 @@
       "capabilities": {},
       "doc": "Inspect retained launch rules; null means no snapshot was recorded.",
       "kind": "request",
-      "name": "_sill/policy.snapshot",
+      "name": "_silli/policy.snapshot",
       "params": {
         "$ref": "#/$defs/SessionKey"
       },
@@ -9704,7 +9704,7 @@
       "capabilities": {},
       "doc": "Validate at most 1 MiB of transferred complete-policy text without installation or grants.",
       "kind": "request",
-      "name": "_sill/policy.check",
+      "name": "_silli/policy.check",
       "params": {
         "$ref": "#/$defs/PolicyCheck"
       },
@@ -9716,7 +9716,7 @@
       "capabilities": {},
       "doc": "Install at most 1 MiB of complete policy text in the daemon host user policy directory. Explicit replace permits overwrite; inspect named policy after uncertain replies.",
       "kind": "request",
-      "name": "_sill/policy.import",
+      "name": "_silli/policy.import",
       "params": {
         "$ref": "#/$defs/PolicyImport"
       },
@@ -9728,7 +9728,7 @@
       "capabilities": {},
       "doc": "List managed session processes in bounded live name-ordered pages.",
       "kind": "request",
-      "name": "_sill/procs.list",
+      "name": "_silli/procs.list",
       "params": {
         "$ref": "#/$defs/ProcessesList"
       },
@@ -9740,7 +9740,7 @@
       "capabilities": {},
       "doc": "Read at most 10000 lines and 4 MiB of managed-process output.",
       "kind": "request",
-      "name": "_sill/procs.tail",
+      "name": "_silli/procs.tail",
       "params": {
         "$ref": "#/$defs/ProcessTail"
       },
@@ -9752,7 +9752,7 @@
       "capabilities": {},
       "doc": "Request stop of one named process. List its state after an uncertain outcome; do not blindly retry.",
       "kind": "request",
-      "name": "_sill/procs.stop",
+      "name": "_silli/procs.stop",
       "params": {
         "$ref": "#/$defs/ProcessKey"
       },
@@ -9762,11 +9762,11 @@
     },
     {
       "capabilities": {
-        "sill.jail_processes": 1
+        "silli.jail_processes": 1
       },
       "doc": "What runs in the session's jail now: the commands the agent started, each tree once at its root, and services (managed processes and programs listening on a port). A reading of this moment; empty when the jail is not running.",
       "kind": "request",
-      "name": "_sill/procs.running",
+      "name": "_silli/procs.running",
       "params": {
         "$ref": "#/$defs/SessionKey"
       },
@@ -9776,11 +9776,11 @@
     },
     {
       "capabilities": {
-        "sill.jail_processes": 1
+        "silli.jail_processes": 1
       },
-      "doc": "Stop a command running in the jail, with everything it started (asked, then made to after 3 s). The pid is the jail's, as _sill/procs.running names it.",
+      "doc": "Stop a command running in the jail, with everything it started (asked, then made to after 3 s). The pid is the jail's, as _silli/procs.running names it.",
       "kind": "request",
-      "name": "_sill/procs.stop_command",
+      "name": "_silli/procs.stop_command",
       "params": {
         "$ref": "#/$defs/CommandKey"
       },
@@ -9792,7 +9792,7 @@
       "capabilities": {},
       "doc": "Dismiss one named process. List after an uncertain outcome; do not blindly retry.",
       "kind": "request",
-      "name": "_sill/procs.dismiss",
+      "name": "_silli/procs.dismiss",
       "params": {
         "$ref": "#/$defs/ProcessKey"
       },
@@ -9804,7 +9804,7 @@
       "capabilities": {},
       "doc": "List sessions in bounded live pages ordered by immutable creation time and identity.",
       "kind": "request",
-      "name": "_sill/sessions.list",
+      "name": "_silli/sessions.list",
       "params": {
         "$ref": "#/$defs/List6"
       },
@@ -9816,7 +9816,7 @@
       "capabilities": {},
       "doc": "Read one exact session identity.",
       "kind": "request",
-      "name": "_sill/sessions.get",
+      "name": "_silli/sessions.get",
       "params": {
         "$ref": "#/$defs/SessionKey"
       },
@@ -9828,7 +9828,7 @@
       "capabilities": {},
       "doc": "Atomically create a session; retry the same create_id and input to recover its identity.",
       "kind": "request",
-      "name": "_sill/sessions.create",
+      "name": "_silli/sessions.create",
       "params": {
         "$ref": "#/$defs/Create"
       },
@@ -9840,7 +9840,7 @@
       "capabilities": {},
       "doc": "Update one session field. Do not blindly retry after connection loss.",
       "kind": "request",
-      "name": "_sill/sessions.update",
+      "name": "_silli/sessions.update",
       "params": {
         "$ref": "#/$defs/Update"
       },
@@ -9852,7 +9852,7 @@
       "capabilities": {},
       "doc": "Start a jail. Do not blindly retry after connection loss.",
       "kind": "request",
-      "name": "_sill/sessions.start",
+      "name": "_silli/sessions.start",
       "params": {
         "$ref": "#/$defs/SessionKey"
       },
@@ -9864,7 +9864,7 @@
       "capabilities": {},
       "doc": "Stop the jail, preserving the session. Do not blindly retry after connection loss.",
       "kind": "request",
-      "name": "_sill/sessions.stop",
+      "name": "_silli/sessions.stop",
       "params": {
         "$ref": "#/$defs/SessionKey"
       },
@@ -9876,7 +9876,7 @@
       "capabilities": {},
       "doc": "End a session, possibly waiting for its summary. Do not blindly retry after connection loss.",
       "kind": "request",
-      "name": "_sill/sessions.end",
+      "name": "_silli/sessions.end",
       "params": {
         "$ref": "#/$defs/End"
       },
@@ -9888,7 +9888,7 @@
       "capabilities": {},
       "doc": "Request a summary. Do not blindly retry after connection loss.",
       "kind": "request",
-      "name": "_sill/sessions.checkpoint",
+      "name": "_silli/sessions.checkpoint",
       "params": {
         "$ref": "#/$defs/SessionKey"
       },
@@ -9900,7 +9900,7 @@
       "capabilities": {},
       "doc": "Connect to a TCP port in a running session jail; close the byte stream to close the connection. Do not blindly retry.",
       "kind": "request",
-      "name": "_sill/streams.port",
+      "name": "_silli/streams.port",
       "params": {
         "$ref": "#/$defs/PortOpen"
       },
@@ -9910,11 +9910,11 @@
     },
     {
       "capabilities": {
-        "sill.login_browser": 1
+        "silli.login_browser": 1
       },
       "doc": "Connect to the loopback callback port a running login reported in `open_url`, on the daemon host; raw TCP bytes. `not_found` when no such login runs, `invalid_state` when it reported no port or nothing listens. Do not blindly retry.",
       "kind": "request",
-      "name": "_sill/streams.login_callback",
+      "name": "_silli/streams.login_callback",
       "params": {
         "$ref": "#/$defs/OperationKey"
       },
@@ -9924,11 +9924,11 @@
     },
     {
       "capabilities": {
-        "sill.login_browser": 1
+        "silli.login_browser": 1
       },
       "doc": "Stop a running login (also one run by directory setup): its agent and helpers end and the operation fails with code `cancelled`. `not_found` when no such login runs.",
       "kind": "request",
-      "name": "_sill/operations.cancel",
+      "name": "_silli/operations.cancel",
       "params": {
         "$ref": "#/$defs/OperationKey"
       },
@@ -9940,7 +9940,7 @@
       "capabilities": {},
       "doc": "Start host login with tagged progress. Disconnect does not cancel; do not blindly retry.",
       "kind": "request",
-      "name": "_sill/agents.login",
+      "name": "_silli/agents.login",
       "params": {
         "$ref": "#/$defs/AgentLogin"
       },
@@ -9950,11 +9950,11 @@
     },
     {
       "capabilities": {
-        "sill.agent_setup": 1
+        "silli.agent_setup": 1
       },
       "doc": "Start the agent once in a throwaway jail with an empty home and record what it creates as home_paths proposals, with tagged progress. Declares nothing. Disconnect does not cancel; do not blindly retry.",
       "kind": "request",
-      "name": "_sill/agents.discover",
+      "name": "_silli/agents.discover",
       "params": {
         "$ref": "#/$defs/AgentDiscover"
       },
@@ -9964,9 +9964,9 @@
     },
     {
       "capabilities": {},
-      "doc": "Reset an agent as if newly installed: stop its running sessions, then remove its sill-owned home (login, settings, history, memory), ghost copies and saved API keys. The host's own files are untouched.",
+      "doc": "Reset an agent as if newly installed: stop its running sessions, then remove its silli-owned home (login, settings, history, memory), ghost copies and saved API keys. The host's own files are untouched.",
       "kind": "request",
-      "name": "_sill/agents.reset",
+      "name": "_silli/agents.reset",
       "params": {
         "$ref": "#/$defs/AgentReset"
       },
@@ -9978,7 +9978,7 @@
       "capabilities": {},
       "doc": "Install a daemon registry entry with tagged progress. Disconnect does not cancel; do not blindly retry.",
       "kind": "request",
-      "name": "_sill/registry.install",
+      "name": "_silli/registry.install",
       "params": {
         "$ref": "#/$defs/RegistryInstall"
       },
@@ -9990,7 +9990,7 @@
       "capabilities": {},
       "doc": "List the daemon's registry in bounded live pages, including install selectors and trust source.",
       "kind": "request",
-      "name": "_sill/registry.list",
+      "name": "_silli/registry.list",
       "params": {
         "$ref": "#/$defs/RegistryList"
       },
@@ -10002,7 +10002,7 @@
       "capabilities": {},
       "doc": "Open a daemon-owned terminal in a session's jail or on the daemon host. Do not blindly retry after connection loss: list first.",
       "kind": "request",
-      "name": "_sill/terminals.open",
+      "name": "_silli/terminals.open",
       "params": {
         "$ref": "#/$defs/Open"
       },
@@ -10014,7 +10014,7 @@
       "capabilities": {},
       "doc": "Running and recently exited terminals, at most 64.",
       "kind": "request",
-      "name": "_sill/terminals.list",
+      "name": "_silli/terminals.list",
       "params": {
         "$ref": "#/$defs/List7"
       },
@@ -10026,7 +10026,7 @@
       "capabilities": {},
       "doc": "Read one terminal, including its exit.",
       "kind": "request",
-      "name": "_sill/terminals.get",
+      "name": "_silli/terminals.get",
       "params": {
         "$ref": "#/$defs/TerminalKey"
       },
@@ -10038,7 +10038,7 @@
       "capabilities": {},
       "doc": "A byte-stream token: recent output first, then live; closing the stream detaches without ending the terminal.",
       "kind": "request",
-      "name": "_sill/terminals.attach",
+      "name": "_silli/terminals.attach",
       "params": {
         "$ref": "#/$defs/TerminalKey"
       },
@@ -10050,7 +10050,7 @@
       "capabilities": {},
       "doc": "Set the terminal's window size.",
       "kind": "request",
-      "name": "_sill/terminals.resize",
+      "name": "_silli/terminals.resize",
       "params": {
         "$ref": "#/$defs/Resize"
       },
@@ -10062,7 +10062,7 @@
       "capabilities": {},
       "doc": "A host terminal's current working directory.",
       "kind": "request",
-      "name": "_sill/terminals.cwd",
+      "name": "_silli/terminals.cwd",
       "params": {
         "$ref": "#/$defs/TerminalKey"
       },
@@ -10074,7 +10074,7 @@
       "capabilities": {},
       "doc": "Hang up the terminal and forget it; attached streams end.",
       "kind": "request",
-      "name": "_sill/terminals.close",
+      "name": "_silli/terminals.close",
       "params": {
         "$ref": "#/$defs/TerminalKey"
       },
@@ -10086,7 +10086,7 @@
       "capabilities": {},
       "doc": "Create an immutable session upload with an idempotency key.",
       "kind": "request",
-      "name": "_sill/uploads.create",
+      "name": "_silli/uploads.create",
       "params": {
         "$ref": "#/$defs/UploadCreate"
       },
@@ -10098,7 +10098,7 @@
       "capabilities": {},
       "doc": "Read an upload's immutable bytes (attachments are referenced, never embedded).",
       "kind": "request",
-      "name": "_sill/uploads.get",
+      "name": "_silli/uploads.get",
       "params": {
         "$ref": "#/$defs/UploadGet"
       },
@@ -10110,7 +10110,7 @@
       "capabilities": {},
       "doc": "Change adapter controls; do not blindly retry an uncertain login or retry-session action.",
       "kind": "request",
-      "name": "_sill/sessions.control",
+      "name": "_silli/sessions.control",
       "params": {
         "$ref": "#/$defs/SessionControl"
       },
@@ -10122,7 +10122,7 @@
       "capabilities": {},
       "doc": "Request cancellation of one identified active turn.",
       "kind": "request",
-      "name": "_sill/sessions.cancel",
+      "name": "_silli/sessions.cancel",
       "params": {
         "$ref": "#/$defs/CancelTurn"
       },
@@ -10134,7 +10134,7 @@
       "capabilities": {},
       "doc": "Initialize an SFP control connection.",
       "kind": "request",
-      "name": "_sill/initialize",
+      "name": "_silli/initialize",
       "params": {
         "$ref": "#/$defs/Initialize"
       },
@@ -10146,7 +10146,7 @@
       "capabilities": {},
       "doc": "Subscribe with a durable cursor or immutable paginated snapshot.",
       "kind": "request",
-      "name": "_sill/sessions.attach",
+      "name": "_silli/sessions.attach",
       "params": {
         "$ref": "#/$defs/Attach"
       },
@@ -10158,7 +10158,7 @@
       "capabilities": {},
       "doc": "Read a connection-bound immutable snapshot page.",
       "kind": "request",
-      "name": "_sill/sessions.snapshot",
+      "name": "_silli/sessions.snapshot",
       "params": {
         "$ref": "#/$defs/SnapshotRequest"
       },
@@ -10170,7 +10170,7 @@
       "capabilities": {},
       "doc": "Detach this subscription without cancelling work.",
       "kind": "request",
-      "name": "_sill/sessions.detach",
+      "name": "_silli/sessions.detach",
       "params": {
         "$ref": "#/$defs/Detach"
       },
@@ -10182,7 +10182,7 @@
       "capabilities": {},
       "doc": "Durably accept an idempotent submission; queue during work.",
       "kind": "request",
-      "name": "_sill/sessions.submit",
+      "name": "_silli/sessions.submit",
       "params": {
         "$ref": "#/$defs/Submit"
       },
@@ -10194,7 +10194,7 @@
       "capabilities": {},
       "doc": "Recover the outcome of a submission.",
       "kind": "request",
-      "name": "_sill/submissions.get",
+      "name": "_silli/submissions.get",
       "params": {
         "$ref": "#/$defs/SubmissionKey"
       },
@@ -10206,7 +10206,7 @@
       "capabilities": {},
       "doc": "Cancel a knowingly unsent queued submission.",
       "kind": "request",
-      "name": "_sill/submissions.cancel",
+      "name": "_silli/submissions.cancel",
       "params": {
         "$ref": "#/$defs/SubmissionKey"
       },
@@ -10218,7 +10218,7 @@
       "capabilities": {},
       "doc": "Resume a held queued submission, retaining acceptance order.",
       "kind": "request",
-      "name": "_sill/submissions.resume",
+      "name": "_silli/submissions.resume",
       "params": {
         "$ref": "#/$defs/SubmissionKey"
       },
@@ -10228,11 +10228,11 @@
     },
     {
       "capabilities": {
-        "sill.send_now": 1
+        "silli.send_now": 1
       },
       "doc": "Send a queued submission next, stopping the active turn.",
       "kind": "request",
-      "name": "_sill/submissions.send_now",
+      "name": "_silli/submissions.send_now",
       "params": {
         "$ref": "#/$defs/SubmissionKey"
       },
@@ -10244,7 +10244,7 @@
       "capabilities": {},
       "doc": "Record the first valid answer with a durable idempotency key.",
       "kind": "request",
-      "name": "_sill/questions.answer",
+      "name": "_silli/questions.answer",
       "params": {
         "$ref": "#/$defs/AnswerQuestion"
       },
@@ -10256,7 +10256,7 @@
       "capabilities": {},
       "doc": "A committed ordered session event.",
       "kind": "notification",
-      "name": "_sill/session.event",
+      "name": "_silli/session.event",
       "params": {
         "$ref": "#/$defs/SessionEvent"
       },
@@ -10266,9 +10266,9 @@
     },
     {
       "capabilities": {},
-      "doc": "The Sill Frontend Protocol schema and method capabilities, for remote negotiation.",
+      "doc": "The Silli Frontend Protocol schema and method capabilities, for remote negotiation.",
       "kind": "request",
-      "name": "_sill/daemon.schema",
+      "name": "_silli/daemon.schema",
       "params": {
         "$ref": "#/$defs/Empty"
       },
@@ -10278,7 +10278,7 @@
       "capabilities": {},
       "doc": "Version, protocol, pid, mode and session counts of the daemon.",
       "kind": "request",
-      "name": "_sill/daemon.status",
+      "name": "_silli/daemon.status",
       "params": {
         "$ref": "#/$defs/Empty"
       },
@@ -10290,7 +10290,7 @@
       "capabilities": {},
       "doc": "Ask the daemon to leave; sessions keep running and the next daemon adopts them.",
       "kind": "request",
-      "name": "_sill/daemon.shutdown",
+      "name": "_silli/daemon.shutdown",
       "params": {
         "$ref": "#/$defs/Empty"
       },
@@ -10310,6 +10310,6 @@
       "max_text_bytes": 16384
     }
   },
-  "title": "Sill Frontend Protocol (SFP)",
-  "transport": "JSON-RPC 2.0, one message per line, over the unix socket at $XDG_RUNTIME_DIR/sill/daemon.sock (docs/protocol.md)"
+  "title": "Silli Frontend Protocol (SFP)",
+  "transport": "JSON-RPC 2.0, one message per line, over the unix socket at $XDG_RUNTIME_DIR/silli/daemon.sock (docs/protocol.md)"
 }

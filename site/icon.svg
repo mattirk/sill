@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <!-- sill's tray icon: the herring resting on its sill. Single colour on the plate, scales from 16 px
-       up. While an agent works the trays draw it moving (the sill ripples, the fish rides it). The
-       application icon (panels, menus) is sill.svg, the same picture. -->
+  <!-- silli's tray icon: the herring resting on its silli. Single colour on the plate, scales from 16 px
+       up. While an agent works the trays draw it moving (the silli ripples, the fish rides it). The
+       application icon (panels, menus) is silli.svg, the same picture. -->
   <!-- keep this note inside <svg>: gdk-pixbuf (Cinnamon's icons) tells an SVG by
        the opening tag in the file's first bytes -->
   <rect x="4" y="4" width="56" height="56" rx="12" fill="#2b2f36"/>

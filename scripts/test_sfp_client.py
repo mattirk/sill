@@ -48,7 +48,7 @@ class ViewTests(unittest.TestCase):
                 self.page = 0
 
             def call(self, method, params):
-                if method == "_sill/sessions.attach":
+                if method == "_silli/sessions.attach":
                     return {"mode": "snapshot", "subscription_id": "sub", "snapshot": {"token": "t", "at": {"session_id": "s", "seq": "10"}}}
                 self.page += 1
                 return {"at": {"session_id": "s", "seq": "10"}, "records": [{"type": "item", "item": item()}] if self.page == 1 else [], "next_page": "next" if self.page == 1 else None}
@@ -69,7 +69,7 @@ class ViewTests(unittest.TestCase):
                 self.page, self.gap = 0, gap
             def call(self, method, params):
                 at = {"session_id": "s", "seq": "10"}
-                if method == "_sill/sessions.attach":
+                if method == "_silli/sessions.attach":
                     return {"mode": "snapshot", "subscription_id": "sub", "snapshot": {"token": "t", "at": at}}
                 self.page += 1
                 first = self.page == 1

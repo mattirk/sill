@@ -1,4 +1,4 @@
-# Tests of the window draw with the software renderer (crates/sill-gui/src/tests.rs, TEST_BACKEND):
+# Tests of the window draw with the software renderer (crates/silli-gui/src/tests.rs, TEST_BACKEND):
 # a GPU device per test crashes the Vulkan loader when tests run in parallel. This is the switch
 # iced_test's simulator reads; it does not touch the renderer the window itself uses.
 [env]

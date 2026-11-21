@@ -1,5 +1,5 @@
 #!/bin/sh
-# Reproducible, unprivileged Rust setup for Sill's Linux development jail.
+# Reproducible, unprivileged Rust setup for Silli's Linux development jail.
 # Usage: scripts/dev-jail.sh setup | doctor | COMMAND [ARG...]
 set -eu
 cd "$(dirname "$0")/.."
@@ -10,8 +10,8 @@ case "$(uname -s)-$(uname -m)" in
 esac
 # Deliberately isolated from the person's toolchains and shell profiles. The jail keeps
 # ~/.cache across turns; none of this needs to be applied to the host through Changes.
-dev_root=${SILL_DEV_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/sill-dev}
-case "$dev_root" in /*) ;; *) echo 'SILL_DEV_ROOT must be absolute.' >&2; exit 1 ;; esac
+dev_root=${SILLI_DEV_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/silli-dev}
+case "$dev_root" in /*) ;; *) echo 'SILLI_DEV_ROOT must be absolute.' >&2; exit 1 ;; esac
 export CARGO_HOME="$dev_root/cargo" RUSTUP_HOME="$dev_root/rustup"
 export PATH="$CARGO_HOME/bin:$PATH"
 # the version rust-toolchain.toml pins: change both together

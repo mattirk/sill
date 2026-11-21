@@ -1,7 +1,7 @@
-# sill — Sill Frontend Protocol (SFP)
+# silli — Silli Frontend Protocol (SFP)
 
 **Implementation in progress, 2026-11-03:** the current control connection uses
-`_sill/initialize` with identity **`sfp/1-dev.3`**. This development identity implements the
+`_silli/initialize` with identity **`sfp/1-dev.3`**. This development identity implements the
 conversation and host administration surfaces described below; it does not yet claim
 stable `sfp/1`. Clients and daemon upgrade together. A mismatch requires explicit replacement;
 a failed handshake never authorizes restarting a daemon. Private relay protocol 2
@@ -21,7 +21,7 @@ ACP v2 says this in the protocol (`state_update`). ACP v1 does not, so the v1 lo
 agent's own word where it has one, chosen by the name the agent gives at `initialize`:
 claude-agent-acp forwards Claude Code's `session_state_changed` messages when asked with session
 `_meta.claudeCode.emitRawSDKMessages`; codex-acp sends `_meta.codex.threadStatus` in
-`session_info_update`. An agent with neither is never shown working outside a prompt: sill does
+`session_info_update`. An agent with neither is never shown working outside a prompt: silli does
 not guess from output or open tool calls. The relay carries the new event, so the private relay
 protocol is now 4.
 
@@ -32,7 +32,7 @@ change or an automatic migration. Existing agent definitions must be replaced ex
 
 ## Clean baseline decision (2026-11-03)
 
-Sill currently has one user and disposable development history on every machine. The
+Silli currently has one user and disposable development history on every machine. The
 compatibility promise starts at stable `sfp/1`, not at any development identity, database
 layout or private relay version. Old transcript migration is unnecessary, not deferred.
 History/terminal retention remains separate work; discarding old history does not remove
@@ -67,18 +67,18 @@ separately; they do not override this baseline.
 ## Transport
 
 Control uses newline-delimited UTF-8 JSON-RPC 2.0 on the same-user Unix socket
-`$XDG_RUNTIME_DIR/sill/daemon.sock` (0600 in a 0700 directory). Remote clients use system
-SSH to run `sill daemon --stdio`, which bridges to the remote daemon. Request IDs correlate
-responses; notifications have no ID. Public methods use `_sill/<group>.<method>`.
+`$XDG_RUNTIME_DIR/silli/daemon.sock` (0600 in a 0700 directory). Remote clients use system
+SSH to run `silli daemon --stdio`, which bridges to the remote daemon. Request IDs correlate
+responses; notifications have no ID. Public methods use `_silli/<group>.<method>`.
 
-The first control request must be `_sill/initialize`, offering exact protocol identities,
+The first control request must be `_silli/initialize`, offering exact protocol identities,
 a client name/version and optional capabilities. No match returns `incompatible`; other
 methods before initialization return `not_initialized`, and repeated initialization returns
 `invalid_state`. Successful initialization returns the chosen identity, daemon identity,
 negotiated capabilities and limits. A mismatch never authorizes automatic daemon replacement.
 
 Stream-opening methods return a one-use token. Open a separate connection on the same
-transport and send `{"_sill_stream":"TOKEN"}\n`, then exchange the method's stream bytes.
+transport and send `{"_silli_stream":"TOKEN"}\n`, then exchange the method's stream bytes.
 Unused tokens expire in 60 seconds; at most 64 wait at once. Descriptors never cross SFP.
 Rust control calls default to a 120-second deadline (5 seconds for daemon status/shutdown);
 timeout closes the connection and does not establish whether a mutation took effect.
@@ -90,12 +90,12 @@ does not add VM lifecycle methods to the current contract; that API remains unsp
 
 ## Conversation and administration
 
-The implemented public conversation surface is `_sill/sessions.attach`,
-`_sill/sessions.snapshot`, `_sill/sessions.detach`, `_sill/sessions.submit`,
-`_sill/submissions.get`, `_sill/submissions.cancel`, `_sill/submissions.resume`,
-`_sill/questions.answer`, `_sill/sessions.control`, `_sill/sessions.cancel`,
-`_sill/uploads.create`, `_sill/uploads.get` and `_sill/session.event`, plus `_sill/daemon.schema`.
-`_sill/submissions.send_now` needs the capability `sill.send_now: 1` (the first one, 2026-11-05):
+The implemented public conversation surface is `_silli/sessions.attach`,
+`_silli/sessions.snapshot`, `_silli/sessions.detach`, `_silli/sessions.submit`,
+`_silli/submissions.get`, `_silli/submissions.cancel`, `_silli/submissions.resume`,
+`_silli/questions.answer`, `_silli/sessions.control`, `_silli/sessions.cancel`,
+`_silli/uploads.create`, `_silli/uploads.get` and `_silli/session.event`, plus `_silli/daemon.schema`.
+`_silli/submissions.send_now` needs the capability `silli.send_now: 1` (the first one, 2026-11-05):
 the queued submission goes next, before older queued ones, resumed if it was held, and the active
 turn is cancelled so it goes as soon as the agent has stopped. A submission the agent already has
 (`delivery` is no longer `queued`: it went by itself while the request was on its way) is returned
@@ -103,7 +103,7 @@ as it is and nothing is cancelled, the active turn being its own (2026-11-20; be
 refused with `invalid_state`, which the window showed as an error under a prompt the agent was
 answering). One that was cancelled while queued is still refused. A prompt's user item is created when
 it is dispatched, not when it is accepted: a queued prompt appears where the agent receives it.
-`_sill/policy.allow_host` approves a concrete hostname for the selected session only. It
+`_silli/policy.allow_host` approves a concrete hostname for the selected session only. It
 returns `agent_name: "this session"` and `live: true` when a running proxy can use the grant
 on new connections. Grants persist with the session, enter policy previews and subsequent
 launch snapshots, and are deleted with it. Wildcards are refused. Offline policies and
@@ -127,29 +127,29 @@ activated, not selected (below).
 Unavailable capabilities cannot be activated by selecting a policy. Host control never gains
 authority from policy inspection or import.
 
-Session permission changes need `sill.permission_modes: 1` (2026-11-06). The shared client
+Session permission changes need `silli.permission_modes: 1` (2026-11-06). The shared client
 offers it only from programs that display permission state (the CLI's `policy`/`permissions`
-commands and, since its Permissions panel, sill-gui), never on behalf of every frontend. `_sill/permissions.set` remembers a contained capability choice for one
+commands and, since its Permissions panel, silli-gui), never on behalf of every frontend. `_silli/permissions.set` remembers a contained capability choice for one
 session: `enabled: true` is refused with `permission_denied` when the resolved policy,
 an offline rule, `network.allow_additional_hosts = false` or a missing
 backend would block it; `false` always applies; `null` returns to the policy default. Ghost
-sessions and `host_control` refuse every choice. `_sill/permissions.apply_development` (Apply
+sessions and `host_control` refuse every choice. `_silli/permissions.apply_development` (Apply
 development permissions, 2026-11-07) remembers the test desktop and the private bus as session
 choices together, resolving both against the next build first: refused as a whole with
 `permission_denied` naming the blocked capability and its reason, recording nothing, when either
-is blocked; the same ghost rule applies. `_sill/permissions.restore_defaults` (Restore
+is blocked; the same ghost rule applies. `_silli/permissions.restore_defaults` (Restore
 defaults) removes the session's added capability choices and host grants and keeps its policy
 and pins; on a running jail it also stops hosts approved during this run from matching new
 proxy connections. Both return the next-build `preview` and `restart_required`: true when a
 running jail still has another state, including tunnels that remain open. Choices are applied
 after ghost restrictions at every new build and recorded in the launch snapshot;
 a changed choice or a removed launch host marks the running jail `policy_changed`.
-`_sill/policy.save_host` (Save for future sessions) adds a host pattern, wildcards allowed, to
+`_silli/policy.save_host` (Save for future sessions) adds a host pattern, wildcards allowed, to
 the session agent's network defaults and changes no existing session; ghosts refuse it. An
 added agent default does not set a running session's `policy_changed`; a removed one does
 (2026-11-06).
 
-Without `sill.permission_modes` a connection also cannot submit, resume, send now, answer,
+Without `silli.permission_modes` a connection also cannot submit, resume, send now, answer,
 change controls, start, approve hosts or change pins for a session whose launch (when running)
 or next build requests Desktop development or Host control capabilities (`test_desktop`,
 `private_bus`, `gpu`, `host_control`). Those requests return `unsupported` with
@@ -200,9 +200,9 @@ handler, without claiming that the remote agent acted on it. Older relay version
 Uploads are immutable session-scoped objects with client IDs and bounded base64 data. Inline
 attachments currently support images; file attachments reference uploaded objects. Upload IDs
 retain content identity independently of their staged jail file. The daemon stores an inline
-attachment as an upload when it accepts the submission (a reserved `sill-inline-` identity), so
+attachment as an upload when it accepts the submission (a reserved `silli-inline-` identity), so
 submission records reference attachment bytes and never carry them; a frontend fetches what it
-displays with `_sill/uploads.get`. Pre-baseline attachment identities are not migrated.
+displays with `_silli/uploads.get`. Pre-baseline attachment identities are not migrated.
 An uploaded PNG, JPEG, GIF or WebP reaches the agent as an image block when the agent advertised
 image support; any other upload, and every upload to an agent without it, is a staged file.
 
@@ -215,18 +215,18 @@ addition. Conversation records never carry binary data.
 
 An `image` block is an image the agent showed in its message (or, with native ACP v2, in tool
 content). It always has `mime`, then exactly one of `upload_id` (a session upload: fetch the
-bytes with `_sill/uploads.get`) or `omitted` with the reason no bytes were kept: `too_large`
+bytes with `_silli/uploads.get`) or `omitted` with the reason no bytes were kept: `too_large`
 (above 2 MiB decoded), `invalid` (undecodable data or MIME type) or `capacity` (the session's
 agent-image budget was full). Clients show a placeholder for `omitted`. A sub-agent's image carries
 `parent_item_id` like its text. Agent images are content-addressed under the reserved
-`sill-agent-` prefix (the same bytes and MIME type are one upload), are written in the same
+`silli-agent-` prefix (the same bytes and MIME type are one upload), are written in the same
 transaction as the event that first references them, and are removed with the session. They
 have their own budget of 4096 objects and 256 MiB per session, separate from the person's
-uploads, so neither can fill the other's. Clients cannot create `sill-agent-` uploads, but may
+uploads, so neither can fill the other's. Clients cannot create `silli-agent-` uploads, but may
 attach one to a submission like any upload. ACP v1 tool-call images are not yet projected.
 
 Inline upload IDs now hash the complete submission identity and index under the reserved
-`sill-inline-` prefix. Public upload creation rejects that prefix; retries of previously accepted
+`silli-inline-` prefix. Public upload creation rejects that prefix; retries of previously accepted
 submissions deterministically use the same hashed references. Session uploads are bounded at 4096 objects and
 256 MiB of decoded bytes; identical retries still work at the limit. Frontend upload caching and
 some presentation duplication remain UI optimizations rather than compatibility blockers.
@@ -234,7 +234,7 @@ some presentation duplication remain UI optimizations rather than compatibility 
 A login method in `session.authentication` with `api_key` set (the provider the agent names,
 from ACP `_meta["api-key"]`) takes a key the person types: send it as `api_key` with the
 `authenticate` control. The daemon saves it readable by the person only, outside every folder a
-jail sees (`~/.local/state/sill/keys/<agent>/<method>`), and the relay reads it from there when the
+jail sees (`~/.local/state/silli/keys/<agent>/<method>`), and the relay reads it from there when the
 `authenticate` request goes, in both shapes adapters read (`{"api-key": key}`, then
 `{"api-key": {"apiKey": key}}`). It is never journaled or logged. When the agent asks again (a new
 agent process), a saved key for an offered method answers it without `authentication` being set;
@@ -242,7 +242,7 @@ refused once, the login card shows with the agent's reason. `agents.reset` remov
 
 ### What a turn is for (added 2026-11-10)
 
-A `Turn` has `purpose`: why sill, not the person, started it. `summary` is a summary the daemon
+A `Turn` has `purpose`: why silli, not the person, started it. `summary` is a summary the daemon
 asked the agent for (a checkpoint or a session's end, `ask_summary`); `commit` is the turn a
 submission with `purpose` `commit` started. It is null, or absent in records from before the
 field, for the person's own turns and anything the agent began itself. A `Submit` may carry
@@ -255,8 +255,8 @@ item whose `submission_id` names it) belongs with its turn.
 
 The daemon records the purpose when it queues the prompt (`AdapterState::prompt_purpose`) and
 the adapter stamps it on the turn that prompt starts, keeping it through the turn's later
-updates. A client folds such a turn rather than guessing from its words (sill-gui: *Folded
-turns*, docs/sill-gui.md). The field needs no capability: a client that ignores it shows the
+updates. A client folds such a turn rather than guessing from its words (silli-gui: *Folded
+turns*, docs/silli-gui.md). The field needs no capability: a client that ignores it shows the
 turn as any other.
 
 ### Tool calls and their command
@@ -279,27 +279,27 @@ ignores it loses nothing it had.
 ACP v1 updates beyond text and tools are projected too: `plan` becomes a `plan` item per turn
 (one `plan_entry` block per step with `status` and `priority`; later plans patch its content),
 `notice` a `notice` item (`severity` on its block), `available_commands_update` the session's
-`commands`, and a `session_info_update` title the session's `agent_title` (sill's own title is
+`commands`, and a `session_info_update` title the session's `agent_title` (silli's own title is
 unaffected). Other update kinds are logged by the daemon and never become conversation items.
 
 Public session administration is now implemented too (2026-11-03):
 
 | Method | Request | Result |
 |---|---|---|
-| `_sill/sessions.list` | `{after?, limit?}` | `{sessions, next}` |
-| `_sill/sessions.get` | `{session_id}` | public session metadata |
-| `_sill/sessions.create` | `{create_id, agent, policy, pins?, memory_scope?, follows?, remember_pins?, ghost?}` | `{session_id}` |
-| `_sill/sessions.update` | `{session_id, change}` | `{}` |
-| `_sill/sessions.start` | `{session_id}` | `{session_id, fresh}` |
-| `_sill/sessions.stop` | `{session_id}` | `{}` |
-| `_sill/sessions.end` | `{session_id, reason}` | `{pending, deleted}` |
-| `_sill/sessions.checkpoint` | `{session_id}` | `{}` |
+| `_silli/sessions.list` | `{after?, limit?}` | `{sessions, next}` |
+| `_silli/sessions.get` | `{session_id}` | public session metadata |
+| `_silli/sessions.create` | `{create_id, agent, policy, pins?, memory_scope?, follows?, remember_pins?, ghost?}` | `{session_id}` |
+| `_silli/sessions.update` | `{session_id, change}` | `{}` |
+| `_silli/sessions.start` | `{session_id}` | `{session_id, fresh}` |
+| `_silli/sessions.stop` | `{session_id}` | `{}` |
+| `_silli/sessions.end` | `{session_id, reason}` | `{pending, deleted}` |
+| `_silli/sessions.checkpoint` | `{session_id}` | `{}` |
 
 These baseline methods need no optional capability. Metadata is an explicit public record,
 including settings, pins and decimal-string Unix-second timestamps; it exposes no ACP session
 identity or shim socket. `policy_changed` is true when a running session's policy file changed
 after its jail was built; stopping and starting the session applies it. Every operation uses an exact session ID. The CLI resolves unique
-prefixes/titles locally and rejects ambiguity. sill-gui's session listing and lifecycle writes, the
+prefixes/titles locally and rejects ambiguity. silli-gui's session listing and lifecycle writes, the
 CLI and the Python client's `list/create/get/update/start/stop/end/checkpoint` use this surface.
 Public `update` uses a named, `type`-tagged change; unknown change kinds are rejected.
 The metadata write and corresponding conversation session event commit atomically.
@@ -336,7 +336,7 @@ a jail or agent.
 
 Other lifecycle mutations **must not be blindly retried** after timeout/connection loss: read
 metadata and conversation state first; uncertainty does not establish that nothing happened.
-sill-gui drops a closed connection but does not resubmit these actions. `start` starts/reuses
+silli-gui drops a closed connection but does not resubmit these actions. `start` starts/reuses
 the jail, `attach` starts the agent, and `stop` preserves session history. Starting/checkpointing
 an ended session requires an explicit `update` with `reopen`. `end.reason` is `close`, `idle`
 or `quit`; `pending` means the summary is still running, and `deleted` means deletion was
@@ -350,7 +350,7 @@ path are accepted. Pin storage and jail setup preserve non-UTF-8 bytes. Existing
 Independent lifecycle conformance (with `jsonschema` installed in a venv):
 
 ```sh
-SILL_SFP_PYTHON=/path/to/venv/bin/python cargo test -p sill --test recovery independent_python_client -- --ignored
+SILLI_SFP_PYTHON=/path/to/venv/bin/python cargo test -p silli --test recovery independent_python_client -- --ignored
 ```
 
 The fixture supplies a scripted ACP agent; Python creates the session, submits work, reconnects
@@ -363,18 +363,18 @@ Public terminals are implemented too (2026-11-03):
 
 | Method | Request | Result |
 |---|---|---|
-| `_sill/terminals.open` | `{session_id?, label?, argv?, env?, cwd?, cols, rows}` | terminal record |
-| `_sill/terminals.list` | `{session_id?}` | `{terminals}` |
-| `_sill/terminals.get` | `{terminal_id}` | terminal record |
-| `_sill/terminals.attach` | `{terminal_id}` | `{token}` |
-| `_sill/terminals.resize` | `{terminal_id, cols, rows}` | `{}` |
-| `_sill/terminals.cwd` | `{terminal_id}` | `{cwd}` |
-| `_sill/terminals.close` | `{terminal_id}` | `{}` |
+| `_silli/terminals.open` | `{session_id?, label?, argv?, env?, cwd?, cols, rows}` | terminal record |
+| `_silli/terminals.list` | `{session_id?}` | `{terminals}` |
+| `_silli/terminals.get` | `{terminal_id}` | terminal record |
+| `_silli/terminals.attach` | `{terminal_id}` | `{token}` |
+| `_silli/terminals.resize` | `{terminal_id, cols, rows}` | `{}` |
+| `_silli/terminals.cwd` | `{terminal_id}` | `{cwd}` |
+| `_silli/terminals.close` | `{terminal_id}` | `{}` |
 
 The daemon owns each PTY master. A terminal runs in a session's jail (`session_id`) or on the
 daemon host; empty `argv` runs the login shell; `cwd` is a host path record in the jail's or
 the host's namespace. `label` (at most 128 bytes) is the frontend's own name for finding the
-terminal again; sill-gui uses `shell` in a session and `host:<session id>` on the host.
+terminal again; silli-gui uses `shell` in a session and `host:<session id>` on the host.
 
 `attach` returns a one-use byte-stream token (see Transport below). The stream carries, in order, the replay
 buffer — the last 256 KiB of output, trimmed to start on a line — and then live output; bytes
@@ -403,16 +403,16 @@ Public host streams are implemented (2026-11-03):
 
 | Method | Request | Result |
 |---|---|---|
-| `_sill/streams.port` | `{session_id, port}` | `{token}` |
-| `_sill/agents.login` | `{agent_id, method_id, operation_id?}` | `{token, operation}` |
-| `_sill/agents.reset` | `{agent_id}` | `{removed, stopped}` (no stream) |
-| `_sill/registry.install` | `{entry_id, version, source, allow_unreviewed?, operation_id?}` | `{token, operation}` |
-| `_sill/registry.list` | `{after?, limit?}` | `{entries, next}` |
-| `_sill/agents.discover` | `{agent_id, method_id?, operation_id?}` | `{token, operation}` — needs `sill.agent_setup: 1` |
-| `_sill/streams.login_callback` | `{operation_id}` | `{token}` — needs `sill.login_browser: 1` |
-| `_sill/operations.cancel` | `{operation_id}` | `{}` — needs `sill.login_browser: 1` |
+| `_silli/streams.port` | `{session_id, port}` | `{token}` |
+| `_silli/agents.login` | `{agent_id, method_id, operation_id?}` | `{token, operation}` |
+| `_silli/agents.reset` | `{agent_id}` | `{removed, stopped}` (no stream) |
+| `_silli/registry.install` | `{entry_id, version, source, allow_unreviewed?, operation_id?}` | `{token, operation}` |
+| `_silli/registry.list` | `{after?, limit?}` | `{entries, next}` |
+| `_silli/agents.discover` | `{agent_id, method_id?, operation_id?}` | `{token, operation}` — needs `silli.agent_setup: 1` |
+| `_silli/streams.login_callback` | `{operation_id}` | `{token}` — needs `silli.login_browser: 1` |
+| `_silli/operations.cancel` | `{operation_id}` | `{}` — needs `silli.login_browser: 1` |
 
-These baseline methods need no optional capability (except `_sill/agents.discover`, 2026-11-08, below). Login selects a configured agent on the daemon box, never a frontend
+These baseline methods need no optional capability (except `_silli/agents.discover`, 2026-11-08, below). Login selects a configured agent on the daemon box, never a frontend
 command. The agent validates the method during login; an unsupported method is a streamed failure.
 Install selects the exact ID, version and source (`snapshot` or `live`) from the daemon's current
 registry, retaining its reviewed lockfile/distribution. This selector is not a content hash of a
@@ -420,33 +420,33 @@ live index entry. Missing selectors return `not_found`; unknown sources or malfo
 return invalid-params; unreviewed entries require `allow_unreviewed: true` (`permission_denied`
 otherwise), and an unavailable platform returns `unsupported`, all before starting a job.
 
-`_sill/agents.reset` returns an agent to how a fresh install starts: first it stops the agent's
+`_silli/agents.reset` returns an agent to how a fresh install starts: first it stops the agent's
 running sessions (a running agent holds its login and writes to its home; the conversations stay
-and start again when used), then it removes the agent's sill-owned home — login, settings,
+and start again when used), then it removes the agent's silli-owned home — login, settings,
 history, memory — the copies in this daemon's ghost sessions and its saved API keys. `removed`
 counts the files, `stopped` names the sessions. The install, its definition and the host's own
 files are untouched; an unknown agent returns `not_found`.
 
-**Directory setup by probe (2026-11-08, capability `sill.agent_setup: 1`).** `_sill/agents.discover`
-finds where an agent sill installed keeps its state, as proposals for its `home_paths`, in a job
+**Directory setup by probe (2026-11-08, capability `silli.agent_setup: 1`).** `_silli/agents.discover`
+finds where an agent silli installed keeps its state, as proposals for its `home_paths`, in a job
 with the same tagged progress and job key as install (`invalid_state` when the agent is not a
-sill install). Without `method_id`: one first start in the throwaway jail the install probe
+silli install). Without `method_id`: one first start in the throwaway jail the install probe
 uses, with an empty readable home, `initialize` and `session/new`. With `method_id`: that login
 method run on the daemon host with an empty home exactly as a declared host login is; what it
-wrote is proposed, and the proposed directories are copied into the agent's sill-owned home so
-the login holds. Neither declares anything. `_sill/agents.discovered` `{agent_id}` returns
+wrote is proposed, and the proposed directories are copied into the agent's silli-owned home so
+the login holds. Neither declares anything. `_silli/agents.discovered` `{agent_id}` returns
 `{discovery: {at, version, proposals, auth_methods, login_method?, login_files} | null}`, each
 proposal `{path, kind, on_host, initial_content?}` (`on_host`: the same path exists in the
 person's real home), `auth_methods` the agent's login methods `{id, name, description?}`,
 `login_method` set when the proposals come from a login, `login_files` the files it wrote under
-the proposed directories. The person's choice is saved with the baseline `_sill/agents.save`.
+the proposed directories. The person's choice is saved with the baseline `_silli/agents.save`.
 
 Registry listing uses exclusive entry-ID keyset pagination with 1–128 entries (default 64),
 at most one newer version per entry and a 4 MiB entry payload budget per page. Pages reflect
 live registry contents, so concurrent refresh can change later pages. Records expose name,
 version, source, description, links, icon availability, builtin-agent mapping and daemon-platform
 installation facts, without raw package manifests or executable commands. Pages also report
-the live index fetch time as decimal Unix seconds. sill-gui builds its presentation from these
+the live index fetch time as decimal Unix seconds. silli-gui builds its presentation from these
 public registry and agent methods.
 
 Claim tokens as described under Transport: one use, on a new transport within 60 seconds. Port streams
@@ -459,13 +459,13 @@ Login/install streams carry UTF-8 newline-delimited tagged JSON, described by
 `streams.host_progress.event` in the exported schema:
 
 - `{type: "status", text}` or `{type: "stderr", text}` for login progress.
-- `{type: "open_url", url, callback_port?}` (2026-11-11, `sill.login_browser: 1`): a login page
+- `{type: "open_url", url, callback_port?}` (2026-11-11, `silli.login_browser: 1`): a login page
   for the frontend to open in the person's browser; the daemon opens none. `callback_port` is the
   daemon host's loopback port the page's `redirect_uri` names. A frontend on another machine
   listens on exactly that port of its own loopback and relays each connection with
-  `_sill/streams.login_callback {operation_id}`, raw TCP bytes to that port on the daemon host,
+  `_silli/streams.login_callback {operation_id}`, raw TCP bytes to that port on the daemon host,
   served only for the port the running login reported (`not_found` when no such login runs,
-  `invalid_state` without a port or when nothing listens). `_sill/operations.cancel
+  `invalid_state` without a port or when nothing listens). `_silli/operations.cancel
   {operation_id}` stops a running login, including one run by directory setup; it fails with
   code `cancelled` (`not_found` when no such login runs). A `busy` refusal of a job with an
   operation names it in `details.operation_id`.
@@ -480,11 +480,11 @@ an exhausted job budget returns `limit_exceeded`. Progress writes have a one-sec
 a stalled reader loses its stream while the job continues. A job reserves its slot until it
 finishes, including after disconnect. Login retains its existing agent-response deadlines
 (30 seconds for initialization, ten minutes for authentication); installers have no new overall
-deadline. Logins can be cancelled (`sill.login_browser`, above); installs cannot, and
+deadline. Logins can be cancelled (`silli.login_browser`, above); installs cannot, and
 reconnect/replay is unsupported for both job streams.
 Closing or never claiming their stream **does not cancel the job**. EOF without a terminal event,
 a lost token/reply, or daemon death does not establish the outcome. Login/install callers that
-retained an `operation_id` recover it through `_sill/operations.get` or an identical opening
+retained an `operation_id` recover it through `_silli/operations.get` or an identical opening
 request: the latter returns the receipt with `token: null`, never a duplicate job. Without that
 identity, inspect host state before an explicit retry. Port opens must not be blindly retried.
 Stream tokens and active jobs are in memory; durable receipts survive daemon restart and unfinished
@@ -501,8 +501,8 @@ ACP v1 retained as the default.
 This milestone remains `sfp/1-dev.3`. **What stands between it and stable `sfp/1` (decided
 2026-11-03)** is only what could otherwise need `sfp/2`:
 
-- **SFP release checklist:** user acceptance on the shelf, `sill attach` line mode and one client
-  over `sill daemon --stdio` (restart mid-turn, a question answered after reconnecting,
+- **SFP release checklist:** user acceptance on the shelf, `silli attach` line mode and one client
+  over `silli daemon --stdio` (restart mid-turn, a question answered after reconnecting,
   uploads and agent images), with the independent Python conformance suite rerun; then one
   coordinated cutover that sets the identity to `sfp/1`, bumps the private relay protocol,
   re-records [`sfp-1.schema.json`](sfp-1.schema.json) and moves this document's development notes to
@@ -538,13 +538,13 @@ promise of unlimited history or automatic eviction of retry identities.
 ### Freeze guard
 
 [`docs/sfp-1.schema.json`](sfp-1.schema.json) is the recorded protocol document, and a
-`sill-proto` test compares `sill daemon schema` against it on every `cargo test`
+`silli-proto` test compares `silli daemon schema` against it on every `cargo test`
 (`schema_compat.rs`). Types are matched through the `$ref`s that methods, errors and streams
 reach, not by definition name. A change that would need `sfp/2` fails, and nothing can
 accept it: a removed or renamed method, field, variant, enum value, error code, capability
 or limit; a changed type; a field that became required or is no longer always present; a new
 method without a capability requirement. A compatible change fails too, until it is recorded
-with `SILL_SFP_SCHEMA_ACCEPT=1 cargo test -p sill-proto`, so every extension appears in review
+with `SILLI_SFP_SCHEMA_ACCEPT=1 cargo test -p silli-proto`, so every extension appears in review
 as a diff of the file. Documentation text is ignored. The guard cannot see which capability
 an added optional field or variant belongs to; that pairing remains a review rule. Until the
 cutover, the identity check holds the baseline at `sfp/1-dev.3`. A deliberate pre-freeze
@@ -552,17 +552,17 @@ break is recorded by deleting the file and rerunning the test. One such break: o
 document was re-recorded after the GTK-only settings keys (`width`, `drawer_width`, `text_scale`,
 `host_terminal`) left the settings type with the GTK shelf. Another: on 2026-11-10 it was
 re-recorded when repository policy fragments were removed (the list follows). A third: on
-2026-11-19 the settings type and its changes lost `hotkey`, which became sill-gui's own
-setting (`sill-gui.toml`). Gone on 2026-11-10:
-the methods `_sill/policy.start` and `_sill/host_control.exception`; `fragment_ro`,
+2026-11-19 the settings type and its changes lost `hotkey`, which became silli-gui's own
+setting (`silli-gui.toml`). Gone on 2026-11-10:
+the methods `_silli/policy.start` and `_silli/host_control.exception`; `fragment_ro`,
 `fragment_masks`, `sources` and `suggestions` of the policy view; `fragment` and `root` of
-`_sill/policy.check`; `conflicts`, `conflicts_error` and `exception` of the Host control state
+`_silli/policy.check`; `conflicts`, `conflicts_error` and `exception` of the Host control state
 and `exception` of a session record's Host control brief; the error code `exception_required`
 with its details.
 
 ### Snapshot benchmark and disposition (2026-11-03)
 
-Measured inside a sill jail using the optimized `local` profile. The opt-in
+Measured inside a silli jail using the optimized `local` profile. The opt-in
 `daemon::sfp::tests::snapshot_capture_benchmark` seeds canonical history through the real
 journal and calls the production snapshot capture code. A competing journal write to a
 second session waits on the same store mutex arrangement used by the daemon.
@@ -583,7 +583,7 @@ also passed.
 Reproduce each size separately (replace `100` with `10` or `500`):
 
 ```sh
-SILL_SFP_BENCH_MIB=100 cargo test --profile local -p sill snapshot_capture_benchmark -- --ignored --nocapture --test-threads=1
+SILLI_SFP_BENCH_MIB=100 cargo test --profile local -p silli snapshot_capture_benchmark -- --ignored --nocapture --test-threads=1
 ```
 
 **Decision:** defer the shared-lock redesign. The 500 MiB fixture is an extreme text-history
@@ -601,46 +601,46 @@ RSS. Those remain separate validation areas; no production locking change was ma
 
 ### Additional development public APIs (2026-11-03)
 
-`_sill/changes.changed` is the public invalidation notification for Changes views.
-`_sill/files.image` provides bounded session image reads; `_sill/policy.denied`,
-`_sill/policy.remember_denied`, `_sill/policy.quiet_host`, and `_sill/policy.allow_host` expose network permission state and explicit decisions.
+`_silli/changes.changed` is the public invalidation notification for Changes views.
+`_silli/files.image` provides bounded session image reads; `_silli/policy.denied`,
+`_silli/policy.remember_denied`, `_silli/policy.quiet_host`, and `_silli/policy.allow_host` expose network permission state and explicit decisions.
 
 These baseline APIs need no optional capability. The exported schema is authoritative for their
 named request/result records. They do not make the development identity a stable `sfp/1` release.
 
 | Methods | Contract |
 |---|---|
-| `_sill/files.home`, `_sill/files.metadata`, `_sill/files.list` | Exact daemon-host paths; live directory keyset pages (1–128); byte identities, display text ignored. |
-| `_sill/files.read`, `_sill/files.write` | Base64 regular-file data; reads use decimal byte offsets and chunks up to 1 MiB; writes atomically replace up to 1 MiB. Reads refuse symlinks. |
-| `_sill/settings.get`, `_sill/settings.patch` | Explicit settings record and tagged changes; unknown change kinds rejected; at most 64 changes and 1 MiB input. |
-| `_sill/usage.active_time` | `sill.usage: 1` (2026-11-10). `{days}` (1–366) → `{hours: [{hour, ms}]}`: milliseconds agents worked in each Unix hour, ascending, empty hours left out, summed over sessions (deleted ones included; working at once adds up) and counting intervals still running. The journal adds each completed working interval to the hours it covers; work from before 2026-11-10 is not reconstructed. |
-| `_sill/settings.instructions.get`, `_sill/settings.instructions.set` | Global instruction text, at most 1 MiB input. |
-| `_sill/policy.list`, `_sill/policy.get` | Policy names and the TOML policy document. |
-| `_sill/procs.list`, `_sill/procs.tail`, `_sill/procs.stop`, `_sill/procs.dismiss` | Session managed processes; bounded live pages, tail up to 10,000 lines; stop requests termination, not proof of exit. |
-| `_sill/procs.running`, `_sill/procs.stop_command` | Need `sill.jail_processes`. What runs in the session's jail now, seen from outside the agent: commands (each tree once, at its root) and services (managed processes, programs listening on a port); empty when the jail is not running. Stop ends one command with its tree (asked, then killed after 3 s) by its root's pid in the jail; not proof of exit. |
-| `_sill/pins.list`, `_sill/pins.add`, `_sill/pins.remove`, `_sill/sessions.pin`, `_sill/sessions.unpin` | Global or exact-session pins; live byte-order keyset pages, 1–128 entries; global add canonicalizes. Since 2026-11-09 the global list is the person's Shortcuts: navigation only, bound into no jail (docs/pins.md). |
-| `_sill/agents.list`, `_sill/agents.get`, `_sill/agents.save`, `_sill/agents.remove`, `_sill/agents.available` | Explicit configured-agent definitions, ID keyset pages (1–128); save/remove user overrides; availability resolves the configured command on the daemon. |
-| `_sill/providers.list`, `_sill/providers.save`, `_sill/providers.remove`, `_sill/providers.test` | Need `sill.providers: 1` (2026-11-14). Records on the daemon host for OpenAI-compatible endpoints. List → `{providers: [{provider, has_key, endpoint}], agents}`: never a key; `endpoint` is the one `host:port` sessions may reach, `agents` the ids the daemon hands providers to. Save `{provider, key?, clear_key?}` → `{endpoint}`: unknown record fields and loopback addresses are refused; at most 64 providers. Remove `{provider_id}` → `{removed}`, with the key. Test `{base_url, key?, provider_id?}` → `{models, endpoint}`: `GET <base_url>/models` from the daemon host with the given key or the saved one; changes nothing. |
-| `_sill/agents.defaults.get`, `_sill/agents.defaults.set` | Named agent default controls; unknown agents refused. |
-| `_sill/registry.refresh`, `_sill/registry.installed`, `_sill/registry.uninstall`, `_sill/registry.icon` | Resolve daemon registry selectors; uninstall verifies installed version/source; icons return bounded base64 bytes, found by the entry's id alone (the selector's version and source are not checked: an installed version the index has moved past keeps its icon). |
-| `_sill/memory.list`, `_sill/memory.text`, `_sill/memory.search` | Live memory listing/search and paged show/transcript/export/recall text; search currently limited to 500 results. |
-| `_sill/memory.notes.list`, `_sill/memory.notes.add`, `_sill/memory.notes.remove`, `_sill/memory.refresh` | Paged notes and explicit mutations; additions are not safe to retry blindly. |
-| `_sill/changes.list`, `_sill/changes.diff`, `_sill/changes.keep`, `_sill/changes.revert`, `_sill/changes.undo`, `_sill/changes.git-revert`, `_sill/changes.history` | Named Changes records and exact paths; existing filesystem preconditions still apply; consult schemas for paging and selectors. |
-| `_sill/operations.get` | Durable login/install receipt recovery. |
+| `_silli/files.home`, `_silli/files.metadata`, `_silli/files.list` | Exact daemon-host paths; live directory keyset pages (1–128); byte identities, display text ignored. |
+| `_silli/files.read`, `_silli/files.write` | Base64 regular-file data; reads use decimal byte offsets and chunks up to 1 MiB; writes atomically replace up to 1 MiB. Reads refuse symlinks. |
+| `_silli/settings.get`, `_silli/settings.patch` | Explicit settings record and tagged changes; unknown change kinds rejected; at most 64 changes and 1 MiB input. |
+| `_silli/usage.active_time` | `silli.usage: 1` (2026-11-10). `{days}` (1–366) → `{hours: [{hour, ms}]}`: milliseconds agents worked in each Unix hour, ascending, empty hours left out, summed over sessions (deleted ones included; working at once adds up) and counting intervals still running. The journal adds each completed working interval to the hours it covers; work from before 2026-11-10 is not reconstructed. |
+| `_silli/settings.instructions.get`, `_silli/settings.instructions.set` | Global instruction text, at most 1 MiB input. |
+| `_silli/policy.list`, `_silli/policy.get` | Policy names and the TOML policy document. |
+| `_silli/procs.list`, `_silli/procs.tail`, `_silli/procs.stop`, `_silli/procs.dismiss` | Session managed processes; bounded live pages, tail up to 10,000 lines; stop requests termination, not proof of exit. |
+| `_silli/procs.running`, `_silli/procs.stop_command` | Need `silli.jail_processes`. What runs in the session's jail now, seen from outside the agent: commands (each tree once, at its root) and services (managed processes, programs listening on a port); empty when the jail is not running. Stop ends one command with its tree (asked, then killed after 3 s) by its root's pid in the jail; not proof of exit. |
+| `_silli/pins.list`, `_silli/pins.add`, `_silli/pins.remove`, `_silli/sessions.pin`, `_silli/sessions.unpin` | Global or exact-session pins; live byte-order keyset pages, 1–128 entries; global add canonicalizes. Since 2026-11-09 the global list is the person's Shortcuts: navigation only, bound into no jail (docs/pins.md). |
+| `_silli/agents.list`, `_silli/agents.get`, `_silli/agents.save`, `_silli/agents.remove`, `_silli/agents.available` | Explicit configured-agent definitions, ID keyset pages (1–128); save/remove user overrides; availability resolves the configured command on the daemon. |
+| `_silli/providers.list`, `_silli/providers.save`, `_silli/providers.remove`, `_silli/providers.test` | Need `silli.providers: 1` (2026-11-14). Records on the daemon host for OpenAI-compatible endpoints. List → `{providers: [{provider, has_key, endpoint}], agents}`: never a key; `endpoint` is the one `host:port` sessions may reach, `agents` the ids the daemon hands providers to. Save `{provider, key?, clear_key?}` → `{endpoint}`: unknown record fields and loopback addresses are refused; at most 64 providers. Remove `{provider_id}` → `{removed}`, with the key. Test `{base_url, key?, provider_id?}` → `{models, endpoint}`: `GET <base_url>/models` from the daemon host with the given key or the saved one; changes nothing. |
+| `_silli/agents.defaults.get`, `_silli/agents.defaults.set` | Named agent default controls; unknown agents refused. |
+| `_silli/registry.refresh`, `_silli/registry.installed`, `_silli/registry.uninstall`, `_silli/registry.icon` | Resolve daemon registry selectors; uninstall verifies installed version/source; icons return bounded base64 bytes, found by the entry's id alone (the selector's version and source are not checked: an installed version the index has moved past keeps its icon). |
+| `_silli/memory.list`, `_silli/memory.text`, `_silli/memory.search` | Live memory listing/search and paged show/transcript/export/recall text; search currently limited to 500 results. |
+| `_silli/memory.notes.list`, `_silli/memory.notes.add`, `_silli/memory.notes.remove`, `_silli/memory.refresh` | Paged notes and explicit mutations; additions are not safe to retry blindly. |
+| `_silli/changes.list`, `_silli/changes.diff`, `_silli/changes.keep`, `_silli/changes.revert`, `_silli/changes.undo`, `_silli/changes.git-revert`, `_silli/changes.history` | Named Changes records and exact paths; existing filesystem preconditions still apply; consult schemas for paging and selectors. |
+| `_silli/operations.get` | Durable login/install receipt recovery. |
 
 Unless a method explicitly offers a durable retry identity, a lost mutation reply is uncertain:
 read back the target before deciding whether to retry. Desired-state writes can overwrite a
 concurrent edit; a retry is not permission to do so. Frontends do not blindly retry mutations
 through their data connections. Most public data responses have a 4 MiB payload ceiling.
 The public files methods identify the daemon **host** namespace; they do not yet provide a
-complete merged-session filesystem API. Memory text uses connection-bound immutable disk leases built by streaming formatters against a separate read-only SQLite snapshot; subsequent pages seek within the spool. `_sill/memory.text.close` releases a lease early.
+complete merged-session filesystem API. Memory text uses connection-bound immutable disk leases built by streaming formatters against a separate read-only SQLite snapshot; subsequent pages seek within the spool. `_silli/memory.text.close` releases a lease early.
 
 ## Compatibility and errors
 
 **Capability names and versions (settled for sfp/1, 2026-11-03).** A capability name is
 `namespace.feature`: at least two dot-separated parts of lowercase ASCII letters, digits and `_`,
-at most 64 bytes. The `sill.` namespace is the daemon's own. Versions are integers from 1 and
-cumulative: version N keeps every guarantee of version N−1. In `_sill/initialize` the client
+at most 64 bytes. The `silli.` namespace is the daemon's own. Versions are integers from 1 and
+cumulative: version N keeps every guarantee of version N−1. In `_silli/initialize` the client
 offers each capability at the highest version it implements; the daemon answers each one it has
 at min(offered, its own) and omits unknown names and offers of 0. Only answered capabilities may
 be used on that connection. A method that needs a missing capability returns `unsupported` with
@@ -648,10 +648,10 @@ be used on that connection. A method that needs a missing capability returns `un
 `capabilities.offered` and each method's requirement under `methods[].capabilities`.
 
 The sfp/1 baseline needs no optional capability. The current registry (by 2026-11-15) is
-`sill.send_now`, `sill.permission_modes`, `sill.desktop_view`, `sill.host_control`,
-`sill.agent_setup`, `sill.workspaces`, `sill.network_quiet`, `sill.usage`, `sill.login_browser`,
-`sill.jail_processes`, `sill.crosscheck`, `sill.providers`, `sill.provider_limits` and
-`sill.storage`, each at version 1 (`initialize::CAPABILITIES`); `sill.internal` and the `_sill/internal/*` methods have been
+`silli.send_now`, `silli.permission_modes`, `silli.desktop_view`, `silli.host_control`,
+`silli.agent_setup`, `silli.workspaces`, `silli.network_quiet`, `silli.usage`, `silli.login_browser`,
+`silli.jail_processes`, `silli.crosscheck`, `silli.providers`, `silli.provider_limits` and
+`silli.storage`, each at version 1 (`initialize::CAPABILITIES`); `silli.internal` and the `_silli/internal/*` methods have been
 removed. A frontend-declared capability (`initialize::FRONTEND_DECLARED`) states the client's
 own user-facing contract, so the shared client offers it only after the program declares it.
 
@@ -664,7 +664,7 @@ not an SFP capability either.
 lifetime of v1; there are no `sfp/1.x` minor versions. A compatible addition is a new method,
 notification, optional request/result field, enum variant or error detail that an old peer can
 ignore or never sees. Each addition is advertised as a named capability (`name: version`) in
-`_sill/initialize`; a daemon sends a new notification or relies on new behaviour toward a client
+`_silli/initialize`; a daemon sends a new notification or relies on new behaviour toward a client
 only when the client offered it, and a client calls it only when the daemon returned it. An
 optional result field may go to every client (see Unknown fields below); it is paired with a
 capability only when a client must act on it. A missing capability disables that feature;
@@ -679,7 +679,7 @@ receipts for Changes mutations would be a capability such as `changes.operation_
 **Unknown fields (decided 2026-11-03).** Clients ignore fields they do not know in everything the
 daemon sends: results (an empty `{}` result included), notifications, error details and stream
 events. The schema says so: no type reachable from those forbids additional properties, and a
-`sill-proto` test (`what_the_daemon_sends_is_open_to_new_fields`) keeps it that way. Requests stay
+`silli-proto` test (`what_the_daemon_sends_is_open_to_new_fields`) keeps it that way. Requests stay
 strict: the daemon refuses an unknown request field with `invalid_params`, so a client learns that
 the daemon lacks a field instead of having it dropped silently. Where a type is both a request and
 a result (`Answer`, an agent `Definition`), the schema shows it open and the daemon checks the
@@ -721,10 +721,10 @@ Session state includes `active_ms` (completed working intervals in milliseconds)
 The journal accumulates only `working` activity in an open session; waiting for input,
 idle, unknown, and ended states stop the clock. Snapshots preserve the total across
 frontend reconnects. Older state defaults to zero; past work is not reconstructed. Session records
-(`_sill/sessions.get`, `.list`) carry the same two fields, so a frontend that has not attached
+(`_silli/sessions.get`, `.list`) carry the same two fields, so a frontend that has not attached
 shows the same worked time.
 
-Session state's `summarizing` (2026-11-10) is `checkpoint` while the turn running is sill's
+Session state's `summarizing` (2026-11-10) is `checkpoint` while the turn running is silli's
 *Summarize now* turn, `end` while it is the session's closing summary (a checkpoint becomes `end`
 when the tab closes during it), and null otherwise: the agent's own work, or nothing running.
 Activity stays `working` during a summary turn; the field only tells the work apart. It lasts
@@ -742,7 +742,7 @@ as null.
 The exported schema now describes `files.home/metadata/list/read/write/image`,
 `settings.get/patch`, `settings.instructions.get/set`, `policy.list/get/denied/remember_denied/allow_host`,
 `procs.list/tail/stop/dismiss`, and `memory.list/text/search/notes.list/notes.add/notes.remove/compact/forget/refresh`.
-They need no optional capability. sill-gui uses the public file, settings, instructions,
+They need no optional capability. silli-gui uses the public file, settings, instructions,
 network-denial, process and memory operations; CLI memory readers use the same public contract.
 
 - `files.*` paths name the daemon host. `files.image` instead names an absolute path in the
@@ -753,9 +753,9 @@ network-denial, process and memory operations; CLI memory readers use the same p
 - Live-session image reads are opened inside the jail by its supervisor and passed to the
   daemon as read-only file descriptors. This includes private mounts such as `/tmp`; a
   missing jail file never falls back to a same-named host file. Image paths reject `..`,
-  symlink traversal and `/.sill` internals. After a jail stops, retained pin/overlay images
+  symlink traversal and `/.silli` internals. After a jail stops, retained pin/overlay images
   can still be read, but unpinned ephemeral mounts (`/tmp`, `/run`, `/proc`, `/dev`, `/sys`) cannot.
-  Deployment of this change requires a fresh session with the updated `sill-shim`;
+  Deployment of this change requires a fresh session with the updated `silli-shim`;
   restarting only the daemon retains the old supervisor. The public SFP schema is unchanged.
 - File and image reads return at most 1 MiB as base64. Preserve the returned `revision` for later
   chunks; inode, device, size, modification and change timestamps detect changes and produce
@@ -778,7 +778,7 @@ network-denial, process and memory operations; CLI memory readers use the same p
   offsets carry the returned `snapshot_id` and SHA-256 `fingerprint`. Live edits cannot alter an
   existing snapshot. Leases belong to their control connection, expire after 60 idle seconds
   (extended on valid page reads, up to 30 minutes total), and are closed on disconnect or by
-  `_sill/memory.text.close`. At most four leases per connection and 32 globally consume at most
+  `_silli/memory.text.close`. At most four leases per connection and 32 globally consume at most
   512 MiB of anonymous disk files, with 256 MiB per file and a 30-second construction budget.
   Individual records above 64 MiB return `limit_exceeded`. Temporary files are unlinked
   immediately, so failures and daemon crashes cannot leave exported content on disk.
@@ -790,14 +790,14 @@ network-denial, process and memory operations; CLI memory readers use the same p
 All unknown errors, timeouts and disconnects forbid automatic mutation retries. The schema exports
 JSON-RPC error records, stable domain codes, incompatibility details and stale-answer resolution.
 
-Additional public method names in this development revision: `_sill/files.find`, `_sill/memory.compact`, `_sill/memory.forget`, `_sill/repos.changed_lines`, `_sill/repos.head`, `_sill/repos.root`, `_sill/repos.status`, `_sill/repos.summary`, `_sill/sessions.delete`, `_sill/sessions.log`, `_sill/sessions.reset`.
+Additional public method names in this development revision: `_silli/files.find`, `_silli/memory.compact`, `_silli/memory.forget`, `_silli/repos.changed_lines`, `_silli/repos.head`, `_silli/repos.root`, `_silli/repos.status`, `_silli/repos.summary`, `_silli/sessions.delete`, `_silli/sessions.log`, `_silli/sessions.reset`.
 
-`_sill/daemon.status` reports the development protocol identity, RFC 3339 startup time and exact daemon socket path. `_sill/daemon.shutdown` requests daemon exit; it is never automatically retried after uncertainty.
+`_silli/daemon.status` reports the development protocol identity, RFC 3339 startup time and exact daemon socket path. `_silli/daemon.shutdown` requests daemon exit; it is never automatically retried after uncertainty.
 
 ### Public-only clients and server
 
-sill-gui, the CLI and line mode use only public methods. The internal dispatcher, legacy
-conversation subscriptions, schema entries, and `sill.internal` negotiation have been removed.
+silli-gui, the CLI and line mode use only public methods. The internal dispatcher, legacy
+conversation subscriptions, schema entries, and `silli.internal` negotiation have been removed.
 Unknown methods return JSON-RPC method-not-found; they cannot fall back to an internal handler.
 New functionality must have explicit public schemas and bounds.
 
@@ -805,10 +805,10 @@ New functionality must have explicit public schemas and bounds.
 
 The headless workspace suite covers persistence, relay adoption, login, paths, queues, snapshots,
 public administration and native ACP v2 SDK exchanges.
-Run `cargo test --workspace` and `cargo check -p sill`.
+Run `cargo test --workspace` and `cargo check -p silli`.
 
-With Python `jsonschema` installed (set `SILL_SFP_PYTHON` to that environment's interpreter),
-`cargo test -p sill -- --ignored` runs the independent Python
+With Python `jsonschema` installed (set `SILLI_SFP_PYTHON` to that environment's interpreter),
+`cargo test -p silli -- --ignored` runs the independent Python
 administration, Changes, host stream and lifecycle/recovery scenarios plus real OpenSSH
 control/terminal reconnection. The SSH test needs `ssh`, `sshd` and `ssh-keygen`; it uses only
 throwaway keys, a loopback listener and temporary daemon state, and shuts them down afterwards.
@@ -822,16 +822,16 @@ running-daemon replacement or repository commit is part of this source change.
 ### Policy inspection and import (development addition, 2026-11-04)
 
 Added with travelling policies; repository policy fragments, their one-build exception
-(`_sill/policy.start`) and their host suggestions were removed on 2026-11-10. A jail is
+(`_silli/policy.start`) and their host suggestions were removed on 2026-11-10. A jail is
 built from its session's policy alone. The resolver freezes launch inputs, including agent
 endpoints.
 
 | Method | Behavior |
 |---|---|
-| `_sill/policy.preview` | Session key; resolve the session's policy, pins and remembered grants for the next build. Invalid inputs (a policy that does not parse, a pinned folder that is gone) return diagnostics and no resolved text. |
-| `_sill/policy.snapshot` | Session key; return the recorded last successful launch, or null for an older/never-launched jail, and `warnings`: what the session's last launch warned about, in the launcher's words (since 2026-11-15). |
-| `_sill/policy.check` | Validate transferred text as a complete policy. |
-| `_sill/policy.import` | Install transferred complete-policy text under a name; existing user policies require explicit replacement. |
+| `_silli/policy.preview` | Session key; resolve the session's policy, pins and remembered grants for the next build. Invalid inputs (a policy that does not parse, a pinned folder that is gone) return diagnostics and no resolved text. |
+| `_silli/policy.snapshot` | Session key; return the recorded last successful launch, or null for an older/never-launched jail, and `warnings`: what the session's last launch warned about, in the launcher's words (since 2026-11-15). |
+| `_silli/policy.check` | Validate transferred text as a complete policy. |
+| `_silli/policy.import` | Install transferred complete-policy text under a name; existing user policies require explicit replacement. |
 
 Preview and launch views also contain `filesystem`: path rules with target/backing `HostPath`,
 behavior, source and explanation, plus a bounded metadata-only list of stored but unused paths.
@@ -851,7 +851,7 @@ after an uncertain reply.
 
 Every denied-host approval is a session grant, without modifying agent-wide domains; the
 proxy reloads those grants for new connections. Offline launch policies reject grants.
-Only `_sill/policy.save_host` changes agent-wide defaults. Import conflicts
+Only `_silli/policy.save_host` changes agent-wide defaults. Import conflicts
 return `conflict`; build errors retain their diagnostics.
 
 Identity remains `sfp/1-dev.3`; this is not the stable `sfp/1` cutover.
@@ -859,7 +859,7 @@ Identity remains `sfp/1-dev.3`; this is not the stable `sfp/1` cutover.
 
 Session naming extension (2026-11-05): session administration records include optional `name`,
 the human-editable identity initially generated at creation. The existing `title` remains the
-descriptive summary title. `_sill/sessions.update` accepts `{ "type": "name", "text": "…" }`
+descriptive summary title. `_silli/sessions.update` accepts `{ "type": "name", "text": "…" }`
 in its change field. The daemon trims names and accepts 1–80 characters without control
 characters. A name change does not alter `title`; it updates a known summary-signature footer.
 Older sessions without a preserved name return null. The exported schema includes this additive
@@ -867,46 +867,46 @@ extension; clients default absent name fields to null.
 
 ### Workspaces (development addition, 2026-11-09)
 
-`sill.workspaces: 1` gates a session's own clone of each repository it pins. A session's mode is fixed when it is made:
-`_sill/sessions.create` takes an optional `workspaces` (absent follows Settings → Automatic
-workspaces, `automatic_workspaces` in `_sill/settings.*`). The daemon makes a workspace session's
+`silli.workspaces: 1` gates a session's own clone of each repository it pins. A session's mode is fixed when it is made:
+`_silli/sessions.create` takes an optional `workspaces` (absent follows Settings → Automatic
+workspaces, `automatic_workspaces` in `_silli/settings.*`). The daemon makes a workspace session's
 workspaces when its jail starts; there is no create method.
 
-`_sill/workspaces.session` gives a session's repositories as its jail has them (each workspace,
-and repositories kept live with their reason). `_sill/workspaces.list` (live keyset pages, newest
+`_silli/workspaces.session` gives a session's repositories as its jail has them (each workspace,
+and repositories kept live with their reason). `_silli/workspaces.list` (live keyset pages, newest
 first, optionally one session's; the first page lists discarded work still undoable). Both carry
 `details`, each listed workspace's state as `get` gives it, from the same look (added 2026-11-09;
 a workspace whose folder or repository is gone has none, and a client asks `get` for what is
-missing). `_sill/workspaces.get` (record, current `revision`, what an Apply would bring,
+missing). `_silli/workspaces.get` (record, current `revision`, what an Apply would bring,
 `needs_rebase`) and
-`_sill/workspaces.diff` (against what the person has — their checkout on the agent's paths — or
+`_silli/workspaces.diff` (against what the person has — their checkout on the agent's paths — or
 against the base; at most 4 MiB) read. A detail's `files` (added 2026-11-10) lists what an Apply
 would bring path by path, committed and uncommitted alike: each an exact `path` below the
 workspace's `source`, a `status` (`A`, `M`, `D`, `T`) and its `added`/`removed` lines (decimal
 strings, `0` for a binary file). `summary.files`, `added` and `removed` are their count and sums.
 A rename is listed as its two paths, one deleted and one added, so that `workspaces.diff` with
 that `path` (added with it: one path's diff alone, matched literally) says what its entry says.
-`_sill/workspaces.prepare` rebases onto a moved checkout in a helper jail built from the session's
+`_silli/workspaces.prepare` rebases onto a moved checkout in a helper jail built from the session's
 next build (no network), keeping uncommitted changes; a rebase that stops is left for the
-workspace (`conflicts`, `operation` reads `rebase`/`conflict`) and `_sill/workspaces.abort` undoes
-it. `_sill/workspaces.apply` brings exactly the revision the person saw — its commits, by
-fast-forward — and the workspace goes on. `_sill/workspaces.copy` (added 2026-11-12, "Apply
+workspace (`conflicts`, `operation` reads `rebase`/`conflict`) and `_silli/workspaces.abort` undoes
+it. `_silli/workspaces.apply` brings exactly the revision the person saw — its commits, by
+fast-forward — and the workspace goes on. `_silli/workspaces.copy` (added 2026-11-12, "Apply
 without commit") takes the same parameters and writes that revision's whole state, committed or
 not, into the checkout's working tree as uncommitted changes for the person to try: no commit on
 either side, the checkout's branch and index untouched, the workspace's work still there for a
-later apply, which takes the copied files over. `_sill/workspaces.branch` (added 2026-11-16,
+later apply, which takes the copied files over. `_silli/workspaces.branch` (added 2026-11-16,
 "Apply as branch") takes the same parameters and makes a new branch in the checkout at that
 revision's commits without switching to it — the checkout's branch, index and files untouched,
 no rebase first — and answers its name (`Branched.branch`): the branch the agent works on, or the
-session's title in snake_case when the workspace is on sill's own branch. Commits only, as for
+session's title in snake_case when the workspace is on silli's own branch. Commits only, as for
 apply; a name already holding other commits is refused as `branch_exists` and never moved.
-`_sill/workspaces.discard`
-resets the workspace to what the person has and keeps the work 7 days; `_sill/workspaces.undo` puts it
-back. `_sill/workspaces.remove` removes a workspace that cannot be read (its repository was
-replaced by another), folder and record, with no Undo. `_sill/workspaces.changed` (notification, this capability only) invalidates one workspace.
+`_silli/workspaces.discard`
+resets the workspace to what the person has and keeps the work 7 days; `_silli/workspaces.undo` puts it
+back. `_silli/workspaces.remove` removes a workspace that cannot be read (its repository was
+replaced by another), folder and record, with no Undo. `_silli/workspaces.changed` (notification, this capability only) invalidates one workspace.
 
 Mutations take an `operation_id` with a receipt: an
-identical retry never repeats the work, and `_sill/operations.get` reports the receipt. Refusals use
+identical retry never repeats the work, and `_silli/operations.get` reports the receipt. Refusals use
 `invalid_state` with the optional details `{reason, paths}`: `stale_revision`, `source_moved`,
 `source_overlap`, `untracked_collision`, `uncommitted`, `no_identity`, `workspace_detached`
 (the workspace's HEAD is on no branch; its `branch` is otherwise the one its HEAD names,
@@ -919,18 +919,18 @@ write again has them committed by the daemon as the person (`no_identity` when G
 recorded on 2026-11-09 (create, finish, reopen, merge) were replaced the same day, before any
 release, and removed from the recorded baseline.
 
-### `_sill/repos.root` answers for a repository folder (2026-11-08)
+### `_silli/repos.root` answers for a repository folder (2026-11-08)
 
 The repository containing the path: the nearest directory with `.git`, the path itself included
 when it is a directory; a file or a missing path is looked up from its parent; `null` outside any
 repository. Before, the search always began at the parent and a frontend asking about a folder
-that is itself a repository got `null` unless it asked through a made-up child path; sill-gui's
+that is itself a repository got `null` unless it asked through a made-up child path; silli-gui's
 workaround is gone. Additive on the wire (an answer where there was `null`); the recorded document
 changed only in the method's description. Identity remains `sfp/1-dev.3`.
 
 ### Host control activation (2026-11-07)
 
-Capability `sill.host_control` (frontend-declared: a program that shows the "HOST
+Capability `silli.host_control` (frontend-declared: a program that shows the "HOST
 CONTROL · actions can run outside the jail" caption on the session, as a line in the control's
 colour for as long as it is active with its words when it starts or its scope changes, and a window-level line naming
 every session with active control). Host control is an activation held in the daemon's memory,
@@ -938,19 +938,19 @@ never a saved choice (docs/permission-modes.md, Host control):
 
 | Method | Request | Result | Needs |
 |---|---|---|---|
-| `_sill/host_control.activate` | `{session_id, operations}` | state | `sill.host_control` |
-| `_sill/host_control.revoke` | `{session_id}` | state | `sill.host_control` |
-| `_sill/host_control.keep` | `{session_id, name, keep}` | `{}` | `sill.host_control` |
-| `_sill/host_control.state` | `{session_id}` | state | `sill.permission_modes` |
+| `_silli/host_control.activate` | `{session_id, operations}` | state | `silli.host_control` |
+| `_silli/host_control.revoke` | `{session_id}` | state | `silli.host_control` |
+| `_silli/host_control.keep` | `{session_id, name, keep}` | `{}` | `silli.host_control` |
+| `_silli/host_control.state` | `{session_id}` | state | `silli.permission_modes` |
 
 Operations: `view`, `input`, `mac_view`, `mac_input`, `mac_commands`, `inspect`, `launch`, `stop`, `stop_existing`, `commands`. `activate`
 sets the scope exactly and is a new `generation` every time it takes effect, on a running session
 only; it is refused with `permission_denied` for a ghost or a policy
 forbidding Host control, `invalid_state` for a stopped or ended session, `unsupported` (with the
-missing capability in `details`) from a connection without `sill.host_control` or without
-`sill.permission_modes`. The state says `active`, `generation`, `operations`, `displaying` (the
+missing capability in `details`) from a connection without `silli.host_control` or without
+`silli.permission_modes`. The state says `active`, `generation`, `operations`, `displaying` (the
 connections showing this session's control: the activator while it lives, and every
-`sill.host_control` connection attached to the session), `since`, `ended` (why and when the
+`silli.host_control` connection attached to the session), `since`, `ended` (why and when the
 last activation ended) and, when the session's policy forbids Host control, `forbidden` with the
 reason. The activation ends with `revoke`, when the last displaying connection
 closes or detaches, when the session stops, ends or is deleted, or when its jail is found gone;
@@ -960,13 +960,13 @@ while active, for the window-level line.
 
 ### Test desktop pictures (2026-11-06)
 
-Capability `sill.desktop_view` (daemon-offered; every client offers it). A session whose launch has
+Capability `silli.desktop_view` (daemon-offered; every client offers it). A session whose launch has
 the test desktop can be watched from a frontend:
 
 | Method | Request | Result |
 |---|---|---|
-| `_sill/desktop.capture` | `{session_id, since?}` | `{revision, changed, width, height, scale, size}` |
-| `_sill/desktop.read` | `{session_id, revision, offset, length?}` | file bytes record (at most 1 MiB) |
+| `_silli/desktop.capture` | `{session_id, since?}` | `{revision, changed, width, height, scale, size}` |
+| `_silli/desktop.read` | `{session_id, revision, offset, length?}` | file bytes record (at most 1 MiB) |
 
 The daemon takes the picture outside the jail, as a Wayland client of the desktop's own socket
 (Weston's capture protocol). `revision` is the SHA-256 of the picture's pixels; when it equals
@@ -974,17 +974,17 @@ The daemon takes the picture outside the jail, as a Wayland client of the deskto
 the session's latest PNG (RGB, `size` bytes) for `desktop.read`, which returns `conflict` once a
 newer capture replaced that revision. `width`/`height` are pixels; the desktop is `width/scale` by
 `height/scale` points. `not_found` when the session has no test desktop running. One capture runs
-at a time; a frontend polls while it shows the view (sill-gui: every second, slowing to every three
+at a time; a frontend polls while it shows the view (silli-gui: every second, slowing to every three
 while nothing changes).
 
 ### A failed jail start is an error (2026-11-06)
 
-`_sill/sessions.start` (and every start through attach or submit) succeeds only once the jail's
+`_silli/sessions.start` (and every start through attach or submit) succeeds only once the jail's
 shim answers a status request. Before, an accepted connection to the shim socket counted, but
 the launcher binds that socket on the host before bubblewrap runs: a jail that failed at once
 was reported started (`fresh: true`, `running: true`) while the launcher retried and gave up, and
 the next call failed with a reset connection. Now such a start fails with
-`the jail could not start; see journalctl --user -t sill-<id>` after the launcher's retries
+`the jail could not start; see journalctl --user -t silli-<id>` after the launcher's retries
 (about 3 s), leaving no scope. No schema change.
 
 ### Raw desktop controls retired (2026-11-06)
@@ -995,11 +995,11 @@ setting-change variants, and `x11`/`dbus` policy-result fields. These controls a
 socket mounts are removed rather than preserved as aliases. Rebuild daemon and frontends
 together. The stable `sfp/1` cutover is still pending; identity remains `sfp/1-dev.3`.
 
-`_sill/policy.quiet_host` (`sill.network_quiet: 1`) takes `{session_id, host}` and returns `{}`. It saves an exact hostname as a global persistent banner preference, without granting network access. Wildcards are rejected; a numeric port is stripped. Repeating the choice is idempotent.
+`_silli/policy.quiet_host` (`silli.network_quiet: 1`) takes `{session_id, host}` and returns `{}`. It saves an exact hostname as a global persistent banner preference, without granting network access. Wildcards are rejected; a numeric port is stripped. Repeating the choice is idempotent.
 
 ### Crosscheck (2026-11-14)
 
-Capability `sill.crosscheck: 1` adds a second opinion on the work waiting in a workspace:
+Capability `silli.crosscheck: 1` adds a second opinion on the work waiting in a workspace:
 one Reviewer, a saved agent with its options, reads a capture of
 the work in a worker session of its own and reports a summary and a list of problems. A first
 build of 2026-11-13 under the same capability name, with other methods, was reset the same day
@@ -1007,12 +1007,12 @@ and never released.
 
 | Method | Parameters | Result |
 |---|---|---|
-| `_sill/crosscheck.reviewers` | `{}` | `{reviewers, agents}`: the saved Reviewers (`{name, agent, options}`), and for every agent that can review the `options` its latest session reported (`ControlOption`s; empty when none has) |
-| `_sill/crosscheck.set_reviewers` | `{reviewers}` | The same, as saved |
-| `_sill/crosscheck.get` | `{workspace_id}` | `{run}`: the workspace's review or null |
-| `_sill/crosscheck.start` | `{operation_id, workspace_id}` | The review (`Run`) it started |
-| `_sill/crosscheck.remove` | `{run_id}` | Nothing. A review under way is cancelled |
-| `_sill/crosscheck.changed` | Daemon notification: `{workspace_id, run_id}` | The workspace's review changed or was removed; read it again |
+| `_silli/crosscheck.reviewers` | `{}` | `{reviewers, agents}`: the saved Reviewers (`{name, agent, options}`), and for every agent that can review the `options` its latest session reported (`ControlOption`s; empty when none has) |
+| `_silli/crosscheck.set_reviewers` | `{reviewers}` | The same, as saved |
+| `_silli/crosscheck.get` | `{workspace_id}` | `{run}`: the workspace's review or null |
+| `_silli/crosscheck.start` | `{operation_id, workspace_id}` | The review (`Run`) it started |
+| `_silli/crosscheck.remove` | `{run_id}` | Nothing. A review under way is cancelled |
+| `_silli/crosscheck.changed` | Daemon notification: `{workspace_id, run_id}` | The workspace's review changed or was removed; read it again |
 
 A `Run` has `state` (`capturing`, `reviewing`, `complete`, `failed`; `failed` says why in
 `detail`), `reviewers` (one in this version: the `reviewer` used, its worker `session_id`, its
@@ -1031,46 +1031,46 @@ review; a frontend never shows any other state as "no problems".
   starts nothing. After an uncertain start, `get` the workspace before starting again.
 - **Restart.** Nothing is resumed or repeated: a review under way when the daemon stops is
   `failed` at its next start, and its worker is stopped.
-- **Apply and Discard.** A completed `_sill/workspaces.apply` or `_sill/workspaces.discard`
+- **Apply and Discard.** A completed `_silli/workspaces.apply` or `_silli/workspaces.discard`
   removes the workspace's review as `remove` does, one under way included. A repeat of an
   earlier request, answered from its receipt, removes nothing.
-  `_sill/workspaces.copy` and `_sill/workspaces.branch` do not.
+  `_silli/workspaces.copy` and `_silli/workspaces.branch` do not.
 - **Worker sessions** are not listed (`sessions.list`), have no Changes, are left out of memory,
   and refuse the requests that would widen or redirect them (`permission_denied`).
 
 A submission may carry the `purpose` `crosscheck`: the request to fix a review's problems, which
-a frontend writes for the person (`sill_proto::crosscheck::fix_request`). Unlike `commit`, a
+a frontend writes for the person (`silli_proto::crosscheck::fix_request`). Unlike `commit`, a
 frontend folds only that prompt to its first line; the turn it starts is the agent's ordinary work.
 
 
-### VM storage administration (`sill.storage`, version 1)
+### VM storage administration (`silli.storage`, version 1)
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `_sill/storage.space` | `{}` | Used, total and user-available bytes on the daemon host's home and state filesystems. |
-| `_sill/storage.caches` | `{}` | Known private build-cache paths, allocated bytes, session identity and active status; scan failures are reported per cache. |
-| `_sill/storage.clear_build_cache` | `session_id` | `{}`; rechecks inactivity while serialized with startup, then detaches the known cache before removal. |
-| `_sill/storage.sessions` | `{}` | Session directories and allocated bytes, largest sessions first, with eligibility or a reason to review outstanding work. |
-| `_sill/storage.reclaim` | `session_id`, `ended_at` | Recheck the ended session and pending work, then remove its jail files. Preserve the session row and transcript. |
+| `_silli/storage.space` | `{}` | Used, total and user-available bytes on the daemon host's home and state filesystems. |
+| `_silli/storage.caches` | `{}` | Known private build-cache paths, allocated bytes, session identity and active status; scan failures are reported per cache. |
+| `_silli/storage.clear_build_cache` | `session_id` | `{}`; rechecks inactivity while serialized with startup, then detaches the known cache before removal. |
+| `_silli/storage.sessions` | `{}` | Session directories and allocated bytes, largest sessions first, with eligibility or a reason to review outstanding work. |
+| `_silli/storage.reclaim` | `session_id`, `ended_at` | Recheck the ended session and pending work, then remove its jail files. Preserve the session row and transcript. |
 
 Build-cache cleanup accepts a session ID, never a caller-supplied path. It clears only
-`private/home%sill%.cache/sill-dev/target` within that session's state directory.
+`private/home%silli%.cache/silli-dev/target` within that session's state directory.
 Running jails (including launchers still starting or stopping) are refused. Symlinks
 in parent directories and mount traversal are refused; links within the target are
 unlinked without following them. Source, overlays, workspaces and toolchains are
-outside the cleanup scope. `target.sill-clearing` is a detached cache left by an
+outside the cleanup scope. `target.silli-clearing` is a detached cache left by an
 interrupted cleanup; it is included in scans and removed first on the next clear.
 If a new target also exists, clear again after reviewing the refreshed scan.
 After a timeout or lost reply, scan before deciding whether to repeat a clear.
 
-### Model token limits (`sill.provider_limits`, version 1)
+### Model token limits (`silli.provider_limits`, version 1)
 
 Provider records may carry `model_limits`, keyed by an offered model ID, with optional
 positive integer `context` and `output` budgets. When both are given, output must be smaller
 than context. Absent values retain agent defaults. Saving nonempty limits needs this capability.
 OpenCode receives these as each model's `limit.context` and `limit.output`.
 
-`_sill/providers.detect_limits` accepts `base_url`, `model`, optional `key`, and optional
+`_silli/providers.detect_limits` accepts `base_url`, `model`, optional `key`, and optional
 `provider_id` (to reuse its saved key). It reads `/api/ps` under the same host and path prefix
 as an Ollama `/v1` endpoint, and returns `context` from the matching running model's
 `context_length`. It never loads a model or changes the server. An unloaded model, missing

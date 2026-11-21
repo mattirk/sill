@@ -1,13 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/sill-core", "crates/sill-memory", "crates/sill-proto", "crates/sill-shim", "crates/sill", "crates/sill-client", "crates/sill-gui", "crates/sill-vm"]
+members = ["crates/silli-core", "crates/silli-memory", "crates/silli-proto", "crates/silli-shim", "crates/silli", "crates/silli-client", "crates/silli-gui", "crates/silli-vm"]
 # patched copies of upstream crates (vendor/README.md), not members
 exclude = ["vendor"]
 
 [workspace.package]
 version = "0.0.6"
 edition = "2024"
-repository = "https://github.com/mattirk/sill"
+repository = "https://github.com/mattirk/silli"
 license = "Apache-2.0"
 # the Rust that rust-toolchain.toml pins: the code is built and linted with no other
 rust-version = "1.100"
@@ -19,10 +19,10 @@ rust-version = "1.100"
 all = { level = "warn", priority = -1 }
 
 [workspace.dependencies]
-sill-core = { path = "crates/sill-core" }
-sill-memory = { path = "crates/sill-memory" }
-sill-proto = { path = "crates/sill-proto" }
-sill-client = { path = "crates/sill-client" }
+silli-core = { path = "crates/silli-core" }
+silli-memory = { path = "crates/silli-memory" }
+silli-proto = { path = "crates/silli-proto" }
+silli-client = { path = "crates/silli-client" }
 rusqlite = { version = "0.41.0", features = ["bundled"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

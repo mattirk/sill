@@ -13,8 +13,8 @@ P=$D/projects; S=$P/src; W=$D/ws/demo-ab12
 mkdir -p "$S"; g init -q "$S"
 for i in 1 2 3; do echo "line $i" > "$S/f$i.txt"; g -C "$S" add .; g -C "$S" commit -qm "c$i"; done
 echo "secret source work" > "$S/uncommitted.txt"
-g -C "$S" update-ref refs/sill/workspaces/ab12/base HEAD
-g clone -q --shared --no-tags --single-branch -b main "$S" "$W"; g -C "$W" switch -qc sill/demo-ab12
+g -C "$S" update-ref refs/silli/workspaces/ab12/base HEAD
+g clone -q --shared --no-tags --single-branch -b main "$S" "$W"; g -C "$W" switch -qc silli/demo-ab12
 BEFORE=$(find "$S/.git/objects" -type f | sort | sha256sum)
 
 cat > "$D/inside.sh" <<'IN'

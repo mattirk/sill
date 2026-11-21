@@ -1,0 +1,22 @@
+[package]
+name = "silli-shim"
+description = "silli: supervisor that runs inside the jail (SPEC §4.3)"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rustix.workspace = true
+silli-memory.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+silli-core.workspace = true
+
+[lints]
+workspace = true

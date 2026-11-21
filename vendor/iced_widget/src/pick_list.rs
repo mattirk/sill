@@ -174,7 +174,7 @@ pub struct PickList<
     menu_class: <Theme as menu::Catalog>::Class<'a>,
     last_status: Option<Status>,
     menu_height: Length,
-    // sill patch: the menu's own width, padding, text size and distance from the list
+    // silli patch: the menu's own width, padding, text size and distance from the list
     menu_width: Option<f32>,
     menu_padding: Option<Padding>,
     menu_text_size: Option<Pixels>,
@@ -223,25 +223,25 @@ where
         }
     }
 
-    /// sill patch: the menu's width, when at least the list's (else the list's).
+    /// silli patch: the menu's width, when at least the list's (else the list's).
     pub fn menu_width(mut self, width: f32) -> Self {
         self.menu_width = Some(width);
         self
     }
 
-    /// sill patch: each option's padding in the menu (else the list's).
+    /// silli patch: each option's padding in the menu (else the list's).
     pub fn menu_padding<P: Into<Padding>>(mut self, padding: P) -> Self {
         self.menu_padding = Some(padding.into());
         self
     }
 
-    /// sill patch: the options' text size in the menu (else the list's).
+    /// silli patch: the options' text size in the menu (else the list's).
     pub fn menu_text_size(mut self, size: impl Into<Pixels>) -> Self {
         self.menu_text_size = Some(size.into());
         self
     }
 
-    /// sill patch: space between the list and its menu, above or below it.
+    /// silli patch: space between the list and its menu, above or below it.
     pub fn menu_gap(mut self, gap: f32) -> Self {
         self.menu_gap = gap;
         self
@@ -741,7 +741,7 @@ where
 
             let on_select = &self.on_select;
 
-            // sill patch: the menu closes itself on a choice or on a press anywhere outside
+            // silli patch: the menu closes itself on a choice or on a press anywhere outside
             // it, which it captures: the pick list need not see the press (a widget earlier in
             // the tree, a text editor say, would take it first and the menu stayed open)
             let mut menu = Menu::new(
@@ -765,7 +765,7 @@ where
                 menu = menu.on_dismiss(move || on_close.clone());
             }
 
-            // sill patch: the gap on both sides of the list, as the menu opens below or above
+            // silli patch: the gap on both sides of the list, as the menu opens below or above
             Some(menu.overlay(
                 layout.position() + translation - Vector::new(0.0, self.menu_gap),
                 *viewport,

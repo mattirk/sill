@@ -15,11 +15,11 @@ try:
     client = with_client
     repo = os.fsencode(sys.argv[2])
     target = repo + b"/file-\xff\nname"
-    client.call("_sill/pins.add", {"path": path(repo)})
+    client.call("_silli/pins.add", {"path": path(repo)})
     after = None
     found = []
     while True:
-        page = client.call("_sill/changes.list", {"after": after, "limit": 1})
+        page = client.call("_silli/changes.list", {"after": after, "limit": 1})
         found.extend(page["entries"])
         after = page["next"]
         if after is None:
@@ -27,17 +27,17 @@ try:
     assert len(found) == 1 and found[0]["type"] == "live"
     assert base64.b64decode(found[0]["path"]["bytes_base64"]) == target
     params = {"target": {"type": "live", "repo": path(repo), "path": path(target)}}
-    diff = client.call("_sill/changes.diff", params)
+    diff = client.call("_silli/changes.diff", params)
     assert "fixture contents" in diff["text"] and diff["next_offset"] is None
     try:
-        client.call("_sill/changes.diff", dict(params, offset="1", fingerprint="stale"))
+        client.call("_silli/changes.diff", dict(params, offset="1", fingerprint="stale"))
         raise AssertionError("stale diff accepted")
     except RpcError as error:
         assert error.code == "invalid_cursor"
-    history = client.call("_sill/changes.history", {"limit": 1})
+    history = client.call("_silli/changes.history", {"limit": 1})
     assert history["events"] == []
-    client.call("_sill/changes.git-revert", {"repo": path(repo), "path": path(target)})
-    assert client.call("_sill/changes.list", {})["entries"] == []
+    client.call("_silli/changes.git-revert", {"repo": path(repo), "path": path(target)})
+    assert client.call("_silli/changes.list", {})["entries"] == []
     assert client.changes_dirty
 finally:
     with_client.close()

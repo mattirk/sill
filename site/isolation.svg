@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="760" height="760" viewBox="0 -200 760 760" role="img" aria-labelledby="title desc">
-<title id="title">Sill isolation at a glance</title>
+<title id="title">Silli isolation at a glance</title>
 <desc id="desc">On Linux, in a Linux VM on Mac, or on remote Linux over SSH, the same session sandbox is used. The sandboxed agent reads the host filesystem with your user's permissions, except masked paths. You review and keep file changes or apply workspace commits. Network access passes through an allow-list. Live pins allow direct writes and explicit grants enable host controls.</desc>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M1 1L9 5L1 9" fill="none" stroke="#8ab6a5" stroke-width="1.6"/></marker><marker id="deployment-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M1 1L9 5L1 9" fill="none" stroke="#56606b" stroke-width="1.6"/></marker></defs>
 <style>

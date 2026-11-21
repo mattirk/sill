@@ -27,7 +27,7 @@ pub struct Stack<'a, Message, Theme = crate::Theme, Renderer = crate::Renderer>
     children: Vec<Element<'a, Message, Theme, Renderer>>,
     clip: bool,
     base_layer: usize,
-    // sill patch: let a scrollbar claim the pointer over window resize handles.
+    // silli patch: let a scrollbar claim the pointer over window resize handles.
     prefer_base_grab: bool,
 }
 
@@ -75,7 +75,7 @@ where
     }
 
     /// Gives grab interactions in the base layer priority over window resize
-    /// handles (sill patch).
+    /// handles (silli patch).
     pub fn prefer_base_grab(mut self) -> Self {
         self.prefer_base_grab = true;
         self
@@ -200,7 +200,7 @@ where
     }
 }
 
-// sill patch: resize overlays yield to a scrollbar under the pointer.
+// silli patch: resize overlays yield to a scrollbar under the pointer.
 fn is_window_resize(interaction: mouse::Interaction) -> bool {
     matches!(
         interaction,

@@ -1,0 +1,13 @@
+# The silli daemon's socket (docs/daemon.md §3.3): the first client starts silli.service.
+#   systemctl --user enable --now silli.socket
+[Unit]
+Description=silli daemon socket
+
+[Socket]
+ListenStream=%t/silli/daemon.sock
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

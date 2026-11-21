@@ -1,13 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1024" viewBox="0 0 1280 1024" role="img" aria-labelledby="title desc">
-<title id="title">Sill isolation: where agent actions go</title>
-<desc id="desc">Each agent and its tools run in a Linux sandbox with a view of the host filesystem under your user’s read permissions, except hidden paths. Workspace commits reach your checkout through Apply; ordinary file writes stay in an overlay until Keep. Live pins allow direct writes. Network requests pass through an allow-list proxy. Host operations require explicit grants. Policy-masked paths and Sill control state are hidden. Sandboxes share the Linux kernel; on macOS they run inside a Linux VM.</desc>
+<title id="title">Silli isolation: where agent actions go</title>
+<desc id="desc">Each agent and its tools run in a Linux sandbox with a view of the host filesystem under your user’s read permissions, except hidden paths. Workspace commits reach your checkout through Apply; ordinary file writes stay in an overlay until Keep. Live pins allow direct writes. Network requests pass through an allow-list proxy. Host operations require explicit grants. Policy-masked paths and Silli control state are hidden. Sandboxes share the Linux kernel; on macOS they run inside a Linux VM.</desc>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1L9 5L1 9" fill="none" stroke="#57716b" stroke-width="1.6"/></marker></defs>
 <style>
 text{font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fill:#183c36}
 .title{font-size:34px;font-weight:700}.sub{font-size:18px;fill:#526b66}.eyebrow{font-size:13px;font-weight:700;letter-spacing:1.8px}.head{font-size:21px;font-weight:650}.body{font-size:16px;fill:#526b66}.gate{font-size:17px;font-weight:650;text-anchor:middle}.small{font-size:15px;fill:#526b66}.edge{fill:none;stroke:#57716b;stroke-width:2;marker-end:url(#arrow)}
 </style>
 <rect width="1280" height="1024" rx="20" fill="#fafcfb"/>
-<text x="48" y="62" class="title">sill / isolation</text>
+<text x="48" y="62" class="title">silli / isolation</text>
 <text x="48" y="96" class="sub">Agents work inside a sandbox. You control the paths out.</text>
 <rect x="40" y="128" width="1200" height="724" rx="18" fill="#f0f5f3" stroke="#ccdcd5"/>
 <text x="64" y="160" class="eyebrow">ACCESS FROM ONE SESSION</text>
@@ -42,7 +42,7 @@ text{font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fi
 <text x="84" y="808" class="small">Private caches stay with the session.</text>
 <rect x="40" y="874" width="1200" height="66" rx="12" fill="#e9edf2"/>
 <text x="64" y="903" class="eyebrow">HIDDEN FROM THE AGENT</text>
-<text x="64" y="926" class="body">Policy-masked paths (SSH keys, cloud credentials, …) · Sill configuration and control state</text>
+<text x="64" y="926" class="body">Policy-masked paths (SSH keys, cloud credentials, …) · Silli configuration and control state</text>
 <text x="48" y="973" class="small">Simplified default model. Pins and grants expand access; allowed hosts can carry data out.</text>
 <text x="48" y="999" class="small">Sessions share the Linux kernel. On macOS, the Linux VM has access to the folders you share with it.</text>
 </svg>

@@ -45,13 +45,13 @@ class ReleaseTests(unittest.TestCase):
             (image / "system.raw").write_bytes(raw)
         self.command("uname", 'case "$1" in -s) echo Darwin;; -m) echo arm64;; esac')
         self.command("git", 'case "$1" in rev-list) echo 12;; rev-parse) echo abc123;; esac')
-        self.command("cargo", 'mkdir -p target/release target/Sill.iconset; touch target/release/sill-gui')
+        self.command("cargo", 'mkdir -p target/release target/Silli.iconset; touch target/release/silli-gui')
         self.command("stat", "python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_size)' \"$3\"")
         self.command("cp", 'case "$1" in -c) shift;; -Rc) shift; set -- -R "$@";; esac; exec /bin/cp "$@"')
         self.command("iconutil", 'touch "$4"')
         self.command("security", 'exit 1')
         self.command("codesign", 'printf "%s\\n" "$*" >> signing.log')
-        self.command("hdiutil", 'touch dist/Sill.dmg')
+        self.command("hdiutil", 'touch dist/Silli.dmg')
         return image
 
     def run_app(self):
@@ -66,26 +66,26 @@ class ReleaseTests(unittest.TestCase):
                 self.app_fixture(compressed)
                 result = self.run_app()
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertTrue((self.root / "dist/Sill.dmg").exists())
-                self.assertEqual((self.root / "dist/Sill.app/Contents/Resources/LICENSE").read_text(), "test license\n")
+                self.assertTrue((self.root / "dist/Silli.dmg").exists())
+                self.assertEqual((self.root / "dist/Silli.app/Contents/Resources/LICENSE").read_text(), "test license\n")
                 self.assertIn("--sign -", (self.root / "signing.log").read_text())
 
     def test_stale_compressed_image_is_rejected(self):
         image = self.app_fixture(True)
         (image / "system.raw.gz.commit").write_text("old\n")
         self.assertNotEqual(self.run_app().returncode, 0)
-        self.assertFalse((self.root / "dist/Sill.dmg").exists())
+        self.assertFalse((self.root / "dist/Silli.dmg").exists())
 
     def test_image_from_another_commit_is_rejected(self):
         image = self.app_fixture(True)
-        self.env["SILL_IMAGE_EXPECT_COMMIT"] = "abc123"
+        self.env["SILLI_IMAGE_EXPECT_COMMIT"] = "abc123"
         (image / "commit").write_text("other\n")
         (image / "system.raw.gz.commit").write_text("other\n")
         self.assertNotEqual(self.run_app().returncode, 0)
 
     def test_explicit_signing_identity(self):
         self.app_fixture(True)
-        self.env["SILL_SIGNING_IDENTITY"] = "Test signing identity"
+        self.env["SILLI_SIGNING_IDENTITY"] = "Test signing identity"
         self.assertEqual(self.run_app().returncode, 0)
         self.assertIn("--sign Test signing identity", (self.root / "signing.log").read_text())
 
@@ -97,8 +97,8 @@ class ReleaseTests(unittest.TestCase):
             (self.root / name).write_bytes(b"firmware fixture")
         self.command("qemu-system-aarch64", 'printf "%s\\n" "$@" > qemu-args')
         self.command("ssh", 'printf "%s\\n" "$@" > ssh-args')
-        env = dict(self.env, SILL_QEMU_FIRMWARE=str(self.root / "code"),
-                   SILL_QEMU_VARS=str(self.root / "vars"), SILL_IMAGE_SSH_PORT="23456")
+        env = dict(self.env, SILLI_QEMU_FIRMWARE=str(self.root / "code"),
+                   SILLI_QEMU_VARS=str(self.root / "vars"), SILLI_IMAGE_SSH_PORT="23456")
         result = subprocess.run(["sh", "-eu", "-c",
             'work=work; vm=; . ./packaging/mac/image-qemu.sh; boot; guest true; wait_off'],
             cwd=self.root, env=env, capture_output=True, text=True)
@@ -106,12 +106,12 @@ class ReleaseTests(unittest.TestCase):
         qemu = (self.root / "qemu-args").read_text()
         self.assertIn("tcg,thread=multi", qemu)
         self.assertIn("hostfwd=tcp:127.0.0.1:23456-:22", qemu)
-        for disk in ["sill-system", "sill-home", "sill-state"]:
+        for disk in ["silli-system", "silli-home", "silli-state"]:
             self.assertIn("serial=" + disk, qemu)
         self.assertIn("virtconsole,chardev=console", qemu)
         self.assertIn("virtio-net-pci,netdev=net,romfile=", qemu)
         ssh = (self.root / "ssh-args").read_text()
-        self.assertIn("sill@127.0.0.1", ssh)
+        self.assertIn("silli@127.0.0.1", ssh)
         self.assertIn("23456", ssh)
 
     def test_release_is_from_main_with_a_matching_lockfile(self):
@@ -160,17 +160,17 @@ class InstallTests(unittest.TestCase):
         self.log.write_text("")
         self.env = dict(os.environ, PATH=str(self.root / "bin") + ":" + os.environ["PATH"],
                         LOG=str(self.log), RELEASE=str(self.release), HOME=str(self.root))
-        self.env.pop("SILL_VERSION", None)
-        self.env.pop("SILL_DRY_RUN", None)
+        self.env.pop("SILLI_VERSION", None)
+        self.env.pop("SILLI_DRY_RUN", None)
         self.system("Linux", "x86_64")
-        self.latest("https://github.com/mattirk/sill/releases/tag/v0.1.0")
+        self.latest("https://github.com/mattirk/silli/releases/tag/v0.1.0")
         self.command("sudo", 'echo "sudo $*" >> "$LOG"; exec "$@"')
         self.command("apt-get", 'echo "apt-get $*" >> "$LOG"')
-        self.command("sill", 'echo "sill $*" >> "$LOG"')
-        (self.release / "sill_0.1.0_amd64.deb").write_bytes(b"a package")
-        script = b'#!/bin/sh\necho "unpacked sill $*" >> "$LOG"\n'
-        with tarfile.open(self.release / "sill-0.1.0-x86_64.tar.gz", "w:gz") as tar:
-            info = tarfile.TarInfo("sill-0.1.0-x86_64/sill")
+        self.command("silli", 'echo "silli $*" >> "$LOG"')
+        (self.release / "silli_0.1.0_amd64.deb").write_bytes(b"a package")
+        script = b'#!/bin/sh\necho "unpacked silli $*" >> "$LOG"\n'
+        with tarfile.open(self.release / "silli-0.1.0-x86_64.tar.gz", "w:gz") as tar:
+            info = tarfile.TarInfo("silli-0.1.0-x86_64/silli")
             info.size, info.mode = len(script), 0o755
             tar.addfile(info, io.BytesIO(script))
         self.sums()
@@ -221,19 +221,19 @@ cp "$RELEASE/${{url##*/}}" "$out" """)
         self.assertEqual(status, 0, out)
         self.assertIn("checksum ok", out)
         log = self.log.read_text()
-        self.assertIn("releases/download/v0.1.0/sill_0.1.0_amd64.deb", log)
-        self.assertRegex(log, r"sudo apt-get install -y \S+/sill_0\.1\.0_amd64\.deb")
-        self.assertIn("sill init --user", log)
+        self.assertIn("releases/download/v0.1.0/silli_0.1.0_amd64.deb", log)
+        self.assertRegex(log, r"sudo apt-get install -y \S+/silli_0\.1\.0_amd64\.deb")
+        self.assertIn("silli init --user", log)
 
     def test_tarball_runs_its_own_init_and_user_start_can_be_declined(self):
         status, out = self.install("2\nn\n")
         self.assertEqual(status, 0, out)
         log = self.log.read_text()
-        self.assertIn("unpacked sill init", log)
-        self.assertNotIn("sill init --user", log)
+        self.assertIn("unpacked silli init", log)
+        self.assertNotIn("silli init --user", log)
 
     def test_wrong_checksum_installs_nothing(self):
-        (self.release / "sill_0.1.0_amd64.deb").write_bytes(b"another package")
+        (self.release / "silli_0.1.0_amd64.deb").write_bytes(b"another package")
         status, out = self.install("1\ny\n")
         self.assertNotEqual(status, 0)
         self.assertIn("checksum mismatch", out)
@@ -255,14 +255,14 @@ cp "$RELEASE/${{url##*/}}" "$out" """)
 
     def test_mac_plan(self):
         self.system("Darwin", "arm64")
-        status, out = self.install("1\n", SILL_DRY_RUN="1")
+        status, out = self.install("1\n", SILLI_DRY_RUN="1")
         self.assertEqual(status, 0, out)
-        self.assertIn("releases/download/v0.1.0/sill-0.1.0-macos-arm64.dmg", out)
+        self.assertIn("releases/download/v0.1.0/silli-0.1.0-macos-arm64.dmg", out)
         self.assertIn("would run: cp -R", out)
-        self.assertLess(out.index("Sill.app.new"), out.index("rm -rf /Applications/Sill.app\r"), "the copy comes before the removal")
+        self.assertLess(out.index("Silli.app.new"), out.index("rm -rf /Applications/Silli.app\r"), "the copy comes before the removal")
         self.assertEqual(self.log.read_text(), "")
         self.system("Darwin", "x86_64")
-        status, out = self.install("1\n", SILL_DRY_RUN="1")
+        status, out = self.install("1\n", SILLI_DRY_RUN="1")
         self.assertNotEqual(status, 0)
         self.assertIn("Apple Silicon", out)
 
@@ -272,21 +272,21 @@ cp "$RELEASE/${{url##*/}}" "$out" """)
         self.assertNotEqual(status, 0)
         self.assertIn("no Linux package for aarch64", out)
         self.system("Linux", "x86_64")
-        self.latest("https://github.com/mattirk/sill/releases")
+        self.latest("https://github.com/mattirk/silli/releases")
         status, out = self.install("1\n")
         self.assertNotEqual(status, 0)
         self.assertIn("no published release", out)
 
     def test_a_version_is_only_version_characters(self):
         for version in ["../../x", "0.1.0/..", "0.1.0 x", "$(id)"]:
-            status, out = self.install("1\n", SILL_VERSION=version)
+            status, out = self.install("1\n", SILLI_VERSION=version)
             self.assertNotEqual(status, 0, version)
             self.assertIn("not a version", out)
             self.assertEqual(self.log.read_text(), "")
 
     def test_page_offers_the_script_it_ships_and_the_names_the_release_builds(self):
         page = (ROOT / "site/index.html").read_text()
-        self.assertIn("curl -fsSL https://mattirk.github.io/sill/install.sh | sh", page)
+        self.assertIn("curl -fsSL https://mattirk.github.io/silli/install.sh | sh", page)
         self.assertIn('href="install.sh"', page)
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertIn("macos-arm64.dmg", workflow)

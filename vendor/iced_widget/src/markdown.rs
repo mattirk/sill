@@ -250,7 +250,7 @@ pub struct Row {
     cells: Vec<Vec<Item>>,
 }
 
-// sill patch (vendor/README.md): a viewer that draws tables itself needs the cells
+// silli patch (vendor/README.md): a viewer that draws tables itself needs the cells
 impl Row {
     /// The cells of the row.
     pub fn cells(&self) -> &[Vec<Item>] {

@@ -1,0 +1,20 @@
+# silli state filesystem (SPEC §4.9): session upper trees must live on a filesystem that is not inside
+# any overlaid tree. This creates a sparse ext4 image on first boot; var-lib-silli.mount mounts it.
+# Grow later with: systemctl stop var-lib-silli.mount; truncate -s 64G /var/lib/silli.img;
+#                  e2fsck -f /var/lib/silli.img; resize2fs /var/lib/silli.img; systemctl start var-lib-silli.mount
+[Unit]
+Description=Create the silli state filesystem image
+DefaultDependencies=no
+After=local-fs-pre.target
+Before=var-lib-silli.mount
+ConditionPathExists=!/var/lib/silli.img
+
+[Service]
+Type=oneshot
+Environment=SILLI_STATE_SIZE=32G
+ExecStart=/usr/bin/truncate -s ${SILLI_STATE_SIZE} /var/lib/silli.img
+ExecStart=/usr/sbin/mkfs.ext4 -q -L silli-state -m 0 -E lazy_itable_init=1,lazy_journal_init=1 /var/lib/silli.img
+ExecStart=/usr/bin/chmod 600 /var/lib/silli.img
+
+[Install]
+WantedBy=var-lib-silli.mount

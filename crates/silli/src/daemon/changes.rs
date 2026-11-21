@@ -1,0 +1,540 @@
+//! The Changes page's work in the daemon (docs/daemon.md §7 M2): every session's overlay scanned
+//! against its policy, the pinned repositories' git status, keep with its hash check, revert (in
+//! the jail through the shim while it runs, the upper entry dropped when it does not), undo, the
+//! diffs — and the auto-revert sweep, which the frontend ran before the split. Frontends name a change by
+//! session and host path; the daemon finds it again in a fresh scan, so nothing a frontend sends
+//! points at a file of its choosing.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use silli_core::history::Kind as H;
+use silli_core::keep::{self, KeepOptions};
+use silli_core::ledger::{Change, FileType, Kind};
+use silli_core::store::Session;
+use silli_core::wire::{ChangeRow, ChangesList, DiffOf, Done, LiveRepo, SessionChanges};
+
+use super::Hub;
+
+impl Hub {
+    pub(super) fn changes_list(&self) -> Result<ChangesList> {
+        let sessions = self.with_store(|s| s.sessions())?;
+        let uid = own_uid();
+        // a workspace's clone is not listed here: what it holds is the workspace's, told whole
+        // (committed work too) by `workspaces.list`
+        let mut pinned: Vec<PathBuf> = self.with_store(|st| self.pinned_checkouts(st))?;
+        pinned.sort();
+        pinned.dedup();
+        let live = pinned.into_iter().map(|repo| LiveRepo { status: silli_core::changes::git_status(&repo), repo }).filter(|l| !l.status.is_empty()).collect();
+        let known = hashes::take();
+        let mut hashed = hashes::Hashes::default();
+        let mut row = |c: Change| row(c, &known, &mut hashed);
+        let mut out = Vec::new();
+        let mut unreadable = Vec::new();
+        for s in sessions {
+            if self.crosscheck_worker(&s.id) {
+                continue;
+            }
+            let kept = kept_dir(uid, &s.id).map(|d| keep::undoable(&d)).unwrap_or_default();
+            // one session that cannot be read (a launch recorded by an older Silli) is told on its
+            // own; it does not take every other session's changes with it
+            let list: Vec<Change> = match self.session_pending(&s, uid) {
+                Ok(list) => list.into_iter().filter(|c| !c.ignored).collect(),
+                Err(error) => {
+                    unreadable.push(silli_proto::changes::Unreadable { session_id: s.id.clone(), title: s.title.clone(), why: format!("{error:#}") });
+                    if !kept.is_empty() {
+                        out.push(SessionChanges { id: s.id.clone(), title: s.title.clone(), ghost: s.ghost, changes: vec![], agent_state: vec![], kept });
+                    }
+                    continue;
+                }
+            };
+            if list.is_empty() && kept.is_empty() {
+                continue;
+            }
+            let state_dirs = silli_core::session::recorded_filesystem(&s.id)?.state_paths()?;
+            let (agent_state, changes): (Vec<Change>, Vec<Change>) = list.into_iter().partition(|c| silli_core::changes::is_agent_state(&c.path, &state_dirs));
+            out.push(SessionChanges {
+                id: s.id.clone(),
+                title: s.title.clone(),
+                ghost: s.ghost,
+                changes: changes.into_iter().map(&mut row).collect(),
+                agent_state: agent_state.into_iter().map(&mut row).collect(),
+                kept,
+            });
+        }
+        hashes::put(hashed);
+        Ok(ChangesList { live, sessions: out, unreadable })
+    }
+
+    pub(super) fn changes_diff(&self, of: DiffOf) -> Result<String> {
+        match of {
+            DiffOf::Change { session, path } => {
+                let (_, c) = self.find_change(&session, &path)?;
+                silli_core::changes::unified_diff(&c)
+            }
+            DiffOf::Live { repo, rel } => {
+                self.check_live(&repo, &rel)?;
+                Ok(silli_core::changes::git_diff(&repo, &rel))
+            }
+            DiffOf::Kept { session, id } => {
+                self.review_changes_forbidden(&session)?;
+                let dir = kept_dir(own_uid(), &session)?;
+                let Some(k) = keep::list(&dir).into_iter().find(|k| k.id == id) else { bail!("no keep {id} in session {session}") };
+                Ok(silli_core::changes::undo_diff(&k.path, &keep::prior_path(&dir, &k)))
+            }
+        }
+    }
+
+    /// Keep each (path, hash as listed): copied to the host with the previous version saved for undo.
+    pub(super) fn changes_keep(&self, session: &str, items: Vec<(PathBuf, Option<String>)>) -> Result<Done> {
+        let changes = self.scan_one(session)?;
+        let dir = kept_dir(own_uid(), session)?;
+        let filesystem = silli_core::session::recorded_filesystem(session)?;
+        let state = silli_core::session::state_dir_path(own_uid(), session)?;
+        let mut d = Done::default();
+        for (path, hash) in with_new_parents(&changes, items) {
+            let Some(c) = changes.iter().find(|c| c.path == path) else {
+                d.failed.push((path, "no longer a change of this session".into()));
+                continue;
+            };
+            let opts =
+                KeepOptions { staged_original: filesystem.staged_original(&state, &path)?, undo: Some(dir.clone()), expected_hash: hash, ..Default::default() };
+            match keep::keep(c, &opts) {
+                Ok(what) => {
+                    // the history (SPEC §3.6): what was written, what was there, the journal's id
+                    let rec = keep::list(&dir).into_iter().rev().find(|k| k.path == path);
+                    self.history(session, H::Kept, &path, |e| {
+                        e.what = what.to_string();
+                        if let Some(r) = &rec {
+                            e.kept_id = Some(r.id.clone());
+                            e.hash_new = r.hash.clone();
+                            let prior = keep::prior_path(&dir, r);
+                            e.hash_old = prior.is_file().then(|| keep::sha256_file(&prior).ok()).flatten();
+                        }
+                    });
+                    d.done.push((path, what.to_string()))
+                }
+                Err(e) => d.failed.push((path, format!("{e:#}"))),
+            }
+        }
+        Ok(d)
+    }
+
+    /// Revert paths of a session, deepest first: in the jail while it runs, else by dropping the
+    /// upper entry (the overlay is not mounted then, and that is the revert).
+    pub(super) fn changes_revert(&self, session: &str, mut paths: Vec<PathBuf>) -> Result<Done> {
+        let changes = self.scan_one(session)?;
+        paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+        let found: Vec<Change> = paths.iter().filter_map(|p| changes.iter().find(|c| &c.path == p).cloned()).collect();
+        let filesystem = silli_core::session::recorded_filesystem(session)?;
+        let state = silli_core::session::state_dir_path(own_uid(), session)?;
+        for pin in &filesystem.staged_pins {
+            let pin = pin.to_path()?;
+            for c in found.iter().filter(|c| c.path.starts_with(&pin)) {
+                silli_core::staged_pin::refresh_reference(&pin, &state, &c.path)?;
+            }
+        }
+        let mut d = revert(session, &found);
+        for (p, _) in &d.done {
+            self.history(session, H::Reverted, p, |_| {});
+        }
+        for p in paths.into_iter().filter(|p| !found.iter().any(|c| &c.path == p)) {
+            d.failed.push((p, "no longer a change of this session".into()));
+        }
+        Ok(d)
+    }
+
+    /// Undo keeps by id (all of the session's undoable ones when `ids` is empty), newest first;
+    /// `force` puts the previous version back even when the host was edited since.
+    pub(super) fn changes_undo(&self, session: &str, ids: Vec<String>, force: bool) -> Result<Done> {
+        self.review_changes_forbidden(session)?;
+        let dir = kept_dir(own_uid(), session)?;
+        let all = keep::undoable(&dir);
+        let pick: Vec<_> = if ids.is_empty() { all } else { all.into_iter().filter(|k| ids.contains(&k.id)).collect() };
+        let mut d = Done::default();
+        for k in pick {
+            match keep::undo(&dir, &k, force) {
+                Ok(what) => {
+                    self.history(session, H::Undone, &k.path, |e| {
+                        e.what = what.to_string();
+                        e.kept_id = Some(k.id.clone());
+                    });
+                    d.done.push((k.path.clone(), what.to_string()))
+                }
+                Err(e) => d.failed.push((k.path.clone(), format!("{e:#}"))),
+            }
+        }
+        Ok(d)
+    }
+
+    /// `git checkout HEAD` of one path of a pinned repository (an untracked file is removed).
+    pub(super) fn changes_git_revert(&self, repo: &Path, rel: &Path) -> Result<String> {
+        self.check_live(repo, rel)?;
+        Ok(silli_core::changes::git_revert(repo, rel)?.to_string())
+    }
+
+    /// Auto-revert (SPEC §4.4), from the minute sweep: in every session but a ghost (its hour is
+    /// `revert_ghosts`) that is not mid-turn, each overlay change outside any git repository whose
+    /// last write is older than Settings' delay is reverted; a conflict is left for the person, the
+    /// agent's own state alone.
+    pub(super) fn auto_revert(&self) {
+        let minutes = silli_core::config::load().auto_revert_minutes();
+        if minutes == 0 {
+            return;
+        }
+        let after = std::time::Duration::from_secs(minutes as u64 * 60);
+        let uid = own_uid();
+        let sessions: Vec<Session> = self.with_store(|s| s.sessions()).unwrap_or_default().into_iter().filter(|s| !s.ghost && !s.always_apply).collect();
+        for s in sessions {
+            if self.crosscheck_worker(&s.id) {
+                continue;
+            }
+            if self.children.lock().unwrap().contains_key(&s.id) && self.runner(&s.id).map_or(true, |r| r.busy()) {
+                continue;
+            }
+            let Ok(filesystem) = silli_core::session::recorded_filesystem(&s.id) else { continue };
+            let Ok(state_dirs) = filesystem.state_paths() else { continue };
+            let now = std::time::SystemTime::now();
+            let mut due: Vec<Change> = self
+                .session_pending(&s, uid)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|c| !c.conflict && !c.ignored && silli_core::changes::repo_root(&c.path).is_none())
+                .filter(|c| !silli_core::changes::is_agent_state(&c.path, &state_dirs))
+                .filter(|c| written(c).is_some_and(|t| now.duration_since(t).unwrap_or_default() >= after))
+                .collect();
+            if due.is_empty() {
+                continue;
+            }
+            due.sort_by_key(|c| std::cmp::Reverse(c.path.components().count()));
+            let d = revert(&s.id, &due);
+            // one row per sweep and session (SPEC §3.6 decision 3), the paths behind it
+            if !d.done.is_empty() {
+                let paths: Vec<PathBuf> = d.done.iter().map(|(p, _)| p.clone()).collect();
+                let mut e = silli_core::history::event(&s, H::AutoReverted, &silli_memory::history::common_prefix(&paths));
+                e.count = paths.len() as i64;
+                e.paths = paths;
+                if let Err(err) = self.with_store(|st| silli_core::history::record(st, &e)) {
+                    eprintln!("silli daemon: history: {err:#}");
+                }
+            }
+            self.changes_changed();
+            eprintln!(
+                "silli daemon: session {}: auto-reverted {} path(s) outside git{}",
+                s.id,
+                d.done.len(),
+                if d.failed.is_empty() { String::new() } else { format!(", {} failed", d.failed.len()) }
+            );
+        }
+    }
+
+    /// After a turn, report ordinary overlay changes. Reading the ledger never adopts files
+    /// or changes the filesystem rules of this or another session.
+    pub fn turn_ended(self: &std::sync::Arc<Self>, id: &str) {
+        if self.crosscheck_worker(id) {
+            return;
+        }
+        let hub = self.clone();
+        let id = id.to_string();
+        let _ = std::thread::Builder::new().name(format!("silli-turn-{id}")).spawn(move || {
+            let Some(s) = hub.with_store(|st| st.sessions()).ok().and_then(|v| v.into_iter().find(|s| s.id == id)) else { return };
+            let uid = own_uid();
+            let changes = match hub.session_pending(&s, uid) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("silli daemon: session {id}: scanning after the turn: {e:#}");
+                    return;
+                }
+            };
+            let Ok(filesystem) = silli_core::session::recorded_filesystem(&s.id) else { return };
+            let Ok(state) = filesystem.state_paths() else { return };
+            let pending = changes.iter().filter(|c| !c.ignored && !silli_core::changes::is_agent_state(&c.path, &state)).count();
+            let msg = match pending {
+                0 => String::new(),
+                n if s.ghost => format!("{n} change(s) in Changes — they revert an hour after their last write unless kept"),
+                n => format!("{n} change(s) pending in Changes"),
+            };
+            // the turn may have written anything: whatever shows the overlays rescans
+            hub.changes_changed();
+            if !msg.is_empty()
+                && let Err(error) = hub.sfp_lifecycle(&id, None, Some(msg))
+            {
+                eprintln!("silli daemon: publishing Changes notice: {error:#}");
+            }
+        });
+    }
+
+    /// One history row by session `id`. A ghost leaves a row only for what changed the host — its
+    /// keeps and their undos, anonymous — never for a revert, which touched only its own overlay
+    /// (SPEC §3.6 decision 1).
+    fn history(&self, id: &str, kind: H, path: &Path, fill: impl FnOnce(&mut silli_core::history::Event)) {
+        let Some(s) = self.with_store(|st| st.sessions()).ok().and_then(|v| v.into_iter().find(|s| s.id == id)) else { return };
+        if s.ghost && !matches!(kind, H::Kept | H::Undone) {
+            return;
+        }
+        let mut e = silli_core::history::event(&s, kind, path);
+        fill(&mut e);
+        if let Err(err) = self.with_store(|st| silli_core::history::record(st, &e)) {
+            eprintln!("silli daemon: history: {err:#}");
+        }
+    }
+
+    pub(super) fn changes_history(&self, f: silli_core::history::Filter) -> Result<Vec<silli_core::history::Event>> {
+        self.with_store(|st| silli_memory::history::query(st.conn(), &f))
+    }
+
+    /// How the session's jail lays the host out (its overlay layers and the masked paths): what a
+    /// frontend needs to show a file as the agent sees it — an image the agent names, say.
+    pub(in crate::daemon) fn jail_view(&self, id: &str) -> Result<silli_proto::JailView> {
+        let Some(s) = self.with_store(|st| st.sessions())?.into_iter().find(|s| s.id == id) else { bail!("no session {id}") };
+        let uid = own_uid();
+        let launch = silli_core::session::policy_snapshot(&s.id)?.context("launch not recorded; rebuild the session")?;
+        let filesystem = launch.filesystem.context("filesystem plan not recorded; rebuild the session")?;
+        let sdir = silli_core::session::state_dir_path(uid, &s.id)?;
+        let plan = silli_core::changes::session_view(&launch.policy, &sdir, &self.home, &filesystem)?;
+        Ok(silli_proto::JailView { layers: plan.layers.into_iter().map(|l| (l.host, l.upper)).collect(), masked: plan.masked })
+    }
+
+    fn review_changes_forbidden(&self, session: &str) -> Result<()> {
+        if self.crosscheck_worker(session) {
+            return Err(silli_proto::rpc::Error::domain("permission_denied", "Crosscheck worker writes are disposable and cannot be kept").into());
+        }
+        Ok(())
+    }
+
+    fn scan_one(&self, session: &str) -> Result<Vec<Change>> {
+        self.review_changes_forbidden(session)?;
+        let Some(s) = self.with_store(|st| st.sessions())?.into_iter().find(|s| s.id == session) else { bail!("no session {session}") };
+        let uid = own_uid();
+        self.session_changes(&s, uid)
+    }
+
+    fn find_change(&self, session: &str, path: &Path) -> Result<(String, Change)> {
+        match self.scan_one(session)?.into_iter().find(|c| c.path == path) {
+            Some(c) => Ok((session.to_string(), c)),
+            None => bail!("{} is no longer a change of session {session}", path.display()),
+        }
+    }
+
+    /// Active (not ended) sessions' pinned folders, and the global ones, that are git
+    /// repositories; and the workspaces' clones, which a workspace session's drawer reads in the
+    /// repositories' place (docs/parallel-coding.md §12).
+    fn pinned_repos(&self) -> Result<Vec<PathBuf>> {
+        self.with_store(|st| {
+            let mut out = self.pinned_checkouts(st)?;
+            out.extend(silli_core::workspace::records::all_clones(st.conn())?);
+            Ok(out)
+        })
+    }
+
+    /// Active sessions' pinned folders that are git repositories: the person's own checkouts.
+    fn pinned_checkouts(&self, st: &silli_core::store::Store) -> Result<Vec<PathBuf>> {
+        let mut out = Vec::new();
+        for s in st.sessions()?.into_iter().filter(|s| s.ended_at.is_none()) {
+            let worker: bool = st.conn().query_row("SELECT EXISTS(SELECT 1 FROM crosscheck_workers WHERE session_id=?1)", [&s.id], |r| r.get(0))?;
+            if worker {
+                continue;
+            }
+            out.extend(st.pins(&s.id)?.into_iter().filter(|p| p.join(".git").exists()));
+        }
+        Ok(out)
+    }
+
+    /// A live diff or revert is only for a pinned repository, and only below it.
+    fn check_live(&self, repo: &Path, rel: &Path) -> Result<()> {
+        if !self.pinned_repos()?.iter().any(|p| p == repo) {
+            bail!("{} is not a pinned repository", repo.display());
+        }
+        if rel.is_absolute() || rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            bail!("{}: not a path inside the repository", rel.display());
+        }
+        Ok(())
+    }
+}
+
+fn own_uid() -> u32 {
+    rustix::process::getuid().as_raw()
+}
+
+fn kept_dir(uid: u32, session: &str) -> Result<PathBuf> {
+    Ok(silli_core::session::state_dir(uid, session)?.join("kept"))
+}
+
+fn written(c: &Change) -> Option<std::time::SystemTime> {
+    std::fs::symlink_metadata(&c.upper).ok()?.modified().ok()
+}
+
+fn row(c: Change, known: &hashes::Hashes, hashed: &mut hashes::Hashes) -> ChangeRow {
+    let written = written(&c).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
+    let hash = (c.file_type == FileType::File && matches!(c.kind, Kind::Added | Kind::Modified)).then(|| hashes::of(&c.upper, known, hashed)).flatten();
+    ChangeRow {
+        repo: silli_core::changes::repo_root(&c.path).unwrap_or_default(),
+        protected: keep::protected(&c.path).map(str::to_string),
+        written,
+        hash,
+        change: c,
+    }
+}
+
+/// The overlay files' hashes from one listing to the next: a file is read again only when it is
+/// not the file that was hashed — another inode, size, or time of last write or change. The
+/// agent cannot set a file's change time, so a write it makes always shows. A file changed in the
+/// clock tick it is hashed in is not remembered (a second write in that tick would carry the same
+/// times): it is read again next time, as git does with its index. What is remembered is what the
+/// last listing listed, so it goes with the changes it is of.
+mod hashes {
+    use std::collections::HashMap;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    /// Device, inode, size, and the times of last write and change in nanoseconds.
+    #[derive(Clone, PartialEq, Eq)]
+    pub struct Stamp(u64, u64, u64, (i64, i64), (i64, i64));
+    pub type Hashes = HashMap<PathBuf, (Stamp, String)>;
+
+    static KNOWN: Mutex<Option<Hashes>> = Mutex::new(None);
+
+    /// What the last listing hashed. Not removed: another listing running now reads it too.
+    pub fn take() -> Hashes {
+        KNOWN.lock().unwrap().clone().unwrap_or_default()
+    }
+
+    pub fn put(hashed: Hashes) {
+        *KNOWN.lock().unwrap() = Some(hashed);
+    }
+
+    fn stamp(m: &std::fs::Metadata) -> Stamp {
+        Stamp(m.dev(), m.ino(), m.size(), (m.mtime(), m.mtime_nsec()), (m.ctime(), m.ctime_nsec()))
+    }
+
+    /// The clock files' times are taken from, as it stands now.
+    fn tick() -> (i64, i64) {
+        let t = rustix::time::clock_gettime(rustix::time::ClockId::RealtimeCoarse);
+        (t.tv_sec, t.tv_nsec)
+    }
+
+    /// `upper`'s SHA-256: the remembered one when the file is still the one hashed.
+    pub fn of(upper: &Path, known: &Hashes, hashed: &mut Hashes) -> Option<String> {
+        let before = stamp(&std::fs::symlink_metadata(upper).ok()?);
+        if let Some((s, hash)) = known.get(upper)
+            && *s == before
+        {
+            hashed.insert(upper.to_path_buf(), (before, hash.clone()));
+            return Some(hash.clone());
+        }
+        let now = tick();
+        let hash = silli_core::keep::sha256_file(upper).ok()?;
+        // settled before the read began: any later write has a later change time
+        if before.4 < now {
+            hashed.insert(upper.to_path_buf(), (before, hash.clone()));
+        }
+        Some(hash)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A file that is still the one hashed is not read again; one written since is.
+        #[test]
+        fn a_file_is_hashed_again_only_when_it_changed() {
+            let dir = std::env::temp_dir().join(format!("silli-hashes-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("f");
+            std::fs::write(&file, "one\n").unwrap();
+            let real = silli_core::keep::sha256_file(&file).unwrap();
+            let mut hashed = Hashes::default();
+            assert_eq!(of(&file, &Hashes::default(), &mut hashed), Some(real.clone()));
+            // remembered against the file as it is: that is what is answered, the file unread
+            let known: Hashes = [(file.clone(), (stamp(&std::fs::symlink_metadata(&file).unwrap()), "remembered".to_string()))].into();
+            let mut hashed = Hashes::default();
+            assert_eq!(of(&file, &known, &mut hashed).as_deref(), Some("remembered"));
+            assert!(hashed.contains_key(&file), "and it stays remembered for the next listing");
+            // written since (another size): read again
+            std::fs::write(&file, "another\n").unwrap();
+            let mut hashed = Hashes::default();
+            let now = of(&file, &known, &mut hashed).unwrap();
+            assert_eq!(now, silli_core::keep::sha256_file(&file).unwrap());
+            assert_ne!(now, real);
+            assert!(hashed.get(&file).is_none_or(|(_, h)| *h == now));
+            assert_eq!(of(&dir.join("missing"), &known, &mut hashed), None);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+}
+
+/// Revert `changes` of a session in the given order.
+fn revert(session: &str, changes: &[Change]) -> Done {
+    let mut d = Done::default();
+    let mut control = if silli_core::session::is_running(session) {
+        silli_core::session::socket_path(session).ok().and_then(|s| silli_core::shim::Control::connect(&s).ok())
+    } else {
+        None
+    };
+    for c in changes {
+        let r = match control.as_mut() {
+            Some(ctl) => ctl.revert(&c.path),
+            None => remove_upper_entry(&c.upper).map(|_| "dropped from the session's record".to_string()),
+        };
+        match r {
+            Ok(what) => d.done.push((c.path.clone(), what)),
+            Err(e) => d.failed.push((c.path.clone(), format!("{e:#}"))),
+        }
+    }
+    d
+}
+
+/// Remove an entry from an unmounted upper tree (whiteout, file, symlink or directory).
+fn remove_upper_entry(upper: &Path) -> Result<()> {
+    match upper.symlink_metadata() {
+        Ok(md) if md.is_dir() => std::fs::remove_dir_all(upper)?,
+        Ok(_) => std::fs::remove_file(upper)?,
+        Err(_) => {}
+    }
+    Ok(())
+}
+
+/// A file kept inside a folder the session created needs that folder on the host first (keep
+/// refuses a missing parent): the session's own new ancestor folders join the keep, and everything
+/// goes shallowest first. Keeping one file in a new folder failed with "No such file or directory".
+fn with_new_parents(changes: &[Change], items: Vec<(PathBuf, Option<String>)>) -> Vec<(PathBuf, Option<String>)> {
+    let mut all = items;
+    let asked: Vec<PathBuf> = all.iter().map(|(p, _)| p.clone()).collect();
+    for path in &asked {
+        for parent in path.ancestors().skip(1) {
+            if parent == std::path::Path::new("/") || std::fs::symlink_metadata(parent).is_ok() {
+                break;
+            }
+            if changes.iter().any(|c| c.path == parent) && !all.iter().any(|(p, _)| p == parent) {
+                all.push((parent.to_path_buf(), None));
+            }
+        }
+    }
+    all.sort_by_key(|(p, _)| p.components().count());
+    all
+}
+
+#[cfg(test)]
+mod keep_parent_tests {
+    use super::*;
+
+    #[test]
+    fn a_file_in_a_new_folder_brings_the_folder_shallowest_first() {
+        let dir = std::env::temp_dir().join(format!("silli-keep-parents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let change =
+            |p: PathBuf, ft| Change { path: p, upper: PathBuf::from("/upper"), kind: Kind::Added, file_type: ft, size: 0, conflict: false, ignored: false };
+        let (new, deeper) = (dir.join("new"), dir.join("new/deeper"));
+        let file = deeper.join("a.txt");
+        let changes = vec![change(new.clone(), FileType::Dir), change(deeper.clone(), FileType::Dir), change(file.clone(), FileType::File)];
+        let order: Vec<PathBuf> = with_new_parents(&changes, vec![(file.clone(), Some("h".into()))]).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(order, [new.clone(), deeper.clone(), file.clone()]);
+        // a folder already on the host is not touched, nor anything above it
+        std::fs::create_dir_all(&new).unwrap();
+        let order: Vec<PathBuf> = with_new_parents(&changes, vec![(file.clone(), None)]).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(order, [deeper, file]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

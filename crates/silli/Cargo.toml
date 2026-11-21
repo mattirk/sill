@@ -1,0 +1,33 @@
+[package]
+name = "silli"
+description = "silli: the `silli` command and the daemon (the desktop window is the silli-gui crate)"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "silli"
+path = "src/main.rs"
+
+[dependencies]
+silli-core.workspace = true
+silli-memory.workspace = true
+silli-proto.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+rustix.workspace = true
+# silli-mac: the vsock socket to Silli.app on the Mac (daemon/host_mac.rs)
+libc = "0.2"
+toml.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+# the daemon's Host control display viewing (pure Rust, headless too)
+x11rb = "0.14"
+async-channel = "2"
+futures = "0.3"
+
+[lints]
+workspace = true

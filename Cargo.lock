@@ -4158,7 +4158,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sill"
+name = "silli"
 version = "0.0.6"
 dependencies = [
  "anyhow",
@@ -4170,26 +4170,26 @@ dependencies = [
  "rustix 1.1.6",
  "serde",
  "serde_json",
- "sill-core",
- "sill-memory",
- "sill-proto",
+ "silli-core",
+ "silli-memory",
+ "silli-proto",
  "toml",
  "x11rb 0.14.0",
 ]
 
 [[package]]
-name = "sill-client"
+name = "silli-client"
 version = "0.0.6"
 dependencies = [
  "anyhow",
  "serde",
  "serde_json",
- "sill-proto",
+ "silli-proto",
  "toml",
 ]
 
 [[package]]
-name = "sill-core"
+name = "silli-core"
 version = "0.0.6"
 dependencies = [
  "agent-client-protocol",
@@ -4206,8 +4206,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
- "sill-memory",
- "sill-proto",
+ "silli-memory",
+ "silli-proto",
  "similar",
  "toml",
  "tracing",
@@ -4216,7 +4216,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sill-gui"
+name = "silli-gui"
 version = "0.0.6"
 dependencies = [
  "alacritty_terminal",
@@ -4238,9 +4238,9 @@ dependencies = [
  "rustix 1.1.6",
  "serde",
  "serde_json",
- "sill-client",
- "sill-proto",
- "sill-vm",
+ "silli-client",
+ "silli-proto",
+ "silli-vm",
  "toml",
  "tray-icon",
  "unicode-segmentation",
@@ -4249,7 +4249,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sill-memory"
+name = "silli-memory"
 version = "0.0.6"
 dependencies = [
  "anyhow",
@@ -4258,7 +4258,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sill-proto"
+name = "silli-proto"
 version = "0.0.6"
 dependencies = [
  "anyhow",
@@ -4270,7 +4270,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sill-shim"
+name = "silli-shim"
 version = "0.0.6"
 dependencies = [
  "anyhow",
@@ -4278,12 +4278,12 @@ dependencies = [
  "rustix 1.1.6",
  "serde",
  "serde_json",
- "sill-core",
- "sill-memory",
+ "silli-core",
+ "silli-memory",
 ]
 
 [[package]]
-name = "sill-vm"
+name = "silli-vm"
 version = "0.0.6"
 dependencies = [
  "anyhow",

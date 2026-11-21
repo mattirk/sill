@@ -1,6 +1,6 @@
 <!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>sill — a shelf for AI coding agents</title>
-<meta name=description content="Sill runs AI coding agents in a jail on your own machine. Install it on Linux or an Apple Silicon Mac.">
+<title>silli — a shelf for AI coding agents</title>
+<meta name=description content="Silli runs AI coding agents in a jail on your own machine. Install it on Linux or an Apple Silicon Mac.">
 <link rel=icon href="icon.svg">
 <style>
 :root{--bg:#1d1f23;--fg:#e6e6e6;--dim:#8d929b;--line:#33373e;--code:#25282e;--accent:#78aeed}
@@ -26,13 +26,13 @@ ol{padding-left:1.2rem;color:var(--dim);font-size:.95rem}ol li{margin:.3rem 0}
 footer{margin-top:4rem;padding-top:1.2rem;border-top:1px solid var(--line);color:var(--dim);font-size:.85rem}
 </style>
 <main>
-<header><img src="icon.svg" alt=""><b>sill</b>
-<nav><a href="https://github.com/mattirk/sill">GitHub</a><a href="https://github.com/mattirk/sill/blob/main/SECURITY.md">Security</a><a href="https://github.com/mattirk/sill/releases/latest">Releases</a></nav></header>
+<header><img src="icon.svg" alt=""><b>silli</b>
+<nav><a href="https://github.com/mattirk/silli">GitHub</a><a href="https://github.com/mattirk/silli/blob/main/SECURITY.md">Security</a><a href="https://github.com/mattirk/silli/releases/latest">Releases</a></nav></header>
 
 <h1>A shelf for AI coding agents.</h1>
-<p class=lead>Sill runs Claude Code, OpenCode, Kimi Code or any ACP agent in a jail on your own machine. The agent sees the whole machine; what it may change, reach and keep is up to you.</p>
+<p class=lead>Silli runs Claude Code, OpenCode, Kimi Code or any ACP agent in a jail on your own machine. The agent sees the whole machine; what it may change, reach and keep is up to you.</p>
 
-<div class=cmd><code id=cmd>curl -fsSL https://mattirk.github.io/sill/install.sh | sh</code><button data-copy="#cmd">Copy</button></div>
+<div class=cmd><code id=cmd>curl -fsSL https://mattirk.github.io/silli/install.sh | sh</code><button data-copy="#cmd">Copy</button></div>
 <p class=note>Paste in a terminal on Linux or an Apple Silicon Mac. The script asks before it changes anything — <a href="install.sh">read it first</a>.</p>
 
 <h2>What the script does</h2>
@@ -43,21 +43,21 @@ footer{margin-top:4rem;padding-top:1.2rem;border-top:1px solid var(--line);color
 <li>Installs, asks <code>sudo</code> when needed.</li>
 </ol>
 
-<a class=isolation href="https://github.com/mattirk/sill/blob/main/SECURITY.md" aria-label="Read the security documentation"><img src="isolation.svg" width="760" height="760" alt="Sill sandboxes run on Linux, in a Linux VM, or on remote Linux over SSH. Agents read unmasked files as your user; you review and keep or apply changes. Network access uses an allow-list. Live pins and explicit grants expand access."></a>
+<a class=isolation href="https://github.com/mattirk/silli/blob/main/SECURITY.md" aria-label="Read the security documentation"><img src="isolation.svg" width="760" height="760" alt="Silli sandboxes run on Linux, in a Linux VM, or on remote Linux over SSH. Agents read unmasked files as your user; you review and keep or apply changes. Network access uses an allow-list. Live pins and explicit grants expand access."></a>
 
 <h2>Or download directly · <span data-version>latest</span></h2>
 <div class=rows>
-<div class=row><b>Mac</b><span>Apple Silicon · Sill.app with its Linux VM</span><a data-asset="macos-arm64\.dmg$" href="https://github.com/mattirk/sill/releases/latest">Sill.dmg</a></div>
-<div class=row><b>Debian / Ubuntu</b><span>x86_64 · <code>sudo apt install ./sill_*.deb</code></span><a data-asset="amd64\.deb$" href="https://github.com/mattirk/sill/releases/latest">.deb</a></div>
-<div class=row><b>Other Linux</b><span>x86_64 · unpack, <code>sudo ./sill init</code></span><a data-asset="x86_64\.tar\.gz$" href="https://github.com/mattirk/sill/releases/latest">.tar.gz</a></div>
-<div class=row><b>Checksums</b><span>one file covering every package</span><a data-asset="^SHA256SUMS$" href="https://github.com/mattirk/sill/releases/latest">SHA256SUMS</a></div>
+<div class=row><b>Mac</b><span>Apple Silicon · Silli.app with its Linux VM</span><a data-asset="macos-arm64\.dmg$" href="https://github.com/mattirk/silli/releases/latest">Silli.dmg</a></div>
+<div class=row><b>Debian / Ubuntu</b><span>x86_64 · <code>sudo apt install ./silli_*.deb</code></span><a data-asset="amd64\.deb$" href="https://github.com/mattirk/silli/releases/latest">.deb</a></div>
+<div class=row><b>Other Linux</b><span>x86_64 · unpack, <code>sudo ./silli init</code></span><a data-asset="x86_64\.tar\.gz$" href="https://github.com/mattirk/silli/releases/latest">.tar.gz</a></div>
+<div class=row><b>Checksums</b><span>one file covering every package</span><a data-asset="^SHA256SUMS$" href="https://github.com/mattirk/silli/releases/latest">SHA256SUMS</a></div>
 </div>
 <p class=note>Linux needs bubblewrap, cgroup v2 and a kernel ≥ 6.2. The Mac app is not notarized yet: on first open use System Settings → Privacy &amp; Security → Open Anyway.</p>
 
-<footer>Sill reduces what an agent can do to your machine; it does not guarantee security. Apache-2.0.</footer>
+<footer>Silli reduces what an agent can do to your machine; it does not guarantee security. Apache-2.0.</footer>
 </main>
 <script>
-const REPO = 'mattirk/sill';
+const REPO = 'mattirk/silli';
 document.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', async () => {
   const text = document.querySelector(b.dataset.copy).textContent.trim();
   try { await navigator.clipboard.writeText(text); }

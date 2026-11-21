@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   version:
-    if: github.repository == 'mattirk/sill'
+    if: github.repository == 'mattirk/silli'
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.check.outputs.version }}
@@ -66,8 +66,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 180
     env:
-      SILL_IMAGE_CACHE: ${{ github.workspace }}/target/image-cache
-      SILL_IMAGE_BINARIES: ${{ github.workspace }}/target/mac-prebuilt
+      SILLI_IMAGE_CACHE: ${{ github.workspace }}/target/image-cache
+      SILLI_IMAGE_BINARIES: ${{ github.workspace }}/target/mac-prebuilt
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.100.0
@@ -112,8 +112,8 @@ jobs:
     timeout-minutes: 90
     env:
       # Free ad-hoc signing; local app.sh builds still prefer the existing local certificate.
-      SILL_SIGNING_IDENTITY: '-'
-      SILL_IMAGE_EXPECT_COMMIT: ${{ github.sha }}
+      SILLI_SIGNING_IDENTITY: '-'
+      SILLI_IMAGE_EXPECT_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -125,12 +125,12 @@ jobs:
           path: dist/mac-image
       - name: Verify image transfer
         run: cd dist/mac-image && shasum -a 256 -c SHA256SUMS
-      - run: cargo test --locked -p sill-gui -p sill-vm -p sill-client -p sill-proto
+      - run: cargo test --locked -p silli-gui -p silli-vm -p silli-client -p silli-proto
       - run: packaging/mac/app.sh
       - name: Name release package
         env:
           VERSION: ${{ needs.version.outputs.version }}
-        run: mv dist/Sill.dmg "dist/sill-$VERSION-macos-arm64.dmg"
+        run: mv dist/Silli.dmg "dist/silli-$VERSION-macos-arm64.dmg"
       - uses: actions/upload-artifact@v4
         with:
           name: release-mac
@@ -163,7 +163,7 @@ jobs:
         # the notes are the version's CHANGELOG.md section, with GitHub's compare link after them
         run: |
           gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "sill $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes --latest \
+            --title "silli $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes --latest \
             dist/*.tar.gz dist/*.deb dist/*.dmg dist/SHA256SUMS
   # What the download page tells people to paste, run against the release that was just published.
   install:
@@ -178,5 +178,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install from the published release
         env:
-          SILL_VERSION: ${{ needs.version.outputs.version }}
+          SILLI_VERSION: ${{ needs.version.outputs.version }}
         run: python3 packaging/try-install.py

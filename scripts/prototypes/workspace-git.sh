@@ -24,9 +24,9 @@ rm -rf "$D/ws-reference"
 
 # --- the workspace proper: shared clone, branch at base, retention anchor first
 ID=ab12; W=$D/ws/demo-$ID
-g -C "$S" update-ref refs/sill/workspaces/$ID/base "$BASE"
+g -C "$S" update-ref refs/silli/workspaces/$ID/base "$BASE"
 g clone -q --shared --no-tags --single-branch -b main "$S" "$W"
-g -C "$W" switch -q -c sill/demo-$ID
+g -C "$W" switch -q -c silli/demo-$ID
 echo "agent work" > "$W/f2.txt"; echo new > "$W/new.txt"; g -C "$W" add .; g -C "$W" commit -qm "agent change"
 WTIP=$(g -C "$W" rev-parse HEAD)
 check "workspace commit exists only in the clone's own store" "! g -C '$S' cat-file -e $WTIP && g -C '$W' cat-file -e $WTIP"
@@ -49,11 +49,11 @@ g -C "$S" checkout -q -f -B main "$BASE"; g -C "$S" clean -qfdx
 
 echo "== 3. rebase onto a moved source without fetching"
 echo "host work" > "$S/f3.txt"; g -C "$S" commit -qam "host change"; DEST=$(g -C "$S" rev-parse HEAD)
-g -C "$S" update-ref refs/sill/workspaces/$ID/dest "$DEST"        # retain before the workspace uses it
-g -C "$W" update-ref refs/sill/dest "$DEST"                        # objects already reachable via alternates
+g -C "$S" update-ref refs/silli/workspaces/$ID/dest "$DEST"        # retain before the workspace uses it
+g -C "$W" update-ref refs/silli/dest "$DEST"                        # objects already reachable via alternates
 check "workspace sees destination tip without a fetch" "g -C '$W' cat-file -e $DEST"
-g -C "$W" update-ref refs/sill/pre-rebase "$WTIP"
-check "rebase onto destination succeeds in the workspace" "g -C '$W' rebase -q refs/sill/dest"
+g -C "$W" update-ref refs/silli/pre-rebase "$WTIP"
+check "rebase onto destination succeeds in the workspace" "g -C '$W' rebase -q refs/silli/dest"
 NEWTIP=$(g -C "$W" rev-parse HEAD)
 
 echo "== 4. host-side Git and workspace-controlled config"
@@ -68,7 +68,7 @@ g -C "$W" config core.hooksPath "$D/hooks"; mkdir -p "$D/hooks"; for h in pre-pu
 g -C "$W" config uploadpack.packObjectsHook "$(mk packObjectsHook)"
 g -C "$W" config filter.x.smudge "$(mk smudge)"; g -C "$W" config filter.x.clean "$(mk clean)"; echo "* filter=x" > "$W/.git/info/attributes"
 g -C "$W" config core.pager "$(mk pager)"; g -C "$W" config diff.external "$(mk diff.external)"
-g -C "$S" fetch -q "$W" sill/demo-$ID:refs/sill/workspaces/$ID/incoming 2>/dev/null
+g -C "$S" fetch -q "$W" silli/demo-$ID:refs/silli/workspaces/$ID/incoming 2>/dev/null
 echo "   host fetch from the workspace ran: $(cat $CAN 2>/dev/null | sort -u | tr '\n' ';' || true)"
 check "host fetch from the workspace ran no workspace-configured program" "[ ! -s '$CAN' ]"
 : > "$CAN"; g -C "$W" status --short >/dev/null 2>&1; g -C "$W" diff >/dev/null 2>&1
@@ -79,7 +79,7 @@ check "fetched result's new objects are in the source's own store" "g -C '$S' ca
 
 echo "== 5. fast-forward merge preserving source edits"
 echo "my unrelated edit" >> "$S/f1.txt"; echo "staged" > "$S/staged.txt"; g -C "$S" add staged.txt
-check "ff merge with unrelated dirty + staged files succeeds" "g -C '$S' merge -q --ff-only refs/sill/workspaces/$ID/incoming"
+check "ff merge with unrelated dirty + staged files succeeds" "g -C '$S' merge -q --ff-only refs/silli/workspaces/$ID/incoming"
 check "unrelated edit survived" "grep -q 'my unrelated edit' '$S/f1.txt'"
 check "staged file still staged" "g -C '$S' diff --cached --name-only | grep -q staged.txt"
 check "branch, index and files updated" "[ \"\$(g -C '$S' rev-parse main)\" = $NEWTIP ] && grep -q 'agent work' '$S/f2.txt' && g -C '$S' ls-files | grep -q new.txt"
@@ -87,15 +87,15 @@ check "branch, index and files updated" "[ \"\$(g -C '$S' rev-parse main)\" = $N
 g -C "$S" stash -q; g -C "$S" commit -qm noop --allow-empty 2>/dev/null; g -C "$S" stash pop -q
 W2=$D/ws/two; g clone -q --shared --no-tags --single-branch -b main "$S" "$W2"; g -C "$W2" switch -qc b2
 echo "agent f1" > "$W2/f1.txt"; g -C "$W2" commit -qam "touch f1"
-g -C "$S" fetch -q "$W2" b2:refs/sill/workspaces/two/incoming
-check "overlapping dirty file stops the ff merge" "! g -C '$S' merge -q --ff-only refs/sill/workspaces/two/incoming"
+g -C "$S" fetch -q "$W2" b2:refs/silli/workspaces/two/incoming
+check "overlapping dirty file stops the ff merge" "! g -C '$S' merge -q --ff-only refs/silli/workspaces/two/incoming"
 check "...and the person's edit is untouched" "grep -q 'my unrelated edit' '$S/f1.txt'"
 echo "untracked" > "$S/u.txt"; g -C "$W2" checkout -q b2; echo x > "$W2/u.txt"; g -C "$W2" add u.txt; g -C "$W2" commit -qm "adds u"
-g -C "$S" fetch -q "$W2" b2:refs/sill/workspaces/two/incoming
-check "untracked-file collision stops the ff merge" "! g -C '$S' merge -q --ff-only refs/sill/workspaces/two/incoming && grep -q untracked '$S/u.txt'"
+g -C "$S" fetch -q "$W2" b2:refs/silli/workspaces/two/incoming
+check "untracked-file collision stops the ff merge" "! g -C '$S' merge -q --ff-only refs/silli/workspaces/two/incoming && grep -q untracked '$S/u.txt'"
 
 echo "== 6. after merge, remove clones and anchors"
-rm -rf "$D/ws" "$D/ws-shared"; for r in $(g -C "$S" for-each-ref --format='%(refname)' refs/sill/); do g -C "$S" update-ref -d "$r"; done
+rm -rf "$D/ws" "$D/ws-shared"; for r in $(g -C "$S" for-each-ref --format='%(refname)' refs/silli/); do g -C "$S" update-ref -d "$r"; done
 g -C "$S" reflog expire --expire=now --all; g -C "$S" gc -q --prune=now
 check "source fsck clean without any workspace" "g -C '$S' fsck --full"
 check "fresh clone of the source checks out" "g clone -q '$S' '$D/fresh' && [ -f '$D/fresh/new.txt' ]"

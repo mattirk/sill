@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""A small X11 window ("sill-witness") that writes every key and button it receives to a file.
+"""A small X11 window ("silli-witness") that writes every key and button it receives to a file.
 
     x11_input_witness.py LOG
 
@@ -18,8 +18,8 @@ window = screen.root.create_window(
     40, 30, 300, 200, 0, screen.root_depth, X.InputOutput, X.CopyFromParent,
     background_pixel=screen.white_pixel,
     event_mask=X.KeyPressMask | X.ButtonPressMask | X.StructureNotifyMask | X.ExposureMask)
-window.set_wm_name("sill-witness")
-window.set_wm_class("sill-witness", "sill-witness")
+window.set_wm_name("silli-witness")
+window.set_wm_class("silli-witness", "silli-witness")
 window.map()
 d.sync()
 while True:

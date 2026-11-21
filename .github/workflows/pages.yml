@@ -1,4 +1,4 @@
-# The download page (site/) at https://mattirk.github.io/sill/, from the public repository's main.
+# The download page (site/) at https://mattirk.github.io/silli/, from the public repository's main.
 # Needs Settings → Pages → Source: GitHub Actions, set once by hand.
 name: pages
 on:
@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   deploy:
-    if: github.repository == 'mattirk/sill' && github.ref == 'refs/heads/main'
+    if: github.repository == 'mattirk/silli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       pages: write

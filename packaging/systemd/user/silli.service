@@ -1,0 +1,33 @@
+# The silli daemon (docs/daemon.md): sessions, ledger, memory behind $XDG_RUNTIME_DIR/silli/daemon.sock.
+# Started by silli.socket on the first connection; always on from then (decision 4).
+#   systemctl --user status silli          # is it up
+#   journalctl --user -u silli -f          # its log
+#   systemctl --user restart silli         # after an update — sessions survive it: each is a scope
+#                                         # silli-<id>.scope under silli.slice, not part of this unit
+#   systemctl --user set-property silli.slice MemoryMax=16G   # cap every session together
+#   systemctl --user reset-failed silli.socket silli.service && systemctl --user start silli.socket
+#                                         # after ten failed starts in a minute (the start limit):
+#                                         # the socket stopped with the service, the journal has why
+[Unit]
+Description=silli daemon
+Requires=silli.socket
+After=silli.socket
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+# READY=1 once it listens, WATCHDOG=1 every 15 s while every lock of the hub answers
+# (docs/daemon.md §3.7): a daemon that finds a lock stuck leaves by itself (status 102), one too
+# wedged to say so is killed here; either way sessions keep running and the next daemon adopts them
+Type=notify
+NotifyAccess=main
+WatchdogSec=90
+ExecStart=/usr/local/bin/silli daemon
+# a stop is asked over the socket (the reply, STOPPING=1, the pid file removed, exit 0) rather
+# than signalled; SIGTERM follows only for a daemon that does not answer
+ExecStop=/usr/local/bin/silli daemon stop
+# The per-session ACP relays retain live turns across a daemon restart.
+KillMode=process
+Restart=on-failure
+RestartSec=2
+Slice=app.slice

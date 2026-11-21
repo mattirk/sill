@@ -1,5 +1,5 @@
-# sill policy "default" (SPEC §4.2): the whole machine visible, every write recorded in the session's
-# overlay, secrets hidden, network only to the agent's own endpoints. Copy to ~/.config/sill/policies/
+# silli policy "default" (SPEC §4.2): the whole machine visible, every write recorded in the session's
+# overlay, secrets hidden, network only to the agent's own endpoints. Copy to ~/.config/silli/policies/
 # under another name to make variants.
 
 name = "default"
@@ -22,13 +22,13 @@ allow_local = []          # host-local addresses are refused in every mode unles
 # A pattern grants one port: 443 for CONNECT (TLS) and 80 for plain HTTP; "host:8443" names another,
 # "host:*" any. e.g. allow_local = ["localhost:8080", "server.lan:*"]
 
-# Refused hosts sill never asks about: telemetry / crash reporting (Sentry, Statsig, Datadog, Segment,
+# Refused hosts silli never asks about: telemetry / crash reporting (Sentry, Statsig, Datadog, Segment,
 # PostHog, ...; the list is in policy.rs `quiet_default`). Still blocked, just quietly. Set
 # `quiet = []` to be asked about everything, or list your own hosts to replace the built-in list.
 
 [paths]
 # Unrecorded host writes — one reason each (SPEC §4.2 "direct"). Agent state is NOT here: each agent gets
-# a sill-owned home bound over its real one (registry `home_paths`), so nothing it writes reaches the host's
+# a silli-owned home bound over its real one (registry `home_paths`), so nothing it writes reaches the host's
 # own copy of the agent (shell snapshots, plugin caches: SPEC §4.10 #4).
 direct = [
 ]
@@ -87,6 +87,6 @@ seccomp = true
 # extra environment for every process in the jail, e.g. TZ = "Europe/Helsinki"
 
 [processes]
-# Managed processes (`sill-proc start --name dev --port 3000 -- …`): ports exposed on this machine's
+# Managed processes (`silli-proc start --name dev --port 3000 -- …`): ports exposed on this machine's
 # loopback without asking; any other port is asked once per session. e.g. expose = ["3000-3999"]
 expose = []

@@ -118,11 +118,11 @@ pub struct TextEditor<
     min_height: f32,
     max_height: f32,
     padding: Padding,
-    // sill patch: visible logical line numbers and their scrolled pixel positions.
+    // silli patch: visible logical line numbers and their scrolled pixel positions.
     line_numbers: Option<fn(&Renderer::Editor) -> Vec<(usize, f32)>>,
-    // sill patch: rectangles (in the text's own coordinates) filled behind the text.
+    // silli patch: rectangles (in the text's own coordinates) filled behind the text.
     marks: Option<Box<dyn Fn(&Renderer::Editor) -> Vec<(Rectangle, Color)> + 'a>>,
-    // sill patch: a vertical scrollbar for unwrapped editors that scroll internally.
+    // silli patch: a vertical scrollbar for unwrapped editors that scroll internally.
     scrollbar: Option<ScrollbarStyle<'a, Renderer::Editor, Message>>,
     wrapping: Wrapping,
     class: Theme::Class<'a>,
@@ -319,7 +319,7 @@ where
         }
     }
 
-    /// Enables a gutter using the renderer's visible logical lines (sill patch).
+    /// Enables a gutter using the renderer's visible logical lines (silli patch).
     pub fn line_numbers(
         mut self,
         visible_lines: fn(&Renderer::Editor) -> Vec<(usize, f32)>,
@@ -328,7 +328,7 @@ where
         self
     }
 
-    /// Rectangles filled behind the text, in the text's own coordinates (sill patch): Find's
+    /// Rectangles filled behind the text, in the text's own coordinates (silli patch): Find's
     /// matches, which show while the focus is in the find bar rather than in the editor.
     pub fn marks(
         mut self,
@@ -338,7 +338,7 @@ where
         self
     }
 
-    /// Shows a vertical scrollbar on hover for an unwrapped editor (sill patch).
+    /// Shows a vertical scrollbar on hover for an unwrapped editor (silli patch).
     /// Metrics are the renderer's vertical offset in logical lines and the
     /// height of one line in pixels. The action receives an absolute fraction.
     pub fn vertical_scrollbar(
@@ -511,7 +511,7 @@ where
         internal.editor.perform(action);
     }
 
-    // sill patch: metrics for an unwrapped editor, in logical lines.
+    // silli patch: metrics for an unwrapped editor, in logical lines.
     fn vertical_scroll_metrics(
         &self,
         metrics: fn(&R::Editor) -> (f32, f32),
@@ -524,7 +524,7 @@ where
         (offset, visible_lines, max_offset)
     }
 
-    /// Builds a scroll action for a fraction of an unwrapped editor's vertical range (sill patch).
+    /// Builds a scroll action for a fraction of an unwrapped editor's vertical range (silli patch).
     /// Metrics are the current offset in logical lines and the line height in pixels.
     pub fn scroll_to_fraction(
         &self,
@@ -649,14 +649,14 @@ where
     }
 }
 
-// sill patch: renderer offset and color for the opt-in scrollbar.
+// silli patch: renderer offset and color for the opt-in scrollbar.
 struct ScrollbarStyle<'a, Editor, Message> {
     color: Color,
     metrics: fn(&Editor) -> (f32, f32),
     on_scroll: Box<dyn Fn(f32) -> Message + 'a>,
 }
 
-// sill patch: geometry shared by drawing and hit testing.
+// silli patch: geometry shared by drawing and hit testing.
 struct EditorScrollbar {
     color: Color,
     track: Rectangle,
@@ -678,9 +678,9 @@ pub struct State<Highlighter: text::Highlighter> {
     last_click: Option<mouse::Click>,
     drag_click: Option<mouse::click::Kind>,
     partial_scroll: f32,
-    // sill patch: distance from the thumb top to the pointer while dragging.
+    // silli patch: distance from the thumb top to the pointer while dragging.
     scrollbar_grab: Option<f32>,
-    // sill patch: let a horizontal parent handle sideways source scrolling.
+    // silli patch: let a horizontal parent handle sideways source scrolling.
     modifiers: keyboard::Modifiers,
     last_theme: RefCell<Option<String>>,
     highlighter: RefCell<Highlighter>,
@@ -849,7 +849,7 @@ where
         };
 
         let state = tree.state.downcast_mut::<State<Highlighter>>();
-        // sill patch: handle the scrollbar before text clicks and selection drags.
+        // silli patch: handle the scrollbar before text clicks and selection drags.
         match event {
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
             | Event::Window(window::Event::Unfocused) => {
@@ -890,7 +890,7 @@ where
             }
             _ => {}
         }
-        // sill patch: unwrapped source editors delegate sideways scrolling to their parent.
+        // silli patch: unwrapped source editors delegate sideways scrolling to their parent.
         if let Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) = event {
             state.modifiers = *modifiers;
         }
@@ -1203,7 +1203,7 @@ where
 
         let text_bounds = bounds.shrink(padding);
 
-        // sill patch: draw only visible line labels, outside the selectable source text.
+        // silli patch: draw only visible line labels, outside the selectable source text.
         if let Some(visible_lines) = self.line_numbers {
             let size = self.text_size.unwrap_or_else(|| renderer.default_size());
             let gutter = Rectangle {
@@ -1232,7 +1232,7 @@ where
             }
         }
 
-        // sill patch: Find's marks, behind the text and clipped to it.
+        // silli patch: Find's marks, behind the text and clipped to it.
         if let Some(marks) = &self.marks {
             let origin = text_bounds.position() - Point::ORIGIN;
             for (mark, color) in marks(&internal.editor) {
@@ -1326,7 +1326,7 @@ where
         }
 
         drop(internal);
-        // sill patch: place the thumb at the visible edge, even when the editor is wider.
+        // silli patch: place the thumb at the visible edge, even when the editor is wider.
         if (cursor.is_over(*viewport) || state.scrollbar_grab.is_some())
             && let Some(bar) = self.scrollbar_geometry(bounds, viewport)
         {

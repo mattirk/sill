@@ -1,17 +1,17 @@
 #!/bin/sh
-# sill installer — https://github.com/mattirk/sill
+# silli installer — https://github.com/mattirk/silli
 #
-#   curl -fsSL https://mattirk.github.io/sill/install.sh | sh
+#   curl -fsSL https://mattirk.github.io/silli/install.sh | sh
 #
 # Finds the latest release on GitHub, asks what to install, verifies the download against the
 # release's SHA256SUMS and installs it. Nothing is changed before you answer. To read it first:
-#   curl -fsSL https://mattirk.github.io/sill/install.sh | less
+#   curl -fsSL https://mattirk.github.io/silli/install.sh | less
 #
-# Environment: SILL_VERSION=0.1.0 (default: the latest release),
-#              SILL_DRY_RUN=1 (print the plan, download and change nothing).
+# Environment: SILLI_VERSION=0.1.0 (default: the latest release),
+#              SILLI_DRY_RUN=1 (print the plan, download and change nothing).
 set -eu
 
-REPO=mattirk/sill
+REPO=mattirk/silli
 RELEASES="https://github.com/$REPO/releases"
 
 main() {
@@ -22,34 +22,34 @@ main() {
         *) die "unsupported architecture: $arch" ;;
     esac
     command -v curl >/dev/null 2>&1 || die "curl is required"
-    ver=${SILL_VERSION:-$(latest)}
+    ver=${SILLI_VERSION:-$(latest)}
     [ -n "$ver" ] || die "no published release found; see $RELEASES"
     ver=${ver#v}
     # only what a version is made of goes into file names and paths
     case "$ver" in *[!0-9A-Za-z.+-]*) die "not a version: $ver" ;; esac
     base="$RELEASES/download/v$ver"
-    say "sill $ver for $os $arch"
+    say "silli $ver for $os $arch"
 
     case "$os" in
     Darwin)
         [ "$arch" = aarch64 ] || die "the Mac app needs Apple Silicon"
-        file="sill-$ver-macos-arm64.dmg"
-        choose "Install Sill.app into /Applications (replaces an installed one)" \
+        file="silli-$ver-macos-arm64.dmg"
+        choose "Install Silli.app into /Applications (replaces an installed one)" \
                "Only download $file to ~/Downloads" \
                "Cancel"
         case "$choice" in
             1) fetch
                run hdiutil attach -nobrowse -readonly -quiet -mountpoint "$tmp/mnt" "$tmp/$file"
                mounted=$tmp/mnt
-               [ -n "${SILL_DRY_RUN:-}" ] || [ -d "$tmp/mnt/Sill.app" ] || die "$file holds no Sill.app; nothing installed"
+               [ -n "${SILLI_DRY_RUN:-}" ] || [ -d "$tmp/mnt/Silli.app" ] || die "$file holds no Silli.app; nothing installed"
                # the new app is whole beside the old one before the old one goes
-               run rm -rf /Applications/Sill.app.new
-               run cp -R "$tmp/mnt/Sill.app" /Applications/Sill.app.new
-               run rm -rf /Applications/Sill.app
-               run mv /Applications/Sill.app.new /Applications/Sill.app
+               run rm -rf /Applications/Silli.app.new
+               run cp -R "$tmp/mnt/Silli.app" /Applications/Silli.app.new
+               run rm -rf /Applications/Silli.app
+               run mv /Applications/Silli.app.new /Applications/Silli.app
                run hdiutil detach -quiet "$tmp/mnt"
                mounted=
-               say "Installed: open Sill from Applications."
+               say "Installed: open Silli from Applications."
                say "The app is not notarized. If macOS refuses to open it, allow it under"
                say "System Settings → Privacy & Security → Open Anyway." ;;
             2) fetch
@@ -61,36 +61,36 @@ main() {
         [ "$arch" = x86_64 ] || die "releases have no Linux package for $arch yet; build from source: https://github.com/$REPO#build-from-source"
         if command -v apt-get >/dev/null 2>&1; then
             choose "Debian package (apt-get install)" \
-                   "Tarball into /usr/local (sudo ./sill init)" \
+                   "Tarball into /usr/local (sudo ./silli init)" \
                    "Only show what would be done" \
                    "Cancel"
         else
-            choose "Tarball into /usr/local (sudo ./sill init)" \
+            choose "Tarball into /usr/local (sudo ./silli init)" \
                    "Only show what would be done" \
                    "Cancel"
             choice=$((choice + 1))
         fi
-        if [ "$choice" = 3 ]; then SILL_DRY_RUN=1; choice=2; fi
+        if [ "$choice" = 3 ]; then SILLI_DRY_RUN=1; choice=2; fi
         case "$choice" in
-            1) file="sill_${ver}_${deb_arch}.deb"; fetch
+            1) file="silli_${ver}_${deb_arch}.deb"; fetch
                run sudo apt-get install -y "$tmp/$file" ;;
-            2) file="sill-$ver-$arch.tar.gz"; fetch
+            2) file="silli-$ver-$arch.tar.gz"; fetch
                run tar -xzf "$tmp/$file" -C "$tmp"
-               run sudo "$tmp/sill-$ver-$arch/sill" init ;;
+               run sudo "$tmp/silli-$ver-$arch/silli" init ;;
             *) say "Nothing changed."; return 0 ;;
         esac
-        if ask "Start the sill window with your desktop session (sill init --user)?"; then
-            run sill init --user
+        if ask "Start the silli window with your desktop session (silli init --user)?"; then
+            run silli init --user
         fi
-        say "Done. Show the window with: sill toggle" ;;
+        say "Done. Show the window with: silli toggle" ;;
     *) die "unsupported system: $os" ;;
     esac
 }
 
 say() { printf '%s\n' "$*"; }
-die() { printf 'sill install: %s\n' "$*" >&2; exit 1; }
+die() { printf 'silli install: %s\n' "$*" >&2; exit 1; }
 run() {
-    if [ -n "${SILL_DRY_RUN:-}" ]; then say "  would run: $*"; else say "  $*"; "$@"; fi
+    if [ -n "${SILLI_DRY_RUN:-}" ]; then say "  would run: $*"; else say "  $*"; "$@"; fi
 }
 
 # The latest published release, from where github.com sends /releases/latest (…/releases/tag/vX.Y.Z).
@@ -127,7 +127,7 @@ fetch() {
     mounted=
     # a mounted image is let go before its folder is removed
     trap '[ -z "$mounted" ] || hdiutil detach -quiet "$mounted" 2>/dev/null || true; rm -rf "$tmp"' EXIT
-    if [ -n "${SILL_DRY_RUN:-}" ]; then say "  would download and verify: $base/$file"; return 0; fi
+    if [ -n "${SILLI_DRY_RUN:-}" ]; then say "  would download and verify: $base/$file"; return 0; fi
     say "  downloading $base/$file"
     curl -fL --proto '=https' --proto-redir '=https' --progress-bar -o "$tmp/$file" "$base/$file" || die "download failed: $base/$file"
     curl -fsSL --proto '=https' --proto-redir '=https' -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" || die "download failed: $base/SHA256SUMS"

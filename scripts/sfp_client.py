@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Independent SFP validation client. No sill-core imports or database access.
+"""Independent SFP validation client. No silli-core imports or database access.
 
 Install scripts/requirements-sfp.txt in a virtual environment. The daemon's exported
 JSON Schema validates every public request, result and notification. --schema can
-instead read the JSON printed by `sill daemon schema`. Cursor files include the
+instead read the JSON printed by `silli daemon schema`. Cursor files include the
 entire reconstructed view, because a cursor alone is insufficient for replay.
 """
 import argparse
@@ -154,15 +154,15 @@ class Client:
         self.input = self.sock.makefile("rb")
         offer = {"protocols": [PROTOCOL], "client": {"name": name, "version": "0.1"},
                  "capabilities": dict(capabilities or {})}
-        response = self.call("_sill/initialize", offer)
+        response = self.call("_silli/initialize", offer)
         self.capabilities = response.get("capabilities", {})
         if response["protocol"] != PROTOCOL:
             raise ValueError("daemon selected an unoffered protocol")
         self.max_frame = min(MAX_FRAME, response["limits"]["max_message_bytes"])
         if self.schema is None:
-            self.schema = self.call("_sill/daemon.schema", {})
-        self.validate("_sill/initialize", "params", offer)
-        self.validate("_sill/initialize", "result", response)
+            self.schema = self.call("_silli/daemon.schema", {})
+        self.validate("_silli/initialize", "params", offer)
+        self.validate("_silli/initialize", "result", response)
 
     def close(self):
         self.input.close()
@@ -204,7 +204,7 @@ class Client:
         while True:
             message = self.read()
             if "method" in message and "id" not in message:
-                if message["method"] == "_sill/changes.changed":
+                if message["method"] == "_silli/changes.changed":
                     self.validate(message["method"], "params", message["params"])
                     self.changes_dirty = True
                     continue
@@ -244,7 +244,7 @@ class Client:
         stream.settimeout(120)
         try:
             stream.connect(self.path)
-            stream.sendall((json.dumps({"_sill_stream": token}) + "\n").encode())
+            stream.sendall((json.dumps({"_silli_stream": token}) + "\n").encode())
             return stream
         except BaseException:
             stream.close()
@@ -273,11 +273,11 @@ class Client:
     def event(self):
         while True:
             message = self.pending.pop(0) if self.pending else self.read()
-            if message.get("method") == "_sill/changes.changed":
+            if message.get("method") == "_silli/changes.changed":
                 self.validate(message["method"], "params", message["params"])
                 self.changes_dirty = True
                 continue
-            if message.get("method") != "_sill/session.event":
+            if message.get("method") != "_silli/session.event":
                 raise ValueError(f"unexpected notification {message.get('method')}")
             self.validate(message["method"], "params", message["params"])
             return message["params"]
@@ -288,7 +288,7 @@ class Client:
             if view.session_id != session_id:
                 raise ValueError("saved view belongs to another session")
             params["since"] = {"session_id": session_id, "seq": str(view.seq)}
-        attached = self.call("_sill/sessions.attach", params)
+        attached = self.call("_silli/sessions.attach", params)
         subscription = attached["subscription_id"]
         if attached["mode"] == "snapshot":
             lease = attached["snapshot"]
@@ -296,7 +296,7 @@ class Client:
             page = None
             fragment_id, fragment_text = None, ""
             while True:
-                response = self.call("_sill/sessions.snapshot", {"token": lease["token"], "page": page})
+                response = self.call("_silli/sessions.snapshot", {"token": lease["token"], "page": page})
                 if response["at"] != lease["at"] or response["at"]["session_id"] != session_id:
                     raise ValueError("snapshot pages have different boundaries")
                 fragment = response.get("fragment")
@@ -340,8 +340,8 @@ class Client:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--socket", default=str(Path(os.environ.get("XDG_RUNTIME_DIR", "/run/user/" + str(os.getuid()))) / "sill/daemon.sock"))
-    parser.add_argument("--schema", type=Path, help="JSON exported by sill daemon schema (otherwise fetched)")
+    parser.add_argument("--socket", default=str(Path(os.environ.get("XDG_RUNTIME_DIR", "/run/user/" + str(os.getuid()))) / "silli/daemon.sock"))
+    parser.add_argument("--schema", type=Path, help="JSON exported by silli daemon schema (otherwise fetched)")
     commands = parser.add_subparsers(dest="command", required=True)
     listing = commands.add_parser("list", help="list sessions through bounded public pages")
     listing.add_argument("--limit", type=int, default=64)
@@ -406,20 +406,20 @@ def main():
         if args.command == "registry":
             after = None
             while True:
-                page = client.call("_sill/registry.list", {"after": after, "limit": 64})
+                page = client.call("_silli/registry.list", {"after": after, "limit": 64})
                 for entry in page["entries"]:
                     print(json.dumps(entry, ensure_ascii=False))
                 after = page["next"]
                 if after is None:
                     break
         elif args.command == "operation":
-            print(json.dumps(client.call("_sill/operations.get", {"operation_id": args.operation_id}), ensure_ascii=False))
+            print(json.dumps(client.call("_silli/operations.get", {"operation_id": args.operation_id}), ensure_ascii=False))
         elif args.command in ("login", "install"):
             if args.command == "login":
-                method = "_sill/agents.login"
+                method = "_silli/agents.login"
                 params = {"agent_id": args.agent_id, "method_id": args.method_id}
             else:
-                method = "_sill/registry.install"
+                method = "_silli/registry.install"
                 params = {"entry_id": args.entry_id, "version": args.version, "source": args.source, "allow_unreviewed": args.allow_unreviewed}
             import uuid
             params["operation_id"] = args.operation_id or str(uuid.uuid4())
@@ -435,7 +435,7 @@ def main():
         elif args.command == "list":
             after = None
             while True:
-                page = client.call("_sill/sessions.list", {"after": after, "limit": args.limit})
+                page = client.call("_silli/sessions.list", {"after": after, "limit": args.limit})
                 for session in page["sessions"]:
                     print(json.dumps(session, ensure_ascii=False))
                 after = page["next"]
@@ -443,7 +443,7 @@ def main():
                     break
         elif args.command == "create":
             pins = [{"bytes_base64": base64.b64encode(os.fsencode(p)).decode(), "display": os.fsdecode(os.fsencode(p)).encode("utf-8", "replace").decode()} for p in args.pin]
-            result = client.call("_sill/sessions.create", {"create_id": args.create_id, "agent": args.agent, "policy": args.policy, "ghost": args.ghost, "pins": pins})
+            result = client.call("_silli/sessions.create", {"create_id": args.create_id, "agent": args.agent, "policy": args.policy, "ghost": args.ghost, "pins": pins})
             print(json.dumps(result))
         elif args.command in ("get", "start", "stop", "checkpoint", "end", "update"):
             params = {"session_id": args.session_id}
@@ -451,7 +451,7 @@ def main():
                 params["reason"] = args.reason
             elif args.command == "update":
                 params["change"] = args.change
-            print(json.dumps(client.call("_sill/sessions." + args.command, params), ensure_ascii=False))
+            print(json.dumps(client.call("_silli/sessions." + args.command, params), ensure_ascii=False))
         elif args.command == "watch":
             view = View(**json.loads(args.state.read_text())) if args.state and args.state.exists() else None
             subscription, view = client.attach(args.session_id, view)
@@ -462,16 +462,16 @@ def main():
                 if event["subscription_id"] == subscription and view.apply(event):
                     view.save(args.state)
                     print(json.dumps(event, ensure_ascii=False), flush=True)
-            client.call("_sill/sessions.detach", {"session_id": args.session_id, "subscription_id": subscription})
+            client.call("_silli/sessions.detach", {"session_id": args.session_id, "subscription_id": subscription})
         elif args.command == "submit":
             # Attach starts the agent if necessary; the mutation itself never creates a session.
             client.attach(args.session_id)
             images = [{"type": "inline", "name": path.name, "mime": "image/" + (path.suffix.lstrip(".").lower().replace("jpg", "jpeg") or "png"),
                        "data_base64": base64.b64encode(path.read_bytes()).decode()} for path in args.image]
             params = {"session_id": args.session_id, "submission_id": args.submission_id, "text": args.text, "attachments": images}
-            result = client.call("_sill/sessions.submit", params)
+            result = client.call("_silli/sessions.submit", params)
             if args.retry:
-                retry = client.call("_sill/sessions.submit", params)
+                retry = client.call("_silli/sessions.submit", params)
                 if (retry["submission_id"], retry["accepted_seq"]) != (result["submission_id"], result["accepted_seq"]):
                     raise ValueError("retry created another submission")
                 result = retry
@@ -479,16 +479,16 @@ def main():
                 raise ValueError("the accepted submission embeds attachment bytes instead of referencing an upload")
             print(json.dumps(result, ensure_ascii=False))
         elif args.command == "upload":
-            result = client.call("_sill/uploads.get", {"session_id": args.session_id, "upload_id": args.upload_id})
+            result = client.call("_silli/uploads.get", {"session_id": args.session_id, "upload_id": args.upload_id})
             args.out.write_bytes(base64.b64decode(result["data_base64"], validate=True))
             print(json.dumps({k: result[k] for k in ("upload_id", "name", "mime")}, ensure_ascii=False))
         elif args.command == "answer":
             answer = {"type": "cancel"} if args.cancel else ({"type": "permission", "option_id": args.option} if args.option else {"type": "form", "values": args.form_json})
-            result = client.call("_sill/questions.answer", {"session_id": args.session_id, "question_id": args.question_id, "answer_id": args.answer_id, "answer": answer})
+            result = client.call("_silli/questions.answer", {"session_id": args.session_id, "question_id": args.question_id, "answer_id": args.answer_id, "answer": answer})
             print(json.dumps(result, ensure_ascii=False))
         else:
             method = "get" if args.command == "status" else args.command
-            print(json.dumps(client.call("_sill/submissions." + method, {"session_id": args.session_id, "submission_id": args.submission_id}), ensure_ascii=False))
+            print(json.dumps(client.call("_silli/submissions." + method, {"session_id": args.session_id, "submission_id": args.submission_id}), ensure_ascii=False))
     finally:
         client.close()
 
