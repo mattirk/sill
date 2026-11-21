@@ -30,6 +30,8 @@ impl App {
             return Task::none();
         };
         self.visible = true;
+        #[cfg(target_os = "macos")]
+        crate::macos::unhide();
         let xid = self.xid;
         let place = self.placing();
         let again = place.clone();
@@ -95,6 +97,9 @@ impl App {
     /// The settings saved, and the window unmapped.
     fn hidden(&mut self) -> Task<Message> {
         self.save_settings();
+        // the Mac: the application before sill gets the keyboard back
+        #[cfg(target_os = "macos")]
+        crate::macos::hide();
         match self.window_id {
             Some(id) => iced::window::set_mode(id, iced::window::Mode::Hidden),
             None => Task::none(),

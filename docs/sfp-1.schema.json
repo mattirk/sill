@@ -6718,25 +6718,6 @@
           "additionalProperties": false,
           "properties": {
             "type": {
-              "const": "hotkey",
-              "type": "string"
-            },
-            "value": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "type": {
               "const": "default_page",
               "type": "string"
             },
@@ -7018,13 +6999,6 @@
           "default": null,
           "type": [
             "boolean",
-            "null"
-          ]
-        },
-        "hotkey": {
-          "default": null,
-          "type": [
-            "string",
             "null"
           ]
         },

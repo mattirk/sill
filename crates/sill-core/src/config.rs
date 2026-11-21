@@ -18,9 +18,6 @@ pub struct Config {
     /// pinned one): the diff view while it has changes, the tree while it is clean, switched again on
     /// every change to its files; the view button still switches by hand in between. Unset = off.
     pub drawer_follow_changes: Option<bool>,
-    /// Unused since 2026-11-19: the global show/hide key is sill-gui's own setting now. Kept
-    /// until the protocol, which carries it, is next re-recorded.
-    pub hotkey: Option<String>,
     /// Backend page the herring opens: `changes` (default), `agents`, `settings`.
     pub default_page: Option<String>,
     /// Show the session timer automatically while the agent works. Unset = off.

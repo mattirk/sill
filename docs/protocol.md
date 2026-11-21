@@ -547,7 +547,9 @@ cutover, the identity check holds the baseline at `sfp/1-dev.3`. A deliberate pr
 break is recorded by deleting the file and rerunning the test. One such break: on 2026-11-07 the
 document was re-recorded after the GTK-only settings keys (`width`, `drawer_width`, `text_scale`,
 `host_terminal`) left the settings type with the GTK shelf. Another: on 2026-11-10 it was
-re-recorded when repository policy fragments were removed. Gone:
+re-recorded when repository policy fragments were removed (the list follows). A third: on
+2026-11-19 the settings type and its changes lost `hotkey`, which became sill-gui's own
+setting (`sill-gui.toml`). Gone on 2026-11-10:
 the methods `_sill/policy.start` and `_sill/host_control.exception`; `fragment_ro`,
 `fragment_masks`, `sources` and `suggestions` of the policy view; `fragment` and `root` of
 `_sill/policy.check`; `conflicts`, `conflicts_error` and `exception` of the Host control state

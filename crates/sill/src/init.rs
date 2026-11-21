@@ -747,7 +747,7 @@ fn user_setup(a: &InitArgs) -> Result<()> {
     let on_path = which("sill").and_then(|p| p.canonicalize().ok()) == exe.canonicalize().ok();
     println!(
         "hotkey: bind `{} toggle` to a key in your desktop's keyboard shortcuts (Alt+Space is the usual choice; \
-         sill-gui's own grab, Settings → Window → Hotkey, works on X11)",
+         sill-gui's own key, Settings → Window → Hotkey, works on X11 and on the Mac)",
         if on_path { "sill".to_string() } else { exe.display().to_string() }
     );
     Ok(())

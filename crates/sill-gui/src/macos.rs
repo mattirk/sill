@@ -80,6 +80,31 @@ pub fn is_active() -> bool {
     }
 }
 
+/// Hide the application, as Cmd+H does: the application that was active before becomes active
+/// again, which taking the window off the screen alone does not do (sill stayed in the menu bar
+/// with no window; the person, 2026-11-19). Any way of showing the window unhides it
+/// ([`unhide`]), and so does a click on its Dock icon.
+pub fn hide() {
+    // SAFETY: on the main thread (the window's update); `hide:` takes a sender, which may be nil.
+    unsafe {
+        let app: *mut AnyObject = msg_send![objc2::class!(NSApplication), sharedApplication];
+        if !app.is_null() {
+            let () = msg_send![app, hide: std::ptr::null_mut::<AnyObject>()];
+        }
+    }
+}
+
+/// Undo [`hide`], before the window is shown and made active.
+pub fn unhide() {
+    // SAFETY: as `hide`; `unhideWithoutActivation` takes nothing.
+    unsafe {
+        let app: *mut AnyObject = msg_send![objc2::class!(NSApplication), sharedApplication];
+        if !app.is_null() {
+            let () = msg_send![app, unhideWithoutActivation];
+        }
+    }
+}
+
 /// Before this window starts another sill window (Open on a box): let it take the front. Since
 /// macOS 14 activation is cooperative — an app comes forward only when the active one yields — so
 /// this window, active from the press, yields to every process of its own bundle: the new window,
